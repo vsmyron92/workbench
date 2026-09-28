@@ -1,0 +1,258 @@
+/* Devcontainer feature: panel, confirmation, top-bar chip. Tokens only. */
+
+/* ---------------------------------------------------------------- panel */
+.wb-dc-panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.wb-dc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex: none;
+}
+.wb-dc-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 9px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  background: var(--bg-hover);
+  color: var(--fg-muted);
+  flex: none;
+}
+.wb-dc-state.success {
+  background: var(--success-bg);
+  color: var(--success);
+}
+.wb-dc-state.accent {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.wb-dc-state.warning {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.wb-dc-state.danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+.wb-dc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.wb-dc-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 12px 10px;
+}
+.wb-dc-block.wb-error {
+  flex-direction: row;
+  align-items: center;
+  margin: 8px 10px 0;
+}
+.wb-dc-kv {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+.wb-dc-kv .k {
+  width: 84px;
+  flex: none;
+  color: var(--fg-muted);
+}
+.wb-dc-kv .v {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.wb-dc-port {
+  gap: 8px;
+  padding: 0 4px;
+  font-size: var(--fs-sm);
+}
+
+/* ---------------------------------------------------------------- risks */
+.wb-dc-risks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wb-dc-risks li {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+.wb-dc-risks li > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.wb-dc-risks li svg {
+  flex: none;
+  margin-top: 2px;
+}
+.wb-dc-risks.danger li,
+.wb-dc-risks li.danger {
+  background: var(--danger-bg);
+}
+.wb-dc-risks.danger li svg,
+.wb-dc-risks li.danger svg {
+  color: var(--danger);
+}
+.wb-dc-risks.warning li,
+.wb-dc-risks li.warning {
+  background: var(--warning-bg);
+}
+.wb-dc-risks.warning li svg,
+.wb-dc-risks li.warning svg {
+  color: var(--warning);
+}
+.wb-dc-risks.info li svg,
+.wb-dc-risks li.info svg {
+  color: var(--fg-subtle);
+}
+.wb-dc-risks.compact li {
+  padding: 3px 6px;
+}
+
+/* ---------------------------------------------------------------- confirmation */
+.wb-dc-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wb-dc-danger {
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, transparent);
+  border-radius: var(--radius);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wb-dc-danger-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--danger);
+}
+.wb-dc-danger .wb-dc-risks li {
+  background: transparent;
+  padding: 2px 4px;
+}
+.wb-dc-head select {
+  max-width: 45%;
+  min-width: 0;
+}
+.wb-dc-plan {
+  display: grid;
+  grid-template-columns: minmax(96px, max-content) minmax(0, 1fr);
+  gap: 6px 12px;
+  font-size: var(--fs-sm);
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+}
+.wb-dc-plan-key {
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.wb-dc-plan-val {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.wb-dc-plan-val.danger,
+.wb-dc-plan-val .wb-dc-bad {
+  color: var(--danger);
+}
+.wb-dc-plan-val.warning {
+  color: var(--warning);
+}
+.wb-dc-plan-key:has(+ .wb-dc-plan-val.danger) {
+  color: var(--danger);
+  font-weight: 600;
+}
+.wb-dc-tok {
+  display: inline-block;
+  margin: 0 4px 2px 0;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+}
+.wb-dc-cmd {
+  margin: 2px 0 0;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wb-dc-hash {
+  font-family: var(--font-mono);
+}
+
+/* ---------------------------------------------------------------- top bar chip */
+.wb-dc-chip {
+  gap: 5px;
+  color: var(--fg-muted);
+}
+.wb-dc-chip.success {
+  color: var(--fg);
+}
+.wb-dc-chip.danger {
+  color: var(--danger);
+}
+.wb-dc-chip-label {
+  font-size: var(--fs-sm);
+}
+
+/* ---------------------------------------------------------------- scaffold */
+.wb-dc-scaffold {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wb-dc-editor {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  min-height: 300px;
+  resize: vertical;
+}
+
+@media (max-width: 640px) {
+  .wb-dc-plan {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .wb-dc-plan-key {
+    font-weight: 600;
+  }
+}

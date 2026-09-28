@@ -1,0 +1,505 @@
+//! Debug adapters: built-in presets merged with `[debug.adapters.<id>]` from
+//! config.toml, and their availability on this computer.
+//!
+//! **Trust.** An adapter's command runs with the user's rights, so it comes only from
+//! config.toml or a preset, never from repository config (`[[debug]]` entries name an
+//! adapter by id). Availability probes run the adapter's own executable
+//! (`gdb --version`, `python3 -c "import debugpy"`), never anything from a project.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use crate::app::AppState;
+
+/// `[debug]` in config.toml.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DebugConfig {
+    /// Overrides of the presets (`gdb`, `lldb-dap`, `codelldb`, `debugpy`, `delve`) and
+    /// custom adapters, by id.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub adapters: BTreeMap<String, AdapterConfig>,
+    /// The adapter to use per language when a launch configuration names none,
+    /// e.g. `rust = "codelldb"`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub default_adapter: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AdapterKind {
+    Gdb,
+    Lldb,
+    Codelldb,
+    Debugpy,
+    Delve,
+    /// Any other DAP adapter: `program`, `args`, `cwd`, `env` (object), `stopOnEntry`.
+    #[default]
+    Generic,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// DAP on the adapter's stdin/stdout.
+    #[default]
+    Stdio,
+    /// The adapter listens on a TCP port: `{port}` in `args` is replaced by a free
+    /// loopback port Workbench then connects to.
+    Tcp,
+}
+
+/// One `[debug.adapters.<id>]` table. Every field is optional for a preset id.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AdapterConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AdapterKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub languages: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<Transport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Plain environment for the adapter process (e.g. `PYTHONPATH`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// DAP `adapterID` sent in `initialize`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter_id: Option<String>,
+    /// Arguments merged into every launch/attach request of this adapter.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub launch_defaults: BTreeMap<String, Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_s: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_hint: Option<String>,
+}
+
+/// A resolved adapter (preset + overrides).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Adapter {
+    pub id: String,
+    pub kind: AdapterKind,
+    pub label: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub languages: Vec<String>,
+    pub transport: Transport,
+    pub enabled: bool,
+    pub builtin: bool,
+    #[serde(skip)]
+    pub env: Vec<(String, String)>,
+    pub adapter_id: String,
+    #[serde(skip)]
+    pub launch_defaults: Map<String, Value>,
+    #[serde(skip)]
+    pub connect_timeout: Duration,
+    pub install_hint: String,
+}
+
+impl Adapter {
+    /// Whether this adapter can give the debuggee a Workbench terminal (DAP
+    /// `runInTerminal`), and how to ask for it.
+    pub fn supports_terminal(&self) -> bool {
+        matches!(self.kind, AdapterKind::Lldb | AdapterKind::Codelldb | AdapterKind::Debugpy)
+    }
+}
+
+const NATIVE: &[&str] = &["c", "cpp", "rust"];
+
+fn preset(id: &str) -> Option<Adapter> {
+    let base = |kind: AdapterKind, label: &str, command: &str, args: &[&str], langs: &[&str], transport: Transport, adapter_id: &str, hint: &str| Adapter {
+        id: id.to_string(),
+        kind,
+        label: label.into(),
+        command: command.into(),
+        args: args.iter().map(|s| s.to_string()).collect(),
+        languages: langs.iter().map(|s| s.to_string()).collect(),
+        transport,
+        enabled: true,
+        builtin: true,
+        env: vec![],
+        adapter_id: adapter_id.into(),
+        launch_defaults: Map::new(),
+        connect_timeout: Duration::from_secs(10),
+        install_hint: hint.into(),
+    };
+    Some(match id {
+        "gdb" => base(
+            AdapterKind::Gdb,
+            "GDB",
+            "gdb",
+            &["-q", "-i", "dap"],
+            &["c", "cpp", "rust", "fortran", "ada", "d", "objc"],
+            Transport::Stdio,
+            "gdb",
+            "GDB 14 or newer speaks DAP (gdb -i dap). Install it with your package manager, e.g. `sudo apt install gdb`.",
+        ),
+        "lldb-dap" => base(
+            AdapterKind::Lldb,
+            "LLDB (lldb-dap)",
+            &lldb_dap_command(),
+            &[],
+            &["c", "cpp", "rust", "objc", "swift"],
+            Transport::Stdio,
+            "lldb-dap",
+            "Install LLVM's lldb-dap (`sudo apt install lldb`; releases before LLVM 18 call it lldb-vscode), or set [debug.adapters.lldb-dap] command.",
+        ),
+        "codelldb" => base(
+            AdapterKind::Codelldb,
+            "CodeLLDB",
+            "codelldb",
+            &["--port", "{port}"],
+            NATIVE,
+            Transport::Tcp,
+            "lldb",
+            "Download CodeLLDB from github.com/vadimcn/codelldb/releases, unpack the .vsix (a zip) and set [debug.adapters.codelldb] command to its extension/adapter/codelldb.",
+        ),
+        "debugpy" => base(
+            AdapterKind::Debugpy,
+            "debugpy",
+            "python3",
+            &["-m", "debugpy.adapter"],
+            &["python"],
+            Transport::Stdio,
+            "debugpy",
+            "Install debugpy for the interpreter in `command` (`python3 -m pip install debugpy`), or point [debug.adapters.debugpy] env.PYTHONPATH at a folder where it is installed.",
+        ),
+        "delve" => base(
+            AdapterKind::Delve,
+            "Delve",
+            "dlv",
+            &["dap", "--listen", "127.0.0.1:{port}"],
+            &["go"],
+            Transport::Tcp,
+            "go",
+            "Install Delve: `go install github.com/go-delve/delve/cmd/dlv@latest` (it lands in ~/go/bin; put that on PATH or set [debug.adapters.delve] command).",
+        ),
+        _ => return None,
+    })
+}
+
+pub const PRESETS: &[&str] = &["gdb", "lldb-dap", "codelldb", "debugpy", "delve"];
+
+/// lldb-dap's executable: `lldb-dap`, the older `lldb-vscode`, or a versioned one
+/// (`lldb-dap-19`), whichever is on PATH.
+fn lldb_dap_command() -> String {
+    for c in ["lldb-dap", "lldb-vscode"] {
+        if crate::util::which(c) {
+            return c.into();
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        let mut best: Option<(u32, String)> = None;
+        for dir in std::env::split_paths(&path) {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten().take(5000) {
+                let n = e.file_name().to_string_lossy().into_owned();
+                for prefix in ["lldb-dap-", "lldb-vscode-"] {
+                    if let Some(v) = n.strip_prefix(prefix).and_then(|v| v.parse::<u32>().ok()) {
+                        if best.as_ref().is_none_or(|(b, _)| v > *b) {
+                            best = Some((v, n.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((_, n)) = best {
+            return n;
+        }
+    }
+    "lldb-dap".into()
+}
+
+fn apply(a: &mut Adapter, c: &AdapterConfig) {
+    if let Some(k) = c.kind {
+        a.kind = k;
+    }
+    if let Some(l) = &c.label {
+        a.label = l.clone();
+    }
+    if let Some(cmd) = &c.command {
+        a.command = cmd.clone();
+    }
+    if let Some(args) = &c.args {
+        a.args = args.clone();
+    }
+    if let Some(l) = &c.languages {
+        a.languages = l.iter().map(|s| s.to_ascii_lowercase()).collect();
+    }
+    if let Some(t) = c.transport {
+        a.transport = t;
+    }
+    if let Some(e) = c.enabled {
+        a.enabled = e;
+    }
+    a.env.extend(c.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    if let Some(i) = &c.adapter_id {
+        a.adapter_id = i.clone();
+    }
+    for (k, v) in &c.launch_defaults {
+        a.launch_defaults.insert(k.clone(), v.clone());
+    }
+    if let Some(s) = c.connect_timeout_s {
+        a.connect_timeout = Duration::from_secs(s.clamp(1, 120));
+    }
+    if let Some(h) = &c.install_hint {
+        a.install_hint = h.clone();
+    }
+}
+
+/// Valid adapter ids: what `[debug.adapters.<id>]` and `[[debug]] adapter` may use.
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 40 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Every adapter: presets (with their overrides) in preference order, then custom
+/// adapters. The second value lists config problems (a custom adapter without a
+/// command).
+pub fn all(cfg: &DebugConfig) -> (Vec<Adapter>, Vec<String>) {
+    let mut out = vec![];
+    let mut warnings = vec![];
+    for id in PRESETS {
+        let mut a = preset(id).expect("preset");
+        if let Some(c) = cfg.adapters.get(*id) {
+            apply(&mut a, c);
+        }
+        out.push(a);
+    }
+    for (id, c) in &cfg.adapters {
+        if PRESETS.contains(&id.as_str()) {
+            continue;
+        }
+        if !valid_id(id) {
+            warnings.push(format!("[debug.adapters.{id}]: invalid id (letters, digits, - _ . only)"));
+            continue;
+        }
+        let Some(command) = c.command.clone().filter(|c| !c.trim().is_empty()) else {
+            warnings.push(format!("[debug.adapters.{id}]: `command` is required for a custom adapter"));
+            continue;
+        };
+        let mut a = Adapter {
+            id: id.clone(),
+            kind: AdapterKind::Generic,
+            label: id.clone(),
+            command,
+            args: vec![],
+            languages: vec![],
+            transport: Transport::Stdio,
+            enabled: true,
+            builtin: false,
+            env: vec![],
+            adapter_id: id.clone(),
+            launch_defaults: Map::new(),
+            connect_timeout: Duration::from_secs(10),
+            install_hint: format!("Check `command` in [debug.adapters.{id}] of config.toml."),
+        };
+        apply(&mut a, c);
+        out.push(a);
+    }
+    (out, warnings)
+}
+
+pub fn find(cfg: &DebugConfig, id: &str) -> Option<Adapter> {
+    all(cfg).0.into_iter().find(|a| a.id == id)
+}
+
+// ---------------------------------------------------------------- availability
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Availability {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+impl Availability {
+    fn missing(problem: String) -> Self {
+        Self { available: false, path: None, version: None, problem: Some(problem) }
+    }
+}
+
+/// `(major, minor)` of `GNU gdb (Ubuntu 17.1-2ubuntu1) 17.1`.
+pub fn gdb_version(first_line: &str) -> Option<(u32, u32)> {
+    let last = first_line.split_whitespace().last()?;
+    let mut it = last.split(['.', '-']);
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next().and_then(|m| m.parse().ok()).unwrap_or(0);
+    Some((major, minor))
+}
+
+const PROBE_TTL: Duration = Duration::from_secs(30);
+
+fn resolve_command(cmd: &str) -> Option<PathBuf> {
+    crate::util::which_path(cmd)
+}
+
+async fn probe_uncached(a: &Adapter) -> Availability {
+    if !a.enabled {
+        return Availability::missing(format!("disabled in config.toml ([debug.adapters.{}] enabled = false)", a.id));
+    }
+    let Some(path) = resolve_command(&a.command) else {
+        return Availability::missing(format!("`{}` was not found on PATH", a.command));
+    };
+    let path_s = path.display().to_string();
+    let run = |args: Vec<&'static str>| {
+        let mut cmd = tokio::process::Command::new(&path);
+        cmd.args(args).current_dir("/");
+        for (k, v) in &a.env {
+            cmd.env(k, v);
+        }
+        crate::util::proc::run_cmd(cmd, Duration::from_secs(8))
+    };
+    match a.kind {
+        AdapterKind::Gdb => match run(vec!["--version"]).await {
+            Ok(out) => {
+                let line = out.stdout.lines().next().unwrap_or("").trim().to_string();
+                match gdb_version(&line) {
+                    Some((major, _)) if major < 14 => Availability {
+                        available: false,
+                        path: Some(path_s),
+                        version: Some(line),
+                        problem: Some("this GDB has no DAP support: GDB 14 or newer is needed".into()),
+                    },
+                    _ => Availability { available: true, path: Some(path_s), version: Some(line), problem: None },
+                }
+            }
+            Err(e) => Availability::missing(format!("`{} --version` failed: {}", a.command, e.message)),
+        },
+        AdapterKind::Debugpy if a.args.first().map(String::as_str) == Some("-m") => {
+            match run(vec!["-c", "import debugpy; print(debugpy.__version__)"]).await {
+                Ok(out) if out.ok() => Availability {
+                    available: true,
+                    path: Some(path_s),
+                    version: out.stdout.lines().next().map(|v| format!("debugpy {}", v.trim())),
+                    problem: None,
+                },
+                Ok(_) => Availability {
+                    available: false,
+                    path: Some(path_s),
+                    version: None,
+                    problem: Some(format!("debugpy is not importable by {}", a.command)),
+                },
+                Err(e) => Availability::missing(format!("`{}` failed: {}", a.command, e.message)),
+            }
+        }
+        _ => Availability { available: true, path: Some(path_s), version: None, problem: None },
+    }
+}
+
+/// Whether `a` can run here (cached for half a minute: config edits apply soon).
+pub async fn probe(state: &AppState, a: &Adapter) -> Availability {
+    let key = format!("{}\u{0}{}\u{0}{:?}\u{0}{}", a.id, a.command, a.kind, a.enabled);
+    if let Some((at, v)) = state.debug.probes.lock().get(&key) {
+        if at.elapsed() < PROBE_TTL {
+            return v.clone();
+        }
+    }
+    let v = probe_uncached(a).await;
+    state.debug.probes.lock().insert(key, (Instant::now(), v.clone()));
+    v
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdapterView {
+    #[serde(flatten)]
+    pub adapter: Adapter,
+    pub availability: Availability,
+}
+
+pub async fn views(state: &AppState) -> (Vec<AdapterView>, Vec<String>) {
+    let cfg = state.config.read().debug.clone();
+    let (list, warnings) = all(&cfg);
+    let avail = futures::future::join_all(list.iter().map(|a| probe(state, a))).await;
+    (list.into_iter().zip(avail).map(|(adapter, availability)| AdapterView { adapter, availability }).collect(), warnings)
+}
+
+/// The adapter for `language`: `[debug] default_adapter.<language>`, else the first
+/// available adapter that lists the language, else the first that lists it (so the
+/// error names what to install). `None` when no adapter knows the language.
+pub async fn for_language(state: &AppState, language: &str) -> Option<Adapter> {
+    let cfg = state.config.read().debug.clone();
+    let language = language.to_ascii_lowercase();
+    if let Some(id) = cfg.default_adapter.get(&language) {
+        if let Some(a) = find(&cfg, id) {
+            return Some(a);
+        }
+    }
+    let (list, _) = all(&cfg);
+    let candidates: Vec<Adapter> = list.into_iter().filter(|a| a.enabled && a.languages.iter().any(|l| *l == language)).collect();
+    for a in &candidates {
+        if probe(state, a).await.available {
+            return Some(a.clone());
+        }
+    }
+    candidates.into_iter().next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presets_merge_with_config_and_custom_adapters_need_a_command() {
+        let cfg: DebugConfig = toml::from_str(
+            r#"
+            [adapters.gdb]
+            command = "/opt/gdb/bin/gdb"
+            launch_defaults = { stopAtBeginningOfMainSubprogram = false }
+            [adapters.codelldb]
+            command = "~/tools/codelldb/adapter/codelldb"
+            [adapters.jsdebug]
+            command = "node"
+            args = ["/opt/js-debug/src/dapDebugServer.js", "{port}"]
+            transport = "tcp"
+            languages = ["JavaScript", "typescript"]
+            [adapters.broken]
+            args = ["x"]
+            [default_adapter]
+            rust = "codelldb"
+            "#,
+        )
+        .unwrap();
+        let (list, warnings) = all(&cfg);
+        let gdb = list.iter().find(|a| a.id == "gdb").unwrap();
+        assert_eq!(gdb.command, "/opt/gdb/bin/gdb");
+        assert_eq!(gdb.args, vec!["-q", "-i", "dap"], "preset args stay");
+        assert_eq!(gdb.launch_defaults["stopAtBeginningOfMainSubprogram"], false);
+        let js = list.iter().find(|a| a.id == "jsdebug").unwrap();
+        assert_eq!((js.kind, js.transport, js.builtin), (AdapterKind::Generic, Transport::Tcp, false));
+        assert_eq!(js.languages, vec!["javascript", "typescript"]);
+        assert!(!list.iter().any(|a| a.id == "broken"));
+        assert!(warnings.iter().any(|w| w.contains("broken") && w.contains("command")), "{warnings:?}");
+        // Order: presets first (preference order), custom after.
+        assert_eq!(list.iter().map(|a| a.id.as_str()).take(5).collect::<Vec<_>>(), PRESETS.to_vec());
+        // Round-trips through TOML (config.toml is rewritten by Settings).
+        let text = toml::to_string(&cfg).unwrap();
+        assert_eq!(toml::from_str::<DebugConfig>(&text).unwrap(), cfg);
+    }
+
+    #[test]
+    fn gdb_versions() {
+        assert_eq!(gdb_version("GNU gdb (Ubuntu 17.1-2ubuntu1) 17.1"), Some((17, 1)));
+        assert_eq!(gdb_version("GNU gdb (GDB) 13.2"), Some((13, 2)));
+        assert_eq!(gdb_version("GNU gdb (GDB) Fedora Linux 14.2-1.fc40"), Some((14, 2)));
+        assert_eq!(gdb_version("nonsense"), None);
+    }
+}

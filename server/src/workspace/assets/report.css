@@ -1,0 +1,65 @@
+/* Workbench report styles, served as ../_shared/report.css next to every card folder.
+   Adapted from Mr. Mak Workspace (MIT), workspace/_shared/report.css.
+   Opt in with <html data-wb-report="document">. Reports run sandboxed: keep them
+   self-contained (relative files only; no CDN scripts, fonts or remote images). */
+:root {
+  --wbr-bg: #1e1f22;
+  --wbr-surface: #2b2d30;
+  --wbr-inset: #232428;
+  --wbr-border: #393b40;
+  --wbr-text: #dfe1e5;
+  --wbr-muted: #9da0a8;
+  --wbr-accent: #548af7;
+  --wbr-good: #5fb865;
+  --wbr-warn: #e0b050;
+  --wbr-bad: #e55765;
+  --wbr-font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --wbr-mono: 'JetBrains Mono', 'DejaVu Sans Mono', ui-monospace, monospace;
+}
+html[data-wb-report] { background: var(--wbr-bg); color-scheme: dark; }
+html[data-wb-report], html[data-wb-report] * { scrollbar-color: #4e5157 var(--wbr-bg); scrollbar-width: thin; }
+html[data-wb-report] body { margin: 0; font-family: var(--wbr-font); color: var(--wbr-text); background: var(--wbr-bg); }
+html[data-wb-report='document'] body { padding: clamp(20px, 4vw, 48px) clamp(16px, 4vw, 52px) 64px; line-height: 1.7; }
+html[data-wb-report='document'] :is(main, .container, .wrap) { max-width: 1120px; margin: 0 auto; }
+html[data-wb-report] h1 { font: 600 clamp(26px, 3vw, 36px)/1.2 var(--wbr-font); letter-spacing: -0.02em; margin: 0 0 12px; }
+html[data-wb-report] h2 { font: 600 clamp(19px, 2vw, 24px)/1.35 var(--wbr-font); margin: 36px 0 14px; padding-bottom: 10px; border-bottom: 1px solid var(--wbr-border); }
+html[data-wb-report] h3 { font: 600 16px/1.5 var(--wbr-font); margin: 22px 0 8px; }
+html[data-wb-report] :is(.meta, .subtitle) { color: var(--wbr-muted); font-size: 13px; margin-bottom: 24px; }
+html[data-wb-report] a { color: var(--wbr-accent); text-underline-offset: 3px; }
+html[data-wb-report] .card { background: var(--wbr-surface); border: 1px solid var(--wbr-border); border-radius: 10px; padding: 16px 18px; margin: 14px 0; }
+html[data-wb-report] :is(.grid-2, .grid-3, .grid-4, .gallery) { display: grid; gap: 14px; }
+html[data-wb-report] .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+html[data-wb-report] .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+html[data-wb-report] :is(.grid-4, .gallery) { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+html[data-wb-report] .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+html[data-wb-report] .kpi { background: var(--wbr-surface); border: 1px solid var(--wbr-border); border-radius: 10px; padding: 12px 14px; }
+html[data-wb-report] .kpi b { display: block; font-size: 22px; }
+html[data-wb-report] .good { color: var(--wbr-good); }
+html[data-wb-report] .warn { color: var(--wbr-warn); }
+html[data-wb-report] .bad { color: var(--wbr-bad); }
+html[data-wb-report] table { width: 100%; border-collapse: collapse; font-size: 13px; display: block; overflow-x: auto; }
+html[data-wb-report] :is(th, td) { padding: 8px 12px; border-bottom: 1px solid var(--wbr-border); text-align: left; overflow-wrap: anywhere; }
+html[data-wb-report] th { color: var(--wbr-muted); font-weight: 600; white-space: nowrap; }
+html[data-wb-report] :is(pre, code) { font-family: var(--wbr-mono); font-size: 0.92em; }
+html[data-wb-report] pre { background: var(--wbr-inset); border: 1px solid var(--wbr-border); border-radius: 8px; padding: 12px 14px; overflow: auto; }
+html[data-wb-report] img { max-width: 100%; height: auto; border-radius: 6px; }
+html[data-wb-report] img[data-wb-zoom] { cursor: zoom-in; }
+html[data-wb-report] figure { margin: 0; }
+html[data-wb-report] figcaption { color: var(--wbr-muted); font-size: 12px; margin-top: 6px; }
+html[data-wb-report] video { max-width: 100%; border-radius: 6px; }
+@media (max-width: 680px) {
+  html[data-wb-report] :is(.grid-2, .grid-3) { grid-template-columns: 1fr; }
+}
+/* Image lightbox (report.js). The dialog sits in the top layer. */
+dialog.wb-lightbox { position: fixed; inset: 0; margin: auto; width: calc(100vw - 24px); height: calc(100vh - 24px); max-width: none; max-height: none; padding: 0; border: 1px solid #4e5157; border-radius: 10px; background: #1a1b1e; color: #dfe1e5; overflow: hidden; font: 13px/1.5 var(--wbr-font); }
+dialog.wb-lightbox::backdrop { background: rgba(0, 0, 0, 0.8); }
+dialog.wb-lightbox[open] { display: flex; flex-direction: column; }
+.wb-lightbox-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px; background: #2b2d30; border-bottom: 1px solid #393b40; }
+.wb-lightbox-caption { flex: 1; min-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-lightbox-toolbar :is(button, a) { border: 1px solid #4e5157; border-radius: 6px; padding: 4px 10px; background: transparent; color: #dfe1e5; cursor: pointer; text-decoration: none; font: inherit; }
+.wb-lightbox-toolbar :is(button, a):hover { background: #393b40; }
+.wb-lightbox-stage { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 12px; }
+.wb-lightbox-stage img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 0; cursor: zoom-in; }
+.wb-lightbox-stage.actual { display: block; }
+.wb-lightbox-stage.actual img { max-width: none; max-height: none; cursor: zoom-out; }
+.wb-lightbox-note { margin: 0; padding: 4px; text-align: center; font-size: 12px; color: #9da0a8; }

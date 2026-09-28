@@ -1,0 +1,103 @@
+// Top bar branch button, status bar branch/sync/state item, stripe badge.
+
+import { ChevronDown, GitBranch } from 'lucide-react'
+import { Spinner, StatusDot } from '@/ui'
+import { useGitStatus } from './api'
+import { shortSha, stateLabel } from './logic'
+import { useGitUi, useRunningOp } from './store'
+import type { GitStatus } from './types'
+
+function branchName(s: GitStatus) {
+  return s.branch ?? (s.head ? shortSha(s.head) : 'No commits yet')
+}
+
+function togglePopover(pid: string, el: HTMLElement, from: 'topbar' | 'statusbar') {
+  const ui = useGitUi.getState()
+  if (ui.popover?.projectId === pid && ui.popover.from === from) ui.closePopover()
+  else ui.openPopover(pid, el.getBoundingClientRect(), from)
+}
+
+function Sync({ s }: { s: GitStatus }) {
+  if (!s.ahead && !s.behind) return null
+  return (
+    <span className="git-sync" title={`${s.ahead} outgoing, ${s.behind} incoming commit(s) relative to ${s.upstream}`}>
+      {s.ahead > 0 && `↑${s.ahead}`}
+      {s.ahead > 0 && s.behind > 0 && ' '}
+      {s.behind > 0 && `↓${s.behind}`}
+    </span>
+  )
+}
+
+/** CLion's branch widget in the top bar. */
+export function BranchTopbarWidget({ projectId }: { projectId: string | null }) {
+  const st = useGitStatus(projectId)
+  const s = st.data
+  if (!projectId || !s) return null
+  const title = s.branch
+    ? `Branch ${s.branch}${s.upstream ? ` → ${s.upstream}` : ' (no upstream)'}${s.upstreamGone ? ' (upstream gone)' : ''}`
+    : s.head
+      ? `Detached HEAD at ${s.head}`
+      : 'No commits yet'
+  return (
+    <button
+      className={`wb-topbar-widget git-branch-btn${s.branch ? '' : ' detached'}`}
+      data-git-branch-anchor=""
+      onClick={(e) => togglePopover(projectId, e.currentTarget, 'topbar')}
+      title={title}
+    >
+      <GitBranch size={14} className="wb-muted" />
+      <span className="name">{branchName(s)}</span>
+      <Sync s={s} />
+      {s.state !== 'clean' && <span className="wb-badge warning">{stateLabel(s.state)}</span>}
+      <ChevronDown size={13} className="wb-muted" />
+    </button>
+  )
+}
+
+/** Branch, sync and repository state in the status bar; a running fetch/pull/push. */
+export function GitStatusbarWidget({ projectId }: { projectId: string | null }) {
+  const st = useGitStatus(projectId)
+  const running = useRunningOp(projectId)
+  const s = st.data
+  if (!projectId || !s) return null
+  return (
+    <>
+      <button
+        className="wb-status-item"
+        data-git-branch-anchor=""
+        onClick={(e) => togglePopover(projectId, e.currentTarget, 'statusbar')}
+        title={s.upstream ? `${s.branch ?? 'HEAD'} → ${s.upstream}` : 'Branches'}
+      >
+        <GitBranch size={13} />
+        <span>{branchName(s)}</span>
+        <Sync s={s} />
+        {s.state !== 'clean' && (
+          <span className="wb-warning" style={{ fontWeight: 600 }}>
+            {stateLabel(s.state).toUpperCase()}
+            {s.stateDetail.step && s.stateDetail.total ? ` ${s.stateDetail.step}/${s.stateDetail.total}` : ''}
+          </span>
+        )}
+      </button>
+      {running && (
+        <span className="wb-status-item" title={running.lastLine}>
+          <Spinner size={11} />
+          {running.title}
+        </span>
+      )}
+    </>
+  )
+}
+
+/** Stripe badge of the Commit tool window: a red dot while conflicts exist. */
+export function CommitBadge({ projectId }: { projectId: string | null }) {
+  const st = useGitStatus(projectId)
+  const conflicts = st.data?.files.filter((f) => f.conflict).length ?? 0
+  return conflicts ? <StatusDot tone="danger" title={`${conflicts} conflicted file(s)`} /> : null
+}
+
+/** Mobile tab badge: number of changed files. */
+export function ChangesBadge({ projectId }: { projectId: string | null }) {
+  const st = useGitStatus(projectId)
+  const n = st.data?.files.filter((f) => f.index !== '!').length ?? 0
+  return n ? <span className="git-count-badge">{n > 99 ? '99+' : n}</span> : null
+}

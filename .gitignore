@@ -1,0 +1,10 @@
+/web/node_modules/
+/web/dist/
+/server/target/
+*.log
+.env
+.env.*
+!.env.example
+/.claude/worktrees/
+/.claude/scheduled_tasks.lock
+/.idea/

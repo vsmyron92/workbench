@@ -1,0 +1,744 @@
+/* Debug feature. Colours come from theme/tokens.css only. */
+
+/* ---------------------------------------------------------------- editor gutter */
+.monaco-editor .wb-dbg-glyph {
+  cursor: pointer;
+}
+.monaco-editor .wb-dbg-glyph::before,
+.monaco-editor .wb-dbg-glyph::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+/* Breakpoints: a red dot (CLion); conditional: with a hole; log point: amber; disabled:
+   hollow grey; unverified in a running session: hollow red; muted: grey. */
+.monaco-editor .wb-dbg-glyph.bp::before,
+.monaco-editor .wb-dbg-glyph.bp-cond::before,
+.monaco-editor .wb-dbg-glyph.bp-log::before,
+.monaco-editor .wb-dbg-glyph.bp-disabled::before,
+.monaco-editor .wb-dbg-glyph.bp-unverified::before,
+.monaco-editor .wb-dbg-glyph.bp-muted::before,
+.monaco-editor .wb-dbg-glyph.hint::before {
+  width: 11px;
+  height: 11px;
+  margin: -5.5px 0 0 -5.5px;
+  border-radius: 50%;
+}
+.monaco-editor .wb-dbg-glyph.bp::before {
+  background: var(--danger);
+}
+.monaco-editor .wb-dbg-glyph.bp-cond::before {
+  background: radial-gradient(circle, var(--bg) 0 1.6px, var(--danger) 2.2px);
+}
+.monaco-editor .wb-dbg-glyph.bp-log::before {
+  background: var(--warning);
+}
+.monaco-editor .wb-dbg-glyph.bp-disabled::before {
+  border: 1.5px solid var(--fg-subtle);
+}
+.monaco-editor .wb-dbg-glyph.bp-unverified::before {
+  border: 2px solid var(--danger);
+}
+.monaco-editor .wb-dbg-glyph.bp-muted::before {
+  background: var(--fg-subtle);
+}
+.monaco-editor .wb-dbg-glyph.hint::before {
+  background: var(--danger);
+  opacity: 0.35;
+}
+/* The execution point (top frame) and a selected outer frame: an arrow over the line. */
+.monaco-editor .wb-dbg-glyph.exec::after,
+.monaco-editor .wb-dbg-glyph.frame::after {
+  width: 15px;
+  height: 14px;
+  margin: -7px 0 0 -7.5px;
+  clip-path: polygon(0 30%, 48% 30%, 48% 0, 100% 50%, 48% 100%, 48% 70%, 0 70%);
+}
+/* On a breakpoint line the dot shrinks behind the arrow, so both stay readable. */
+.monaco-editor .wb-dbg-glyph.exec::before {
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -7px;
+}
+.monaco-editor .wb-dbg-glyph.exec::after {
+  background: var(--warning);
+}
+.monaco-editor .wb-dbg-glyph.frame::after {
+  background: var(--fg-muted);
+}
+.monaco-editor .wb-dbg-exec-line {
+  background: var(--accent-bg);
+}
+.monaco-editor .wb-dbg-frame-line {
+  background: var(--bg-active-muted);
+}
+.monaco-editor .wb-dbg-bp-line {
+  background: var(--danger-bg);
+}
+
+/* ---------------------------------------------------------------- tool window */
+.wb-dbg {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.wb-dbg-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+  min-width: 0;
+}
+.wb-dbg-head-title {
+  padding: 0 4px;
+}
+.wb-dbg-stabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 100%;
+  min-width: 0;
+  overflow-x: auto;
+}
+.wb-dbg-stab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 0 6px 0 8px;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+.wb-dbg-stab:hover {
+  color: var(--fg);
+}
+.wb-dbg-stab.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+.wb-dbg-stab .close {
+  opacity: 0;
+}
+.wb-dbg-stab:hover .close,
+.wb-dbg-stab.active .close {
+  opacity: 1;
+}
+
+.wb-dbg-launch {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  min-width: 0;
+  flex: none;
+}
+.wb-dbg-launch-sel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  max-width: 260px;
+  padding: 0 6px 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.wb-dbg-launch-sel:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.wb-icon-btn.wb-dbg-go:not(:disabled),
+.wb-icon-btn.wb-dbg-resume:not(:disabled) {
+  color: var(--success);
+}
+.wb-icon-btn.wb-dbg-stop:not(:disabled) {
+  color: var(--danger);
+}
+
+.wb-dbg-bar {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+  min-width: 0;
+}
+.wb-dbg-bar .wb-tabs {
+  border-bottom: 0;
+  flex: none;
+  align-self: stretch;
+  align-items: stretch;
+}
+.wb-dbg-bar .wb-tab {
+  height: auto;
+}
+.wb-dbg-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+  padding-right: 4px;
+}
+.wb-dbg-toolbar .spacer {
+  flex: 1;
+}
+.wb-dbg-sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 5px;
+  background: var(--border-strong);
+  flex: none;
+}
+.wb-dbg-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.wb-dbg-state.warning {
+  color: var(--warning);
+}
+.wb-dbg-state.danger {
+  color: var(--danger);
+}
+.wb-dbg-state.success {
+  color: var(--success);
+}
+.wb-dbg-error {
+  padding: 6px 10px;
+  font-size: var(--fs-sm);
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-bottom: 1px solid var(--border);
+  white-space: pre-wrap;
+  max-height: 72px;
+  overflow: auto;
+  flex: none;
+}
+.wb-dbg-tabdot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
+.wb-dbg-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.wb-dbg-split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.wb-dbg-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.wb-dbg-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  font-size: var(--fs-sm);
+}
+
+/* ---------------------------------------------------------------- frames */
+.wb-dbg-frames {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.wb-dbg-threadbar {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+  min-width: 0;
+}
+.wb-dbg-threadbar .wb-select {
+  height: 24px;
+  width: 100%;
+  font-size: var(--fs-sm);
+}
+.wb-dbg-list {
+  flex: 1;
+  min-height: 0;
+}
+.wb-dbg-frame {
+  gap: 8px;
+  min-height: 24px;
+  font-size: var(--fs-sm);
+}
+.wb-dbg-fname {
+  font-family: var(--font-mono);
+  min-width: 0;
+}
+.wb-dbg-floc {
+  margin-left: auto;
+  color: var(--fg-muted);
+  flex: none;
+  max-width: 45%;
+}
+.wb-dbg-frame.dim .wb-dbg-fname,
+.wb-dbg-frame.outside .wb-dbg-fname {
+  color: var(--fg-subtle);
+}
+
+/* ---------------------------------------------------------------- variables */
+.wb-dbg-vars {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.wb-dbg-evalbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.wb-dbg-evalbar .wb-input {
+  flex: 1;
+  height: 24px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+.wb-dbg-evalresult {
+  border-bottom: 1px solid var(--border);
+  flex: none;
+  max-height: 40%;
+  overflow: auto;
+}
+.wb-dbg-tree {
+  flex: 1;
+  min-height: 0;
+  padding: 2px 0;
+}
+.wb-dbg-var {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 22px;
+  padding-right: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  cursor: default;
+  user-select: text;
+}
+.wb-dbg-var:hover {
+  background: var(--bg-hover);
+}
+.wb-dbg-var .twisty {
+  display: inline-flex;
+  width: 14px;
+  flex: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.wb-dbg-var .name {
+  color: var(--syn-variable);
+}
+.wb-dbg-var.scope .name {
+  font-family: var(--font-ui);
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+.wb-dbg-var.watch .name {
+  color: var(--fg);
+}
+.wb-dbg-var .eq {
+  color: var(--fg-subtle);
+}
+.wb-dbg-var .value {
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.wb-dbg-var.changed .value {
+  color: var(--accent);
+}
+.wb-dbg-var .value.error {
+  color: var(--danger);
+  font-family: var(--font-ui);
+}
+.wb-dbg-var .type {
+  margin-left: 6px;
+  color: var(--fg-subtle);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.wb-dbg-var .remove {
+  margin-left: auto;
+  opacity: 0;
+  flex: none;
+}
+.wb-dbg-var:hover .remove {
+  opacity: 1;
+}
+.wb-dbg-var.dim {
+  color: var(--fg-muted);
+}
+.wb-dbg-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-family: var(--font-ui);
+  cursor: pointer;
+}
+.wb-dbg-link:hover {
+  text-decoration: underline;
+}
+.wb-dbg-evalstop {
+  padding: 5px 10px;
+  font-size: var(--fs-sm);
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.wb-dbg-watch-icon {
+  color: var(--fg-muted);
+  flex: none;
+}
+.wb-dbg-edit {
+  height: 20px;
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+/* ---------------------------------------------------------------- console */
+.wb-dbg-console {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.wb-dbg-console-out {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--bg);
+}
+.wb-dbg-console-out .c-stdout,
+.wb-dbg-console-out .c-repl-out {
+  color: var(--fg);
+}
+.wb-dbg-console-out .c-stderr,
+.wb-dbg-console-out .c-repl-err {
+  color: var(--danger);
+}
+.wb-dbg-console-out .c-console {
+  color: var(--fg-muted);
+}
+.wb-dbg-console-out .c-important {
+  color: var(--warning);
+}
+.wb-dbg-console-out .c-adapter {
+  color: var(--fg-subtle);
+}
+.wb-dbg-console-out .c-workbench {
+  color: var(--accent);
+}
+.wb-dbg-console-out .c-repl-in {
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+.wb-dbg-repl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 6px 0 8px;
+  border-top: 1px solid var(--border);
+  flex: none;
+  background: var(--bg);
+}
+.wb-dbg-repl-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+.wb-dbg-repl-input::placeholder {
+  color: var(--fg-subtle);
+}
+
+/* ---------------------------------------------------------------- breakpoints */
+.wb-dbg-bps {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.wb-dbg-bpfile {
+  padding: 4px 10px 2px 26px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.wb-dbg-bprow {
+  padding-left: 12px;
+  font-size: var(--fs-sm);
+  min-height: 24px;
+}
+.wb-dbg-bprow .wb-checkbox {
+  gap: 0;
+}
+.wb-dbg-bprow .wb-icon-btn {
+  opacity: 0;
+}
+.wb-dbg-bprow:hover .wb-icon-btn {
+  opacity: 1;
+}
+.wb-dbg-bpline {
+  font-family: var(--font-mono);
+  flex: none;
+}
+.wb-dbg-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+  box-sizing: border-box;
+}
+.wb-dbg-dot.bp,
+.wb-dbg-dot.fn {
+  background: var(--danger);
+}
+.wb-dbg-dot.fn {
+  border-radius: 2px;
+  transform: rotate(45deg) scale(0.85);
+}
+.wb-dbg-dot.bp-cond {
+  background: radial-gradient(circle, var(--bg-panel) 0 1.5px, var(--danger) 2px);
+}
+.wb-dbg-dot.bp-log {
+  background: var(--warning);
+}
+.wb-dbg-dot.bp-disabled {
+  border: 1.5px solid var(--fg-subtle);
+  background: transparent;
+}
+.wb-dbg-dot.bp-unverified {
+  border: 2px solid var(--danger);
+}
+.wb-dbg-dot.bp-muted {
+  background: var(--fg-subtle);
+}
+.wb-dbg-addfn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 6px 12px;
+}
+.wb-dbg-addfn .wb-input {
+  flex: 1;
+  height: 24px;
+  font-size: var(--fs-sm);
+}
+.wb-dbg-exc + .wb-dbg-exc {
+  margin-top: 4px;
+}
+
+/* ---------------------------------------------------------------- start */
+.wb-dbg-start {
+  flex: 1;
+  min-height: 0;
+  padding-bottom: 8px;
+}
+.wb-dbg-config {
+  gap: 8px;
+  font-size: var(--fs-sm);
+  padding-left: 14px;
+}
+.wb-dbg-config .name {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.wb-dbg-config .go {
+  opacity: 0;
+  flex: none;
+}
+.wb-dbg-config:hover .go,
+.wb-dbg-config.selected .go {
+  opacity: 1;
+}
+.wb-dbg-start-actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+}
+.wb-dbg-adapters {
+  padding: 2px 12px 6px 14px;
+}
+.wb-dbg-adapter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+.wb-dbg-adapter .label {
+  flex: none;
+  font-weight: 500;
+}
+.wb-dbg-adapter .hint {
+  color: var(--fg-muted);
+  max-width: 60%;
+}
+.wb-dbg-adapters-foot {
+  margin-top: 6px;
+}
+
+/* ---------------------------------------------------------------- pickers */
+.wb-dbg-picker-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+.wb-dbg-picker-note.warning {
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+.wb-dbg-picker .wb-dbg-pid {
+  font-family: var(--font-mono);
+  color: var(--fg-muted);
+  min-width: 56px;
+  text-align: right;
+}
+.wb-dbg-picker .wb-dbg-pname {
+  flex: none;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- top bar */
+.wb-dbg-topbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  min-width: 0;
+  margin: 0 4px;
+}
+.wb-dbg-topbar .wb-topbar-widget {
+  color: var(--fg);
+  font-size: var(--fs);
+}
+.wb-dbg-topbar .wb-icon-btn.stop {
+  color: var(--danger);
+  width: 28px;
+  height: 28px;
+}
+
+/* ---------------------------------------------------------------- dialog */
+.wb-dbg-bpform {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 380px;
+}
+.wb-dbg-bpform .wb-input {
+  font-family: var(--font-mono);
+}
+
+/* ---------------------------------------------------------------- debug.source panel */
+
+.wb-dbg-src {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+}
+.wb-dbg-src-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+  min-width: 0;
+  font-size: 12px;
+}
+.wb-dbg-src-path {
+  min-width: 0;
+  flex: 0 1 auto;
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+.wb-dbg-src-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 0 6px;
+  border-radius: 3px;
+  background: var(--bg-active-muted);
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 18px;
+}
+.wb-dbg-src-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}

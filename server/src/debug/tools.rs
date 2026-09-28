@@ -1,0 +1,165 @@
+//! MCP: `debug_state` (read-only). An agent sees what the user's debugger sees —
+//! sessions, why the program stopped, the top of the stack, the locals of a frame and
+//! the console's tail — but never starts, steps, evaluates in or stops a session:
+//! the requests made here (`stackTrace`, `scopes`, `variables`) only read.
+
+use serde_json::{Value, json};
+
+use super::routes::{frames_view, variable_view};
+use super::session::{REQUEST_TIMEOUT, SessionState};
+use crate::mcp::{McpTool, ToolOutput, tool};
+
+const MAX_FRAMES: i64 = 30;
+const MAX_LOCALS: usize = 60;
+const VALUE_CHARS: usize = 300;
+
+fn short(v: &str, max: usize) -> String {
+    if v.chars().count() <= max {
+        return v.to_string();
+    }
+    let s: String = v.chars().take(max).collect();
+    format!("{s}…")
+}
+
+/// The last `max` characters of `v`: the newest console output is what explains a
+/// stop or a crash.
+fn tail(v: &str, max: usize) -> String {
+    let n = v.chars().count();
+    if n <= max {
+        return v.to_string();
+    }
+    let s: String = v.chars().skip(n - max).collect();
+    format!("…{s}")
+}
+
+pub fn tools() -> Vec<McpTool> {
+    vec![tool(
+        "debug_state",
+        "The state of the user's debug sessions in Workbench (gdb, lldb, debugpy, delve… over DAP): for each \
+         session its launch configuration, state (starting|running|stopped|terminated|failed), and when stopped: \
+         the stop reason, the threads, the call stack of the stopped thread (function, file:line) and the local \
+         variables of one frame (values truncated), plus the last lines of the debug console. Use it to help the \
+         user understand a stop, a crash or a wrong value. Read-only: only the user starts, steps or stops sessions.",
+        json!({ "type": "object", "properties": {
+            "projectId": { "type": "string", "description": "Workbench project id; defaults to the calling session's project." },
+            "sessionId": { "type": "string", "description": "One debug session (default: every session of the project)." },
+            "frame": { "type": "integer", "description": "Stack frame index for the locals (0 = the innermost, default)." },
+            "threadId": { "type": "integer", "description": "Thread whose stack to show (default: the thread that stopped)." }
+        } }),
+        false,
+        |state, ctx, args| async move {
+            let pid = ctx.project_for(args.get("projectId").and_then(Value::as_str))?;
+            state.projects.require(&pid)?;
+            let only = args.get("sessionId").and_then(Value::as_str);
+            let frame_index = args.get("frame").and_then(Value::as_i64).unwrap_or(0).clamp(0, MAX_FRAMES - 1) as usize;
+            let mut out = vec![];
+            for s in state.debug.sessions_of(&pid) {
+                if only.is_some_and(|o| o != s.id) {
+                    continue;
+                }
+                let info = s.info();
+                let mut v = json!({
+                    "sessionId": info.id,
+                    "name": info.name,
+                    "adapter": info.adapter_label,
+                    "request": info.request,
+                    "state": info.state,
+                    "error": info.error,
+                    "exitCode": info.exit_code,
+                    "process": info.process,
+                });
+                if info.state == SessionState::Stopped {
+                    let stop = info.stopped.clone();
+                    v["stop"] = json!(stop.as_ref().map(|st| json!({
+                        "reason": st.reason, "description": st.description, "text": st.text, "threadId": st.thread_id
+                    })));
+                    v["threads"] = json!(info.threads.iter().take(40).collect::<Vec<_>>());
+                    let tid = args.get("threadId").and_then(Value::as_i64).or(stop.and_then(|x| x.thread_id)).or(info.threads.first().map(|t| t.id));
+                    if let Some(tid) = tid {
+                        match s.request("stackTrace", json!({ "threadId": tid, "startFrame": 0, "levels": MAX_FRAMES }), REQUEST_TIMEOUT).await {
+                            Ok(body) => {
+                                let frames = frames_view(&s, &body);
+                                let list = frames["frames"].as_array().cloned().unwrap_or_default();
+                                v["stack"] = json!(list
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, f)| {
+                                        let file = f.pointer("/source/path").and_then(Value::as_str).unwrap_or("?");
+                                        format!("#{i} {} at {file}:{}", f["name"].as_str().unwrap_or("?"), f["line"])
+                                    })
+                                    .collect::<Vec<_>>());
+                                if let Some(frame_id) = list.get(frame_index).and_then(|f| f["id"].as_i64()) {
+                                    v["frame"] = json!(frame_index);
+                                    v["locals"] = locals(&s, frame_id).await;
+                                }
+                            }
+                            Err(e) => v["stackError"] = json!(e.message),
+                        }
+                    }
+                }
+                let (lines, _) = s.output_after(info.output_seq.saturating_sub(40), 40);
+                let text: String = lines.iter().filter(|l| l.category != "telemetry").map(|l| l.text.as_str()).collect();
+                v["console"] = json!(tail(&text, 4000));
+                out.push(v);
+            }
+            if out.is_empty() {
+                return Ok(ToolOutput::Text(format!("No debug sessions in project {pid}. The user starts them from the Debug tool window (Shift+F9).")));
+            }
+            Ok(ToolOutput::Json(json!({ "projectId": pid, "sessions": out })))
+        },
+    )]
+}
+
+/// Locals of a frame: every scope that is not marked expensive (registers are
+/// left out), one level deep, values truncated.
+async fn locals(s: &super::session::Session, frame_id: i64) -> Value {
+    let Ok(body) = s.request("scopes", json!({ "frameId": frame_id }), REQUEST_TIMEOUT).await else { return Value::Null };
+    let mut scopes = vec![];
+    let mut total = 0;
+    for sc in body.get("scopes").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let name = sc.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+        let hint = sc.get("presentationHint").and_then(Value::as_str).unwrap_or("");
+        let lower = name.to_ascii_lowercase();
+        let noise = matches!(lower.as_str(), "registers" | "globals" | "global" | "statics" | "static");
+        if sc.get("expensive").and_then(Value::as_bool).unwrap_or(false) || hint == "registers" || noise {
+            continue;
+        }
+        let Some(r) = sc.get("variablesReference").and_then(Value::as_i64).filter(|r| *r > 0) else { continue };
+        let Ok(vars) = s.request("variables", json!({ "variablesReference": r }), REQUEST_TIMEOUT).await else { continue };
+        let list: Vec<Value> = vars
+            .get("variables")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .take(MAX_LOCALS.saturating_sub(total))
+            .map(|v| {
+                let v = variable_view(s, v, "value");
+                json!({ "name": v["name"], "type": v["type"], "value": short(v["value"].as_str().unwrap_or(""), VALUE_CHARS) })
+            })
+            .collect();
+        total += list.len();
+        scopes.push(json!({ "scope": name, "variables": list }));
+        if total >= MAX_LOCALS {
+            break;
+        }
+    }
+    json!(scopes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_console_tail_keeps_the_newest_output() {
+        let text = format!("{}FINAL LINE", "x".repeat(5000));
+        let t = tail(&text, 4000);
+        assert!(t.ends_with("FINAL LINE"), "{}", &t[t.len() - 20..]);
+        assert_eq!(t.chars().count(), 4001);
+        assert!(t.starts_with('…'));
+        assert_eq!(tail("short", 4000), "short");
+        // Characters, not bytes.
+        assert_eq!(tail("ééé", 2), "…éé");
+    }
+}

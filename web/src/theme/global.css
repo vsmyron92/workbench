@@ -1,0 +1,446 @@
+@import './tokens.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs);
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+code,
+kbd,
+pre,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+::selection {
+  background: var(--accent-bg);
+}
+
+/* Thin, unobtrusive scrollbars everywhere. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-hover);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Utility classes shared by every feature. */
+.wb-fill {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+.wb-scroll {
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}
+.wb-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.wb-grow {
+  flex: 1;
+  min-width: 0;
+}
+.wb-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-muted {
+  color: var(--fg-muted);
+}
+.wb-subtle {
+  color: var(--fg-subtle);
+}
+.wb-small {
+  font-size: var(--fs-sm);
+}
+.wb-xs {
+  font-size: var(--fs-xs);
+}
+.wb-danger {
+  color: var(--danger);
+}
+.wb-success {
+  color: var(--success);
+}
+.wb-warning {
+  color: var(--warning);
+}
+.wb-pad {
+  padding: 8px 10px;
+}
+.wb-divider {
+  height: 1px;
+  background: var(--border);
+  flex: none;
+}
+
+/* Rendered markdown / HTML documents (READMEs, Confluence pages, Jira issues). */
+.wb-prose {
+  line-height: 1.6;
+  font-size: 14px;
+  max-width: 920px;
+  overflow-wrap: anywhere;
+}
+.wb-prose h1,
+.wb-prose h2,
+.wb-prose h3,
+.wb-prose h4 {
+  line-height: 1.25;
+  margin: 1.4em 0 0.5em;
+}
+.wb-prose h1 {
+  font-size: 1.7em;
+}
+.wb-prose h2 {
+  font-size: 1.35em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.25em;
+}
+.wb-prose h3 {
+  font-size: 1.12em;
+}
+.wb-prose p,
+.wb-prose ul,
+.wb-prose ol,
+.wb-prose table,
+.wb-prose pre,
+.wb-prose blockquote {
+  margin: 0 0 0.9em;
+}
+.wb-prose code {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.05em 0.35em;
+}
+.wb-prose pre {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  overflow: auto;
+}
+.wb-prose pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+/* highlight.js token colours from the theme (both light and dark). */
+.hljs {
+  color: var(--fg);
+  background: transparent;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-template-tag {
+  color: var(--syn-keyword);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-template-variable,
+.hljs-char\.escape_ {
+  color: var(--syn-string);
+}
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet {
+  color: var(--syn-number);
+}
+.hljs-comment,
+.hljs-quote {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+.hljs-type,
+.hljs-built_in,
+.hljs-class .hljs-title,
+.hljs-title\.class_ {
+  color: var(--syn-type);
+}
+.hljs-title,
+.hljs-title\.function_,
+.hljs-section {
+  color: var(--syn-function);
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-property,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id,
+.hljs-name,
+.hljs-tag {
+  color: var(--syn-attr);
+}
+.hljs-variable,
+.hljs-params,
+.hljs-link {
+  color: var(--syn-variable);
+}
+.hljs-meta,
+.hljs-meta .hljs-keyword,
+.hljs-selector-pseudo {
+  color: var(--syn-meta);
+}
+.hljs-deletion {
+  color: var(--danger);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}
+.wb-prose table {
+  border-collapse: collapse;
+  display: block;
+  overflow: auto;
+}
+.wb-prose th,
+.wb-prose td {
+  border: 1px solid var(--border-strong);
+  padding: 5px 9px;
+  vertical-align: top;
+}
+.wb-prose th {
+  background: var(--bg-panel);
+}
+.wb-prose blockquote {
+  border-left: 3px solid var(--border-strong);
+  padding-left: 12px;
+  color: var(--fg-muted);
+}
+.wb-prose img {
+  max-width: 100%;
+}
+.wb-prose hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 1.6em 0;
+}
+.wb-prose kbd {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  padding: 0 0.35em;
+}
+.wb-prose details {
+  margin: 0 0 0.9em;
+}
+.wb-prose summary {
+  cursor: pointer;
+}
+.wb-prose li > p {
+  margin: 0 0 0.4em;
+}
+.wb-prose li.task-list-item {
+  list-style: none;
+}
+.wb-prose li.task-list-item input {
+  margin: 0 0.45em 0 -1.35em;
+  vertical-align: -1px;
+}
+.wb-prose section[data-footnotes] {
+  border-top: 1px solid var(--border);
+  margin-top: 2em;
+  font-size: 0.9em;
+  color: var(--fg-muted);
+}
+
+/* Markdown renderer (ui/Markdown.tsx): anchors, code blocks, alerts, diagrams. */
+.wb-md-heading {
+  position: relative;
+}
+.wb-md-anchor {
+  display: inline-flex;
+  margin-left: 6px;
+  vertical-align: middle;
+  color: var(--fg-subtle);
+  opacity: 0;
+}
+.wb-md-heading:hover .wb-md-anchor,
+.wb-md-anchor:focus-visible {
+  opacity: 1;
+}
+.wb-md-anchor:hover {
+  color: var(--accent);
+}
+.wb-prose .wb-md-table {
+  overflow: auto;
+  margin: 0 0 0.9em;
+}
+.wb-prose .wb-md-table table {
+  display: table;
+  margin: 0;
+}
+.wb-prose .wb-md-table tr:nth-child(2n) td {
+  background: var(--bg-panel);
+}
+.wb-md-code {
+  position: relative;
+  margin: 0 0 0.9em;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+.wb-md-code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 2px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-subtle);
+  border-bottom: 1px solid var(--border);
+}
+.wb-md-code-bar button {
+  display: inline-flex;
+  padding: 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.wb-md-code-bar button:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.wb-prose .wb-md-code pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+.wb-md-mermaid {
+  margin: 0 0 0.9em;
+  text-align: center;
+  overflow: auto;
+}
+.wb-md-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+.wb-md-frontmatter {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wb-md-frontmatter pre {
+  margin: 6px 0 4px;
+}
+.wb-prose blockquote.wb-alert {
+  --alert: var(--info);
+  border-left-color: var(--alert);
+  color: var(--fg);
+}
+.wb-prose blockquote.wb-alert-important {
+  --alert: var(--important);
+}
+.wb-prose blockquote.wb-alert-warning {
+  --alert: var(--warning);
+}
+.wb-prose blockquote.wb-alert-caution {
+  --alert: var(--danger);
+}
+.wb-prose blockquote.wb-alert-tip {
+  --alert: var(--success);
+}
+.wb-alert-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--alert);
+  font-weight: 600;
+  margin-bottom: 0.3em;
+}
+.wb-alert > :last-child {
+  margin-bottom: 0;
+}
+
+@keyframes wb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes wb-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}

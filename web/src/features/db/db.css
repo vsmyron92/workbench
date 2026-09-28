@@ -1,0 +1,213 @@
+/* Database feature: tool window tree, data source dialog, SQL console. Tokens only. */
+
+/* ---------------------------------------------------------------- tool window */
+.wb-db-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 30px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.wb-db-tree {
+  flex: 1;
+  min-height: 0;
+  padding: 2px 0 8px;
+}
+.wb-db-row {
+  gap: 5px;
+  font-size: var(--fs-sm);
+  padding-left: 6px;
+}
+.wb-db-row svg {
+  flex: none;
+}
+.wb-db-d1 {
+  padding-left: 22px;
+}
+.wb-db-d2 {
+  padding-left: 38px;
+}
+.wb-db-d3 {
+  padding-left: 58px;
+  cursor: default;
+}
+.wb-db-name {
+  white-space: nowrap;
+  flex: 0 1 auto;
+  min-width: 3ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wb-db-pk {
+  color: var(--warning);
+}
+.wb-db-idx {
+  flex: none;
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  font-size: var(--fs-xs);
+}
+.wb-db-link {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+}
+.wb-db-link:hover {
+  text-decoration: underline;
+}
+
+/* ---------------------------------------------------------------- dialog */
+.wb-db-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.wb-db-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+/* ---------------------------------------------------------------- console */
+.wb-db-console {
+  background: var(--bg);
+}
+.wb-db-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex: none;
+  min-width: 0;
+}
+.wb-db-bar b {
+  flex: 0 1 auto;
+  min-width: 4ch;
+}
+.wb-db-bar > .wb-ellipsis {
+  flex: 0 100 auto;
+  min-width: 0;
+}
+.wb-db-bar > button,
+.wb-db-max {
+  flex: none;
+}
+.wb-db-max {
+  width: auto;
+}
+.wb-db-editor {
+  flex: none;
+  min-height: 60px;
+}
+.wb-db-results {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.wb-db-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 8px 10px 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  flex: none;
+}
+.wb-db-error svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--danger);
+}
+.wb-db-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+.wb-db-grid {
+  flex: 1;
+  min-height: 0;
+  outline: none;
+}
+.wb-db-grid table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.wb-db-grid th,
+.wb-db-grid td {
+  padding: 3px 10px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  white-space: pre;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.wb-db-grid th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-panel);
+  font-weight: 600;
+  color: var(--fg);
+}
+.wb-db-grid .n {
+  position: sticky;
+  left: 0;
+  background: var(--bg-panel);
+  color: var(--fg-subtle);
+  text-align: right;
+}
+.wb-db-grid th.n {
+  z-index: 2;
+}
+.wb-db-grid .num {
+  text-align: right;
+}
+.wb-db-grid td.null {
+  color: var(--fg-subtle);
+  font-style: italic;
+}
+.wb-db-grid tbody tr:hover td {
+  background: var(--bg-hover);
+}
+.wb-db-grid tbody tr.sel td {
+  background: var(--bg-active);
+}
+.wb-db-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  padding: 0 10px;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-xs);
+  flex: none;
+  min-width: 0;
+}
+.wb-db-notices {
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}

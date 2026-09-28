@@ -1,0 +1,631 @@
+/* Platform slice: settings panel, activity tool window, pairing, mobile "More". */
+
+/* ---------------------------------------------------------------- settings panel */
+.wb-set {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+}
+.wb-set-nav {
+  width: 196px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 6px;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.wb-set-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.wb-set-nav-item svg {
+  color: var(--fg-muted);
+  flex: none;
+}
+.wb-set-nav-item:hover {
+  background: var(--bg-hover);
+}
+.wb-set-nav-item.active {
+  background: var(--bg-active);
+}
+.wb-set-nav-item.active svg {
+  color: var(--fg);
+}
+.wb-set-nav-item .wb-badge {
+  margin-left: auto;
+}
+.wb-set-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.wb-set-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  container-type: inline-size;
+}
+.wb-set-page {
+  max-width: 940px;
+  padding: 14px 24px 40px;
+}
+.wb-set-page.wide {
+  max-width: none;
+}
+/* Title and description first; the actions move below them when the panel is narrow. */
+.wb-set-page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 12px;
+}
+.wb-set-page-text {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+.wb-set-page-actions {
+  flex: none;
+  flex-wrap: wrap;
+}
+.wb-set-title {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+.wb-set-desc {
+  margin-top: 2px;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.wb-set-group {
+  margin-top: 20px;
+}
+.wb-set-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  margin-bottom: 6px;
+}
+.wb-set-group-head .title {
+  font-weight: 600;
+}
+.wb-set-group-desc {
+  margin: -2px 0 8px;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.wb-set-box {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  min-width: 0;
+}
+.wb-set-row {
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  min-height: 40px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--border);
+}
+.wb-set-row:first-child {
+  border-top: 0;
+}
+.wb-set-row.top {
+  align-items: start;
+}
+.wb-set-row .label {
+  font-weight: 500;
+}
+.wb-set-row .hint {
+  margin-top: 2px;
+  color: var(--fg-subtle);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+}
+.wb-set-row .control {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.wb-set-row .control > .wb-input,
+.wb-set-row .control > .wb-select {
+  flex: 1;
+  min-width: 160px;
+  max-width: 460px;
+}
+/* A narrow settings panel (a split, a small window): each setting's control goes
+   under its label instead of squeezing beside it. */
+@container (max-width: 600px) {
+  .wb-set-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+  .wb-set-page {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+}
+.wb-set-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.wb-set-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  flex: none;
+  font-size: var(--fs-sm);
+  background: var(--warning-bg);
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+}
+.wb-set-banner svg {
+  color: var(--warning);
+  flex: none;
+}
+.wb-set-note {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.wb-set-note svg {
+  flex: none;
+  margin-top: 2px;
+}
+.wb-set-note.warning {
+  background: var(--warning-bg);
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+  color: var(--fg);
+}
+.wb-set-note.warning svg {
+  color: var(--warning);
+}
+.wb-set-note code,
+.wb-set-desc code,
+.wb-set-row code {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+  font-size: var(--fs-xs);
+}
+.wb-set-code {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 4px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+.wb-set-code > span {
+  flex: 1;
+  min-width: 0;
+}
+.wb-seg {
+  display: inline-flex;
+  max-width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.wb-seg button {
+  height: 26px;
+  padding: 0 12px;
+  border: 0;
+  background: var(--bg-inset);
+  color: var(--fg-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* A narrow settings panel shrinks the labels instead of cutting off the last option. */
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.wb-seg button svg {
+  flex: none;
+}
+.wb-seg-wrap {
+  container-type: inline-size;
+  width: 100%;
+  min-width: 0;
+}
+/* Narrow (a settings panel beside another): labels without icons before ellipses. */
+@container (max-width: 260px) {
+  .wb-seg button svg {
+    display: none;
+  }
+  .wb-seg button {
+    padding: 0 9px;
+  }
+}
+.wb-seg-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-seg button + button {
+  border-left: 1px solid var(--border-strong);
+}
+.wb-seg button.active {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- dense tables */
+.wb-pf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+.wb-pf-table th {
+  padding: 6px 10px;
+  text-align: left;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+.wb-pf-table td {
+  padding: 5px 10px;
+  vertical-align: middle;
+  border-top: 1px solid var(--border);
+}
+.wb-pf-table tbody tr:first-child td {
+  border-top: 0;
+}
+.wb-pf-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+.wb-pf-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.wb-pf-table td.actions {
+  text-align: right;
+  white-space: nowrap;
+  width: 1%;
+}
+.wb-pf-table .mono {
+  font-size: var(--fs-xs);
+}
+.wb-pf-table .desc {
+  color: var(--fg-muted);
+  max-width: 520px;
+}
+
+/* ---------------------------------------------------------------- list editor */
+.wb-strlist {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  max-width: 560px;
+}
+.wb-strlist-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.wb-strlist-item .wb-input {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+.wb-strlist-empty {
+  color: var(--fg-subtle);
+  font-size: var(--fs-sm);
+  padding: 2px 0;
+}
+.wb-field-error {
+  color: var(--danger);
+  font-size: var(--fs-xs);
+}
+
+/* ---------------------------------------------------------------- TOML editors */
+.wb-toml {
+  height: 340px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg);
+}
+.wb-toml.fill {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+}
+.wb-toml-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.wb-toml-status .wb-danger,
+.wb-toml-status .wb-success {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ---------------------------------------------------------------- pairing */
+.wb-pair {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+}
+.wb-pair-side {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wb-qr {
+  display: inline-flex;
+  flex: none;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--fg);
+  color: var(--bg);
+}
+[data-theme='light'] .wb-qr {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+}
+.wb-qr svg {
+  display: block;
+  width: 220px;
+  height: 220px;
+}
+.wb-qr.expired {
+  opacity: 0.2;
+}
+.wb-pair-code {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+}
+.wb-pair-done {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 0;
+  text-align: center;
+}
+.wb-pair-done svg {
+  color: var(--success);
+}
+@media (max-width: 640px) {
+  .wb-pair {
+    flex-direction: column;
+    align-items: center;
+  }
+}
+
+/* ---------------------------------------------------------------- activity */
+.wb-act {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.wb-act-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 0;
+}
+.wb-act-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 10px 0 6px;
+  border-left: 2px solid transparent;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  min-width: 0;
+}
+.wb-act-row:hover {
+  background: var(--bg-hover);
+}
+.wb-act-row.open {
+  background: var(--bg-active-muted);
+}
+.wb-act-row.writes {
+  border-left-color: var(--warning);
+}
+.wb-act-time {
+  flex: none;
+  width: 56px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--fg-subtle);
+}
+.wb-act-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--fg-muted);
+}
+.wb-act-icon.success {
+  color: var(--success);
+}
+.wb-act-icon.warning {
+  color: var(--warning);
+}
+.wb-act-icon.error {
+  color: var(--danger);
+}
+.wb-act-icon.info {
+  color: var(--info);
+}
+.wb-act-session {
+  flex: none;
+  max-width: 180px;
+  color: var(--fg-muted);
+}
+.wb-act-tool {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.wb-act-summary {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.wb-act-title {
+  flex: none;
+  max-width: 45%;
+  font-weight: 500;
+}
+.wb-act-msg {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg-muted);
+}
+.wb-act-ms {
+  flex: none;
+  color: var(--fg-subtle);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+.wb-act-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 12px 8px 72px;
+  background: var(--bg-inset);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.wb-act-detail .mono {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wb-act-detail .wb-danger {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- mobile "More" */
+.wb-more {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 12px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.wb-more-title {
+  margin: 0 0 6px;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+.wb-more-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+.wb-more-row:first-child {
+  border-top: 0;
+}
+.wb-more .wb-btn {
+  height: 36px;
+}
+.wb-more .wb-act-row {
+  height: 32px;
+}
+
+/* ---------------------------------------------------------------- push */
+.wb-push-topics {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 8px 18px;
+  width: 100%;
+  padding: 2px 0;
+}
+.wb-push-topics .wb-checkbox {
+  align-items: flex-start;
+}
+.wb-push-topics .wb-checkbox input {
+  margin-top: 3px;
+}
+.wb-push-topic-hint {
+  display: block;
+  color: var(--fg-subtle);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+.wb-more .wb-push-topics {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+/* A push service's error: two lines, the rest in the tooltip. */
+.wb-push-error {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}

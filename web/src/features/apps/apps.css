@@ -1,0 +1,696 @@
+/* Apps feature: run configurations, environments, previews. Tokens only. */
+
+/* ---------------------------------------------------------------- shared */
+.wb-apps-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  background: var(--bg-hover);
+  color: var(--fg-muted);
+  flex: none;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wb-apps-chip.success {
+  background: var(--success-bg);
+  color: var(--success);
+}
+.wb-apps-chip.accent {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.wb-apps-chip.warning {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.wb-apps-chip.danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+.wb-apps-chip .wb-dot {
+  width: 6px;
+  height: 6px;
+}
+/* A run in the project's dev container. */
+.wb-apps-ctr {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: var(--fs-xs);
+  color: var(--accent);
+  background: var(--accent-bg);
+  flex: none;
+}
+/* The dev container entry of the Apps tool window and phone tab. */
+.wb-apps-dc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: var(--fs-sm);
+  border-bottom: 1px solid var(--border);
+}
+.wb-apps-dc-link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+}
+.wb-apps-dc-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.wb-icon-btn.play {
+  color: var(--success);
+}
+.wb-icon-btn.stop:not(:disabled) {
+  color: var(--danger);
+}
+.wb-apps-rerun {
+  color: var(--success);
+}
+
+/* ---------------------------------------------------------------- tool window */
+.wb-apps .wb-toolbar {
+  height: 30px;
+}
+.wb-apps-warnings {
+  margin: 6px 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--warning-bg);
+  color: var(--fg);
+}
+.wb-apps-empty {
+  padding: 4px 12px 12px 24px;
+  line-height: 1.5;
+}
+.wb-apps-envs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 8px 10px;
+}
+.wb-apps-env {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--fg-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  padding: 5px 6px 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.wb-apps-env.success {
+  border-left-color: var(--success);
+}
+.wb-apps-env.warning {
+  border-left-color: var(--warning);
+}
+.wb-apps-env.danger {
+  border-left-color: var(--danger);
+}
+.wb-apps-env .head {
+  gap: 5px;
+  height: 22px;
+}
+.wb-apps-env .head .name {
+  font-weight: 600;
+}
+.wb-apps-env .meta {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  gap: 8px;
+}
+.wb-apps-env .host {
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+}
+.wb-apps-env .status.success {
+  color: var(--fg-muted);
+}
+.wb-apps-env .status.warning {
+  color: var(--warning);
+}
+.wb-apps-env .status.danger {
+  color: var(--danger);
+}
+.wb-apps-env .spark {
+  gap: 6px;
+}
+.wb-apps-env .err {
+  color: var(--danger);
+}
+.wb-apps-env .foot {
+  gap: 8px;
+  margin-top: 1px;
+}
+.wb-apps-version {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.wb-apps-version:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.wb-apps-version:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.wb-apps-deploying {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-sm);
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.wb-apps-spark {
+  display: block;
+  flex: none;
+  overflow: visible;
+}
+.wb-apps-spark line,
+.wb-apps-spark polyline {
+  vector-effect: non-scaling-stroke;
+}
+.wb-apps-env .uptime {
+  flex: none;
+  min-width: 30px;
+  text-align: right;
+}
+.wb-apps-spark .base {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.wb-apps-spark .line {
+  fill: none;
+  stroke: var(--success);
+  stroke-width: 1.3;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.wb-apps-env.warning .wb-apps-spark .line {
+  stroke: var(--warning);
+}
+.wb-apps-spark .fail {
+  stroke: var(--danger);
+  stroke-width: 1.5;
+}
+
+/* run configurations */
+.wb-apps-runs {
+  padding-bottom: 10px;
+}
+.wb-apps-group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px 0 10px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--fg-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.wb-apps-group:hover {
+  color: var(--fg);
+}
+.wb-apps-group.static {
+  cursor: default;
+  padding-left: 8px;
+  margin-top: 4px;
+}
+.wb-apps-run {
+  padding-left: 26px;
+  padding-right: 4px;
+  height: var(--row);
+  gap: 6px;
+}
+.wb-apps-run .kind {
+  color: var(--fg-muted);
+  flex: none;
+}
+.wb-apps-run .kind.server,
+.wb-apps-run .kind.service {
+  color: var(--accent);
+}
+.wb-apps-run .kind.test {
+  color: var(--success);
+}
+.wb-apps-run .kind.build {
+  color: var(--warning);
+}
+.wb-apps-run .name {
+  min-width: 40px;
+}
+.wb-apps-run .actions {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+.wb-apps-run .actions .wb-icon-btn:not(.play):not(.stop) {
+  display: none;
+}
+.wb-apps-run:hover .actions .wb-icon-btn {
+  display: inline-flex;
+}
+
+/* ---------------------------------------------------------------- top bar / status bar */
+.wb-apps-runbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  min-width: 0;
+}
+.wb-apps-runsel {
+  max-width: 240px;
+  gap: 6px;
+  font-size: var(--fs);
+}
+.wb-apps-runsel .icon {
+  position: relative;
+  display: inline-flex;
+  color: var(--fg-muted);
+}
+.wb-apps-runsel .icon .dot {
+  position: absolute;
+  right: -3px;
+  bottom: -2px;
+  display: inline-flex;
+  padding: 1px;
+  border-radius: 50%;
+  background: var(--bg-panel);
+}
+.wb-apps-runsel .icon .dot .wb-dot {
+  width: 6px;
+  height: 6px;
+}
+.wb-apps-runbar .wb-icon-btn {
+  width: 28px;
+  height: 28px;
+}
+.wb-apps-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+.wb-apps-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 11px;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.wb-apps-pill:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.wb-apps-pill.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+.wb-apps-pill.warning {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+/* ---------------------------------------------------------------- deploy dialog */
+.wb-apps-deploy {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wb-apps-deploy-commit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  min-width: 0;
+}
+.wb-apps-gates {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+}
+.wb-apps-gate {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 6px;
+}
+.wb-apps-gate svg {
+  margin-top: 2px;
+  flex: none;
+}
+.wb-apps-gate .label {
+  font-weight: 600;
+}
+.wb-apps-deploy-cmd {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.wb-apps-deploy-cmd code,
+.wb-apps-cmd {
+  display: block;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- app panel */
+.wb-apps-panel {
+  background: var(--bg);
+}
+.wb-apps-urlbar {
+  gap: 4px;
+  background: var(--bg-panel);
+}
+.wb-apps-urlbar form {
+  gap: 4px;
+}
+.wb-apps-urlbar .wb-input {
+  width: 100%;
+}
+.wb-apps-proxy-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-size: var(--fs-xs);
+  flex: none;
+}
+.wb-apps-devices {
+  display: inline-flex;
+  gap: 1px;
+  padding: 0 4px;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+.wb-apps-banner {
+  padding: 5px 10px;
+  background: var(--warning-bg);
+  color: var(--fg);
+  border-bottom: 1px solid var(--border);
+}
+.wb-apps-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.wb-apps-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+}
+.wb-apps-stage.tablet,
+.wb-apps-stage.phone {
+  padding: 12px;
+  background: var(--bg-panel);
+}
+.wb-apps-frame {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  display: flex;
+}
+.wb-apps-stage.tablet .wb-apps-frame,
+.wb-apps-stage.phone .wb-apps-frame {
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+.wb-apps-frame iframe {
+  flex: 1;
+  border: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-elevated);
+}
+.wb-apps-loadbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 50% 100%;
+  background-repeat: no-repeat;
+  animation: wb-apps-load 1.1s ease-in-out infinite;
+  z-index: 1;
+}
+@keyframes wb-apps-load {
+  from {
+    background-position: -50% 0;
+  }
+  to {
+    background-position: 150% 0;
+  }
+}
+
+/* ---------------------------------------------------------------- run tool window */
+.wb-apps-runwin {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+.wb-apps-runwin-list {
+  width: 280px;
+  flex: none;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  padding: 2px 0;
+}
+.wb-apps-runwin-list .wb-list-row {
+  gap: 6px;
+  height: var(--row);
+}
+.wb-apps-runwin-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+.wb-apps-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+}
+.wb-apps-details .wb-row {
+  gap: 6px;
+}
+.wb-apps-results {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 6px;
+}
+.wb-apps-results .summary {
+  gap: 5px;
+  font-size: var(--fs-sm);
+  margin-bottom: 4px;
+}
+.wb-apps-result {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+.wb-apps-result svg {
+  flex: none;
+}
+.wb-apps-result .detail {
+  max-width: 50%;
+}
+
+/* ---------------------------------------------------------------- mobile */
+.wb-apps-mobile .wb-section-header {
+  padding: 12px 12px 4px;
+}
+.wb-apps-mrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.wb-apps-mrow .wb-btn {
+  height: 38px;
+  min-width: 44px;
+  padding: 0 10px;
+}
+
+/* ---------------------------------------------------------------- HTTP Client responses */
+.wb-http {
+  display: flex;
+  flex-direction: column;
+}
+.wb-http-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+  min-width: 0;
+}
+.wb-http-runs {
+  min-width: 0;
+  max-width: 60%;
+}
+.wb-http-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  flex: none;
+  min-width: 0;
+}
+.wb-http-status {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  font-family: var(--font-mono);
+}
+.wb-http-status.success {
+  background: var(--success-bg);
+  color: var(--success);
+}
+.wb-http-status.accent {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.wb-http-status.warning {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.wb-http-status.danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+.wb-http-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+.wb-http-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.wb-http-pending {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  color: var(--fg-muted);
+}
+.wb-http-headers {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+.wb-http-headers th,
+.wb-http-headers td {
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.wb-http-headers th {
+  width: 30%;
+  color: var(--fg-muted);
+  font-weight: 500;
+}
+.wb-http-request {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 0;
+}
+.wb-http-reqline {
+  padding: 0 10px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+.wb-http-reqbody {
+  margin: 8px 10px;
+  padding: 8px 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+.wb-http-request p,
+.wb-http-none {
+  padding: 0 10px;
+}

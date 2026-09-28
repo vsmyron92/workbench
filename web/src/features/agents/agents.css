@@ -1,0 +1,1105 @@
+/* Agents & terminals. Colours come from theme tokens only (--agent-*, --accent, …). */
+
+/* ---------------------------------------------------------------- state dots and chips */
+.wb-ag-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--agent-idle);
+}
+.wb-ag-dot.working,
+.wb-ag-dot.starting {
+  background: var(--agent-working);
+  animation: wb-ag-breathe 1.2s ease-in-out infinite;
+}
+.wb-ag-dot.attention {
+  background: var(--agent-attention);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--agent-attention) 25%, transparent);
+}
+.wb-ag-dot.error {
+  background: var(--agent-error);
+}
+.wb-ag-dot.unread {
+  background: var(--accent);
+}
+.wb-ag-dot.exited {
+  background: transparent;
+  border: 1.5px solid var(--fg-subtle);
+}
+
+.wb-ag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 10px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  flex: none;
+  color: var(--agent-idle);
+  background: color-mix(in srgb, var(--agent-idle) 14%, transparent);
+}
+.wb-ag-chip.working,
+.wb-ag-chip.starting {
+  color: var(--agent-working);
+  background: color-mix(in srgb, var(--agent-working) 14%, transparent);
+}
+.wb-ag-chip.attention {
+  color: var(--agent-attention);
+  background: color-mix(in srgb, var(--agent-attention) 16%, transparent);
+}
+.wb-ag-chip.error {
+  color: var(--agent-error);
+  background: color-mix(in srgb, var(--agent-error) 14%, transparent);
+}
+.wb-ag-chip.unread {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+.wb-ag-chip.exited {
+  color: var(--fg-subtle);
+  background: var(--bg-hover);
+}
+.wb-ag-chip .wb-ag-dot {
+  width: 6px;
+  height: 6px;
+  box-shadow: none;
+}
+
+@keyframes wb-ag-breathe {
+  50% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+}
+
+.wb-ag-accent {
+  color: var(--accent);
+}
+.wb-ag-colorbar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+}
+.wb-ag-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--agent-attention);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 700;
+}
+.wb-ag-linkish {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font-size: var(--fs-sm);
+}
+.wb-ag-linkish:hover {
+  text-decoration: underline;
+}
+
+/* ---------------------------------------------------------------- remote control link */
+.wb-ag-remote {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  flex: none;
+}
+.wb-ag-remote-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.wb-ag-remote-open:hover {
+  background: var(--accent-bg);
+}
+
+/* ---------------------------------------------------------------- terminal view */
+.wb-ag-term {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  /* Padding lives on this wrapper; the fitted element must have none. */
+  padding: 4px 0 0 8px;
+  background: var(--bg);
+}
+.wb-ag-term.drag-over {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.wb-ag-term-host {
+  width: 100%;
+  height: 100%;
+  /* A grid sized for another view (a larger screen) must not spill out. */
+  overflow: hidden;
+}
+.wb-ag-sized {
+  position: absolute;
+  bottom: 8px;
+  right: 16px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.wb-ag-sized:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+.wb-ag-term .xterm-viewport {
+  background-color: var(--bg) !important;
+}
+.wb-ag-search {
+  position: absolute;
+  top: 6px;
+  right: 16px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+}
+.wb-ag-search .wb-input {
+  width: 200px;
+}
+.wb-ag-reconnecting {
+  position: absolute;
+  bottom: 8px;
+  right: 16px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: var(--fs-xs);
+}
+
+/* ---------------------------------------------------------------- terminal panel */
+.wb-ag-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.wb-ag-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 6px 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex: none;
+  min-width: 0;
+}
+.wb-ag-header-title {
+  font-weight: 600;
+  min-width: 40px;
+  max-width: 40%;
+  cursor: default;
+}
+.wb-ag-header-meta {
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+.wb-ag-attention {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--warning-bg);
+  color: var(--fg);
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+  font-size: var(--fs-sm);
+  flex: none;
+  min-width: 0;
+}
+.wb-ag-attention > svg {
+  color: var(--warning);
+  flex: none;
+}
+.wb-ag-attention.error {
+  background: var(--danger-bg);
+  border-bottom-color: color-mix(in srgb, var(--danger) 30%, transparent);
+}
+.wb-ag-attention.error > svg {
+  color: var(--danger);
+}
+.wb-ag-exit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  flex: none;
+}
+
+/* ---------------------------------------------------------------- composer */
+.wb-ag-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+}
+.wb-ag-composer .wb-textarea {
+  resize: vertical;
+  min-height: 64px;
+  font-size: var(--fs);
+}
+.wb-ag-composer.compact {
+  border-radius: 0;
+  border-width: 0 0 1px;
+}
+.wb-ag-composer .wb-error {
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------- agent providers */
+.wb-ag-composer-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.wb-ag-composer-head .wb-icon-btn.warn:not(.active) {
+  color: var(--warning);
+}
+.wb-ag-providers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.wb-ag-provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.wb-ag-provider:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.wb-ag-provider.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--fg);
+  font-weight: 600;
+}
+.wb-ag-provider.unavailable {
+  border-style: dashed;
+  color: var(--fg-subtle);
+}
+.wb-ag-provider.unavailable .wb-ag-picon {
+  color: var(--fg-subtle);
+}
+.wb-ag-provider-note {
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  color: var(--fg-subtle);
+}
+/* Provider icons share one tint per kind (theme tokens only). */
+.wb-ag-picon {
+  flex: none;
+  color: var(--fg-muted);
+}
+.wb-ag-picon.claude {
+  color: var(--vcs-modified);
+}
+.wb-ag-picon.codex {
+  color: var(--success);
+}
+.wb-ag-picon.kimi {
+  color: var(--vcs-renamed);
+}
+.wb-ag-picon.gemini {
+  color: var(--important);
+}
+.wb-ag-picon.aider {
+  color: var(--syn-meta);
+}
+.wb-ag-provider.active .wb-ag-picon.custom {
+  color: var(--accent);
+}
+.wb-ag-pbadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--bg-inset);
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.wb-ag-pbadge.compact {
+  padding: 0;
+  background: transparent;
+}
+.wb-ag-inside .wb-checkbox {
+  gap: 5px;
+  font-size: var(--fs-sm);
+}
+.wb-ag-inside svg {
+  vertical-align: -2px;
+  color: var(--accent);
+}
+/* The process runs in the project's dev container. */
+.wb-ag-ctr {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.wb-ag-ctr.compact {
+  height: 14px;
+  padding: 0 3px;
+}
+.wb-ag-help {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+.wb-ag-help code {
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+.wb-ag-help-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.wb-ag-help-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.wb-ag-help-list b {
+  color: var(--fg);
+  font-weight: 600;
+}
+.wb-ag-help-code {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+.wb-ag-danger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: var(--fs-sm);
+}
+.wb-ag-composer-row .wb-select.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.wb-ag-note {
+  color: var(--fg-subtle);
+  font-size: var(--fs-xs);
+}
+.wb-ag-htabs {
+  margin: 0 -4px;
+}
+.wb-ag-htab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.wb-ag-composer-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.wb-ag-composer-row .wb-select {
+  height: 24px;
+  font-size: var(--fs-sm);
+  max-width: 190px;
+}
+.wb-ag-starters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.wb-ag-starter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--bg-inset);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.wb-ag-starter svg {
+  color: var(--accent);
+}
+.wb-ag-starter:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+/* ---------------------------------------------------------------- agents home */
+.wb-ag-home {
+  height: 100%;
+  overflow: auto;
+  background: var(--bg);
+}
+.wb-ag-home-inner {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 16px 20px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.wb-ag-home-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.wb-ag-home-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.wb-ag-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+.wb-ag-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 10px;
+}
+.wb-ag-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 10px 8px 13px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  cursor: pointer;
+  overflow: hidden;
+  min-width: 0;
+}
+.wb-ag-card:hover {
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--bg-hover) 45%, var(--bg-panel));
+}
+.wb-ag-card.attention {
+  border-color: color-mix(in srgb, var(--agent-attention) 55%, var(--border));
+}
+.wb-ag-card.error {
+  border-color: color-mix(in srgb, var(--agent-error) 55%, var(--border));
+}
+.wb-ag-card.exited {
+  opacity: 0.75;
+}
+.wb-ag-card-top,
+.wb-ag-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.wb-ag-card-top > .wb-subtle {
+  white-space: nowrap;
+}
+.wb-ag-card-title {
+  font-weight: 600;
+  min-width: 0;
+}
+.wb-ag-card-msg {
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-height: 1.45em;
+}
+.wb-ag-card-msg.empty {
+  color: var(--fg-subtle);
+  font-style: italic;
+}
+.wb-ag-card-attention {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  padding: 5px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--warning-bg);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+.wb-ag-card-attention svg {
+  color: var(--warning);
+  flex: none;
+  margin-top: 2px;
+}
+.wb-ag-card-foot {
+  font-size: var(--fs-xs);
+}
+/* A permission request answerable from Workbench: summary, then Allow / Deny. */
+.wb-ag-perm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--warning-bg);
+  border: 1px solid color-mix(in srgb, var(--agent-attention) 35%, transparent);
+  font-size: var(--fs-sm);
+  cursor: default;
+  min-width: 0;
+}
+.wb-ag-perm-head {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  min-width: 0;
+}
+.wb-ag-perm-head svg {
+  color: var(--warning);
+  flex: none;
+  margin-top: 2px;
+}
+.wb-ag-perm-summary {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.wb-ag-perm-summary code {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg-inset);
+  color: var(--fg);
+}
+.wb-ag-perm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.wb-ag-perm.compact .wb-ag-perm-actions {
+  gap: 4px;
+}
+/* The whole request, folded or open, and what is hidden here. */
+.wb-ag-perm-more {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+.wb-btn.small.wb-ag-perm-toggle {
+  height: 20px;
+  padding: 0 4px;
+  margin-left: -4px;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+}
+.wb-ag-perm-detail {
+  align-self: stretch;
+  margin: 0;
+  padding: 5px 7px;
+  max-height: 11.5em;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: text;
+  user-select: text;
+}
+.wb-ag-perm-note {
+  display: flex;
+  gap: 5px;
+  align-items: flex-start;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+}
+.wb-ag-perm-note svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--warning);
+}
+/* What "For session" allows, as text. */
+.wb-ag-perm-rule {
+  font-size: var(--fs-xs);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.wb-ag-perm-rule code {
+  font-family: var(--font-mono);
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--bg-inset);
+  color: var(--fg);
+}
+/* In the tab's header strip: one line, actions on the right; the full request and the
+   session rule on the lines below. */
+.wb-ag-attention.perm {
+  gap: 4px 8px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  flex-wrap: wrap;
+}
+.wb-ag-perm-extra {
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-left: 21px;
+  min-width: 0;
+}
+.wb-ag-perm-extra:empty {
+  display: none;
+}
+.wb-ag-attention.perm .wb-ag-perm-detail {
+  max-height: 30vh;
+}
+.wb-ag-attention.perm .wb-ag-perm-summary {
+  -webkit-line-clamp: 1;
+  flex: 1 1 0;
+}
+.wb-ag-attention.perm .wb-ag-perm-actions {
+  flex: none;
+  flex-wrap: nowrap;
+}
+.wb-ag-empty-cards {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  color: var(--fg-muted);
+}
+.wb-ag-home-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 12px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .wb-ag-home-cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.wb-ag-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 10px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  min-width: 0;
+}
+.wb-ag-history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wb-ag-history-rows {
+  display: flex;
+  flex-direction: column;
+}
+.wb-ag-hrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 3px 4px;
+  border-radius: var(--radius-sm);
+  min-width: 0;
+}
+.wb-ag-hrow:hover {
+  background: var(--bg-hover);
+}
+.wb-ag-hrow-title {
+  font-weight: 500;
+}
+.wb-ag-hrow-sub {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  min-width: 0;
+}
+.wb-ag-hrow-sub.wb-ellipsis {
+  display: block;
+}
+.wb-ag-url {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-xs);
+}
+/* A button that must stay inside a narrow card: its label shortens instead. */
+.wb-btn.wb-ag-wrap-btn {
+  max-width: 100%;
+  min-width: 0;
+}
+.wb-btn.wb-ag-wrap-btn svg {
+  flex: none;
+}
+
+/* ---------------------------------------------------------------- agents tool window */
+.wb-ag-row {
+  align-items: flex-start;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  min-height: 40px;
+}
+.wb-ag-row > .wb-ag-dot {
+  margin-top: 5px;
+}
+.wb-ag-row.attention {
+  background: color-mix(in srgb, var(--agent-attention) 8%, transparent);
+}
+.wb-ag-row-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.wb-ag-row-title .unread {
+  font-weight: 700;
+}
+.wb-ag-row-sub {
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+}
+.wb-ag-row.attention .wb-ag-row-sub {
+  color: var(--warning);
+}
+
+/* ---------------------------------------------------------------- bottom terminal tool window */
+.wb-ag-tabs {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 30px;
+  padding: 0 4px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  flex: none;
+}
+.wb-ag-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  max-width: 220px;
+  padding: 0 4px 0 10px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+}
+.wb-ag-tab:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+.wb-ag-tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+.wb-ag-tab-close {
+  display: inline-flex;
+  border: 0;
+  padding: 2px;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  visibility: hidden;
+}
+.wb-ag-tab:hover .wb-ag-tab-close,
+.wb-ag-tab.active .wb-ag-tab-close {
+  visibility: visible;
+}
+.wb-ag-tab-close:hover {
+  background: var(--bg-active-muted);
+  color: var(--fg);
+}
+.wb-ag-bottom-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------------------------------------------------------------- top bar / status bar */
+.wb-ag-pill.attention {
+  color: var(--agent-attention);
+  background: color-mix(in srgb, var(--agent-attention) 14%, transparent);
+  font-weight: 600;
+}
+.wb-ag-pill.attention:hover {
+  background: color-mix(in srgb, var(--agent-attention) 24%, transparent);
+}
+.wb-ag-pill.working {
+  color: var(--fg-muted);
+}
+.wb-ag-status.attention {
+  color: var(--agent-attention);
+}
+
+/* ---------------------------------------------------------------- phone */
+.wb-ag-mobile-list {
+  display: flex;
+  flex-direction: column;
+}
+.wb-ag-mobile-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 6px;
+}
+.wb-ag-mobile-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  text-align: left;
+  color: var(--fg);
+}
+.wb-ag-mobile-row:active {
+  background: var(--bg-hover);
+}
+.wb-ag-mobile-row {
+  cursor: pointer;
+}
+.wb-ag-mobile-row:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+/* Answering from the row is not opening it. */
+.wb-ag-mobile-row .wb-ag-perm:active {
+  background: var(--warning-bg);
+}
+.wb-ag-mobile-perm {
+  flex: none;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+/* Phones: the full request scrolls within the row; buttons big enough to hit. */
+.wb-ag-mobile-perm .wb-ag-perm-detail {
+  max-height: 35vh;
+}
+.wb-ag-mobile-row .wb-ag-perm-toggle,
+.wb-ag-mobile-perm .wb-ag-perm-toggle {
+  min-height: 28px;
+}
+.wb-ag-mobile-row .wb-ag-perm-actions .wb-btn,
+.wb-ag-mobile-perm .wb-ag-perm-actions .wb-btn {
+  min-height: 30px;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+.wb-ag-mobile-title {
+  font-weight: 600;
+}
+.wb-ag-mobile-sub {
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.wb-ag-mobile-sub.attention {
+  color: var(--warning);
+}
+.wb-ag-mobile-term {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.wb-ag-mobile-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 44px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex: none;
+  min-width: 0;
+}
+.wb-ag-mobile-term .wb-ag-term {
+  padding: 2px 0 0 4px;
+}
+.wb-ag-keys {
+  display: flex;
+  gap: 3px;
+  padding: 4px 6px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  overflow-x: auto;
+  flex: none;
+}
+.wb-ag-keys button {
+  flex: 1 1 0;
+  min-width: 32px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  touch-action: manipulation;
+  user-select: none;
+}
+.wb-ag-keys button:active {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+}
+.wb-ag-compose {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-panel);
+  flex: none;
+}
+.wb-ag-compose .wb-textarea {
+  flex: 1;
+  resize: none;
+  min-height: 36px;
+  max-height: 120px;
+}
+.wb-ag-compose .wb-icon-btn {
+  width: 36px;
+  height: 36px;
+  color: var(--accent);
+}
+/* Why the compose box cannot send (Claude shows a dialog). */
+.wb-ag-compose-note {
+  flex: none;
+  padding: 4px 10px 0;
+  background: var(--bg-panel);
+  color: var(--warning);
+  font-size: var(--fs-xs);
+}

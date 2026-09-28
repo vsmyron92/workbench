@@ -1,0 +1,144 @@
+/* Design tokens. Every component styles itself from these variables; Monaco and
+   xterm get the same palette from theme/palette.ts. Dark is the default. */
+
+:root,
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #1e1f22; /* window chrome, editor and terminal backgrounds */
+  --bg-panel: #2b2d30; /* tool windows, top and status bars */
+  --bg-inset: #232428; /* inputs, code blocks inside panels */
+  --bg-elevated: #313338; /* menus, popovers, dialogs */
+  --bg-hover: #393b40;
+  --bg-active: #2e436e; /* selected row */
+  --bg-active-muted: #33363c; /* selected row, unfocused list */
+
+  --border: #393b40;
+  --border-strong: #4e5157;
+  --focus: #3574f0;
+
+  --fg: #dfe1e5;
+  --fg-muted: #9da0a8;
+  --fg-subtle: #6f737a;
+  --fg-on-accent: #ffffff;
+
+  --accent: #548af7;
+  --accent-strong: #3574f0;
+  --accent-bg: rgba(53, 116, 240, 0.16);
+
+  --success: #5fb865;
+  --success-bg: rgba(95, 184, 101, 0.14);
+  --warning: #e0b050;
+  --warning-bg: rgba(224, 176, 80, 0.14);
+  --danger: #e55765;
+  --danger-bg: rgba(229, 87, 101, 0.14);
+  --info: #548af7;
+  --important: #a98bf0; /* markdown [!IMPORTANT] callouts */
+
+  /* Version control file colours (CLion conventions). */
+  --vcs-modified: #6f9ce8;
+  --vcs-added: #73bd79;
+  --vcs-deleted: #8c8c8c;
+  --vcs-untracked: #d5756c;
+  --vcs-renamed: #68b4d7;
+  --vcs-conflict: #e55765;
+  --vcs-ignored: #838b58;
+
+  /* Agent states. */
+  --agent-working: #548af7;
+  --agent-attention: #e0b050;
+  --agent-idle: #6f737a;
+  --agent-error: #e55765;
+
+  /* Syntax colours for highlighted code outside Monaco (markdown code blocks). */
+  --syn-keyword: #cf8e6d;
+  --syn-string: #6aab73;
+  --syn-number: #2aacb8;
+  --syn-comment: #7a7e85;
+  --syn-type: #16baac;
+  --syn-function: #56a8f5;
+  --syn-attr: #bcbec4;
+  --syn-variable: #c77dbb;
+  --syn-meta: #b3ae60;
+
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --scrollbar: rgba(255, 255, 255, 0.14);
+  --scrollbar-hover: rgba(255, 255, 255, 0.24);
+}
+
+[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --bg-panel: #f7f8fa;
+  --bg-inset: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-hover: #ebecf0;
+  --bg-active: #d4e2ff;
+  --bg-active-muted: #dfe1e5;
+
+  --border: #ebecf0;
+  --border-strong: #c9ccd6;
+  --focus: #3574f0;
+
+  --fg: #1e1f22;
+  --fg-muted: #5a5d63;
+  --fg-subtle: #818594;
+  --fg-on-accent: #ffffff;
+
+  --accent: #3574f0;
+  --accent-strong: #315fbd;
+  --accent-bg: rgba(53, 116, 240, 0.12);
+
+  --success: #208a3c;
+  --success-bg: rgba(32, 138, 60, 0.1);
+  --warning: #a46704;
+  --warning-bg: rgba(164, 103, 4, 0.1);
+  --danger: #c7222d;
+  --danger-bg: rgba(199, 34, 45, 0.08);
+  --info: #3574f0;
+  --important: #8250df;
+
+  --vcs-modified: #3574f0;
+  --vcs-added: #208a3c;
+  --vcs-deleted: #818594;
+  --vcs-untracked: #c7222d;
+  --vcs-renamed: #0e7fa8;
+  --vcs-conflict: #c7222d;
+  --vcs-ignored: #818a4f;
+
+  --agent-working: #3574f0;
+  --agent-attention: #a46704;
+  --agent-idle: #818594;
+  --agent-error: #c7222d;
+
+  --syn-keyword: #0033b3;
+  --syn-string: #067d17;
+  --syn-number: #1750eb;
+  --syn-comment: #8c8c8c;
+  --syn-type: #008080;
+  --syn-function: #00627a;
+  --syn-attr: #174ad4;
+  --syn-variable: #871094;
+  --syn-meta: #9e880d;
+
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
+  --scrollbar: rgba(0, 0, 0, 0.18);
+  --scrollbar-hover: rgba(0, 0, 0, 0.3);
+}
+
+:root {
+  --font-ui: 'Inter Variable', 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', 'DejaVu Sans Mono', ui-monospace, monospace;
+  --fs: 13px;
+  --fs-sm: 12px;
+  --fs-xs: 11px;
+  --fs-lg: 15px;
+  --row: 26px; /* list row height */
+  --bar: 36px; /* top bar */
+  --status-bar: 24px;
+  --stripe: 40px; /* tool window icon stripe */
+  --radius: 6px;
+  --radius-sm: 4px;
+  --gap: 8px;
+}

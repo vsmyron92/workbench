@@ -1,0 +1,45 @@
+// Dev container for working on Workbench itself (Rust server + React web app).
+// Open it with VS Code "Reopen in Container", `devcontainer up --workspace-folder .`,
+// or Workbench's own dev container support.
+{
+  "name": "Workbench",
+  "build": { "dockerfile": "Dockerfile" },
+  "remoteUser": "vscode",
+
+  "containerEnv": {
+    // Build output stays out of the bind-mounted repo (see CLAUDE.md), in a volume.
+    "CARGO_TARGET_DIR": "/home/vscode/.cache/workbench-targets/dev",
+    // A Workbench started in here never shares state with the one on the host.
+    "WORKBENCH_CONFIG_DIR": "/home/vscode/.config/workbench-dev",
+    "WORKBENCH_DATA_DIR": "/home/vscode/.local/share/workbench-dev",
+    // `npm run dev` proxies /api to the dev server below.
+    "WORKBENCH_BACKEND": "http://127.0.0.1:7787"
+  },
+
+  "mounts": [
+    // Caches survive rebuilds of the container.
+    "source=workbench-cargo-registry,target=/usr/local/cargo/registry,type=volume",
+    "source=workbench-targets,target=/home/vscode/.cache/workbench-targets,type=volume",
+    // Claude Code's login and settings for this container only (not the host's ~/.claude).
+    "source=workbench-claude-${devcontainerId},target=/home/vscode/.claude,type=volume"
+  ],
+
+  // 7787, not 7777: a Workbench on the host usually has 7777. Inside the container,
+  // bind to 0.0.0.0 so the published port reaches it:
+  //   cd server && cargo run -- serve --bind 0.0.0.0:7787
+  //   cd web && npm run dev -- --host 0.0.0.0     (proxies /api to WORKBENCH_BACKEND)
+  "forwardPorts": [7787, 5173],
+  "portsAttributes": {
+    "7787": { "label": "Workbench (dev)" },
+    "5173": { "label": "Vite dev server" }
+  },
+
+  // Volumes may be created root-owned by older engines; make sure the user owns them.
+  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.cache/workbench-targets /home/vscode/.claude /usr/local/cargo/registry && cd web && npm ci --no-audit --no-fund",
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml", "oxc.oxc-vscode"]
+    }
+  }
+}

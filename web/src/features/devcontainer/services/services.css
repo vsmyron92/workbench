@@ -1,0 +1,218 @@
+/* The Services tool window (Docker). Tokens only. */
+
+.wb-svc {
+  flex-direction: row;
+}
+.wb-svc-tree {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  min-width: 0;
+  min-height: 0;
+}
+.wb-svc-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.wb-svc-filter {
+  flex: 1;
+  min-width: 60px;
+}
+.wb-svc-rows {
+  flex: 1;
+  min-height: 0;
+  padding: 2px 0 6px;
+  outline: none;
+}
+.wb-svc-rows:focus-visible .wb-svc-row.selected {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.wb-svc-row {
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+.wb-svc-row svg {
+  flex: none;
+}
+.wb-svc-head {
+  padding-left: 4px;
+  font-weight: 600;
+}
+.wb-svc-depth1 {
+  padding-left: 20px;
+}
+.wb-svc-depth2 {
+  padding-left: 40px;
+}
+.wb-svc-depth1.wb-svc-row:not([aria-expanded]) {
+  padding-left: 37px;
+}
+.wb-svc-chev {
+  display: inline-flex;
+  color: var(--fg-subtle);
+}
+.wb-svc-name {
+  white-space: nowrap;
+  flex: 0 1 auto;
+  min-width: 4ch;
+}
+/* The image gives way first, then the status, the name last. */
+.wb-svc-image {
+  flex: 0 1000 auto;
+  min-width: 0;
+}
+.wb-svc-status {
+  flex: 0 10 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-svc-size,
+.wb-svc-inuse {
+  flex: none;
+  white-space: nowrap;
+}
+.wb-svc-note {
+  padding: 8px 12px;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+
+.wb-svc-detail {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.wb-svc-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.wb-svc-head-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  min-height: 34px;
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex: none;
+}
+.wb-svc-head-bar b {
+  min-width: 6ch;
+  flex: 0 1 auto;
+}
+/* The name and status give way; the buttons keep their size. */
+.wb-svc-head-bar > .wb-ellipsis {
+  min-width: 0;
+  flex: 0 100 auto;
+}
+.wb-svc-head-bar > button {
+  flex: none;
+}
+.wb-svc-info {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 12px 12px;
+}
+.wb-svc-info .wb-dc-kv .k {
+  width: 96px;
+}
+.wb-svc-cmd {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wb-svc-port {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--fg);
+  text-decoration: none;
+}
+a.wb-svc-port {
+  color: var(--accent);
+}
+a.wb-svc-port:hover {
+  text-decoration: underline;
+}
+.wb-svc-mounts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  width: 100%;
+}
+.wb-svc-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+}
+.wb-svc-link:hover {
+  text-decoration: underline;
+}
+.wb-svc-file {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.wb-svc-services {
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 4px;
+}
+.wb-svc-services .wb-svc-row {
+  padding-left: 4px;
+}
+.wb-svc-table {
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+  width: 100%;
+}
+.wb-svc-table th,
+.wb-svc-table td {
+  padding: 2px 8px 2px 0;
+  text-align: left;
+  vertical-align: top;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+.wb-svc-table th {
+  font-weight: 600;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  width: 1%;
+}
+.wb-svc-table tr:hover td,
+.wb-svc-table tr:hover th {
+  background: var(--bg-hover);
+}
+.wb-svc-inspect {
+  flex: 1;
+  min-height: 0;
+}
