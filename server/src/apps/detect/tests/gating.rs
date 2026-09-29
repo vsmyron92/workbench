@@ -5,11 +5,14 @@
 //! `deploy`: the UI asks first and agents cannot start it (`runs::needs_confirmation`).
 //! Names from repository files never add a command of their own.
 
+use std::path::Path;
+
 use super::super::{TaskGraph, command_words, npm_refs, reaches_out};
-use super::{detect_checked, has_run, names, run, tree};
+use super::{detect_checked, detect_checked_as, has_run, names, run, tree};
 use crate::apps::runs::needs_confirmation;
 use crate::config::ProjectFile;
 use crate::config::project::RunConfig;
+use crate::util::os::shell::Dialect;
 
 fn group<'a>(pf: &'a ProjectFile, name: &str) -> &'a str {
     run(pf, name).group.as_deref().unwrap_or("")
@@ -295,44 +298,76 @@ fn remote_engines_compose_pushes_and_releases_reach_out() {
 
 #[test]
 fn names_from_repository_files_are_one_shell_word() {
+    // `mkdir` is a command in bash and in PowerShell: an injected one leaves a directory.
     let d = tree(&[
-        ("Taskfile.yml", "version: '3'\ntasks:\n  \"lint; touch PWNED_TASK #\":\n    cmds: [echo linting]\n  \"two\\nlines\":\n    cmds: [echo x]\n"),
+        ("Taskfile.yml", "version: '3'\ntasks:\n  \"lint; mkdir PWNED_TASK #\":\n    cmds: [echo linting]\n  \"two\\nlines\":\n    cmds: [echo x]\n"),
         ("Makefile", ".PHONY: a;touch\na;touch:\n\techo a\n"),
-        ("package.json", r#"{"scripts":{"x; touch PWNED_NPM":"echo x","build:prod":"vite build"}}"#),
-        ("composer.json", r#"{"scripts":{"t$(touch PWNED_PHP)":"phpunit"}}"#),
+        ("package.json", r#"{"scripts":{"x; mkdir PWNED_NPM":"echo x","build:prod":"vite build"}}"#),
+        ("composer.json", r#"{"scripts":{"t$(mkdir PWNED_PHP)":"phpunit"}}"#),
     ]);
-    let pf = detect_checked(d.path());
-    let task = run(&pf, "task lint; touch PWNED_TASK #");
-    assert!(task.command.ends_with("task 'lint; touch PWNED_TASK #'"), "{}", task.command);
-    assert_eq!(group(&pf, "task lint; touch PWNED_TASK #"), "tasks");
-    assert!(!pf.runs.iter().any(|r| r.name.contains('\n')), "a name with a line break is not offered: {:?}", names(&pf));
-    assert_eq!(run(&pf, "x; touch PWNED_NPM").command, "npm run 'x; touch PWNED_NPM'");
-    assert_eq!(run(&pf, "build:prod").command, "npm run build:prod", "plain names stay as they are");
-    assert_eq!(run(&pf, "composer t$(touch PWNED_PHP)").command, "composer run-script 't$(touch PWNED_PHP)'");
-    assert_eq!(run(&pf, "make a;touch").command, "make 'a;touch'");
+    // Both run shells' languages, on every OS: the name is one single-quoted word.
+    for dialect in [Dialect::Posix, Dialect::PowerShell] {
+        let pf = detect_checked_as(d.path(), dialect);
+        let task = run(&pf, "task lint; mkdir PWNED_TASK #");
+        assert!(task.command.ends_with("task 'lint; mkdir PWNED_TASK #'"), "{dialect:?}: {}", task.command);
+        assert_eq!(group(&pf, "task lint; mkdir PWNED_TASK #"), "tasks");
+        assert!(!pf.runs.iter().any(|r| r.name.contains('\n')), "a name with a line break is not offered: {:?}", names(&pf));
+        assert_eq!(run(&pf, "x; mkdir PWNED_NPM").command, "npm run 'x; mkdir PWNED_NPM'", "{dialect:?}");
+        assert_eq!(run(&pf, "build:prod").command, "npm run build:prod", "plain names stay as they are");
+        assert_eq!(run(&pf, "composer t$(mkdir PWNED_PHP)").command, "composer run-script 't$(mkdir PWNED_PHP)'", "{dialect:?}");
+        assert_eq!(run(&pf, "make a;touch").command, "make 'a;touch'", "{dialect:?}");
+    }
 
-    // The quoted command hands the whole name to the tool and runs nothing else.
+    // The quoted command, in this OS's run shell, hands the whole name to the tool and runs
+    // nothing else.
+    let pf = detect_checked_as(d.path(), Dialect::HOST);
     let bin = d.path().join("fakebin");
     std::fs::create_dir_all(&bin).unwrap();
     for tool in ["task", "go-task", "npm", "composer"] {
+        fake_tool(&bin, tool);
+    }
+    for name in ["task lint; mkdir PWNED_TASK #", "x; mkdir PWNED_NPM", "composer t$(mkdir PWNED_PHP)"] {
+        let ok = in_run_shell(&run(&pf, name).command, d.path(), &bin).status().unwrap().success();
+        assert!(ok, "{name}: {}", run(&pf, name).command);
+    }
+    let args = std::fs::read_to_string(d.path().join("args.txt")).unwrap();
+    assert_eq!(args, "lint; mkdir PWNED_TASK #|run|x; mkdir PWNED_NPM|run-script|t$(mkdir PWNED_PHP)|");
+    for f in ["PWNED_TASK", "PWNED_NPM", "PWNED_PHP"] {
+        assert!(!d.path().join(f).exists(), "{f} was created");
+    }
+}
+
+/// A stand-in for the program `tool` in `bin` that appends each of its arguments and a `|`
+/// to `args.txt` in the current directory: a shell script on Unix; on Windows a PowerShell
+/// script, which the run shell finds on `PATH` by its bare name (as it finds `npm.ps1`) and
+/// hands the arguments exactly as it parsed them.
+fn fake_tool(bin: &Path, tool: &str) {
+    #[cfg(unix)]
+    {
         let p = bin.join(tool);
         std::fs::write(&p, "#!/bin/sh\nprintf '%s|' \"$@\" >> args.txt\n").unwrap();
         crate::util::fs::set_mode(&p, 0o755);
     }
-    for name in ["task lint; touch PWNED_TASK #", "x; touch PWNED_NPM", "composer t$(touch PWNED_PHP)"] {
-        let ok = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(&run(&pf, name).command)
-            .current_dir(d.path())
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok, "{name}");
+    #[cfg(windows)]
+    {
+        let script = "foreach ($a in $args) { [IO.File]::AppendAllText((Join-Path (Get-Location).ProviderPath 'args.txt'), \"$a|\") }\r\n";
+        std::fs::write(bin.join(format!("{tool}.ps1")), script).unwrap();
     }
-    let args = std::fs::read_to_string(d.path().join("args.txt")).unwrap();
-    assert_eq!(args, "lint; touch PWNED_TASK #|run|x; touch PWNED_NPM|run-script|t$(touch PWNED_PHP)|");
-    for f in ["PWNED_TASK", "PWNED_NPM", "PWNED_PHP"] {
-        assert!(!d.path().join(f).exists(), "{f} was created");
-    }
+}
+
+/// `command` run in `dir` by this OS's run shell, which finds programs in `bin` first:
+/// `bash -c` on Unix (`run_argv`'s `bash -lc` without the login profile, which could put
+/// the real tools first); on Windows PowerShell with the encoded command, exactly as
+/// `os::shell::run_argv` starts it.
+fn in_run_shell(command: &str, dir: &Path, bin: &Path) -> std::process::Command {
+    #[cfg(unix)]
+    let (argv, path) = (vec!["bash".to_string(), "-c".into(), command.to_string()], format!("{}:/usr/bin:/bin", bin.display()));
+    #[cfg(windows)]
+    let (argv, path) = {
+        let system = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into())).join("System32");
+        (crate::util::os::shell::run_argv(command), std::env::join_paths([bin, system.as_path()]).unwrap())
+    };
+    let mut c = std::process::Command::new(&argv[0]);
+    c.args(&argv[1..]).current_dir(dir).env("PATH", path);
+    c
 }
