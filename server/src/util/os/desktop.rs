@@ -62,6 +62,8 @@ mod sys {
     use windows_sys::Win32::UI::Shell::{SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
+    use crate::util::os::win32::wide;
+
     /// Chromium browsers by their App Paths names, in the order Linux tries them.
     const BROWSERS: &[&str] = &["chrome.exe", "msedge.exe", "brave.exe"];
 
@@ -91,10 +93,6 @@ mod sys {
 
     pub fn notify_send() -> Option<PathBuf> {
         None
-    }
-
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain([0]).collect()
     }
 
     /// The executable registered under App Paths for `exe`: per user first, then per

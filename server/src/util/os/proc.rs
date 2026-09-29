@@ -420,11 +420,10 @@ mod imp {
 
     use tokio::process::Command;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
-        LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, GetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
-    use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
-    use windows_sys::Win32::Security::{GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::System::Diagnostics::Debug::CheckRemoteDebuggerPresent;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
     use windows_sys::Win32::System::JobObjects::{
@@ -432,39 +431,15 @@ mod imp {
         JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateEventW, EVENT_MODIFY_STATE, GetCurrentProcess, OpenEventW, OpenProcess, OpenProcessToken,
-        PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, SetEvent,
-        TerminateProcess, WaitForSingleObject,
+        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateEventW, EVENT_MODIFY_STATE, OpenEventW, OpenProcess, PROCESS_QUERY_INFORMATION,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, SetEvent, TerminateProcess, WaitForSingleObject,
     };
-    use windows_sys::core::PWSTR;
 
     use super::ProcEntry;
+    use crate::util::os::win32::{Handle, Local, User, sid_string, wide};
 
     /// The exit code of processes ended by `TerminateJobObject` or `TerminateProcess`.
     const KILLED: u32 = 1;
-
-    /// An owned kernel handle, closed on drop.
-    pub(super) struct Handle(HANDLE);
-
-    // SAFETY: a kernel handle is valid in every thread of the process, and the calls made
-    // on these (wait, terminate, query, set) are thread-safe.
-    unsafe impl Send for Handle {}
-    // SAFETY: as above.
-    unsafe impl Sync for Handle {}
-
-    impl Handle {
-        /// `None` for the failure results: null and `INVALID_HANDLE_VALUE`.
-        fn new(h: HANDLE) -> Option<Handle> {
-            (!h.is_null() && h != INVALID_HANDLE_VALUE).then_some(Handle(h))
-        }
-    }
-
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            // SAFETY: the handle is owned, valid and closed only here.
-            unsafe { CloseHandle(self.0) };
-        }
-    }
 
     fn open_process(access: u32, pid: u32) -> Option<Handle> {
         // SAFETY: plain call; `Handle` owns the result.
@@ -475,11 +450,6 @@ mod imp {
     fn running(h: &Handle) -> bool {
         // SAFETY: a valid process handle; a zero timeout only polls.
         unsafe { WaitForSingleObject(h.0, 0) == WAIT_TIMEOUT }
-    }
-
-    /// NUL-terminated UTF-16 for the `W` functions.
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(Some(0)).collect()
     }
 
     pub fn prepare(cmd: &mut Command) {
@@ -763,70 +733,22 @@ mod imp {
         Ok(true)
     }
 
-    /// A security descriptor from `LocalAlloc`, freed on drop.
-    struct LocalSd(PSECURITY_DESCRIPTOR);
-
-    impl Drop for LocalSd {
-        fn drop(&mut self) {
-            // SAFETY: allocated with LocalAlloc by the conversion call and freed only here.
-            unsafe { LocalFree(self.0) };
-        }
-    }
-
-    /// A NUL-terminated UTF-16 string from a Win32 call.
-    ///
-    /// # Safety
-    /// `p` points to a NUL-terminated string.
-    unsafe fn from_wide(p: *const u16) -> String {
-        let mut len = 0;
-        // SAFETY: the caller's promise: every unit up to the NUL is readable.
-        while unsafe { *p.add(len) } != 0 {
-            len += 1;
-        }
-        // SAFETY: `len` units were just read.
-        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, len) })
-    }
-
     /// This process's user as a SID string (`S-1-5-21-…`).
     fn user_sid() -> Option<String> {
-        let mut token = std::ptr::null_mut();
-        // SAFETY: the pseudo handle of this process; `token` receives a handle `Handle` owns.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-            return None;
-        }
-        let token = Handle::new(token)?;
-        let mut len = 0u32;
-        // SAFETY: a size query: no buffer; `len` receives the size needed.
-        unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut len) };
-        // A buffer of usize keeps TOKEN_USER (a pointer first) aligned.
-        let mut buf = vec![0usize; (len as usize).div_ceil(size_of::<usize>())];
-        // SAFETY: `buf` holds at least `len` bytes, aligned for TOKEN_USER.
-        if unsafe { GetTokenInformation(token.0, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) } == 0 {
-            return None;
-        }
-        // SAFETY: filled in by the call; the SID it points to lives in `buf`.
-        let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-        let mut text: PWSTR = std::ptr::null_mut();
-        // SAFETY: a valid SID; `text` receives a LocalAlloc'd string, freed below.
-        if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
-            return None;
-        }
-        // SAFETY: a NUL-terminated string from the call, freed once read.
-        let out = unsafe { from_wide(text) };
-        // SAFETY: allocated by ConvertSidToStringSidW, not used after this.
-        unsafe { LocalFree(text.cast()) };
-        Some(out)
+        let user = User::current().ok()?;
+        // SAFETY: `user` keeps its SID valid for the call.
+        unsafe { sid_string(user.sid()) }
     }
 
     /// A protected DACL granting only this user and SYSTEM (the owner-only DACL of os::perm,
     /// kept here so the stop event does not depend on it).
-    fn owner_only_sd() -> Option<LocalSd> {
+    fn owner_only_sd() -> Option<Local> {
         let sddl = wide(&format!("D:P(A;;GA;;;{})(A;;GA;;;SY)", user_sid()?));
         let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         // SAFETY: `sddl` is NUL-terminated; `sd` receives a LocalAlloc'd descriptor that
-        // `LocalSd` frees; the size is not asked for.
+        // `Local` frees; the size is not asked for.
         let ok = unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, std::ptr::null_mut()) } != 0;
-        (ok && !sd.is_null()).then_some(LocalSd(sd))
+        (ok && !sd.is_null()).then_some(Local(sd))
     }
 
     /// Creates the stop event of `data_dir`, for this user and SYSTEM only. `None` (logged)

@@ -1,19 +1,21 @@
 # Porting the server to Windows
 
-**Status: planned, not started.** Workbench's server is Unix-only today: `nix` and `libc`
-are unconditional dependencies and nothing is behind `cfg(windows)`. This is the plan for a
-native `x86_64-pc-windows-msvc` build that works on Windows 10 and 11, with Linux behaviour
-unchanged. File and line references are from 0.1.0 (commit `493a66e`) and will drift.
+**Status: in progress.** The `util::os` areas `perm`, `fs`, `proc`, `shell`, `exe`, `path`,
+`net` and `desktop` are in (their shared Win32 helpers live in `util/os/win32.rs`); the
+server compiles for Windows except the terminals slice (`os::session`, §1.F), and nothing
+has run on Windows yet. This is the plan for a native `x86_64-pc-windows-msvc` build that
+works on Windows 10 and 11, with Linux behaviour unchanged. File and line references are
+from 0.1.0 (commit `493a66e`) and will drift.
 
 Estimated size: 6–8 engineer-weeks, in 14 steps that each compile and pass on Linux.
 
 ## Core idea
 
 Every OS-specific site goes through one new core module, `server/src/util/os/`
-(`mod.rs`, `unix.rs`, `windows.rs`), with the areas `perm`, `fs`, `proc`, `session`,
-`shell`, `exe`, `path`, `net` and `desktop`. The Unix bodies are today's code, moved
-verbatim from the call sites, so Linux behaviour stays identical by construction.
-Windows-only behaviour is always `cfg(windows)`.
+(`mod.rs` and a file per area, holding its `cfg(unix)` and `cfg(windows)` bodies), with the
+areas `perm`, `fs`, `proc`, `session`, `shell`, `exe`, `path`, `net` and `desktop`. The Unix
+bodies are today's code, moved verbatim from the call sites, so Linux behaviour stays
+identical by construction. Windows-only behaviour is always `cfg(windows)`.
 
 ## 1. Inventory and abstractions
 

@@ -13,7 +13,7 @@ use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
-use tokio_postgres::config::{Host, SslMode};
+use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{AsyncMessage, CancelToken, Client, Config, NoTls, Socket};
 use tokio_postgres_rustls::MakeRustlsConnect;
@@ -93,11 +93,7 @@ fn split_sslmode(url: &str) -> (String, Option<String>) {
 }
 
 fn host_string(c: &Config) -> String {
-    match c.get_hosts().first() {
-        Some(Host::Tcp(h)) => h.clone(),
-        Some(Host::Unix(p)) => p.display().to_string(),
-        None => String::new(),
-    }
+    c.get_hosts().first().map(crate::util::os::net::postgres_host).unwrap_or_default()
 }
 
 /// The OS user, libpq's default for `user` (and `dbname`).

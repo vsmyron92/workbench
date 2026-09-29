@@ -445,25 +445,7 @@ mod win {
         let beside = path.parent().map(|d| d.join("rustup.exe"));
         let cargo_home = std::env::var_os("CARGO_HOME").map(PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".cargo")));
         let installed = cargo_home.map(|c| c.join("bin").join("rustup.exe"));
-        [beside, installed].into_iter().flatten().find(|r| r.is_file() && same_file(path, r))
-    }
-
-    /// Whether `a` and `b` are the same file (hard links included): same volume and file
-    /// index. The files are opened without access rights, as `std::fs::metadata` does.
-    fn same_file(a: &Path, b: &Path) -> bool {
-        fn id(p: &Path) -> Option<(u32, u32, u32)> {
-            use std::os::windows::fs::OpenOptionsExt;
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle};
-            // Dropping `f` closes the handle.
-            let f = std::fs::OpenOptions::new().access_mode(0).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(p).ok()?;
-            let mut info = BY_HANDLE_FILE_INFORMATION::default();
-            // SAFETY: `f` owns an open handle for the whole call, and `info` is a writable
-            // BY_HANDLE_FILE_INFORMATION the call fills in.
-            let ok = unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) };
-            (ok != 0).then_some((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
-        }
-        matches!((id(a), id(b)), (Some(x), Some(y)) if x == y)
+        [beside, installed].into_iter().flatten().find(|r| r.is_file() && crate::util::os::win32::same_file(path, r, true).unwrap_or(false))
     }
 
     pub(super) fn python() -> Vec<String> {

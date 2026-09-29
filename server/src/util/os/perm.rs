@@ -101,6 +101,12 @@ pub fn owned_by_me(path: &Path) -> io::Result<bool> {
     imp::owned_by_me(path)
 }
 
+/// The current user's uid and gid (a dev container's user is mapped onto them); `None` on
+/// Windows, which has neither.
+pub fn user_ids() -> Option<(u32, u32)> {
+    imp::user_ids()
+}
+
 /// Tests: `path` has the permission bits `mode` on Unix; a private mode is also checked
 /// through `privacy`, which is what Windows can check.
 #[cfg(test)]
@@ -193,6 +199,10 @@ mod imp {
         Ok(std::fs::metadata(path)?.uid() == nix::unistd::getuid().as_raw())
     }
 
+    pub fn user_ids() -> Option<(u32, u32)> {
+        Some((nix::unistd::getuid().as_raw(), nix::unistd::getgid().as_raw()))
+    }
+
     #[cfg(test)]
     pub fn expose(path: &Path, mode: u32) {
         apply(path, mode).unwrap();
@@ -205,27 +215,23 @@ mod imp {
     use std::fs::{File, Metadata};
     use std::io;
     use std::mem::{offset_of, size_of};
-    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use std::path::{Component, Path, Prefix};
+    use std::path::Path;
     use std::ptr::{null, null_mut};
     use std::sync::OnceLock;
     use std::time::Duration;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ,
-        GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree, WIN32_ERROR,
+        ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE,
+        INVALID_HANDLE_VALUE, WIN32_ERROR,
     };
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW, SetSecurityInfo,
-    };
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW, SetSecurityInfo};
     use windows_sys::Win32::Security::{
-        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddAccessAllowedAceEx, AddAce, CONTAINER_INHERIT_ACE, CheckTokenMembership,
-        CopySid, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl,
-        GetTokenInformation, INHERIT_ONLY_ACE, INHERITED_ACE, InitializeAcl, InitializeSecurityDescriptor, LookupAccountSidW,
-        OBJECT_INHERIT_ACE, OBJECT_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-        PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SetSecurityDescriptorControl,
-        SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser, UNPROTECTED_DACL_SECURITY_INFORMATION, WELL_KNOWN_SID_TYPE,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddAccessAllowedAceEx, AddAce, CONTAINER_INHERIT_ACE, CheckTokenMembership, CopySid,
+        CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl, INHERIT_ONLY_ACE, INHERITED_ACE,
+        InitializeAcl, InitializeSecurityDescriptor, LookupAccountSidW, OBJECT_INHERIT_ACE, OBJECT_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
+        SECURITY_MAX_SID_SIZE, SetSecurityDescriptorControl, SetSecurityDescriptorDacl, UNPROTECTED_DACL_SECURITY_INFORMATION, WELL_KNOWN_SID_TYPE,
         WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid, WinLocalSystemSid,
     };
     use windows_sys::Win32::Storage::FileSystem::{
@@ -236,9 +242,9 @@ mod imp {
     use windows_sys::Win32::System::SystemServices::{
         ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     use super::Privacy;
+    use crate::util::os::win32::{Local, User, sid_string, wide_path};
 
     /// What a new file's handle may do: write (as std's) and read its attributes (`metadata`).
     /// Not change its DACL: a share may refuse that right (`apply_to` asks for it itself).
@@ -308,7 +314,7 @@ mod imp {
     }
 
     fn create_dir(path: &Path, sd: &Descriptor) -> io::Result<()> {
-        let w = wide(path)?;
+        let w = wide_path(path)?;
         let sa = sd.attributes();
         // SAFETY: `w` is NUL-terminated; `sa` and the descriptor it points to outlive the call.
         if unsafe { CreateDirectoryW(w.as_ptr(), &sa) } == 0 {
@@ -397,6 +403,10 @@ mod imp {
         Ok(admin && member != 0)
     }
 
+    pub fn user_ids() -> Option<(u32, u32)> {
+        None
+    }
+
     #[cfg(test)]
     pub fn expose(path: &Path, _mode: u32) {
         use windows_sys::Win32::Security::WinWorldSid;
@@ -468,25 +478,7 @@ mod imp {
     }
 
     fn current_user() -> io::Result<Sid> {
-        let mut token: HANDLE = null_mut();
-        // SAFETY: this process's pseudo handle; `token` receives a handle `Handle` closes.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let token = Handle(token);
-        let mut len = 0u32;
-        // SAFETY: a size query; it fails with ERROR_INSUFFICIENT_BUFFER and sets `len`.
-        unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut len) };
-        // u64s: TOKEN_USER holds a pointer.
-        let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
-        let size = (buf.len() * 8) as u32;
-        // SAFETY: `buf` holds `size` bytes, aligned for TOKEN_USER.
-        if unsafe { GetTokenInformation(token.0, TokenUser, buf.as_mut_ptr().cast(), size, &mut len) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: GetTokenInformation filled `buf` with a TOKEN_USER whose SID lies in `buf`.
-        let user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
-        Sid::copy(user.User.Sid)
+        Sid::copy(User::current()?.sid())
     }
 
     /// `DOMAIN\name`, or the SID's string form.
@@ -499,16 +491,8 @@ mod imp {
             let domain = String::from_utf16_lossy(&domain[..d as usize]);
             return if domain.is_empty() { name } else { format!("{domain}\\{name}") };
         }
-        let mut s: *mut u16 = null_mut();
-        // SAFETY: `s` receives a LocalAlloc'ed string, freed by `Local`.
-        if unsafe { ConvertSidToStringSidW(sid, &mut s) } != 0 {
-            let _free = Local(s.cast());
-            // SAFETY: a NUL-terminated string.
-            let len = (0..).take_while(|&i| unsafe { *s.add(i) } != 0).count();
-            // SAFETY: `len` characters before the NUL.
-            return String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(s, len) });
-        }
-        "an unknown account".into()
+        // SAFETY: `sid` is valid.
+        unsafe { sid_string(sid) }.unwrap_or_else(|| "an unknown account".into())
     }
 
     // ---------------------------------------------------------------- DACLs
@@ -565,7 +549,7 @@ mod imp {
 
     /// Set `path`'s DACL; `protected` stops it inheriting from the folder.
     fn set_dacl(path: &Path, acl: &Acl, protected: bool) -> io::Result<()> {
-        let w = wide(path)?;
+        let w = wide_path(path)?;
         let info = DACL_SECURITY_INFORMATION | if protected { PROTECTED_DACL_SECURITY_INFORMATION } else { UNPROTECTED_DACL_SECURITY_INFORMATION };
         // SAFETY: `w` is NUL-terminated; the ACL is ours and well formed.
         check(unsafe { SetNamedSecurityInfoW(w.as_ptr(), SE_FILE_OBJECT, info, null_mut(), null_mut(), acl.ptr(), null()) })
@@ -722,7 +706,7 @@ mod imp {
 
     impl Security {
         pub(super) fn of(path: &Path, what: OBJECT_SECURITY_INFORMATION) -> io::Result<Security> {
-            let w = wide(path)?;
+            let w = wide_path(path)?;
             let (mut owner, mut dacl, mut sd): (PSID, *mut ACL, PSECURITY_DESCRIPTOR) = (null_mut(), null_mut(), null_mut());
             // SAFETY: `w` is NUL-terminated; the results point into `sd`, which `Local` frees.
             let rc = unsafe { GetNamedSecurityInfoW(w.as_ptr(), SE_FILE_OBJECT, what, &mut owner, null_mut(), &mut dacl, null_mut(), &mut sd) };
@@ -739,28 +723,6 @@ mod imp {
     }
 
     // ---------------------------------------------------------------- handles and paths
-
-    /// Closes a handle when dropped.
-    struct Handle(HANDLE);
-
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            // SAFETY: a handle we own, closed once.
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-
-    /// Frees a block the system allocated for us (descriptors, strings) when dropped.
-    struct Local(*mut c_void);
-
-    impl Drop for Local {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                // SAFETY: a LocalAlloc'ed block we own, freed once.
-                unsafe { LocalFree(self.0) };
-            }
-        }
-    }
 
     /// Another handle to `file`, with the rights `access`.
     fn reopen(file: &File, access: u32) -> io::Result<File> {
@@ -779,7 +741,7 @@ mod imp {
     }
 
     fn create_file(path: &Path, sd: Option<&Descriptor>, access: u32, disposition: FILE_CREATION_DISPOSITION) -> io::Result<File> {
-        let w = wide(path)?;
+        let w = wide_path(path)?;
         let sa = sd.map(Descriptor::attributes);
         let sa_ptr = sa.as_ref().map_or(null(), |a| a as *const SECURITY_ATTRIBUTES);
         // As std's `create_new`, a new file is never created through a symlink or junction,
@@ -794,28 +756,6 @@ mod imp {
         }
         // SAFETY: a fresh handle nobody else owns; `File` closes it.
         Ok(unsafe { File::from_raw_handle(h) })
-    }
-
-    /// `path` as a NUL-terminated UTF-16 string. Long paths get the `\\?\` prefix (absolute
-    /// and normalized first), as std does.
-    fn wide(path: &Path) -> io::Result<Vec<u16>> {
-        let mut w: Vec<u16> = path.as_os_str().encode_wide().collect();
-        if w.contains(&0) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL character"));
-        }
-        if w.len() >= 248 {
-            let abs = std::path::absolute(path)?;
-            let full: Vec<u16> = abs.as_os_str().encode_wide().collect();
-            w = match abs.components().next() {
-                Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_)) => r"\\?\".encode_utf16().chain(full).collect(),
-                Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::UNC(..)) => {
-                    r"\\?\UNC\".encode_utf16().chain(full.into_iter().skip(2)).collect()
-                }
-                _ => full,
-            };
-        }
-        w.push(0);
-        Ok(w)
     }
 
     #[cfg(test)]

@@ -99,7 +99,7 @@ pub fn preset_defaults(spec: &mut ServerSpec, placement: &Placement) {
 
 /// `…/node_modules/typescript/lib` beside a server installed with npm (locally or globally).
 fn typescript_near(bin: &Path) -> Option<std::path::PathBuf> {
-    let real = bin.canonicalize().ok()?;
+    let real = crate::util::os::path::canonicalize(bin).ok()?;
     for dir in real.ancestors().skip(1).take(8) {
         for cand in [dir.join("node_modules/typescript/lib"), dir.join("typescript/lib")] {
             if cand.join("tsserver.js").is_file() {

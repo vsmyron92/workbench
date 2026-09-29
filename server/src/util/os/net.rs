@@ -34,6 +34,16 @@ pub async fn kill_port_holders(port: u16) -> Result<String, String> {
     sys::kill_port_holders(port).await
 }
 
+/// A Postgres host as text: its name or address, or on Unix the directory of its socket.
+pub fn postgres_host(host: &tokio_postgres::config::Host) -> String {
+    use tokio_postgres::config::Host;
+    match host {
+        Host::Tcp(h) => h.clone(),
+        #[cfg(unix)]
+        Host::Unix(p) => p.display().to_string(),
+    }
+}
+
 #[cfg(unix)]
 mod sys {
     use std::ffi::CStr;
@@ -108,8 +118,8 @@ mod sys {
     use std::ptr;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_BUFFER_OVERFLOW, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, ERROR_SUCCESS, FILETIME, HANDLE,
-        INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+        ERROR_BUFFER_OVERFLOW, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, ERROR_SUCCESS, FILETIME, HANDLE, INVALID_HANDLE_VALUE,
+        WAIT_OBJECT_0,
     };
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses, GetExtendedTcpTable,
@@ -120,16 +130,17 @@ mod sys {
     use windows_sys::Win32::Networking::WinSock::{
         AF_INET, AF_INET6, AF_UNSPEC, IPPROTO_IPV6, IPV6_V6ONLY, SOCKADDR_IN, SOCKADDR_IN6, SOCKET, WSAGetLastError, setsockopt,
     };
-    use windows_sys::Win32::Security::{EqualSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::Security::EqualSid;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
     use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess,
-        WaitForSingleObject,
+        GetCurrentProcessId, GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
     };
+
+    use crate::util::os::win32::{Handle, User, from_wide};
 
     /// Hyper-V switches (WSL, Docker Desktop, Windows Sandbox), VMware and VirtualBox
     /// host adapters, by their default friendly names.
@@ -140,36 +151,10 @@ mod sys {
     /// equivalent, docker-proxy, runs as root and `fuser -k` cannot stop it either).
     const FORWARDERS: &[&str] = &["wslrelay.exe", "com.docker.backend.exe", "com.docker.proxy.exe", "vpnkit.exe"];
 
-    /// Closes a kernel handle when dropped.
-    struct Handle(HANDLE);
-
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            // SAFETY: the handle came from a successful Open* or CreateToolhelp32Snapshot call
-            // and is closed only here.
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-
     /// A zeroed buffer of at least `bytes` bytes, 8-byte aligned as the Win32 structures
     /// read from it need.
     fn aligned(bytes: usize) -> Vec<u64> {
         vec![0u64; bytes.div_ceil(8).max(1)]
-    }
-
-    /// A NUL-terminated UTF-16 string.
-    ///
-    /// # Safety
-    /// `p` must point at a NUL-terminated UTF-16 string.
-    unsafe fn wide_str(p: *const u16) -> String {
-        // SAFETY: the caller guarantees a terminating NUL, so every read is in bounds.
-        unsafe {
-            let mut n = 0;
-            while *p.add(n) != 0 {
-                n += 1;
-            }
-            String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
-        }
     }
 
     pub fn interfaces() -> Vec<(String, IpAddr)> {
@@ -202,7 +187,7 @@ mod sys {
                 if adapter.OperStatus != IfOperStatusUp || adapter.FriendlyName.is_null() {
                     continue;
                 }
-                let name = wide_str(adapter.FriendlyName);
+                let name = from_wide(adapter.FriendlyName);
                 let mut ua = adapter.FirstUnicastAddress;
                 while !ua.is_null() {
                     let unicast = &*ua;
@@ -271,8 +256,7 @@ mod sys {
             return Err(format!("no Windows process listens on port {port} (WSL or a VM may hold it); free the port yourself"));
         }
         let (procs, listed) = processes().map_err(|e| format!("cannot list the processes on port {port}: {e}"))?;
-        // SAFETY: the pseudo-handle of the current process needs no closing.
-        let mine = token_user(unsafe { GetCurrentProcess() }).map_err(|e| format!("cannot read Workbench's user ({e})"))?;
+        let mine = User::current().map_err(|e| format!("cannot read Workbench's user ({e})"))?;
         // SAFETY: no preconditions.
         let me = unsafe { GetCurrentProcessId() };
         let (mut stopped, mut notes, mut gone) = (vec![], vec![], false);
@@ -493,16 +477,12 @@ mod sys {
         Ok(Some(Process { handle, created: ticks(created), exited, name }))
     }
 
-    /// Terminate `p` when it runs as `mine`'s user (a TOKEN_USER buffer from `token_user`)
-    /// and is not a port forwarder.
-    fn stop(p: &Process, mine: &[u64]) -> Result<(), String> {
+    /// Terminate `p` when it runs as `mine` and is not a port forwarder.
+    fn stop(p: &Process, mine: &User) -> Result<(), String> {
         let name = &p.name;
-        let theirs = token_user(p.handle.0).map_err(|e| format!("cannot read the user of {name} ({e})"))?;
-        // SAFETY: both buffers hold a TOKEN_USER written by GetTokenInformation, whose Sid
-        // points into the same buffer.
-        let same = unsafe {
-            EqualSid((*(mine.as_ptr() as *const TOKEN_USER)).User.Sid, (*(theirs.as_ptr() as *const TOKEN_USER)).User.Sid) != 0
-        };
+        let theirs = User::of(p.handle.0).map_err(|e| format!("cannot read the user of {name} ({e})"))?;
+        // SAFETY: both SIDs are valid while `mine` and `theirs` live.
+        let same = unsafe { EqualSid(mine.sid(), theirs.sid()) != 0 };
         if !same {
             return Err(format!("{name} belongs to another user"));
         }
@@ -527,29 +507,6 @@ mod sys {
         }
         let path = String::from_utf16_lossy(&buf[..(len as usize).min(buf.len())]);
         Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned())
-    }
-
-    /// The TOKEN_USER of a process (its user's SID), in a buffer it points into.
-    fn token_user(process: HANDLE) -> io::Result<Vec<u64>> {
-        let mut token: HANDLE = ptr::null_mut();
-        // SAFETY: `process` is open with at least PROCESS_QUERY_LIMITED_INFORMATION (or is
-        // the current process's pseudo-handle); the token is closed by the guard.
-        if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let token = Handle(token);
-        let mut len: u32 = 0;
-        // SAFETY: a null buffer of length 0 only asks for the size needed.
-        unsafe { GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut len) };
-        if len == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut buf = aligned(len as usize);
-        // SAFETY: buf is writable for at least `len` bytes and 8-byte aligned.
-        if unsafe { GetTokenInformation(token.0, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(buf)
     }
 
     #[cfg(test)]

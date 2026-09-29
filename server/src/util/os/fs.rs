@@ -328,11 +328,9 @@ mod unix {
 #[cfg(windows)]
 mod win {
     use std::ffi::OsString;
-    use std::fs::OpenOptions;
     use std::io::{self, ErrorKind};
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use std::os::windows::fs::{FileTypeExt, OpenOptionsExt};
-    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::fs::FileTypeExt;
     use std::path::{Component, Path, PathBuf};
     use std::time::Duration;
 
@@ -340,10 +338,7 @@ mod win {
         ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_NOT_SAME_DEVICE, ERROR_PRIVILEGE_NOT_HELD, ERROR_SUCCESS,
         MAX_PATH,
     };
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, GetDriveTypeW, GetFileInformationByHandle,
-        GetVolumeNameForVolumeMountPointW, GetVolumePathNameW, MoveFileExW,
-    };
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW, MoveFileExW};
     use windows_sys::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RegGetValueW};
     use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
     use windows_sys::Win32::UI::Shell::{
@@ -351,6 +346,7 @@ mod win {
     };
 
     use crate::error::{ApiError, ApiResult};
+    use crate::util::os::win32::{same_file, starts_with, wide, wide_path};
 
     pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
         match move_file(from, to) {
@@ -393,23 +389,7 @@ mod win {
     /// `from` and `to` differ only in the case of the final name, and are one file.
     fn case_only(from: &Path, to: &Path) -> bool {
         let (Some(a), Some(b)) = (from.file_name(), to.file_name()) else { return false };
-        a != b && a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase() && same_file(from, to).unwrap_or(false)
-    }
-
-    /// Volume serial number and file index: equal for two names of one file.
-    fn file_id(p: &Path) -> io::Result<(u32, u32, u32)> {
-        // No access rights are needed to read the id; the entry itself, a directory too.
-        let f = OpenOptions::new().access_mode(0).custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).open(p)?;
-        let mut info = BY_HANDLE_FILE_INFORMATION::default();
-        // SAFETY: `f` keeps the handle open for the call, and `info` is a valid out-pointer.
-        if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
-    }
-
-    fn same_file(a: &Path, b: &Path) -> io::Result<bool> {
-        Ok(file_id(a)? == file_id(b)?)
+        a != b && a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase() && same_file(from, to, false).unwrap_or(false)
     }
 
     /// Rename through a free temporary name beside `from` (a case-only rename on a
@@ -421,35 +401,6 @@ mod win {
         move_file(&tmp, to).inspect_err(|_| {
             let _ = move_file(&tmp, from);
         })
-    }
-
-    /// `p` for the `…W` functions: absolute (which also turns `/` into `\`),
-    /// NUL-terminated, and with the `\\?\` prefix when it is too long for MAX_PATH.
-    fn wide_path(p: &Path) -> io::Result<Vec<u16>> {
-        let abs = std::path::absolute(p)?;
-        let mut w: Vec<u16> = abs.as_os_str().encode_wide().collect();
-        if w.contains(&0) {
-            return Err(io::Error::new(ErrorKind::InvalidInput, "path contains a NUL character"));
-        }
-        if w.len() >= 248 && !starts_with(&w, r"\\?\") && !starts_with(&w, r"\\.\") {
-            if starts_with(&w, r"\\") {
-                // \\server\share\… → \\?\UNC\server\share\…
-                w.splice(..2, r"\\?\UNC\".encode_utf16());
-            } else {
-                w.splice(..0, r"\\?\".encode_utf16());
-            }
-        }
-        w.push(0);
-        Ok(w)
-    }
-
-    fn starts_with(w: &[u16], s: &str) -> bool {
-        s.encode_utf16().enumerate().all(|(i, c)| w.get(i) == Some(&c))
-    }
-
-    /// `s` NUL-terminated, for the `…W` functions.
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain([0]).collect()
     }
 
     /// A UTF-16 buffer up to its first NUL.
