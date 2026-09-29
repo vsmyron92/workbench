@@ -182,18 +182,19 @@ pub(crate) fn docker_path(state: &AppState) -> String {
 
 /// How to run the devcontainer CLI, if it is installed or configured.
 pub(crate) fn cli_command(state: &AppState) -> Option<Vec<String>> {
+    use crate::util::os::exe;
     let c = settings(state).cli.trim().to_string();
     if c == "npx" {
-        return crate::util::which_path("npx").map(|p| vec![p.display().to_string(), "-y".into(), "@devcontainers/cli".into()]);
+        return exe::resolve("npx").map(|r| r.argv(&["-y", "@devcontainers/cli"]));
     }
     if c.is_empty() {
-        return crate::util::which_path("devcontainer").map(|p| vec![p.display().to_string()]);
+        return exe::resolve("devcontainer").map(|r| r.argv(&[]));
     }
     let p = crate::config::expand_tilde(&c);
     if p.is_file() {
-        return Some(vec![p.display().to_string()]);
+        return Some(exe::classify(p).argv(&[]));
     }
-    crate::util::which_path(&c).map(|p| vec![p.display().to_string()])
+    exe::resolve(&c).map(|r| r.argv(&[]))
 }
 
 /// What is installed (cached for 30 s).

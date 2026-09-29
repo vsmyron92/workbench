@@ -409,8 +409,8 @@ async fn check_via_host(project: &Project, e: &Environment, h: &crate::config::p
     };
     let secs = (u64::from(h.timeout_ms) / 1000).clamp(1, 60);
     let argv = remote::argv(&target, &via_host_command(&h.url, secs), false);
-    let mut c = tokio::process::Command::new(&argv[0]);
-    c.args(&argv[1..]).current_dir(&project.root);
+    let mut c = crate::util::os::shell::command(&argv);
+    c.current_dir(&project.root);
     match crate::util::proc::run_cmd(c, Duration::from_secs(secs + 20)).await {
         Ok(out) => {
             let (code, ms) = parse_via_host(&out.stdout);
@@ -467,8 +467,8 @@ pub async fn probe_version(state: &AppState, project: &Project, e: &Environment)
     } else if let Some(cmd) = &v.command {
         let target = remote::env_target(project, e)?;
         let argv = remote::argv(&target, cmd, false);
-        let mut c = tokio::process::Command::new(&argv[0]);
-        c.args(&argv[1..]).current_dir(&project.root);
+        let mut c = crate::util::os::shell::command(&argv);
+        c.current_dir(&project.root);
         let out = crate::util::proc::run_cmd(c, Duration::from_secs(40)).await?;
         let info = if out.ok() {
             let raw = out.stdout.trim().to_string();

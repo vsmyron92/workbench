@@ -981,8 +981,8 @@ async fn run_prelaunch_config(state: &AppState, project: &Arc<Project>, s: &Arc<
     }
 }
 
-/// Run `command` (`bash -lc`) in a visible terminal of the project (in its dev
-/// container when the session uses it) and wait for it to succeed.
+/// Run `command` in the run shell (`bash -lc` on Unix) in a visible terminal of the
+/// project (in its dev container when the session uses it) and wait for it to succeed.
 async fn run_in_terminal(state: &AppState, s: &Arc<Session>, plan: &Plan, title: &str, command: &str) -> Result<String, String> {
     let mut meta = json!({ "debug": s.id, "debugPreLaunch": true });
     if plan.target.is_some() {
@@ -993,7 +993,7 @@ async fn run_in_terminal(state: &AppState, s: &Arc<Session>, plan: &Plan, title:
         title: title.to_string(),
         project_id: Some(s.project_id.clone()),
         cwd: plan.cwd.clone(),
-        argv: vec!["bash".into(), "-lc".into(), command.to_string()],
+        argv: crate::util::os::shell::run_argv(command),
         env: vec![],
         cols: None,
         rows: None,
@@ -1039,7 +1039,7 @@ async fn cargo_build(state: &AppState, s: &Arc<Session>, plan: &Plan, t: &derive
     };
     let args: Vec<String> = t.build_args().iter().map(|a| q(a)).collect();
     // JSON messages go to the file; the human-readable diagnostics stay in the terminal.
-    let cmd = format!("cargo {} > {}", args.join(" "), q(&file_arg));
+    let cmd = crate::util::os::shell::redirect_stdout(&format!("cargo {}", args.join(" ")), &q(&file_arg));
     let mut root_plan = plan.clone();
     root_plan.cwd = s.paths.root.join(&t.workspace);
     let title = format!("Build {}", t.config_name().trim_start_matches("Cargo: "));
@@ -1049,7 +1049,7 @@ async fn cargo_build(state: &AppState, s: &Arc<Session>, plan: &Plan, t: &derive
             let f = f.clone();
             tokio::task::spawn_blocking(move || {
                 let meta = std::fs::metadata(&f).ok()?;
-                (meta.len() < 64 * 1024 * 1024).then(|| std::fs::read_to_string(&f).ok()).flatten()
+                (meta.len() < 64 * 1024 * 1024).then(|| crate::util::os::shell::read_output(&f)).flatten()
             })
             .await
             .ok()
