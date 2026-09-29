@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use axum::extract::{Path as AxPath, State as AxState};
 use axum::http::{HeaderMap, StatusCode, header};
-use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use p256::SecretKey;
 use p256::elliptic_curve::Generate;

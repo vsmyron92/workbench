@@ -16,6 +16,13 @@ and the tests run.
   release job with `install.ps1`, and the user documentation (§4, step 14). The server loads
   DLLs by name only from its own folder and System32 (`os::dll`). The server and its tests
   compile for Windows.
+- **First `windows-latest` run:** the MSVC build succeeded; `cargo test` passed 971 tests
+  and failed 57. Fixed since: TOML fixtures that put a Windows path in a basic string (the
+  GitHub and GitLab overlays, the hostile `.workbench.toml`), dev container paths shown or
+  split with `\`, Local History's repair of a torn index line (`perm::set_len` on an append
+  handle), `Event::set` of a name nothing holds (ERROR_INVALID_HANDLE), a terminal exit
+  announced before it was recorded (every OS) and a reused leader pid (`session::Handle`),
+  and tests that assumed `sh`, `/etc` or `/`-joined paths. The next run confirms them.
 - **Next:** the CI job passing on `windows-latest` and becoming required (steps 6 and 13),
   then real Windows 10 and 11 machines (§5). Until then a tag publishes the Linux archive
   alone: the release workflow builds the Windows archive on a tag only once the repository
@@ -415,7 +422,11 @@ project.
 - `fake_ls.py` and `fake_dap.py` only need `python3` → `python()` (`lsp/tests.rs:58, 226`,
   `debug/tests.rs:15, 86`). The five bash fakes (`terminals/testdata/fake-*.sh`) became one
   `fake_cli.py`, used on every OS (on Windows through an npm-style shim, so the tests take
-  the shim unwrapping path); the terminals' end-to-end tests run Python programs.
+  the shim unwrapping path); the terminals' end-to-end tests run Python programs. The
+  Services test's fake docker is `devcontainer/testdata/fake_docker.py` likewise (run as
+  `docker` on Unix, through a `docker.cmd` and `docker.ps1` shim on Windows).
+- A fixture that writes a path into TOML writes it as a TOML value (`toml::Value`), never
+  spliced into a basic string, where a Windows path's `\` is an escape.
 - CI runs `git config --global core.autocrlf false`; test repositories set it too. End-to-end
   timeouts scale by 2–3× on Windows.
 
