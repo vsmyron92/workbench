@@ -166,6 +166,9 @@ async fn enable(State(state): State<AppState>, caller: Option<Extension<Caller>>
     user_only(&caller)?;
     let p = state.projects.require(&pid)?;
     let mode = body.and_then(|b| b.0.mode);
+    if mode == Some(Mode::Container) {
+        crate::devcontainer::require_supported()?;
+    }
     let root = p.root.display().to_string();
     let st = state.clone();
     let id = p.id.clone();
@@ -212,6 +215,9 @@ struct SettingsBody {
 async fn settings(State(state): State<AppState>, caller: Option<Extension<Caller>>, Path(pid): Path<String>, Json(body): Json<SettingsBody>) -> ApiResult<Json<Value>> {
     user_only(&caller)?;
     let p = state.projects.require(&pid)?;
+    if body.mode == Some(Mode::Container) {
+        crate::devcontainer::require_supported()?;
+    }
     if let Some(list) = &body.disabled_servers {
         if list.len() > 100 || list.iter().any(|s| !super::config::valid_id(s)) {
             return Err(ApiError::bad_request("bad server ids"));

@@ -146,7 +146,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 - **Agent tokens:** `auth.issue_agent_token(terminal_id)` is put into a hosted session's environment (`WORKBENCH_AGENT_TOKEN`). It is valid only on `/api/hooks/**` and `/mcp`, whose handlers check it with `auth.agent_from_headers`.
   - A hosted session is confined to its own project over MCP. Tools resolve the project with `McpCtx::project_for`, which refuses a `projectId` naming another project; terminal tools show only what `McpCtx::may_see_project` allows. Only a caller that is not a session (the master token without `X-Workbench-Terminal`) may name any project.
 - **Paths:** every client path goes through `util::paths::resolve_in_root`, or through `resolve_absolute_in` for extra roots. These reject `..` escapes and symlinks leaving the root.
-  - Whether a string is an absolute path, and the Windows rules, live in `util::os::path`. On Windows client paths use `/` only (a `\` could slip past checks that split on `/`), and names that alias another file or a device are refused (`:`, device names like `NUL` or `com1.txt`, a trailing dot or space, 8.3 short names like `GIT~1`); roots compare without regard to ASCII case; UNC roots (`\\server\share`, `\\wsl$`) are refused. Canonical paths drop `\\?\` wherever a plain path names the same file and have an uppercase drive letter; comparisons take `\\?\C:\` for `C:\`. Linux keeps its rules.
+  - Whether a string is an absolute path, and the Windows rules, live in `util::os::path`. On Windows client paths use `/` only (a `\` could slip past checks that split on `/`), and names that alias another file or a device are refused (`:`, device names like `NUL` or `com1.txt`, a trailing dot or space, 8.3 short names like `GIT~1`); roots compare without regard to ASCII case; UNC roots (`\\server\share`, `\\wsl$`, also spelled `\\?\UNC\…` or `\??\UNC\…`) are refused: adding one as a project answers `unsupported_platform` (`networkRoots`), so does a path that resolves to one (a mapped network drive), and config.toml entries naming one are skipped at reload before anything opens them. Canonical paths drop `\\?\` wherever a plain path names the same file and have an uppercase drive letter; comparisons take `\\?\C:\` for `C:\`. Linux keeps its rules.
 - **PTY input is code execution.** Every authenticated device is fully trusted, so remote exposure requires pairing and should use TLS (a proxy such as `tailscale serve` or Caddy, or `[server.tls]`).
 - **Dev containers:** a `devcontainer.json` (with its Dockerfile and compose files) is repository content that runs code on the host's Docker. Nothing builds or starts without the user's approval of the exact plan (a sha256 the server checks); agents can only read the status. The bridge listener on a container network's gateway serves only `/api/hooks/**` and `/mcp`, only with agent tokens. See "Dev containers".
 - **Docker (Services)** is root on this computer: `/api/docker/**` acts only for devices (agent tokens are not valid there; in-process callers get 403 on every route that changes something or opens a terminal). Details and `inspect` mask values of secret-looking names (`*PASSWORD*`, `*TOKEN*`, `*_KEY`, `*SECRET*`…), passwords in URLs, and those inside JSON labels (`devcontainer.metadata`'s `remoteEnv`).
@@ -194,6 +194,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 **Handlers:**
 - Return `ApiResult<Json<T>>`. JSON is camelCase (`#[serde(rename_all = "camelCase")]`).
 - Errors come from the `ApiError` constructors. Use `not_configured` for a missing token, site or similar, which makes the UI show setup help.
+- A feature the OS leaves out answers `ApiError::unsupported(feature, reason)`: HTTP 501, `{error: {code: "unsupported_platform", message, feature}}`. The table of such features is `util::os::support` (`Feature`, `unsupported(f)`, `require(f)`, `require_root(path)`); everything is supported on Linux. MCP tools return the same reason.
 - Use `conflict` for optimistic-concurrency failures and `upstream` for remote failures.
 
 ### TypeScript
@@ -209,7 +210,8 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 - Panels, tool windows and mobile tabs may be `React.lazy` components: the dock, `ToolWindowArea` and the phone shell wrap them in `Suspense`. Both shells are lazy chunks, and so are `AnsiLog`, `Markdown` and Monaco.
 - **Keyboard shortcuts** (`shell/CommandPalette.tsx`, `shell/paletteSearch.ts`) run in the bubble phase: a terminal keeps every key typed into it (Ctrl+T, Ctrl+K, Ctrl+P mean something to bash and Claude Code, like CLion's "Override IDE shortcuts"), and keys a focused widget handled (Monaco's own bindings) are not taken. Ctrl+K opens the palette elsewhere; Ctrl+Shift+P opens it from anywhere. Editor keys are Monaco *actions* added per editor (never `addCommand`, whose keybinding is global); features that hook every editor add theirs a microtask after `onDidCreateEditor` (see "Editor models"). The only capture-phase keys are the debugger's F7/F8/F9/Ctrl+F2 while the current project has a live session; a widget that handles one of them itself declares it with `data-wb-keys="F7 …"` on an ancestor (the git diff viewer's F7 = Next Difference), and terminals keep every key. The full list, with who owns each key, is under "Keyboard shortcuts" below.
 - Shell actions (`web/src/shell/actions.ts`): `openPanel`, `closePanel`, `focusPanel`, `showToolWindow`, `toast` (options `actions: ToastAction[]` for several buttons and `code` for a monospace block, e.g. a permission request's command), `toastError`, `confirmDialog` (supports `typed` confirmation), `promptDialog`, `openSettings(section?)`, `addProjectInteractive`.
-- `ErrorBox` shows `not_configured` errors as setup help with an "Open Settings" button (`settingsSection`, default `integrations`; not on a phone).
+- `ErrorBox` shows `not_configured` errors as setup help with an "Open Settings" button (`settingsSection`, default `integrations`; not on a phone), and `unsupported_platform` errors in the same box ("Not available on Windows", the reason, no Settings or Retry).
+- `api/health.ts` loads `GET /api/health` once after sign-in. `useUnsupported(feature)` / `unsupportedReason(feature)` and `useExperimental(feature)` read it; features hide what the server's OS leaves out (the dev container chip, status item, commands and the Services link to its panel), explain what is limited (the Attach to Process picker's gdb note, Settings › Notifications), and mark the Services tool window "experimental". Before the report arrives nothing is hidden.
 - `askAgent({projectId, prompt, …})` lives in `shell/agentBridge.ts` and calls `POST /api/agents/ask`.
 - `devcontainerAction(projectId, 'panel' | 'start' | 'stop' | 'rebuild' | 'shell')` lives in `shell/devcontainerBridge.ts`. The devcontainer feature registers the handler, so a Start from the Apps tool window or the phone goes through its confirmation.
 - Data comes from `api` (`api/client.ts`; `api.upload(path, blob, query, onProgress, signal)` streams a raw-body upload with progress; `getDeviceKey()` hands the device key to the service worker) and `useEvent` / `useInvalidateOn` (`api/events.ts`). After a reconnect or `lagged`, `installResync` (mounted once in `App.tsx`) refetches every active query once; `useInvalidateOn` only handles its own event types.
@@ -385,6 +387,8 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `/api/projects/{pid}/db/**` | db |
 | `/mcp`, `/api/platform/**`, `/api/settings/**`, `/api/push/**` | platform |
 | `/sw.js`, `/manifest.webmanifest`, `/icons/**` (public, served by `spa.rs` from `web/public`) | platform files, core serving |
+
+`GET /api/health` (public) → `{ok, service, version, startedAt, os, unsupported, experimental}`: `os` is `linux`, `windows` or `macos`; `unsupported` maps a feature to why this OS leaves it out and `experimental` to a note (both empty on Linux). Features on Windows: `devcontainer`, `desktopNotifications`, `gdbAttach`, `rustGdbPrettyPrinters` and `networkRoots` are unsupported, `services` is experimental.
 
 **App previews** are not proxied under `/api`: `GET /api/projects/{pid}/envs/{name}/proxy-url` starts a per-env proxy on its own loopback port (`apps/proxy.rs`) and returns a one-time URL. It is local-only (`url: null` for remote devices).
 
@@ -1017,6 +1021,12 @@ bridges to the host blocks the bridge listener. Container IPs are reachable only
 networks. Root containers write root-owned files into the project (as with any devcontainer
 without a remote user). Features, `hostRequirements`, `waitFor`, `userEnvProbe` and
 `customizations` are not interpreted by the built-in engine (features need the CLI).
+**Windows** has no dev containers (`util::os::support`: the bridge listener cannot bind the
+gateway inside Docker Desktop's VM, and there is no uid mapping): `/api/projects/{pid}/devcontainer/**`
+and `devcontainer_status` answer 501 `unsupported_platform`, `summary` is `None`, `running_target`
+gives the reason and no container is polled. What asks for the container explicitly (a container
+terminal or agent session, language servers' `container` mode) checks `require_supported` and
+answers the same. Services works there and is marked experimental.
 
 ## Third phase (2026-09-27): code intelligence, debugger, CLion VCS, Confluence authoring, push, approvals, local history
 
@@ -1395,7 +1405,10 @@ the default toolchain's pretty printers (`rustc --print sysroot` run outside the
 with `RUSTUP_AUTO_INSTALL=0`: a `rust-toolchain.toml` could name a toolchain inside the
 repository, whose scripts gdb would load). A native attach is checked (`TracerPid`): gdb 17
 answers `attach` with success when ptrace refused it; the error then explains
-`kernel.yama.ptrace_scope`. Reverse requests: `runInTerminal` spawns a Workbench Command
+`kernel.yama.ptrace_scope`. On Windows (`util::os::support`) gdb neither attaches to a process
+(an attach by language picks lldb-dap or CodeLLDB; one that ends up with gdb answers
+`unsupported_platform`, a gdbserver `target` still goes) nor loads the pretty printers (the
+console says so). Reverse requests: `runInTerminal` spawns a Workbench Command
 terminal (`meta.debug`, `meta.debuggee`; redacted like the session's env), so the debuggee
 has a real TTY; `startDebugging` starts a child session (`parentId`) with the given
 configuration, sent as-is: when the configuration names a loopback `connect: {host, port}`

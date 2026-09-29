@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState, useSyncExternalStore } from 'react
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import { api, setUnauthorizedHandler, settleDeviceKey } from '@/api/client'
 import { installResync, startEvents } from '@/api/events'
+import { loadHealth } from '@/api/health'
 import { installProjectsSync } from '@/api/queries'
 import { Login } from '@/shell/Login'
 import { providers } from '@/shell/registry'
@@ -36,6 +37,8 @@ function Authenticated() {
   // Once for the whole app, not once per hook instance.
   useEffect(() => installResync(queryClient), [])
   useEffect(() => installProjectsSync(queryClient), [])
+  // What the server's OS leaves out (dev containers on Windows…): hidden, or explained.
+  useEffect(() => void loadHealth(), [])
   const tree = <Suspense fallback={<Loading label="Loading…" />}>{mobile ? <MobileShell /> : <DesktopShell />}</Suspense>
   return providers.reduceRight((children, P) => <P>{children}</P>, tree)
 }

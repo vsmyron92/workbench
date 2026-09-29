@@ -23,8 +23,9 @@ import {
   type TextareaHTMLAttributes,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertTriangle, ChevronDown, ChevronRight, Settings2 } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronRight, MonitorX, Settings2 } from 'lucide-react'
 import { ApiError } from '@/api/client'
+import { osLabel, useHealth } from '@/api/health'
 import { isMobileShell, openSettings } from '@/shell/actions'
 import type { AnsiLog as AnsiLogT } from './AnsiLog'
 import type { Markdown as MarkdownT } from './Markdown'
@@ -200,29 +201,36 @@ export function EmptyState({
  * Shows an error; `not_configured` errors get a setup-flavoured box with a link to
  * Settings (`settingsSection`, default Integrations; not on a phone, which has no
  * Settings panel). Edits to config.toml apply live, so Retry works after either.
+ * `unsupported_platform` errors (the server's OS leaves the feature out) get the same
+ * box with the reason, and neither Settings nor Retry, which cannot change that.
  */
 export function ErrorBox({ error, onRetry, settingsSection = 'integrations' }: { error: unknown; onRetry?: () => void; settingsSection?: string }) {
-  const setup = error instanceof ApiError && error.notConfigured
+  const os = osLabel(useHealth()?.os)
+  const kind = errorKind(error)
+  const setup = kind === 'setup'
   const msg = error instanceof Error ? error.message : String(error)
   const settingsLink = setup && !isMobileShell()
+  const retry = kind === 'unsupported' ? undefined : onRetry
   return (
-    <div className={setup ? 'wb-error setup' : 'wb-error'}>
+    <div className={kind === 'error' ? 'wb-error' : 'wb-error setup'}>
       <div className="wb-row" style={{ alignItems: 'flex-start' }}>
-        {setup ? <Settings2 size={16} /> : <AlertTriangle size={16} className="wb-danger" />}
+        {kind === 'unsupported' ? <MonitorX size={16} /> : setup ? <Settings2 size={16} /> : <AlertTriangle size={16} className="wb-danger" />}
         <div className="wb-grow">
-          <div style={{ fontWeight: 600, marginBottom: 2 }}>{setup ? 'Not set up yet' : 'Something went wrong'}</div>
+          <div style={{ fontWeight: 600, marginBottom: 2 }}>
+            {kind === 'unsupported' ? `Not available on ${os ?? 'this system'}` : setup ? 'Not set up yet' : 'Something went wrong'}
+          </div>
           <div className="wb-small">{msg}</div>
         </div>
       </div>
-      {(onRetry || settingsLink) && (
+      {(retry || settingsLink) && (
         <div className="wb-row" style={{ marginTop: 8, gap: 6 }}>
           {settingsLink && (
             <Button size="small" icon={Settings2} onClick={() => openSettings(settingsSection)}>
               Open Settings
             </Button>
           )}
-          {onRetry && (
-            <Button size="small" onClick={onRetry}>
+          {retry && (
+            <Button size="small" onClick={retry}>
               Retry
             </Button>
           )}
@@ -230,6 +238,12 @@ export function ErrorBox({ error, onRetry, settingsSection = 'integrations' }: {
       )}
     </div>
   )
+}
+
+/** How `ErrorBox` shows an error: setup help, a feature this OS leaves out, or a failure. */
+export function errorKind(error: unknown): 'setup' | 'unsupported' | 'error' {
+  if (!(error instanceof ApiError)) return 'error'
+  return error.notConfigured ? 'setup' : error.unsupported ? 'unsupported' : 'error'
 }
 
 export function Badge({ tone, children, title }: { tone?: 'accent' | 'success' | 'warning' | 'danger'; children: ReactNode; title?: string }) {

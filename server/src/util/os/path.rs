@@ -420,7 +420,9 @@ mod win {
 
     pub fn unsupported_root(root: &str) -> Option<&'static str> {
         let r = root.replace('/', "\\");
-        let host = match r.strip_prefix(r"\\?\") {
+        // `\??\` is the NT namespace `\\?\` stands for: Win32 passes it through, so
+        // `\??\UNC\server\share` reaches the network redirector too.
+        let host = match r.strip_prefix(r"\\?\").or_else(|| r.strip_prefix(r"\??\")) {
             // `\\?\C:\x` is a local drive.
             Some(rest) if drive(rest).is_some() => return None,
             Some(rest) => match rest.get(..4) {
@@ -433,10 +435,10 @@ mod win {
         Some(if host == "wsl$" || host == "wsl.localhost" { WSL } else { UNC })
     }
 
-    /// A path's root as a key equal for every spelling of it (`C:\`, `c:/` and `\\?\C:\`;
-    /// `\\Server\Share` and `\\?\UNC\server\share`), and the rest of the path.
+    /// A path's root as a key equal for every spelling of it (`C:\`, `c:/`, `\\?\C:\` and
+    /// `\??\C:\`; `\\Server\Share` and `\\?\UNC\server\share`), and the rest of the path.
     fn split_root(s: &str) -> (String, &str) {
-        let (unc, rest) = match s.strip_prefix(r"\\?\").or_else(|| s.strip_prefix("//?/")) {
+        let (unc, rest) = match s.strip_prefix(r"\\?\").or_else(|| s.strip_prefix("//?/")).or_else(|| s.strip_prefix(r"\??\")) {
             Some(v) => match v.get(..4) {
                 Some(p) if p.eq_ignore_ascii_case(r"UNC\") || p.eq_ignore_ascii_case("UNC/") => (true, &v[4..]),
                 _ if drive(v).is_some() => (false, v),
@@ -649,13 +651,13 @@ mod tests {
 
     #[test]
     fn windows_unc_roots_are_refused() {
-        for wsl in [r"\\wsl$\Ubuntu\home\u\proj", r"\\WSL.localhost\Ubuntu", "//wsl$/Debian", r"\\?\UNC\wsl$\Ubuntu"] {
+        for wsl in [r"\\wsl$\Ubuntu\home\u\proj", r"\\WSL.localhost\Ubuntu", "//wsl$/Debian", r"\\?\UNC\wsl$\Ubuntu", r"\??\UNC\wsl$\Ubuntu"] {
             assert!(win::unsupported_root(wsl).is_some_and(|m| m.contains("WSL")), "{wsl}");
         }
-        for unc in [r"\\server\share\proj", "//server/share", r"\\?\UNC\server\share\x", r"\\.\pipe\x"] {
+        for unc in [r"\\server\share\proj", "//server/share", r"\\?\UNC\server\share\x", r"\\.\pipe\x", r"\??\UNC\server\share\proj", r"\??\unc\server\share"] {
             assert!(win::unsupported_root(unc).is_some_and(|m| m.contains("network")), "{unc}");
         }
-        for local in [r"C:\Users\me\proj", "c:/x", r"\\?\C:\x", r"\x", "rel"] {
+        for local in [r"C:\Users\me\proj", "c:/x", r"\\?\C:\x", r"\??\C:\x", r"\x", "rel"] {
             assert_eq!(win::unsupported_root(local), None, "{local}");
         }
     }
@@ -676,6 +678,8 @@ mod tests {
         }
         assert_eq!(s("C:\\src\\wor\u{212A}\\x", "C:\\src\\wor\u{212A}"), Some("x"));
         assert_eq!(s(r"\\Server\Share\x", r"\\?\UNC\server\share"), Some("x"));
+        assert_eq!(s(r"\??\C:\p\x", r"C:\p"), Some("x"));
+        assert_eq!(s(r"\??\UNC\server\share\x", r"\\server\share"), Some("x"));
         assert_eq!(s(r"C:\p2\x", r"C:\p"), None);
         assert_eq!(s(r"D:\p\x", r"C:\p"), None);
         assert_eq!(s(r"C:p\x", r"C:\p"), None);

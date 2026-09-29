@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Bell, BookOpen, Code, Columns2, Keyboard, Moon, Sun } from 'lucide-react'
+import { FEATURES, useUnsupported } from '@/api/health'
 import { useUi } from '@/state/store'
 import { Button, Checkbox, ErrorBox, Input, Loading, TimeAgo } from '@/ui'
 import { useSettings } from '../api'
@@ -17,10 +18,15 @@ export function BrowserNotificationsRow() {
   const supported = typeof Notification !== 'undefined'
   const [perm, setPerm] = useState<NotificationPermission | 'unsupported'>(supported ? Notification.permission : 'unsupported')
   const secure = window.isSecureContext
+  const noDesktop = useUnsupported(FEATURES.desktopNotifications)
   return (
     <Row
       label="Browser notifications"
-      hint="On phones and other computers, while Workbench is in the background. The computer Workbench runs on gets desktop notifications instead."
+      hint={
+        noDesktop
+          ? 'While Workbench is in the background, on this computer too: its server shows no desktop notifications.'
+          : 'On phones and other computers, while Workbench is in the background. The computer Workbench runs on gets desktop notifications instead.'
+      }
     >
       <Checkbox checked={enabled} onChange={(v) => setPrefs({ notifications: v })}>
         Notify on this device

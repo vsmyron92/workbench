@@ -22,7 +22,13 @@
 //!
 //! CONTRACT (other slices): `summary` (projects), `running_target` / `exec_target` /
 //! `kill_inside` (terminals), `run_inside` / `port_route` (apps), `agent_command`
-//! (terminals, agents in containers), `router`, `start`, `shutdown`, `mcp_tools`.
+//! (terminals, agents in containers), `require_supported`, `router`, `start`,
+//! `shutdown`, `mcp_tools`.
+//!
+//! Where dev containers do not work (`util::os::support`: Windows) none of this is
+//! offered: no summary, no container is ever found, and the routes, the MCP tool and
+//! whatever asks for a container explicitly (`require_supported`) answer
+//! `unsupported_platform`. The Services tool window (`services`) still works.
 
 mod bridge;
 pub(crate) mod config;
@@ -231,8 +237,23 @@ fn use_container_of(saved: &store::Saved) -> bool {
     saved.use_container.unwrap_or(saved.attached)
 }
 
-/// `ProjectSummary.devcontainer`: `None` for a project without configs or containers.
+/// Why dev containers do not work on this OS (`None` where they do).
+fn unsupported() -> Option<&'static str> {
+    crate::util::os::support::unsupported(crate::util::os::support::Feature::Devcontainer)
+}
+
+/// `Err(unsupported_platform)` where dev containers do not work: what the routes answer,
+/// for callers that would put a terminal, an agent or a language server inside.
+pub fn require_supported() -> crate::error::ApiResult<()> {
+    crate::util::os::support::require(crate::util::os::support::Feature::Devcontainer)
+}
+
+/// `ProjectSummary.devcontainer`: `None` for a project without configs or containers,
+/// and where dev containers do not work.
 pub fn summary(state: &AppState, p: &Project) -> Option<Summary> {
+    if unsupported().is_some() {
+        return None;
+    }
     let configs = config::discover(&p.root);
     let saved = state.devcontainer.saved(state, &p.id);
     let rt = state.devcontainer.rt.lock();
@@ -274,8 +295,12 @@ fn pick(p: &Project, all: &[ContainerInfo], selected: Option<&str>) -> Option<Co
 }
 
 /// Refresh every project's container from Docker (one `ps`, one `inspect`) and emit
-/// `devcontainer.state` for changes. Serialized; cheap when nothing is labelled.
+/// `devcontainer.state` for changes. Serialized; cheap when nothing is labelled. Where
+/// dev containers do not work, no container is ever known (and no bridge listens).
 pub async fn refresh(state: &AppState) {
+    if unsupported().is_some() {
+        return;
+    }
     let _serial = state.devcontainer.refresh_lock.lock().await;
     let docker = docker_path(state);
     let listed = match docker::list_devcontainers(&docker).await {
@@ -484,6 +509,9 @@ for c in "$@"; do echo "cmd:$c=$(command -v "$c" 2>/dev/null)"; done"#;
 /// The project's running container as terminals use it, whatever "use the container"
 /// says (a terminal that chose the container keeps it). `Err` explains why not.
 pub async fn running_target(state: &AppState, pid: &str) -> Result<ExecTarget, String> {
+    if let Some(why) = unsupported() {
+        return Err(why.to_string());
+    }
     let p = state.projects.get(pid).ok_or_else(|| format!("no project {pid:?}"))?;
     let mut c = container_of(state, pid);
     if c.as_ref().is_none_or(|c| !c.running) {

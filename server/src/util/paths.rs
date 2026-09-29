@@ -11,15 +11,13 @@ use crate::util::os;
 /// Then, for paths that exist, re-check containment after resolving symlinks
 /// (a symlink inside the project pointing outside is refused). On Windows `rel` also
 /// keeps to `/` separators and names that mean one file (`os::path::check_relative`),
-/// and UNC roots are refused.
+/// and UNC roots are refused (`unsupported_platform`, `os::support::require_root`).
 pub fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf, ApiError> {
     let rel = rel.trim_start_matches("./");
     if rel.contains('\0') {
         return Err(ApiError::bad_request("path contains NUL"));
     }
-    if let Some(why) = os::path::unsupported_root(root) {
-        return Err(ApiError::bad_request(why));
-    }
+    os::support::require_root(root)?;
     let rel_path = Path::new(rel);
     if rel_path.is_absolute() {
         return Err(ApiError::bad_request("expected a path relative to the project root"));
@@ -196,6 +194,7 @@ mod tests {
         assert_eq!(relative_to(root, &root.join("a").join("b")).as_deref(), Some("a/b"));
         let unc = resolve_in_root(std::path::Path::new(r"\\wsl$\Ubuntu\home\u"), "x").unwrap_err();
         assert!(unc.message.contains("WSL"), "{}", unc.message);
+        assert_eq!((unc.code, unc.feature), ("unsupported_platform", Some("networkRoots")));
     }
 
     /// A junction needs no privilege; canonicalize follows it, so it cannot leave the root.

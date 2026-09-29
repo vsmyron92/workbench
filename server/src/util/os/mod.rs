@@ -15,6 +15,7 @@ pub mod perm;
 pub mod proc;
 pub mod session;
 pub mod shell;
+pub mod support;
 pub mod watch;
 #[cfg(windows)]
 mod win32;

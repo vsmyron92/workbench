@@ -1,5 +1,5 @@
 // Thin fetch wrapper. Same origin, cookie auth; errors become ApiError with the
-// server's `{error:{code,message}}` payload. A 401 flips the app to the login screen.
+// server's `{error:{code,message,feature?}}` payload. A 401 flips the app to the login screen.
 //
 // Device key: browsers send the session cookie to every port on 127.0.0.1, so the
 // cookie alone only lets a request read. Writes and WebSockets also carry this
@@ -10,15 +10,29 @@
 export class ApiError extends Error {
   status: number
   code: string
-  constructor(status: number, code: string, message: string) {
+  /** The feature an `unsupported_platform` error is about (see `api/health.ts`). */
+  feature?: string
+  constructor(status: number, code: string, message: string, feature?: string) {
     super(message)
     this.status = status
     this.code = code
+    this.feature = feature
   }
   /** The integration is not set up (HTTP 412). */
   get notConfigured() {
     return this.code === 'not_configured'
   }
+  /** The server's OS leaves this feature out (HTTP 501, e.g. dev containers on Windows). */
+  get unsupported() {
+    return this.code === 'unsupported_platform'
+  }
+}
+
+type ErrorBody = { error?: { code?: string; message?: string; feature?: string } } | undefined
+
+function apiError(status: number, data: unknown, fallback: string): ApiError {
+  const err = (data as ErrorBody)?.error
+  return new ApiError(status, err?.code ?? 'http_' + status, err?.message ?? (typeof data === 'string' && data ? data : fallback), err?.feature)
 }
 
 type Query = Record<string, string | number | boolean | null | undefined>
@@ -153,10 +167,7 @@ async function request<T>(method: string, path: string, body?: unknown, query?: 
       data = text
     }
   }
-  if (!res.ok) {
-    const err = (data as { error?: { code?: string; message?: string } } | undefined)?.error
-    throw new ApiError(res.status, err?.code ?? 'http_' + res.status, err?.message ?? (typeof data === 'string' ? data : res.statusText))
-  }
+  if (!res.ok) throw apiError(res.status, data, res.statusText)
   return data as T
 }
 
@@ -182,8 +193,7 @@ function upload<T>(path: string, body: Blob, query?: Query, onProgress?: (sent: 
         }
       }
       if (xhr.status >= 200 && xhr.status < 300) return resolve(data as T)
-      const err = (data as { error?: { code?: string; message?: string } } | undefined)?.error
-      reject(new ApiError(xhr.status, err?.code ?? 'http_' + xhr.status, err?.message ?? (typeof data === 'string' && data ? data : xhr.statusText)))
+      reject(apiError(xhr.status, data, xhr.statusText))
     }
     xhr.onerror = () => reject(new ApiError(0, 'network', 'The upload failed: the connection was lost'))
     xhr.onabort = () => reject(new DOMException('Upload cancelled', 'AbortError'))
