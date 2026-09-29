@@ -185,16 +185,24 @@ pub fn language_of(l: &DebugLaunch, root: &Path) -> String {
 }
 
 /// The adapter a launch configuration uses: the one it names, or the one for its
-/// language. Errors name what to install or configure.
+/// language. Errors name what to install or configure. Where gdb cannot attach to a
+/// process (`util::os::support`: Windows), an attach picks another adapter for the
+/// language and one that ends up with gdb is refused (a gdbserver `target` still goes).
 pub async fn adapter_for(state: &AppState, l: &DebugLaunch, language: &str) -> Result<Adapter, ApiError> {
+    use crate::util::os::support::{Feature, unsupported};
     let cfg = state.config.read().debug.clone();
-    match l.adapter.as_deref().filter(|a| !a.trim().is_empty()) {
+    let gdb_attach = if l.request == DebugRequest::Attach && !l.extra.contains_key("target") { unsupported(Feature::GdbAttach) } else { None };
+    let adapter = match l.adapter.as_deref().filter(|a| !a.trim().is_empty()) {
         Some(id) => adapters::find(&cfg, id.trim()).ok_or_else(|| {
             ApiError::not_configured(format!("launch configuration {:?} names adapter {id:?}, which is not a preset: define [debug.adapters.{id}] in config.toml", l.name))
-        }),
-        None => adapters::for_language(state, language).await.ok_or_else(|| {
+        })?,
+        None => adapters::for_language(state, language, gdb_attach.is_none()).await.ok_or_else(|| {
             ApiError::not_configured(format!("no debug adapter knows {language}: add one under [debug.adapters.<id>] in config.toml with languages = [\"{language}\"]"))
-        }),
+        })?,
+    };
+    match gdb_attach {
+        Some(why) if adapter.kind == AdapterKind::Gdb => Err(ApiError::unsupported(Feature::GdbAttach.key(), why)),
+        _ => Ok(adapter),
     }
 }
 
@@ -766,5 +774,38 @@ mod tests {
         let mut with_pid = attach(&[], None);
         with_pid.pid = Some(42);
         assert!(attach_target_known(AdapterKind::Gdb, &with_pid));
+    }
+
+    /// gdb attaches to a process only where the OS allows it (`util::os::support`): on
+    /// Windows an attach by language passes over gdb and one that names it is refused;
+    /// launches and gdbserver targets keep gdb everywhere.
+    #[tokio::test]
+    async fn gdb_attaches_only_where_the_os_allows_it() {
+        use crate::util::os::support::{Feature, unsupported};
+        let t = crate::platform::testutil::app().await;
+        let launch = |adapter: Option<&str>, request: DebugRequest, extra: &[(&str, Value)]| DebugLaunch {
+            name: "x".into(),
+            adapter: adapter.map(str::to_string),
+            request,
+            extra: extra.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+            ..Default::default()
+        };
+        let kind = |r: Result<Adapter, ApiError>| r.map(|a| a.kind).map_err(|e| (e.code, e.feature));
+        let named = kind(adapter_for(&t.state, &launch(Some("gdb"), DebugRequest::Attach, &[]), "cpp").await);
+        match unsupported(Feature::GdbAttach) {
+            None => assert_eq!(named, Ok(AdapterKind::Gdb)),
+            Some(_) => {
+                assert_eq!(named, Err(("unsupported_platform", Some("gdbAttach"))));
+                let by_language = kind(adapter_for(&t.state, &launch(None, DebugRequest::Attach, &[]), "cpp").await);
+                assert!(by_language.is_ok_and(|k| k != AdapterKind::Gdb), "an attach by language picked gdb");
+                // A language only gdb knows: the reason, not "no debug adapter knows fortran".
+                let only_gdb = kind(adapter_for(&t.state, &launch(None, DebugRequest::Attach, &[]), "fortran").await);
+                assert_eq!(only_gdb, Err(("unsupported_platform", Some("gdbAttach"))));
+            }
+        }
+        let gdb_launch = kind(adapter_for(&t.state, &launch(Some("gdb"), DebugRequest::Launch, &[]), "cpp").await);
+        assert_eq!(gdb_launch, Ok(AdapterKind::Gdb));
+        let gdbserver = kind(adapter_for(&t.state, &launch(Some("gdb"), DebugRequest::Attach, &[("target", json!("localhost:1234"))]), "cpp").await);
+        assert_eq!(gdbserver, Ok(AdapterKind::Gdb));
     }
 }

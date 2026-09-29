@@ -445,7 +445,9 @@ pub async fn views(state: &AppState) -> (Vec<AdapterView>, Vec<String>) {
 /// The adapter for `language`: `[debug] default_adapter.<language>`, else the first
 /// available adapter that lists the language, else the first that lists it (so the
 /// error names what to install). `None` when no adapter knows the language.
-pub async fn for_language(state: &AppState, language: &str) -> Option<Adapter> {
+/// `gdb: false` passes over gdb unless it is the default or the only one that lists
+/// the language (an attach where gdb cannot attach: the caller refuses it).
+pub async fn for_language(state: &AppState, language: &str, gdb: bool) -> Option<Adapter> {
     let cfg = state.config.read().debug.clone();
     let language = language.to_ascii_lowercase();
     if let Some(id) = cfg.default_adapter.get(&language) {
@@ -455,12 +457,13 @@ pub async fn for_language(state: &AppState, language: &str) -> Option<Adapter> {
     }
     let (list, _) = all(&cfg);
     let candidates: Vec<Adapter> = list.into_iter().filter(|a| a.enabled && a.languages.iter().any(|l| *l == language)).collect();
-    for a in &candidates {
+    let usable = |a: &&Adapter| gdb || a.kind != AdapterKind::Gdb;
+    for a in candidates.iter().filter(usable) {
         if probe(state, a).await.available {
             return Some(a.clone());
         }
     }
-    candidates.into_iter().next()
+    candidates.iter().find(usable).or(candidates.first()).cloned()
 }
 
 #[cfg(test)]

@@ -453,6 +453,8 @@ async fn update_projects_config(state: &AppState, change: impl FnOnce(&mut Proje
 /// Add a directory as a project (persisted in `projects.include`).
 async fn add(State(state): State<AppState>, Json(body): Json<AddBody>) -> ApiResult<Json<serde_json::Value>> {
     let p = expand_tilde(body.path.trim());
+    // UNC and WSL paths on Windows: refused before `is_dir` connects to their server.
+    util::os::support::require_root(&p)?;
     if !p.is_dir() {
         return Err(ApiError::bad_request(format!("{} is not a directory", p.display())));
     }
@@ -598,6 +600,34 @@ mod tests {
         let after = std::fs::read_to_string(&file).unwrap();
         assert!(after.contains("# where my repos live") && after.contains("exclude"), "{after}");
         assert!(app.state.config.read().projects.exclude.len() == 1);
+    }
+
+    /// Windows: WSL and network paths are refused as `unsupported_platform` before
+    /// anything opens them (which would connect to their server); config.toml is untouched.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_refuses_wsl_and_network_roots() {
+        use tower::ServiceExt;
+        let app = testutil::app().await;
+        let file = app.state.paths.config_file();
+        let before = std::fs::read_to_string(&file).unwrap();
+        for (path, says) in [(r"\\wsl$\Ubuntu\home\u\proj", "WSL"), ("//wsl.localhost/Debian/src", "WSL"), (r"\\server.invalid\share\proj", "network")] {
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("host", "127.0.0.1:7999")
+                .header("authorization", format!("Bearer {}", app.state.auth.master_token()))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(serde_json::json!({ "path": path }).to_string()))
+                .unwrap();
+            let resp = app.router.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status().as_u16(), 501, "{path}");
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!((v["error"]["code"].as_str(), v["error"]["feature"].as_str()), (Some("unsupported_platform"), Some("networkRoots")), "{v}");
+            assert!(v["error"]["message"].as_str().is_some_and(|m| m.contains(says)), "{v}");
+        }
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
     }
 
     #[test]

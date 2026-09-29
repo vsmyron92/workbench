@@ -116,6 +116,21 @@ workbench service uninstall
 `install` without `--enable` only writes the files and prints the next steps
 (`--dry-run` shows them first). The launcher runs `workbench open`.
 
+## On Windows
+
+The Windows version (in progress: the [Windows plan](windows-port.md)) leaves out a few
+things; where one of them is asked for, Workbench says "Not available on Windows" and why:
+
+- **Dev containers.** Their chip, status item and commands are not shown. The **Services**
+  window (Docker containers, compose projects, images) works with Docker Desktop but is
+  marked *experimental*: it has not been tested there yet.
+- **Desktop notifications** from the server. Turn on browser notifications
+  (Settings › General), which then also notify on the computer Workbench runs on, or push.
+- **gdb attaching to a running process**, and rust-gdb's pretty printers. Attach to
+  Process… uses lldb-dap or CodeLLDB for native programs and debugpy for Python.
+- **Projects on a network share or inside WSL** (`\\server\share`, `\\wsl$\…`). Clone the
+  repository to a local drive, or run the Linux Workbench inside WSL for those projects.
+
 ## Next steps
 
 - [Customization](customization.md): project config, run configurations, environments,

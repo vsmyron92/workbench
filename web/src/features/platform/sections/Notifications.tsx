@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { BellRing, RotateCcw, Save, Smartphone } from 'lucide-react'
 import { api } from '@/api/client'
+import { FEATURES, useUnsupported } from '@/api/health'
 import { toast, toastError } from '@/shell/actions'
 import { Button, Checkbox, ErrorBox, Input, Loading } from '@/ui'
 import { patchSettings, reportApply, useSettings } from '../api'
@@ -45,6 +46,8 @@ export function NotificationsSection() {
   const { draft: form, setDraft: setForm, dirty, reset } = useDraft(saved, normalize)
   const [busy, setBusy] = useState(false)
   const [testing, setTesting] = useState(false)
+  // Left out on some OSes (Windows): the server reports why instead of a missing notify-send.
+  const desktopUnsupported = useUnsupported(FEATURES.desktopNotifications)
 
   if (settings.error) return <ErrorBox error={settings.error} onRetry={() => void settings.refetch()} />
   if (!form || !settings.data) return <Loading />
@@ -64,7 +67,7 @@ export function NotificationsSection() {
     setTesting(true)
     try {
       const r = await api.post<NotifyOutcome>('/api/platform/notify-test')
-      const parts = [DESKTOP_TEXT[r.desktop] ?? r.desktop]
+      const parts = [r.desktop === 'unavailable' && desktopUnsupported ? 'desktop notifications are not supported here' : (DESKTOP_TEXT[r.desktop] ?? r.desktop)]
       if (r.command === 'ran') parts.push('command started')
       toast(r.desktop === 'sent' || r.command === 'ran' ? 'success' : 'warning', `Test: ${parts.join(', ')}`)
     } catch (e) {
@@ -112,7 +115,10 @@ export function NotificationsSection() {
       <Group title="On this computer">
         <Row
           label="Desktop notifications"
-          hint={settings.data.notifySend ? 'Shown with notify-send by the Workbench server.' : 'notify-send was not found on the server (install libnotify-bin).'}
+          hint={
+            desktopUnsupported ??
+            (settings.data.notifySend ? 'Shown with notify-send by the Workbench server.' : 'notify-send was not found on the server (install libnotify-bin).')
+          }
         >
           <Checkbox checked={form.desktop} onChange={(desktop) => setForm({ ...form, desktop })}>
             Show desktop notifications

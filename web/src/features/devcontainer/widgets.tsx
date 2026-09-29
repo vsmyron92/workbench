@@ -2,14 +2,17 @@
 // glance; a click opens the panel.
 
 import { Container } from 'lucide-react'
+import { FEATURES, useUnsupported } from '@/api/health'
 import { useProjects } from '@/api/queries'
 import { Spinner, StatusDot } from '@/ui'
 import { openDevcontainerPanel } from './api'
 import { stateLabel, stateTone } from './logic'
 
+/** The project's dev container; null where the server's OS leaves dev containers out. */
 function useSummary(projectId: string | null) {
   const { data } = useProjects()
-  return projectId ? (data?.find((p) => p.id === projectId)?.devcontainer ?? null) : null
+  const unsupported = useUnsupported(FEATURES.devcontainer)
+  return projectId && !unsupported ? (data?.find((p) => p.id === projectId)?.devcontainer ?? null) : null
 }
 
 function tooltip(s: { state: Parameters<typeof stateLabel>[0]; inContainer: boolean; configs: string[] }) {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  desktopNotifiesHere,
   formatCountdown,
   formatMs,
   hostEntryError,
@@ -13,6 +14,16 @@ import {
   timeline,
 } from './lib'
 import type { ActivityEvent, McpCall } from './types'
+
+describe('desktopNotifiesHere', () => {
+  it('leaves notifying to the server on its own computer, unless its OS has no desktop notifications', () => {
+    for (const host of ['localhost', '127.0.0.1', '[::1]']) expect(desktopNotifiesHere(host, null)).toBe(true)
+    // A Windows server: the browser on its computer notifies instead.
+    expect(desktopNotifiesHere('127.0.0.1', 'Desktop notifications are not supported on Windows yet')).toBe(false)
+    // Phones and other computers never see the server's desktop.
+    expect(desktopNotifiesHere('workbench.example.ts.net', null)).toBe(false)
+  })
+})
 
 describe('panelIdFor', () => {
   it('follows the documented id conventions', () => {

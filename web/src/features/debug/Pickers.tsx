@@ -2,7 +2,8 @@
 // the command palette (cmdk).
 
 import { Command as Cmdk } from 'cmdk'
-import { AlertTriangle, Cpu, Plug } from 'lucide-react'
+import { AlertTriangle, Cpu, Info, Plug } from 'lucide-react'
+import { FEATURES, useUnsupported } from '@/api/health'
 import { Kbd, Spinner } from '@/ui'
 import { attachTo, startDebug } from './actions'
 import { useConfigs, useProcesses } from './api'
@@ -61,6 +62,8 @@ function DebugPicker({ pid, close }: { pid: string; close: () => void }) {
 function AttachPicker({ pid, config, close }: { pid: string; config: string | null; close: () => void }) {
   const q = useProcesses(pid, true)
   const list = q.data?.processes ?? []
+  // Where gdb cannot attach (Windows), the server picks another adapter: say so up front.
+  const gdbNote = useUnsupported(FEATURES.gdbAttach)
   return (
     <>
       <Cmdk.Input placeholder={config ? `Attach “${config}” to a process: filter by name, pid or command…` : 'Attach to a process: filter by name, pid or command…'} autoFocus />
@@ -69,6 +72,12 @@ function AttachPicker({ pid, config, close }: { pid: string; config: string | nu
           <div className="wb-dbg-picker-note warning">
             <AlertTriangle size={14} />
             <span>{q.data.ptraceHint}</span>
+          </div>
+        )}
+        {gdbNote && (
+          <div className="wb-dbg-picker-note">
+            <Info size={14} />
+            <span>{gdbNote}</span>
           </div>
         )}
         {q.isLoading && (

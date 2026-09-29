@@ -464,6 +464,8 @@ fn discovery_ignores_escapes() {
 
 /// Starting needs the plan's hash; agents (in-process MCP calls) can never start, stop,
 /// rebuild, remove, write a config or change settings; they can read the status.
+/// (Windows has no dev containers: `windows_answers_unsupported_platform`.)
+#[cfg(unix)]
 #[tokio::test]
 async fn only_the_user_starts_and_only_the_approved_plan() {
     use crate::mcp::{McpCtx, call_api};
@@ -542,6 +544,69 @@ async fn only_the_user_starts_and_only_the_approved_plan() {
     let crate::mcp::ToolOutput::Json(v) = out else { panic!("json expected") };
     assert!(v["plan"].get("hash").is_none());
     assert_eq!(v["state"], "none");
+}
+
+/// Windows has no dev containers (`util::os::support`): every dev container route and the
+/// MCP tool answer 501 `unsupported_platform` before anything runs, projects have no
+/// summary and terminals get the reason; the Services routes still answer.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_answers_unsupported_platform() {
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    let repo = project(&[(".devcontainer/devcontainer.json", "{\"image\": \"debian:bookworm-slim\"}")]);
+    let mut cfg = crate::config::GlobalConfig::default();
+    cfg.projects.roots.clear();
+    cfg.projects.include = vec![repo.path().display().to_string()];
+    cfg.notify.desktop = false;
+    cfg.devcontainer.docker = "C:/nonexistent/docker.exe".into();
+    let t = crate::platform::testutil::app_with(cfg).await;
+    let p = t.state.projects.list()[0].clone();
+    let token = t.state.auth.master_token().to_string();
+    let send = |method: &'static str, path: String| {
+        let router = t.router.clone();
+        let token = token.clone();
+        async move {
+            let req = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "127.0.0.1:7999")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from("{}"))
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            let status = resp.status().as_u16();
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+            (status, serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default())
+        }
+    };
+    let base = format!("/api/projects/{}/devcontainer", p.id);
+    for (method, path) in [
+        ("GET", base.clone()),
+        ("POST", format!("{base}/start")),
+        ("POST", format!("{base}/rebuild")),
+        ("POST", format!("{base}/stop")),
+        ("POST", format!("{base}/remove")),
+        ("PUT", format!("{base}/settings")),
+        ("GET", format!("{base}/scaffold")),
+        ("POST", format!("{base}/scaffold")),
+    ] {
+        let (s, v) = send(method, path.clone()).await;
+        assert_eq!(s, 501, "{method} {path}: {v}");
+        assert_eq!((v["error"]["code"].as_str(), v["error"]["feature"].as_str()), (Some("unsupported_platform"), Some("devcontainer")), "{v}");
+    }
+    assert!(!repo.path().join(".devcontainer/x").exists());
+    let (s, _) = send("GET", "/api/docker/containers".into()).await;
+    assert_eq!(s, 200, "Services is experimental, not left out");
+
+    assert!(super::summary(&t.state, &p).is_none());
+    assert!(super::running_target(&t.state, &p.id).await.unwrap_err().contains("Windows"));
+    let agent = crate::mcp::McpCtx { terminal_id: Some("t1".into()), project_id: Some(p.id.clone()) };
+    let tool = super::mcp_tools().into_iter().find(|x| x.name == "devcontainer_status").unwrap();
+    let Err(e) = (tool.handler)(t.state.clone(), agent, json!({})).await else { panic!("the tool answered") };
+    assert_eq!((e.code, e.feature), ("unsupported_platform", Some("devcontainer")));
 }
 
 #[test]

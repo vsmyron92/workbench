@@ -1,5 +1,6 @@
 //! MCP: `devcontainer_status` (read-only). Agents never start, rebuild, stop or remove
 //! a dev container: building one runs repository-defined code on the host's Docker.
+//! Where dev containers do not work (Windows) it answers what the routes answer.
 
 use serde_json::{Value, json};
 
@@ -17,6 +18,7 @@ pub fn tools() -> Vec<McpTool> {
         } }),
         false,
         |state, ctx, args| async move {
+            crate::util::os::support::require(crate::util::os::support::Feature::Devcontainer)?;
             let pid = ctx.project_for(args.get("projectId").and_then(Value::as_str))?;
             let p = state.projects.require(&pid)?;
             let mut v = super::ops::view(&state, &p, None).await?;

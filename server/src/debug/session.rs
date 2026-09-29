@@ -760,7 +760,11 @@ async fn startup(state: &AppState, project: &Arc<Project>, s: &Arc<Session>, pla
         let mut extra_args = vec![];
         if plan.adapter.kind == AdapterKind::Gdb && plan.request == DebugRequest::Launch && plan.raw_arguments.is_none() {
             if launch::language_of(&plan.launch, &project.root) == "rust" && target.is_none() {
-                extra_args.extend(rust_gdb_args(&project.root).await);
+                use crate::util::os::support::{Feature, unsupported};
+                match unsupported(Feature::RustGdbPrettyPrinters) {
+                    None => extra_args.extend(rust_gdb_args(&project.root).await),
+                    Some(why) => s.log("workbench", format!("Note: {why}\n"), None),
+                }
             }
             // Load the program at once: breakpoints resolve when they are set instead of
             // staying pending until the launch (gdb reads the file only then).

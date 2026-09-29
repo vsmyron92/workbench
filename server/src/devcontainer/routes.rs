@@ -10,9 +10,13 @@
 //!
 //! Only the user acts: in-process calls (MCP tools, i.e. agents) get 403 on every
 //! write, so an agent can read the status but never start, rebuild, stop or remove.
+//!
+//! Where dev containers do not work (Windows), every route here answers 501
+//! `unsupported_platform` (`util::os::support`); the Services routes (`/api/docker`) stay.
 
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -34,7 +38,16 @@ pub fn router() -> Router<AppState> {
         .route("/api/projects/{pid}/devcontainer/remove", post(remove))
         .route("/api/projects/{pid}/devcontainer/settings", put(settings))
         .route("/api/projects/{pid}/devcontainer/scaffold", get(scaffold_get).post(scaffold_write))
+        .route_layer(axum::middleware::from_fn(supported))
         .merge(super::services::router())
+}
+
+/// Dev containers do not work on every OS: refuse before anything runs.
+async fn supported(req: Request, next: Next) -> Response {
+    match crate::util::os::support::require(crate::util::os::support::Feature::Devcontainer) {
+        Ok(()) => next.run(req).await,
+        Err(e) => e.into_response(),
+    }
 }
 
 /// Writes are the user's: refuse in-process (agent) callers.

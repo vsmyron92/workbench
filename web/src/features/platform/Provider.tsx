@@ -8,13 +8,14 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useEvent } from '@/api/events'
+import { FEATURES, unsupportedReason } from '@/api/health'
 import { qk } from '@/api/queries'
 import type { ProjectSummary } from '@/api/types'
 import { getDockApi, openPanel, showToolWindow, toast, type ToastLevel } from '@/shell/actions'
 import { panelDefs } from '@/shell/registry'
 import { useUi } from '@/state/store'
 import { pk, usePushInfo } from './api'
-import { isLoopbackHost, panelIdFor } from './lib'
+import { desktopNotifiesHere, panelIdFor } from './lib'
 import { PairDialogHost } from './PairDialog'
 import { listenToWorker, openTarget, registerWorker, startPresence, syncPush, takeLaunch, type ProjectIds } from './push'
 
@@ -49,10 +50,11 @@ let pushOnHere = false
 /**
  * On a remote device (phone, another computer) the server's desktop
  * notifications are not visible, so use the browser's while the tab is hidden.
+ * The same on the server's own computer when its OS has none (Windows).
  */
 function browserNotify(title: string, body: string, tag?: string) {
   if (!document.hidden || pushOnHere || typeof Notification === 'undefined' || Notification.permission !== 'granted') return
-  if (!useUi.getState().prefs.notifications || isLoopbackHost(location.hostname)) return
+  if (!useUi.getState().prefs.notifications || desktopNotifiesHere(location.hostname, unsupportedReason(FEATURES.desktopNotifications))) return
   try {
     const n = new Notification(title, { body, tag, icon: '/icons/icon-192.png' })
     n.onclick = () => {

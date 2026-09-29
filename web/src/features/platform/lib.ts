@@ -206,3 +206,12 @@ export function formatMs(ms: number): string {
 export function isLoopbackHost(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '::1' || hostname === '[::1]' || hostname.startsWith('127.')
 }
+
+/**
+ * Whether the server's desktop notifications reach whoever looks at this page: on its
+ * own computer (a loopback host), unless the server's OS has none (`desktopUnsupported`,
+ * the health report's reason: Windows). Then the browser notifies instead.
+ */
+export function desktopNotifiesHere(hostname: string, desktopUnsupported: string | null): boolean {
+  return isLoopbackHost(hostname) && !desktopUnsupported
+}
