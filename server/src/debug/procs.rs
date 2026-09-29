@@ -115,9 +115,14 @@ mod tests {
         assert_eq!(p.command, "sleep 30");
         assert_eq!(p.ppid, std::process::id());
         assert!(!l.processes.iter().any(|p| p.pid == std::process::id()), "Workbench itself is not offered");
+    }
+
+    #[test]
+    fn languages_and_hints() {
         assert_eq!(language_of("python3", "/usr/bin/python3 app.py"), "python");
         assert!(ptrace_hint(Some(1)).unwrap().contains("ptrace_scope = 1"));
         assert_eq!(ptrace_hint(Some(0)), None);
+        assert_eq!(ptrace_hint(None), None);
     }
 
     #[cfg(windows)]

@@ -46,6 +46,13 @@ impl ProcGroup {
         ProcGroup(imp::Group::attach(pid))
     }
 
+    /// `attach_pid` for a child spawned without `prepare`, which stays in Workbench's group:
+    /// on Unix the group is that process alone (`terminate` and `kill` signal its pid).
+    /// Windows: as `attach_pid`, so what it starts from then on ends with it.
+    pub fn attach_single(pid: u32) -> ProcGroup {
+        ProcGroup(imp::Group::attach_single(pid))
+    }
+
     /// Ask the group to end: SIGTERM (Unix). Windows: ends the job.
     pub fn terminate(&self) {
         self.0.terminate();
@@ -77,8 +84,16 @@ impl ProcGroup {
 // ---------------------------------------------------------------- single processes
 
 /// Whether a pid is alive, including processes of other users.
+#[allow(dead_code)] // for the terminals' port (docs/windows-port.md §1.F)
 pub fn pid_alive(pid: i32) -> bool {
     imp::pid_alive(pid)
+}
+
+/// Whether a pid of this user's own (Workbench's, from its runtime.json) is alive: a
+/// process that is not ours to see counts as gone. Unix: `/proc/<pid>` exists, which it
+/// does not for other users' processes under `hidepid`. Windows: it opens and runs.
+pub fn own_pid_alive(pid: u32) -> bool {
+    imp::own_pid_alive(pid)
 }
 
 /// End process `pid` at once (SIGKILL). The caller makes sure the pid is still the one
@@ -151,7 +166,9 @@ pub async fn debugger_attached(pid: u32) -> bool {
 // ---------------------------------------------------------------- shutdown
 
 /// Resolves when the server is asked to stop. Unix: SIGINT or SIGTERM. Windows: Ctrl-C,
-/// Ctrl-Break, the console closing, or the stop event of `data_dir` (`request_stop`).
+/// Ctrl-Break, the console closing, or the stop event of `data_dir` (`request_stop`), which
+/// only this user and SYSTEM may set; when another process already holds that event, the
+/// server does not listen to it (and says so in the log).
 pub async fn shutdown_signal(data_dir: &Path) {
     imp::shutdown_signal(data_dir).await;
 }
@@ -185,14 +202,22 @@ mod imp {
         }
     }
 
-    /// The process-group id, which is the leader's pid.
+    /// The process-group id, which is the leader's pid; with `single`, the pid of a process
+    /// left in Workbench's group, signalled alone.
     #[derive(Clone, Copy, Default)]
-    pub struct Group(Option<i32>);
+    pub struct Group {
+        id: Option<i32>,
+        single: bool,
+    }
 
     impl Group {
         pub fn attach(pid: u32) -> Group {
             // 0 and 1 would name Workbench's own group and init (`kill(-1)`: everything).
-            Group(i32::try_from(pid).ok().filter(|p| *p > 1))
+            Group { id: i32::try_from(pid).ok().filter(|p| *p > 1), single: false }
+        }
+
+        pub fn attach_single(pid: u32) -> Group {
+            Group { single: true, ..Group::attach(pid) }
         }
 
         pub fn terminate(&self) {
@@ -212,29 +237,35 @@ mod imp {
         }
 
         fn signal(&self, sig: i32) {
-            if let Some(pg) = self.0 {
+            if self.single {
+                return self.signal_leader(sig);
+            }
+            if let Some(pg) = self.id {
                 // SAFETY: plain syscall; the group is the one the process was started in.
                 unsafe { libc::killpg(pg, sig) };
             }
         }
 
         fn signal_leader(&self, sig: i32) {
-            if let Some(pg) = self.0 {
+            if let Some(pg) = self.id {
                 // SAFETY: plain syscall; the leader's pid is the group id.
                 unsafe { libc::kill(pg, sig) };
             }
         }
 
         pub fn members(&self) -> Vec<u32> {
-            let Some(pg) = self.0 else { return vec![] };
+            let Some(pg) = self.id else { return vec![] };
             let Ok(rd) = std::fs::read_dir("/proc") else { return vec![] };
             rd.flatten()
                 .filter_map(|e| {
                     let pid = e.file_name().to_str()?.parse::<u32>().ok()?;
+                    if self.single && pid as i32 != pg {
+                        return None;
+                    }
                     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
                     // Fields after the command name's last `)`: state, ppid, pgrp.
                     let f: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
-                    (*f.first()? != "Z" && f.get(2)?.parse::<i32>().ok()? == pg).then_some(pid)
+                    (*f.first()? != "Z" && (self.single || f.get(2)?.parse::<i32>().ok()? == pg)).then_some(pid)
                 })
                 .collect()
         }
@@ -248,6 +279,10 @@ mod imp {
         // SAFETY: signal 0 only checks existence and permission.
         let r = unsafe { libc::kill(pid, 0) };
         r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    pub fn own_pid_alive(pid: u32) -> bool {
+        Path::new(&format!("/proc/{pid}")).exists()
     }
 
     pub fn kill_pid(pid: i32) {
@@ -385,9 +420,11 @@ mod imp {
 
     use tokio::process::Command;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
-        WAIT_TIMEOUT,
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+        LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
+    use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+    use windows_sys::Win32::Security::{GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser};
     use windows_sys::Win32::System::Diagnostics::Debug::CheckRemoteDebuggerPresent;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
     use windows_sys::Win32::System::JobObjects::{
@@ -395,9 +432,11 @@ mod imp {
         JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateEventW, EVENT_MODIFY_STATE, OpenEventW, OpenProcess, PROCESS_QUERY_INFORMATION,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, SetEvent, TerminateProcess, WaitForSingleObject,
+        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateEventW, EVENT_MODIFY_STATE, GetCurrentProcess, OpenEventW, OpenProcess, OpenProcessToken,
+        PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, SetEvent,
+        TerminateProcess, WaitForSingleObject,
     };
+    use windows_sys::core::PWSTR;
 
     use super::ProcEntry;
 
@@ -405,7 +444,7 @@ mod imp {
     const KILLED: u32 = 1;
 
     /// An owned kernel handle, closed on drop.
-    struct Handle(HANDLE);
+    pub(super) struct Handle(HANDLE);
 
     // SAFETY: a kernel handle is valid in every thread of the process, and the calls made
     // on these (wait, terminate, query, set) are thread-safe.
@@ -491,6 +530,10 @@ mod imp {
             Group(Some(Arc::new(Job { pid, leader, job })))
         }
 
+        pub fn attach_single(pid: u32) -> Group {
+            Group::attach(pid)
+        }
+
         pub fn terminate(&self) {
             self.kill();
         }
@@ -558,6 +601,10 @@ mod imp {
         }
     }
 
+    pub fn own_pid_alive(pid: u32) -> bool {
+        pid > 0 && open_process(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, pid).is_some_and(|h| running(&h))
+    }
+
     pub fn kill_pid(pid: i32) {
         let Some(h) = u32::try_from(pid).ok().filter(|p| *p > 0).and_then(|p| open_process(PROCESS_TERMINATE, p)) else { return };
         // SAFETY: a process handle with PROCESS_TERMINATE.
@@ -587,8 +634,9 @@ mod imp {
 
     pub fn exit_text(st: &ExitStatus) -> String {
         match st.code() {
-            // NTSTATUS failures (0xC0000005, an access violation) read better in hex.
-            Some(c) if c as u32 >= 0xC000_0000 => format!("exit code {:#010X}", c as u32),
+            // Codes with the high bit set (NTSTATUS 0xC0000005, an access violation; .NET's
+            // 0x80131506) read better in hex.
+            Some(c) if c < 0 => format!("exit code {:#010X}", c as u32),
             Some(c) => format!("exit code {c}"),
             None => "no exit status".into(),
         }
@@ -715,13 +763,100 @@ mod imp {
         Ok(true)
     }
 
+    /// A security descriptor from `LocalAlloc`, freed on drop.
+    struct LocalSd(PSECURITY_DESCRIPTOR);
+
+    impl Drop for LocalSd {
+        fn drop(&mut self) {
+            // SAFETY: allocated with LocalAlloc by the conversion call and freed only here.
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    /// A NUL-terminated UTF-16 string from a Win32 call.
+    ///
+    /// # Safety
+    /// `p` points to a NUL-terminated string.
+    unsafe fn from_wide(p: *const u16) -> String {
+        let mut len = 0;
+        // SAFETY: the caller's promise: every unit up to the NUL is readable.
+        while unsafe { *p.add(len) } != 0 {
+            len += 1;
+        }
+        // SAFETY: `len` units were just read.
+        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, len) })
+    }
+
+    /// This process's user as a SID string (`S-1-5-21-…`).
+    fn user_sid() -> Option<String> {
+        let mut token = std::ptr::null_mut();
+        // SAFETY: the pseudo handle of this process; `token` receives a handle `Handle` owns.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return None;
+        }
+        let token = Handle::new(token)?;
+        let mut len = 0u32;
+        // SAFETY: a size query: no buffer; `len` receives the size needed.
+        unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+        // A buffer of usize keeps TOKEN_USER (a pointer first) aligned.
+        let mut buf = vec![0usize; (len as usize).div_ceil(size_of::<usize>())];
+        // SAFETY: `buf` holds at least `len` bytes, aligned for TOKEN_USER.
+        if unsafe { GetTokenInformation(token.0, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) } == 0 {
+            return None;
+        }
+        // SAFETY: filled in by the call; the SID it points to lives in `buf`.
+        let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        let mut text: PWSTR = std::ptr::null_mut();
+        // SAFETY: a valid SID; `text` receives a LocalAlloc'd string, freed below.
+        if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+            return None;
+        }
+        // SAFETY: a NUL-terminated string from the call, freed once read.
+        let out = unsafe { from_wide(text) };
+        // SAFETY: allocated by ConvertSidToStringSidW, not used after this.
+        unsafe { LocalFree(text.cast()) };
+        Some(out)
+    }
+
+    /// A protected DACL granting only this user and SYSTEM (the owner-only DACL of os::perm,
+    /// kept here so the stop event does not depend on it).
+    fn owner_only_sd() -> Option<LocalSd> {
+        let sddl = wide(&format!("D:P(A;;GA;;;{})(A;;GA;;;SY)", user_sid()?));
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: `sddl` is NUL-terminated; `sd` receives a LocalAlloc'd descriptor that
+        // `LocalSd` frees; the size is not asked for.
+        let ok = unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, std::ptr::null_mut()) } != 0;
+        (ok && !sd.is_null()).then_some(LocalSd(sd))
+    }
+
+    /// Creates the stop event of `data_dir`, for this user and SYSTEM only. `None` (logged)
+    /// when it cannot be created or already exists: another server on this data dir, or a
+    /// process squatting the name, would otherwise share its stop requests.
+    pub(super) fn create_stop_event(data_dir: &Path) -> Option<Handle> {
+        let name = stop_event_name(data_dir);
+        let Some(sd) = owner_only_sd() else {
+            tracing::warn!("cannot build the security of the stop event {name}; `workbench service stop` cannot stop this server");
+            return None;
+        };
+        let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: 0 };
+        let wname = wide(&name);
+        // Auto-reset: a server started right after a stop does not see the old request.
+        // SAFETY: `sa` and its descriptor, and the NUL-terminated `wname`, outlive the call;
+        // `Handle` owns the result.
+        let event = Handle::new(unsafe { CreateEventW(&sa, 0, 0, wname.as_ptr()) });
+        // SAFETY: plain call, right after CreateEventW (which sets it on success too).
+        let err = unsafe { GetLastError() };
+        match event {
+            Some(event) if err != ERROR_ALREADY_EXISTS => return Some(event),
+            Some(_) => tracing::warn!("the stop event {name} already exists (another Workbench on this data dir?); `workbench service stop` cannot stop this server"),
+            None => tracing::warn!("cannot create the stop event {name} (error {err}); `workbench service stop` cannot stop this server"),
+        }
+        None
+    }
+
     /// Resolves once the stop event of `data_dir` is set; never when it cannot be created.
     async fn stop_event(data_dir: &Path) {
-        let name = wide(&stop_event_name(data_dir));
-        // Auto-reset: a server started right after a stop does not see the old request.
-        // SAFETY: `name` is NUL-terminated and outlives the call; default security;
-        // `Handle` owns the result.
-        let Some(event) = Handle::new(unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) }) else {
+        let Some(event) = create_stop_event(data_dir) else {
             return std::future::pending().await;
         };
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -822,14 +957,33 @@ mod tests {
         let mut child = sleeper().spawn().unwrap();
         let pid = child.id() as i32;
         assert!(pid_alive(pid));
+        assert!(own_pid_alive(pid as u32) && own_pid_alive(std::process::id()));
         assert_eq!(parent_of(pid), Some(std::process::id() as i32));
         assert!(!debugger_attached(pid as u32).await);
         kill_pid(pid);
         let status = child.wait().unwrap();
         assert!(!status.success());
         assert!(!pid_alive(pid));
+        assert!(!own_pid_alive(pid as u32));
         assert!(!pid_alive(0) && !pid_alive(-1));
         kill_pid(0); // ignored, not Workbench's own group
+    }
+
+    #[tokio::test]
+    async fn a_process_left_in_our_group_is_ended_alone() {
+        let mut child = sleeper().spawn().unwrap();
+        let group = ProcGroup::attach_single(child.id());
+        let members = group.members();
+        // Windows: the job may also hold the console host of the child.
+        assert!(members.contains(&child.id()), "{members:?}");
+        #[cfg(unix)]
+        assert_eq!(members, vec![child.id()]);
+        group.kill();
+        let status = child.wait().unwrap();
+        assert!(!status.success());
+        #[cfg(unix)]
+        assert_eq!(exit_signal(&status), Some(9));
+        assert!(eventually(|| group.members().is_empty()).await);
     }
 
     #[test]
@@ -888,6 +1042,10 @@ mod tests {
         assert_eq!(name, stop_event_name(&dir.path().join(".")));
         assert_ne!(name, stop_event_name(other.path()));
         assert!(!request_stop(dir.path()).unwrap(), "no server listens yet");
+        // A second server on the data dir (or a squatter of the name) is not listened to.
+        let first = imp::create_stop_event(dir.path()).expect("the event is created");
+        assert!(imp::create_stop_event(dir.path()).is_none());
+        drop(first);
         let path = dir.path().to_path_buf();
         let server = tokio::spawn(async move { shutdown_signal(&path).await });
         assert!(eventually(|| request_stop(dir.path()).unwrap()).await, "the server created its event");
