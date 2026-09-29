@@ -726,7 +726,7 @@ impl Terminals {
         // Environment: base, the provider's (config.toml), then the project overlay's.
         let mut env = base_env(state, &entry.id);
         for (k, v) in &provider.env {
-            let v = if v.starts_with("~/") { crate::config::expand_tilde(v).display().to_string() } else { v.clone() };
+            let v = if crate::util::os::path::home_relative(v).is_some() { crate::config::expand_tilde(v).display().to_string() } else { v.clone() };
             env.push((k.clone(), Some(v)));
         }
         let mut secrets = vec![];
@@ -2364,8 +2364,8 @@ impl Drop for HeldPermission {
 /// Expand `~/` and `${secret:NAME}` in a project `[agent].env` value. The secrets used
 /// are added to `used` (for masking the session's output).
 fn expand_env_value(state: &AppState, project: &Project, v: &str, used: &mut Vec<Secret>) -> Result<String, ApiError> {
-    let v = if let Some(rest) = v.strip_prefix("~/") {
-        crate::config::expand_tilde(&format!("~/{rest}")).display().to_string()
+    let v = if crate::util::os::path::home_relative(v).is_some() {
+        crate::config::expand_tilde(v).display().to_string()
     } else {
         v.to_string()
     };

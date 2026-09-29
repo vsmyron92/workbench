@@ -126,7 +126,11 @@ pub fn detect_gradle(cx: &mut Ctx, f: &Path) {
             }
         }
         for n in names {
-            let mdir = dir.join(n.replace(':', "/"));
+            let rel = n.replace(':', "/");
+            if !crate::util::os::path::stays_inside(&rel) {
+                continue;
+            }
+            let mdir = dir.join(rel);
             let Some(mb) = ["build.gradle.kts", "build.gradle"].iter().map(|x| mdir.join(x)).find(|p| p.is_file()) else { continue };
             cx.mark(format!("gradle:{}", mdir.display()));
             modules.push((format!(":{n}:"), mdir, cx.read(&mb).unwrap_or_default()));
@@ -220,7 +224,7 @@ pub fn detect_maven(cx: &mut Ctx, f: &Path) {
     let mut modules: Vec<(Option<String>, PathBuf, PathBuf, String)> = vec![(None, dir.to_path_buf(), f.to_path_buf(), pom.clone())];
     for m in MODULE.captures_iter(&pom).take(20) {
         let name = m[1].trim_end_matches('/').to_string();
-        if name.contains("..") {
+        if name.contains("..") || !crate::util::os::path::stays_inside(&name) {
             continue;
         }
         let mdir = dir.join(&name);

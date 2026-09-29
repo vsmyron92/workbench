@@ -293,7 +293,7 @@ fn choose_cwd(cx: &Ctx, fc: &FenceCmd) -> Option<String> {
         w.contains('/') && !w.starts_with(['-', '/', '~', '$']) && !w.contains("://") && !w.contains('=')
     });
     match path {
-        Some(p) if cx.root.join(&doc).join(p).exists() && !cx.root.join(&sh).join(p).exists() => Some(doc),
+        Some(p) if crate::util::os::path::stays_inside(p) && cx.root.join(&doc).join(p).exists() && !cx.root.join(&sh).join(p).exists() => Some(doc),
         _ => Some(sh),
     }
 }

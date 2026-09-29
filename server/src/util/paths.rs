@@ -67,7 +67,7 @@ pub fn resolve_entry_in_root(root: &Path, rel: &str) -> Result<PathBuf, ApiError
 }
 
 /// Accept an absolute path only when it lies inside one of `roots` (on Windows
-/// compared without regard to case: `c:\users\me` is `C:\Users\Me`).
+/// compared without regard to ASCII case: `c:\users\me` is `C:\Users\Me`).
 pub fn resolve_absolute_in(roots: &[PathBuf], abs: &str) -> Result<PathBuf, ApiError> {
     let p = Path::new(abs);
     if !p.is_absolute() {
@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(resolve_in_root(root, "a/b/../c.txt").unwrap(), root.join("a").join("c.txt"));
         assert_eq!(resolve_entry_in_root(root, "a/b").unwrap(), root.join("a").join("b"));
         // Case-insensitive roots, `/` or `\` in the absolute path, no escape through `..`.
-        let lower = root.display().to_string().to_lowercase();
+        let lower = root.display().to_string().to_ascii_lowercase();
         let roots = [root.clone()];
         assert_eq!(resolve_absolute_in(&roots, &format!(r"{lower}\a\b")).unwrap(), root.join("a").join("b"));
         assert_eq!(resolve_absolute_in(&roots, &format!("{lower}/a/b")).unwrap(), root.join("a").join("b"));

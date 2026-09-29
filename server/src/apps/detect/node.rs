@@ -295,7 +295,7 @@ fn entry_port(cx: &mut Ctx, dir: &Path, cmd: &str, pkg: &serde_json::Value) -> O
         .find(|t| is_src(t))
         .map(|t| t.to_string())
         .or_else(|| pkg.get("main").and_then(|m| m.as_str()).map(str::to_string))?;
-    if entry.contains("..") || crate::util::os::path::is_absolute_str(&entry) {
+    if entry.contains("..") || crate::util::os::path::is_absolute_str(&entry) || !crate::util::os::path::stays_inside(&entry) {
         return None;
     }
     let src = cx.read(&dir.join(entry.trim_start_matches("./")))?;

@@ -159,7 +159,7 @@ pub fn env_value(raw: &str, vars: &Vars, secret: &mut dyn FnMut(&str) -> Result<
     }
     out.push_str(rest);
     let out = placeholders(&out, vars);
-    Ok(if out == "~" || out.starts_with("~/") { expand_tilde(&out).to_string_lossy().into_owned() } else { out })
+    Ok(if out == "~" || crate::util::os::path::home_relative(&out).is_some() { expand_tilde(&out).to_string_lossy().into_owned() } else { out })
 }
 
 /// Expand a run's env map. Returns the child env and the secrets used (for redaction).

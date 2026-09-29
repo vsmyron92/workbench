@@ -97,6 +97,10 @@ fn members(root: &Path, manifest: &toml::Value) -> Vec<PathBuf> {
             continue;
         }
         let m = m.trim_end_matches('/');
+        // On Windows `C:x` would replace `root` (a trailing `*` is expanded below).
+        if !crate::util::os::path::stays_inside(m.trim_end_matches('*')) {
+            continue;
+        }
         if let Some(prefix) = m.strip_suffix("/*").or(if m == "*" { Some("") } else { None }) {
             let dir = root.join(prefix);
             let Ok(rd) = std::fs::read_dir(&dir) else { continue };

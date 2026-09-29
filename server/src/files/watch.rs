@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn subdirectory_projects_find_the_repository_git_dirs() {
         let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().canonicalize().unwrap().join("mono");
+        let repo = crate::util::os::path::canonicalize(dir.path()).unwrap().join("mono");
         std::fs::create_dir_all(repo.join(".git/refs/heads")).unwrap();
         std::fs::create_dir_all(repo.join("app/web/src")).unwrap();
         let g = git_dirs(&repo.join("app/web")).unwrap();
@@ -518,7 +518,7 @@ mod tests {
     async fn subdirectory_project_emits_git_changed() {
         use crate::config::{GlobalConfig, Paths};
         let (cfg, data, tmp) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let repo = tmp.path().canonicalize().unwrap().join("mono");
+        let repo = crate::util::os::path::canonicalize(tmp.path()).unwrap().join("mono");
         std::fs::create_dir_all(repo.join(".git/refs/heads")).unwrap();
         std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::create_dir_all(repo.join("app/web")).unwrap();
@@ -551,7 +551,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn watcher_reports_changes() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        let root = crate::util::os::path::canonicalize(dir.path()).unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
         std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();

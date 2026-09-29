@@ -1,7 +1,7 @@
 //! `path`: paths as users, clients and other programs write them. Unix keeps the rules
 //! Workbench always had: `/` separates, a leading `/` makes a path absolute, names compare
 //! byte for byte. Windows adds drive letters, `\`, UNC roots, reserved device names, 8.3
-//! short names and names that compare without regard to case (docs/windows-port.md,
+//! short names and names that compare without regard to ASCII case (docs/windows-port.md,
 //! "Paths"). The Windows rules are string logic (`win`), also compiled for tests on every
 //! OS.
 
@@ -109,6 +109,23 @@ pub fn check_relative(rel: &str) -> Result<(), String> {
     }
 }
 
+/// Whether `rel`, a relative path from repository content (a workspace member, a
+/// solution's project), stays below the folder it is joined to as far as its form goes
+/// (`..` is the caller's business). Unix: always, as before. Windows: `\` counts as
+/// `/` and [`check_relative`] must pass: `C:\x`, `C:x` and `\\server\share` replace
+/// the folder in a join (and opening a UNC path connects to the server).
+pub fn stays_inside(rel: &str) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = rel;
+        true
+    }
+    #[cfg(windows)]
+    {
+        win::stays_inside(rel)
+    }
+}
+
 /// Why files under `root` are not served on this OS: never on Unix; on Windows, UNC
 /// paths (network shares, WSL's `\\wsl$`).
 pub fn unsupported_root(root: &Path) -> Option<&'static str> {
@@ -142,7 +159,7 @@ pub fn canonicalize(p: impl AsRef<Path>) -> io::Result<PathBuf> {
 }
 
 /// `p` below `base`, like `Path::strip_prefix`. Windows compares names without regard
-/// to case and takes `\\?\C:\` for `C:\` (both name the same files).
+/// to ASCII case and takes `\\?\C:\` for `C:\` (both name the same files).
 pub fn strip_prefix<'a>(p: &'a Path, base: &Path) -> Option<&'a Path> {
     #[cfg(unix)]
     {
@@ -241,6 +258,28 @@ pub fn claude_temp_dir() -> String {
     }
 }
 
+/// Other programs' credential folders and Workbench's default config and data folders
+/// (whatever `WORKBENCH_*_DIR` says for this instance): the debugger's source view never
+/// shows files from them. Unix: `~/.config/gh`, `~/.config/gcloud`, `~/.config/workbench`,
+/// `~/.local/share/workbench`. Windows: `GitHub CLI`, `gcloud`, `postgresql`
+/// (`pgpass.conf`) and `workbench` in `%APPDATA%`, and `%LOCALAPPDATA%\workbench`.
+pub fn private_dirs() -> Vec<PathBuf> {
+    #[cfg(unix)]
+    {
+        let home = dirs::home_dir().unwrap_or_default();
+        [".config/gh", ".config/gcloud", ".config/workbench", ".local/share/workbench"].iter().map(|d| home.join(d)).collect()
+    }
+    #[cfg(windows)]
+    {
+        let mut out: Vec<PathBuf> = vec![];
+        if let Some(c) = dirs::config_dir() {
+            out.extend(["GitHub CLI", "gcloud", "postgresql", "workbench"].iter().map(|d| c.join(d)));
+        }
+        out.extend(data_home().map(|d| d.join("workbench")));
+        out
+    }
+}
+
 /// libpq's password file: `~/.pgpass`; on Windows `%APPDATA%\postgresql\pgpass.conf`.
 pub fn pgpass_file() -> Option<PathBuf> {
     #[cfg(unix)]
@@ -336,6 +375,10 @@ mod win {
         rel.split('/').filter(|c| !matches!(*c, "" | "." | "..")).try_for_each(check_component)
     }
 
+    pub fn stays_inside(rel: &str) -> bool {
+        check_relative(&rel.replace('\\', "/")).is_ok()
+    }
+
     const WSL: &str = r"projects inside WSL (\\wsl$, \\wsl.localhost) are not supported on Windows: run Workbench inside WSL for them";
     const UNC: &str = r"projects on network paths (\\server\share) are not supported on Windows: clone the repository to a local drive";
 
@@ -364,7 +407,7 @@ mod win {
                 // `\\?\Volume{…}\`: the volume is the root.
                 _ => {
                     let end = v.find(is_sep).unwrap_or(v.len());
-                    return (format!(r"\\?\{}", v[..end].to_lowercase()), &v[end..]);
+                    return (format!(r"\\?\{}", v[..end].to_ascii_lowercase()), &v[end..]);
                 }
             },
             None if s.starts_with(is_sep) && s[1..].starts_with(is_sep) => (true, &s[2..]),
@@ -374,7 +417,7 @@ mod win {
             let server_end = rest.find(is_sep).unwrap_or(rest.len());
             let share = rest[server_end..].trim_start_matches(is_sep);
             let share_end = share.find(is_sep).unwrap_or(share.len());
-            let key = format!(r"\\{}\{}", rest[..server_end].to_lowercase(), share[..share_end].to_lowercase());
+            let key = format!(r"\\{}\{}", rest[..server_end].to_ascii_lowercase(), share[..share_end].to_ascii_lowercase());
             return (key, &share[share_end..]);
         }
         match drive(rest) {
@@ -405,8 +448,13 @@ mod win {
         Some(s.split_at(s.find(is_sep).unwrap_or(s.len())))
     }
 
+    /// ASCII letters without regard to case, everything else exactly. Beyond ASCII each
+    /// volume's own upcase table (written when it was formatted) decides, and no fixed
+    /// table matches every volume: KELVIN SIGN (U+212A) lowercases to `k`, yet NTFS keeps
+    /// `wor\u{212A}` and `work` apart. Calling two names different refuses a path;
+    /// calling them the same could let one out of a root.
     fn same_name(a: &str, b: &str) -> bool {
-        a.eq_ignore_ascii_case(b) || a.to_lowercase() == b.to_lowercase()
+        a.eq_ignore_ascii_case(b)
     }
 
     pub fn strip_prefix<'a>(p: &'a str, base: &str) -> Option<&'a str> {
@@ -486,6 +534,8 @@ mod tests {
             assert!(check_component(name).is_ok(), "{name}");
         }
         assert!(check_relative(r"..\x").is_ok() && check_relative("C:x").is_ok());
+        assert!(stays_inside(r"\\server\share") && stays_inside("C:x"));
+        assert!(private_dirs().iter().any(|d| d.ends_with(".config/gh")) && private_dirs().iter().any(|d| d.ends_with(".local/share/workbench")));
         assert_eq!(unsupported_root(Path::new(r"\\wsl$\Ubuntu")), None);
         assert_eq!(strip_prefix(Path::new("/a/B/c"), Path::new("/a/b")), None);
         assert_eq!(strip_prefix(Path::new("/a/b/c"), Path::new("/a/b/")), Some(Path::new("c")));
@@ -540,6 +590,16 @@ mod tests {
     }
 
     #[test]
+    fn windows_repository_paths_stay_inside() {
+        for bad in [r"C:\x", "C:x", "c:/x", r"\\server\share\x.csproj", "//server/share", r"\x", "/x", "a/b:stream", r"a\NUL", "x/com1.txt"] {
+            assert!(!win::stays_inside(bad), "{bad:?}");
+        }
+        for ok in ["crates/", "crates/api", r"src\App\App.csproj", "./server.js", "", "a/../b"] {
+            assert!(win::stays_inside(ok), "{ok:?}");
+        }
+    }
+
+    #[test]
     fn windows_unc_roots_are_refused() {
         for wsl in [r"\\wsl$\Ubuntu\home\u\proj", r"\\WSL.localhost\Ubuntu", "//wsl$/Debian", r"\\?\UNC\wsl$\Ubuntu"] {
             assert!(win::unsupported_root(wsl).is_some_and(|m| m.contains("WSL")), "{wsl}");
@@ -561,7 +621,12 @@ mod tests {
         assert_eq!(s("C:/p/x/", r"C:\p\"), Some("x/"));
         assert_eq!(s(r"C:\p\.\x", r"C:\p"), Some("x"));
         assert_eq!(s(r"C:\p", r"C:\P"), Some(""));
-        assert_eq!(s(r"C:\Ärger\x", r"c:\ärger"), Some("x"));
+        assert_eq!(s(r"C:\Ärger\x", r"c:\Ärger"), Some("x"));
+        assert_eq!(s(r"C:\Ärger\x", r"C:\ärger"), None);
+        for sign in ["\u{212A}", "\u{212B}", "\u{2126}"] {
+            assert_eq!(s(&format!(r"C:\src\wor{sign}\x"), r"C:\src\work"), None, "{sign}");
+        }
+        assert_eq!(s("C:\\src\\wor\u{212A}\\x", "C:\\src\\wor\u{212A}"), Some("x"));
         assert_eq!(s(r"\\Server\Share\x", r"\\?\UNC\server\share"), Some("x"));
         assert_eq!(s(r"C:\p2\x", r"C:\p"), None);
         assert_eq!(s(r"D:\p\x", r"C:\p"), None);
@@ -608,10 +673,22 @@ mod tests {
         let lower = format!("{}{}", s[..1].to_ascii_lowercase(), &s[1..]);
         assert_eq!(canonicalize(&lower).unwrap(), c);
         // The temp dir itself may be spelled with 8.3 names (`RUNNER~1`): compare canonical paths.
-        assert!(starts_with(Path::new(&lower.to_uppercase()), c.parent().unwrap()));
+        assert!(starts_with(Path::new(&lower.to_ascii_uppercase()), c.parent().unwrap()));
         assert!(is_absolute_str(s) && is_absolute_str(r"\x") && !is_absolute_str("C:x"));
         assert_eq!(home_relative(r"~\x"), Some("x"));
         assert_eq!(to_slash(Path::new(r"a\b")), "a/b");
         assert!(same_name(".GIT", ".git") && CASE_INSENSITIVE);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_private_dirs_are_where_windows_programs_keep_them() {
+        let dirs = private_dirs();
+        let appdata = dirs::config_dir().unwrap();
+        for d in ["GitHub CLI", "gcloud", "workbench"] {
+            assert!(dirs.contains(&appdata.join(d)), "{d}: {dirs:?}");
+        }
+        assert!(dirs.contains(&data_home().unwrap().join("workbench")), "{dirs:?}");
+        assert!(dirs.iter().any(|d| pgpass_file().unwrap().starts_with(d)), "{dirs:?}");
     }
 }

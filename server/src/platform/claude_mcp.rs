@@ -454,7 +454,7 @@ mod tests {
     fn scans_all_scopes_without_leaking_values() {
         let home = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
-        let root = repo.path().canonicalize().unwrap();
+        let root = crate::util::os::path::canonicalize(repo.path()).unwrap();
         let claude_dir = home.path().join(".claude");
         let loc = Locations {
             claude_json: home.path().join(".claude.json"),
@@ -468,7 +468,7 @@ mod tests {
                     "unity-mcp": { "command": "/opt/unity/bin/unity-mcp", "args": ["--token", "SECRETARG"], "env": { "UNITY_KEY": "SECRETENV" } },
                     "clion": { "type": "http", "url": "http://127.0.0.1:64342/sse?token=SECRETQ", "headers": { "Authorization": "Bearer SECRETH" } }
                 },
-                "projects": { root.to_string_lossy(): {
+                "projects": { crate::util::os::path::to_slash(&root): {
                     "mcpServers": { "local-one": { "type": "sse", "url": "https://user:pw@mcp.example.com/x" } },
                     "enabledMcpjsonServers": ["blender"],
                     "disabledMcpjsonServers": ["clion-proj"]

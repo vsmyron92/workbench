@@ -449,7 +449,7 @@ fn copies_from_root(src: &str, dir: &Path, root: &Path) -> bool {
         }
         for s in &args[..args.len() - 1] {
             let s = s.trim_end_matches('/');
-            if s.is_empty() || s == "." || s.contains(['*', '$', '?']) || s.starts_with("http") {
+            if s.is_empty() || s == "." || s.contains(['*', '$', '?']) || s.starts_with("http") || !crate::util::os::path::stays_inside(s) {
                 continue;
             }
             if dir.join(s).exists() {

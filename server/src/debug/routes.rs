@@ -416,11 +416,8 @@ fn private_file(state: &AppState, pid: &str, path: &std::path::Path) -> bool {
     if credential_path(&path.to_string_lossy()) {
         return true;
     }
-    let home = crate::config::expand_tilde("~/");
     let mut roots: Vec<std::path::PathBuf> = vec![state.paths.config_dir.clone(), state.paths.data_dir.clone()];
-    for d in [".config/gh", ".config/gcloud", ".config/workbench", ".local/share/workbench"] {
-        roots.push(home.join(d));
-    }
+    roots.extend(crate::util::os::path::private_dirs());
     let mut refs: Vec<crate::config::project::SecretRef> = state.config.read().secrets.values().cloned().collect();
     if let Some(p) = state.projects.get(pid) {
         refs.extend(p.config.secrets.values().cloned());

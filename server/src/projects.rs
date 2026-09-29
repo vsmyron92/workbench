@@ -125,8 +125,9 @@ pub struct ProjectRegistry {
 const IDS_FILE: &str = "project-ids.json";
 
 /// Is `id` usable as a file name component (`projects/<id>.toml`, `workspace/<id>`)?
+/// On Windows not a device name (`nul`, `com1`), whose files would go to the device.
 fn valid_id(id: &str) -> bool {
-    !id.is_empty() && util::slug(id) == id
+    !id.is_empty() && util::slug(id) == id && util::os::path::check_component(id).is_ok()
 }
 
 /// Ids for `dirs` (canonical, scan order): the id `known` already gives a directory,
@@ -135,7 +136,7 @@ fn valid_id(id: &str) -> bool {
 /// other directory in `known` holds. New assignments are added to `known`.
 fn assign_ids(known: &mut BTreeMap<String, String>, dirs: &[PathBuf]) -> Vec<String> {
     // Workspace scope names (`home`, and the UI's `all` view) never become project
-    // ids: a directory called `home` is project `home-2`.
+    // ids: a directory called `home` is project `home-2` (on Windows so is `nul`).
     let mut taken: HashSet<String> = known.values().cloned().collect();
     taken.extend(RESERVED_IDS.iter().map(|s| s.to_string()));
     dirs.iter()
@@ -150,7 +151,7 @@ fn assign_ids(known: &mut BTreeMap<String, String>, dirs: &[PathBuf]) -> Vec<Str
             let stem = if stem.is_empty() { base.as_str() } else { stem };
             let mut id = base.clone();
             let mut n = 2;
-            while taken.contains(&id) {
+            while taken.contains(&id) || util::os::path::check_component(&id).is_err() {
                 id = format!("{stem}-{n}");
                 n += 1;
             }
@@ -645,6 +646,22 @@ mod tests {
         assert_eq!(known.get("/c/web").map(String::as_str), Some("web"));
     }
 
+    /// On Windows `projects/nul.toml` or `workspace/com1` would be the device.
+    #[cfg(windows)]
+    #[test]
+    fn windows_device_names_are_never_project_ids() {
+        use super::{assign_ids, read_ids};
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+        let mut known = BTreeMap::new();
+        let ids = assign_ids(&mut known, &[PathBuf::from(r"C:\a\nul_"), PathBuf::from(r"C:\b\COM1"), PathBuf::from(r"C:\c\aux-")]);
+        assert_eq!(ids, ["nul-2", "com-2", "aux-2"]);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("project-ids.json");
+        std::fs::write(&file, r#"{"C:\\a\\con":"con","C:\\c\\web":"web"}"#).unwrap();
+        assert_eq!(read_ids(&file).into_values().collect::<Vec<_>>(), ["web"]);
+    }
+
     fn git(dir: &std::path::Path, args: &[&str]) {
         let ok = std::process::Command::new("git").args(args).current_dir(dir).status().unwrap().success();
         assert!(ok, "git {args:?}");
@@ -761,7 +778,7 @@ mod tests {
         assert!(t.state.projects.list().iter().all(|p| p.id != SCRATCH_ID));
         let p = t.state.projects.require(SCRATCH_ID).unwrap();
         assert_eq!(p.name, "Scratches");
-        assert_eq!(p.root, t.state.paths.data_dir.join("scratches").canonicalize().unwrap());
+        assert_eq!(p.root, crate::util::os::path::canonicalize(t.state.paths.data_dir.join("scratches")).unwrap());
         assert_eq!(std::fs::metadata(&p.root).unwrap().permissions().mode() & 0o777, 0o700);
         assert_eq!(t.state.projects.find_by_path(&p.root.join("a.md")).map(|x| x.id.clone()).as_deref(), Some(SCRATCH_ID));
 
