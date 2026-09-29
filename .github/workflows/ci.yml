@@ -47,3 +47,26 @@ jobs:
           workspaces: server
       - run: cargo build --locked
       - run: cargo test --locked
+
+  server-windows:
+    name: Server · Windows (build, test)
+    runs-on: windows-latest
+    # Informational until the port is done (docs/windows-port.md).
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - name: Keep LF line endings
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - run: cargo build --locked
+      - run: cargo test --locked --no-fail-fast

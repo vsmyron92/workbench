@@ -3,6 +3,7 @@
 pub mod ansi;
 pub mod fs;
 pub mod git;
+pub mod os;
 pub mod paths;
 pub mod proc;
 
