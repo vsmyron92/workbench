@@ -14,22 +14,20 @@
   PowerShell by default, and closing a terminal ends what it started, a browser or editor it
   opened that was not running yet included; `workbench service` installs a sign-in entry
   and a Start Menu shortcut that start `workbenchw.exe`, which supervises the server without
-  a console window; git and ssh ask Workbench itself for credentials, and git's credential
-  helpers (Credential Manager) are neither asked for nor handed the token of the GitLab host
-  Workbench answers for; each project has one recursive file watch, so its folders stay
-  renamable; language servers, debuggers and detected run commands take their Windows
-  forms; secret files written by Windows PowerShell 5.1
-  (UTF-16, or UTF-8 with a byte order mark) read as text. A program installed while
-  Workbench runs is found once it restarts, as the "not found" messages say.
+  a console window; git and ssh ask Workbench itself for credentials; each project has one
+  recursive file watch, so its folders stay renamable; language servers, debuggers and
+  detected run commands take their Windows forms; secret files written by Windows
+  PowerShell 5.1 (UTF-16, or UTF-8 with a byte order mark) read as text. A program
+  installed while Workbench runs is found once it restarts, as the "not found" messages say.
   `GET /api/health` reports the OS and what it leaves out (dev containers, desktop
   notifications, gdb attach and rust-gdb's pretty printers, projects on network or WSL
   paths), and those features answer `unsupported_platform` with the reason.
 - **Terminals (every OS):** `[terminals] shell` in `config.toml` sets the program and
-  arguments of new shells (default: `$SHELL -l`; PowerShell on Windows). A process's exit is
-  recorded and saved before it is announced, and Kill, Restart and Close wait for that, so
-  the terminal never reads as still running after Kill or Close. A terminal removed from
-  history stays removed: a save still under way cannot write its files back, so it no longer
-  returns at the next start.
+  arguments of new shells (default: `$SHELL -l`; PowerShell on Windows). Kill, Restart and
+  Close wait (up to 5 seconds) until the process's exit is recorded and saved, where they
+  waited only until it ended, so once they return the terminal reads as exited. A terminal
+  removed from history stays removed: a save still under way cannot write its files back,
+  so it no longer returns at the next start.
 - **Git on Windows:** a working tree git checks out with CRLF over an LF index
   (`core.autocrlf`, Git for Windows' default, or `eol=crlf` attributes) shows in diffs and
   conflicts as git reads it, with LF; a conflict resolved with edited text is written back
