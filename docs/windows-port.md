@@ -335,12 +335,15 @@ is not the same there (every hook, ssh and credential helper git starts would in
 `WORKBENCH_HELPER`, and the argv changes). The dispatch takes a call only with the variable
 set and a single argument that is not a subcommand or an option, because the rebase's
 `workbench git-editor …` and hooks run under the same environment. What Windows users should
-know: git asks its credential helpers first (Git for Windows installs Credential Manager),
-then Workbench's askpass, which answers only the configured GitLab host over https. Remote
-ops run with `GCM_INTERACTIVE=never`: Credential Manager returns what it has stored but
-never opens its sign-in window, so an https host it knows nothing about (the GitLab host
-included) gets Workbench's token or fails at once. Git hands credentials that worked to its
-helpers, so Credential Manager may keep that token afterwards. An ssh key with a passphrase must be loaded in an agent the ssh git uses
+know: Workbench's askpass answers only the configured GitLab host over https (the
+project's `[repo.gitlab]` host when it has its own token), and for that host remote ops empty
+git's credential helper list (`-c credential.https://<host>.helper=`, every OS), so
+Credential Manager is neither asked for it (a sign-in stored there does not answer for
+Workbench) nor handed Workbench's token to store. Other hosts go to git's credential helpers
+(Git for Windows installs Credential Manager) and then to askpass, which refuses them.
+Remote ops run with `GCM_INTERACTIVE=never`: Credential Manager returns what it has stored
+but never opens its sign-in window, so an https host it knows nothing about fails at once.
+An ssh key with a passphrase must be loaded in an agent the ssh git uses
 can reach, and a new host must be accepted once in a terminal (`known_hosts`): remote
 operations cannot prompt and fail instead. A repository an administrator created, or one
 on a drive without owners (FAT, exFAT, some network shares), stops with git's

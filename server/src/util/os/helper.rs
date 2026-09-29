@@ -83,9 +83,11 @@ mod imp {
             (super::VAR.into(), "askpass".into()),
             // Git asks its credential helpers before GIT_ASKPASS, and Git for Windows installs
             // Credential Manager as one: without this it shows a sign-in window on the host's
-            // desktop for a host it has nothing stored for (the configured GitLab host too) and
-            // the op waits on it. Stored credentials still come back; otherwise it fails at
-            // once and git asks Workbench.
+            // desktop for a host it has nothing stored for, and the op waits on it. Stored
+            // credentials still come back; otherwise it fails at once and git asks Workbench,
+            // which answers only the configured GitLab host. For that host remote ops empty
+            // the helper list (`git::askpass::reset_helpers_key`, every OS): Credential
+            // Manager is neither asked nor handed Workbench's token to store.
             ("GCM_INTERACTIVE".into(), "never".into()),
         ])
     }

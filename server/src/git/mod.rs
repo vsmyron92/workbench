@@ -36,6 +36,8 @@ mod status;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_credentials;
+#[cfg(test)]
 mod tests_flows;
 
 use std::path::{Path, PathBuf};
