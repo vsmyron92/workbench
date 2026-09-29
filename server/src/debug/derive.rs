@@ -18,6 +18,22 @@ use crate::util::os::shell::Dialect;
 const MAX_MEMBERS: usize = 64;
 const MAX_TARGETS: usize = 120;
 
+/// Whether looking at `p` follows no link to another computer or a device. Deriving runs
+/// whenever the Debug tool window lists configurations, and a repository's links may name
+/// any path: on Windows opening one to `\\host\share` connects to that host
+/// (`os::path::leaves_machine`; never on Linux). Every look below goes through here.
+fn local(p: &Path) -> bool {
+    !crate::util::os::path::leaves_machine(p)
+}
+
+fn is_file(p: &Path) -> bool {
+    local(p) && p.is_file()
+}
+
+fn read_dir(p: &Path) -> Option<std::fs::ReadDir> {
+    if local(p) { std::fs::read_dir(p).ok() } else { None }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CargoKind {
     Bin,
@@ -73,6 +89,9 @@ impl CargoTarget {
 }
 
 fn read_toml(path: &Path) -> Option<toml::Value> {
+    if !local(path) {
+        return None;
+    }
     let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > 1024 * 1024 {
         return None;
@@ -105,8 +124,8 @@ fn members(root: &Path, manifest: &toml::Value) -> Vec<PathBuf> {
         }
         if let Some(prefix) = m.strip_suffix("/*").or(if m == "*" { Some("") } else { None }) {
             let dir = root.join(prefix);
-            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-            let mut v: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.join("Cargo.toml").is_file()).take(MAX_MEMBERS).collect();
+            let Some(rd) = read_dir(&dir) else { continue };
+            let mut v: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| is_file(&p.join("Cargo.toml"))).take(MAX_MEMBERS).collect();
             v.sort();
             out.extend(v);
         } else if !m.contains('*') {
@@ -129,16 +148,16 @@ fn auto(manifest: &toml::Value, key: &str) -> bool {
 
 /// Files `dir/*.rs` and folders `dir/*/main.rs`, as target names.
 fn auto_targets(dir: &Path) -> Vec<String> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
+    let Some(rd) = read_dir(dir) else { return vec![] };
     let mut v = vec![];
     for e in rd.flatten().take(500) {
         let p = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
-        if p.is_file() {
+        if is_file(&p) {
             if let Some(stem) = name.strip_suffix(".rs") {
                 v.push(stem.to_string());
             }
-        } else if p.join("main.rs").is_file() {
+        } else if is_file(&p.join("main.rs")) {
             v.push(name);
         }
     }
@@ -177,7 +196,7 @@ fn package_targets(root: &Path, workspace: &str, dir: &Path, manifest: &toml::Va
         push(n.clone(), CargoKind::Bin);
     }
     if auto(manifest, "autobins") {
-        if dir.join("src/main.rs").is_file() && !bins.iter().any(|(_, p)| p.as_deref() == Some("src/main.rs")) {
+        if is_file(&dir.join("src/main.rs")) && !bins.iter().any(|(_, p)| p.as_deref() == Some("src/main.rs")) {
             push(pkg.to_string(), CargoKind::Bin);
         }
         for n in auto_targets(&dir.join("src/bin")) {
@@ -186,7 +205,7 @@ fn package_targets(root: &Path, workspace: &str, dir: &Path, manifest: &toml::Va
     }
     // Library unit tests.
     let lib = manifest.get("lib");
-    if lib.is_some() || dir.join("src/lib.rs").is_file() {
+    if lib.is_some() || is_file(&dir.join("src/lib.rs")) {
         let name = lib.and_then(|l| l.get("name")).and_then(|n| n.as_str()).map(str::to_string).unwrap_or_else(|| pkg.replace('-', "_"));
         let tests = lib.and_then(|l| l.get("test")).and_then(|t| t.as_bool()).unwrap_or(true);
         if tests && plain_name(&name) {
@@ -294,13 +313,13 @@ fn cmake_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, build_dirs: &[P
         return;
     }
     let f = dir.join("CMakeLists.txt");
-    if f.is_file() {
+    if is_file(&f) {
         out.push(f);
     }
     if depth == 0 {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Some(rd) = read_dir(dir) else { return };
     let mut subs: Vec<PathBuf> = rd
         .flatten()
         .take(1000)
@@ -310,7 +329,7 @@ fn cmake_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, build_dirs: &[P
             !n.starts_with('.') && !CMAKE_SKIP.contains(&n.as_str())
         })
         .map(|e| e.path())
-        .filter(|p| !build_dirs.contains(p) && !p.join("CMakeCache.txt").exists())
+        .filter(|p| !build_dirs.contains(p) && local(&p.join("CMakeCache.txt")) && !p.join("CMakeCache.txt").exists())
         .collect();
     subs.sort();
     for s in subs {
@@ -321,11 +340,11 @@ fn cmake_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, build_dirs: &[P
 /// Build directories at the root: `build`, `cmake-build-*` and any folder with a
 /// `CMakeCache.txt` (one level deep).
 pub fn cmake_build_dirs(root: &Path) -> Vec<String> {
-    let Ok(rd) = std::fs::read_dir(root) else { return vec![] };
+    let Some(rd) = read_dir(root) else { return vec![] };
     let mut v: Vec<String> = rd
         .flatten()
         .take(500)
-        .filter(|e| e.path().join("CMakeCache.txt").is_file())
+        .filter(|e| is_file(&e.path().join("CMakeCache.txt")))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| plain_name(n))
         .collect();
@@ -339,7 +358,7 @@ pub fn cmake_build_dirs(root: &Path) -> Vec<String> {
 pub fn cmake_targets(root: &Path) -> Vec<CmakeTarget> {
     let dirs = cmake_build_dirs(root);
     let Some(build) = dirs.first() else { return vec![] };
-    if !root.join("CMakeLists.txt").is_file() {
+    if !is_file(&root.join("CMakeLists.txt")) {
         return vec![];
     }
     let re = regex::Regex::new(r"(?im)^\s*add_executable\s*\(\s*([A-Za-z0-9_.+-]+)([^)]*)").expect("regex");
@@ -618,14 +637,17 @@ pub fn venv_python(root: &Path) -> Option<String> {
 
 /// Main packages of a Go module: the root and `cmd/*` (`"."`, `"./cmd/api"`).
 pub fn go_mains(root: &Path) -> Vec<String> {
-    if !root.join("go.mod").is_file() {
+    if !is_file(&root.join("go.mod")) {
         return vec![];
     }
     let is_main = |dir: &Path| -> bool {
-        let Ok(rd) = std::fs::read_dir(dir) else { return false };
+        let Some(rd) = read_dir(dir) else { return false };
         rd.flatten().take(200).filter(|e| e.file_name().to_string_lossy().ends_with(".go") && !e.file_name().to_string_lossy().ends_with("_test.go")).take(30).any(|e| {
             use std::io::Read;
             let mut buf = vec![0u8; 4096];
+            if !local(&e.path()) {
+                return false;
+            }
             let Ok(mut f) = std::fs::File::open(e.path()) else { return false };
             let n = f.read(&mut buf).unwrap_or(0);
             String::from_utf8_lossy(&buf[..n]).lines().any(|l| l.trim() == "package main")
@@ -635,11 +657,11 @@ pub fn go_mains(root: &Path) -> Vec<String> {
     if is_main(root) {
         out.push(".".to_string());
     }
-    if let Ok(rd) = std::fs::read_dir(root.join("cmd")) {
+    if let Some(rd) = read_dir(&root.join("cmd")) {
         let mut v: Vec<String> = rd
             .flatten()
             .take(200)
-            .filter(|e| e.path().is_dir() && is_main(&e.path()))
+            .filter(|e| local(&e.path()) && e.path().is_dir() && is_main(&e.path()))
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| plain_name(n))
             .map(|n| format!("./cmd/{n}"))
@@ -703,6 +725,34 @@ mod tests {
         let lib = nested.iter().find(|t| t.kind == CargoKind::Lib).unwrap();
         assert_eq!(lib.workspace, r.file_name().unwrap().to_str().unwrap());
         assert_eq!(lib.dir, format!("{}/crates/core-lib", lib.workspace));
+    }
+
+    /// Links to another computer are never followed while deriving (Windows): the linked
+    /// files sit on this computer's own share, so a followed link would add targets.
+    #[cfg(windows)]
+    #[test]
+    fn links_to_network_paths_are_not_followed() {
+        use crate::util::os::path::{canonicalize, loopback_share, remote_link_or_skip};
+        let (d, elsewhere) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (r, far) = (canonicalize(d.path()).unwrap(), canonicalize(elsewhere.path()).unwrap());
+        write(&r, "Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n[package]\nname = \"app\"\n");
+        write(&r, "src/main.rs", "fn main() {}");
+        write(&far, "evil.rs", "fn main() {}");
+        write(&far, "remote/Cargo.toml", "[package]\nname = \"remote\"\n");
+        write(&far, "remote/src/main.rs", "fn main() {}");
+        write(&far, "main.go", "package main\n");
+        std::fs::create_dir_all(r.join("crates")).unwrap();
+        let share = loopback_share(&far);
+        std::fs::create_dir_all(r.join("src").join("bin")).unwrap();
+        if !remote_link_or_skip(&share.join("evil.rs"), &r.join("src").join("bin").join("evil.rs"), false) {
+            return;
+        }
+        assert!(remote_link_or_skip(&share.join("remote"), &r.join("crates").join("remote"), true));
+        assert!(remote_link_or_skip(&share.join("main.go"), &r.join("main.go"), false));
+        write(&r, "go.mod", "module x\n");
+        let names: Vec<String> = cargo_targets(&r, "").iter().map(|t| t.config_name()).collect();
+        assert_eq!(names, vec!["Cargo: bin app"]);
+        assert!(go_mains(&r).is_empty());
     }
 
     #[test]

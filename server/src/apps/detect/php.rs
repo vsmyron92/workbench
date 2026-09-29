@@ -24,7 +24,7 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
         ["require", "require-dev"].iter().any(|k| v.get(k).and_then(|r| r.as_object()).is_some_and(|r| r.contains_key(pkg)))
     };
     let artisan = dir.join("artisan");
-    let laravel = artisan.is_file() && (requires("laravel/framework") || cx.read(&artisan).is_some_and(|t| t.contains("Illuminate")));
+    let laravel = cx.is_file(&artisan) && (requires("laravel/framework") || cx.read(&artisan).is_some_and(|t| t.contains("Illuminate")));
     if laravel {
         cx.tag("laravel");
         cx.add_run(RunConfig {
@@ -48,7 +48,7 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
             group: Some("test".into()),
             ..Default::default()
         });
-    } else if requires("symfony/framework-bundle") && dir.join("bin/console").is_file() {
+    } else if requires("symfony/framework-bundle") && cx.is_file(&dir.join("bin/console")) {
         cx.tag("symfony");
         let (command, ready) = if on_path("symfony") {
             ("symfony server:start".to_string(), r"Listening on (https?://\S+)")
@@ -69,7 +69,7 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
         });
     }
     if !laravel {
-        if let Some(cfg) = ["phpunit.xml", "phpunit.xml.dist", "phpunit.dist.xml"].iter().map(|n| dir.join(n)).find(|p| p.is_file()) {
+        if let Some(cfg) = ["phpunit.xml", "phpunit.xml.dist", "phpunit.dist.xml"].iter().map(|n| dir.join(n)).find(|p| cx.is_file(p)) {
             cx.add_run(RunConfig {
                 name: scoped("phpunit", &cwd),
                 kind: RunKind::Test,

@@ -238,7 +238,7 @@ fn suggestions(cx: &mut Ctx) {
     let mut added = 0usize;
     for doc in RUN_DOCS {
         let path = cx.root.join(doc);
-        if !path.is_file() {
+        if !cx.is_file(&path) {
             continue;
         }
         let Some(src) = cx.read(&path) else { continue };
@@ -288,7 +288,7 @@ fn choose_cwd(cx: &Ctx, fc: &FenceCmd) -> Option<String> {
     }
     let Some(doc) = resolve_cwd(cx, fc.doc_cwd.as_deref()) else { return shell };
     let Some(sh) = shell else { return Some(doc) };
-    let is_dir = |d: &str| cx.root.join(d).is_dir();
+    let is_dir = |d: &str| cx.is_dir(&cx.root.join(d));
     if !is_dir(&sh) {
         return Some(if is_dir(&doc) { doc } else { sh });
     }
@@ -296,7 +296,7 @@ fn choose_cwd(cx: &Ctx, fc: &FenceCmd) -> Option<String> {
         w.contains('/') && !w.starts_with(['-', '/', '~', '$']) && !w.contains("://") && !w.contains('=')
     });
     match path {
-        Some(p) if crate::util::os::path::stays_inside(p) && cx.root.join(&doc).join(p).exists() && !cx.root.join(&sh).join(p).exists() => Some(doc),
+        Some(p) if crate::util::os::path::stays_inside(p) && cx.exists(&cx.root.join(&doc).join(p)) && !cx.exists(&cx.root.join(&sh).join(p)) => Some(doc),
         _ => Some(sh),
     }
 }

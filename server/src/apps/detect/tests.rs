@@ -716,6 +716,53 @@ fn hostile_and_empty_trees_are_fine() {
     assert!(pf.runs.is_empty());
 }
 
+/// Files looked up by name that are links to files of the project are read through them,
+/// on every OS (Windows only skips links to other computers, below).
+#[test]
+fn docs_linked_inside_the_project_are_read() {
+    let d = tree(&[("docs/agents.md", "# Commands\n\n```bash\ncargo test --workspace\n```\n")]);
+    if !crate::files::symlink_or_skip("docs/agents.md", d.path().join("CLAUDE.md")) {
+        return;
+    }
+    let pf = detect(d.path());
+    assert!(pf.project.docs.contains(&"CLAUDE.md".to_string()), "{:?}", pf.project.docs);
+    assert!(pf.runs.iter().any(|r| r.command == "cargo test --workspace" && r.group.as_deref() == Some("suggested")), "{:?}", names(&pf));
+}
+
+/// Detection runs for every project at every reload, so links to another computer are
+/// never followed (Windows): docs, build files, marker files and folders looked up by
+/// name, and `.git` files naming a git dir there. The linked files sit on this computer's
+/// own share, so a followed link would show in what detection proposes.
+#[cfg(windows)]
+#[test]
+fn links_to_network_paths_are_not_followed() {
+    use crate::util::os::path::{canonicalize, loopback_share, remote_link_or_skip};
+    let elsewhere = tree(&[
+        ("CLAUDE.md", "# Commands\n\n```bash\ncargo test --workspace\n```\n"),
+        ("web/package.json", r#"{"scripts":{"dev":"vite --port 5173"}}"#),
+        ("pytest.ini", "[pytest]\n"),
+        (".devcontainer/devcontainer.json", r#"{"image":"x"}"#),
+    ]);
+    let share = loopback_share(&canonicalize(elsewhere.path()).unwrap());
+    let d = tree(&[("requirements.txt", "flask\n")]);
+    let root = canonicalize(d.path()).unwrap();
+    if !remote_link_or_skip(&share.join("CLAUDE.md"), &root.join("CLAUDE.md"), false) {
+        return;
+    }
+    for (target, link, dir) in [("CLAUDE.md", "README.md", false), ("web", "web", true), ("pytest.ini", "pytest.ini", false), (".devcontainer", ".devcontainer", true)] {
+        assert!(remote_link_or_skip(&share.join(target), &root.join(link), dir));
+    }
+    write(&root, ".git", &format!("gitdir: {}\n", share.join("gitdir").display()));
+    let t = Instant::now();
+    let pf = detect(&root);
+    assert!(t.elapsed() < Duration::from_secs(5), "took {:?}", t.elapsed());
+    assert!(pf.project.docs.is_empty(), "{:?}", pf.project.docs);
+    assert!(!pf.runs.iter().any(|r| r.command.contains("cargo test") || r.command.contains("vite")), "{:?}", names(&pf));
+    assert!(!pf.project.tags.iter().any(|t| t == "devcontainer" || t == "node"), "{:?}", pf.project.tags);
+    // `pytest.ini` was not looked at: no pytest configured.
+    assert!(pf.runs.iter().filter_map(|r| r.source.as_deref()).all(|s| !s.contains("pytest config")), "{:?}", names(&pf));
+}
+
 #[test]
 fn detection_is_fast_on_a_mixed_tree() {
     let d = tempfile::tempdir().unwrap();

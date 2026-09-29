@@ -173,11 +173,16 @@ pub fn language_of(l: &DebugLaunch, root: &Path) -> String {
         };
     }
     let program = l.program.as_deref().unwrap_or("");
+    // Never through a link to another computer (Windows): configurations are listed unasked.
+    let has = |name: &str| {
+        let p = root.join(name);
+        !crate::util::os::path::leaves_machine_below(root, &p) && p.is_file()
+    };
     if l.module.is_some() || program.ends_with(".py") {
         "python".into()
-    } else if program.ends_with(".go") || (root.join("go.mod").is_file() && !root.join("Cargo.toml").is_file() && (program.starts_with("./") || program == ".")) {
+    } else if program.ends_with(".go") || (has("go.mod") && !has("Cargo.toml") && (program.starts_with("./") || program == ".")) {
         "go".into()
-    } else if root.join("Cargo.toml").is_file() {
+    } else if has("Cargo.toml") {
         "rust".into()
     } else {
         "cpp".into()

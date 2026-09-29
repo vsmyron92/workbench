@@ -16,7 +16,9 @@
   window; git and ssh ask Workbench itself for credentials; each project has one recursive
   file watch, so its folders stay renamable; language servers, debuggers and detected run
   commands take their Windows forms; secret files written by Windows PowerShell 5.1
-  (UTF-16, or UTF-8 with a byte order mark) read as text. A program installed while
+  (UTF-16, or UTF-8 with a byte order mark) read as text. A link in a repository to a
+  network path or a device (`\\host\share\x`) is never followed, so nothing Workbench
+  reads by itself makes Windows sign in to another computer. A program installed while
   Workbench runs is found once it restarts, as the "not found" messages say.
   `GET /api/health` reports the OS and what it leaves out (dev containers, desktop
   notifications, gdb attach and rust-gdb's pretty printers, projects on network or WSL

@@ -37,10 +37,10 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
         group: Some("dev".into()),
         ..Default::default()
     };
-    let rails = dir.join("config/application.rb").is_file() && (has_gem(&gemfile, "rails") || dir.join("bin/rails").is_file());
+    let rails = cx.is_file(&dir.join("config/application.rb")) && (has_gem(&gemfile, "rails") || cx.is_file(&dir.join("bin/rails")));
     // Windows starts no script by its shebang: `ruby bin/rails` there (`super::dialect`).
     let windows = super::dialect() == Dialect::PowerShell;
-    let rails_cmd = match (dir.join("bin/rails").is_file(), windows) {
+    let rails_cmd = match (cx.is_file(&dir.join("bin/rails")), windows) {
         (true, false) => "bin/rails",
         (true, true) => "ruby bin/rails",
         (false, _) => "bundle exec rails",
@@ -51,13 +51,13 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
         // Rails 7+: `bin/dev` runs Procfile.dev (server + asset watchers) through foreman.
         // On Windows only a Ruby `bin/dev` (Rails 8) runs; a shell script does not.
         let dev = dir.join("bin/dev");
-        if dev.is_file() && !windows {
+        if cx.is_file(&dev) && !windows {
             runs.push(server("bin/dev", "bin/dev".into(), 3000, source(cx, &dev, "")));
-        } else if dev.is_file() && cx.read(&dev).is_some_and(|t| t.lines().next().is_some_and(|l| l.starts_with("#!") && l.contains("ruby"))) {
+        } else if cx.is_file(&dev) && cx.read(&dev).is_some_and(|t| t.lines().next().is_some_and(|l| l.starts_with("#!") && l.contains("ruby"))) {
             runs.push(server("bin/dev", "ruby bin/dev".into(), 3000, source(cx, &dev, "")));
         }
         runs.push(server("rails server", format!("{rails_cmd} server"), 3000, source(cx, &dir.join("config/application.rb"), "")));
-        if dir.join("test").is_dir() {
+        if cx.is_dir(&dir.join("test")) {
             runs.push(RunConfig {
                 name: scoped("rails test", &cwd),
                 kind: RunKind::Test,
@@ -68,15 +68,15 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
                 ..Default::default()
             });
         }
-    } else if dir.join("config.ru").is_file() {
+    } else if cx.is_file(&dir.join("config.ru")) {
         runs.push(server("rackup", "bundle exec rackup".into(), 9292, source(cx, &dir.join("config.ru"), "")));
     }
-    if has_gem(&gemfile, "jekyll") || dir.join("_config.yml").is_file() && gemfile.contains("jekyll") {
+    if has_gem(&gemfile, "jekyll") || cx.is_file(&dir.join("_config.yml")) && gemfile.contains("jekyll") {
         cx.tag("jekyll");
         runs.push(server("jekyll serve", "bundle exec jekyll serve --livereload".into(), 4000, source(cx, f, "")));
     }
-    if has_gem(&gemfile, "rspec") || has_gem(&gemfile, "rspec-rails") || dir.join(".rspec").is_file() {
-        if dir.join("spec").is_dir() {
+    if has_gem(&gemfile, "rspec") || has_gem(&gemfile, "rspec-rails") || cx.is_file(&dir.join(".rspec")) {
+        if cx.is_dir(&dir.join("spec")) {
             runs.push(RunConfig {
                 name: scoped("rspec", &cwd),
                 kind: RunKind::Test,
@@ -87,7 +87,7 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
                 ..Default::default()
             });
         }
-    } else if !rails && dir.join("Rakefile").is_file() && dir.join("test").is_dir() {
+    } else if !rails && cx.is_file(&dir.join("Rakefile")) && cx.is_dir(&dir.join("test")) {
         runs.push(RunConfig {
             name: scoped("rake test", &cwd),
             kind: RunKind::Test,

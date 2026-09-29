@@ -23,7 +23,7 @@ use ignore::{WalkBuilder, WalkState};
 use serde::{Deserialize, Serialize};
 
 use super::content::write_file;
-use super::{HARD_IGNORE, MAX_TEXT_BYTES, Sensitive, blocking, in_git_dir, resolve, sha256_hex};
+use super::{MAX_TEXT_BYTES, Sensitive, blocking, in_git_dir, resolve, sha256_hex};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
 
@@ -213,18 +213,8 @@ impl Sink for HitSink<'_> {
 }
 
 fn walker(root: &Path, overrides: ignore::overrides::Override) -> WalkBuilder {
-    let mut b = WalkBuilder::new(root);
-    b.hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .require_git(false)
-        .ignore(true)
-        .parents(true)
-        .follow_links(false)
-        .max_filesize(Some(MAX_FILESIZE))
-        .overrides(overrides)
-        .filter_entry(|e| !HARD_IGNORE.contains(&e.file_name().to_string_lossy().as_ref()));
+    let mut b = super::gitignore::walk(root);
+    b.parents(true).max_filesize(Some(MAX_FILESIZE)).overrides(overrides);
     b
 }
 

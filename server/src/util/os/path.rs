@@ -156,7 +156,11 @@ pub fn unsupported_root(root: &Path) -> Option<&'static str> {
 
 /// `std::fs::canonicalize`. On Windows without the `\\?\` prefix wherever a plain path
 /// names the same file (dunce), and with an uppercase drive letter, so canonical paths
-/// compare and print like the ones users type.
+/// compare and print like the ones users type. Windows also never follows a link to
+/// another computer or a device on the way (the path given may name one itself): the
+/// links are followed one at a time, each target read and checked first
+/// ([`leaves_machine`]), and such a link fails the call with an error
+/// [`is_refused_link`] recognizes.
 pub fn canonicalize(p: impl AsRef<Path>) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
@@ -164,11 +168,267 @@ pub fn canonicalize(p: impl AsRef<Path>) -> io::Result<PathBuf> {
     }
     #[cfg(windows)]
     {
-        let p = dunce::canonicalize(p)?;
+        let abs = std::path::absolute(p.as_ref())?;
+        let (start, parts) = links::split(&abs);
+        // No link is left in `local`, so opening it follows none (a link made in the
+        // meantime aside: whoever can make one there can connect anywhere anyway).
+        let local = links::resolve(start, parts, &links::Disk, &refused_target).map_err(links::Stop::into_io)?;
+        let p = dunce::canonicalize(local)?;
         Ok(match p.to_str().and_then(win::upper_drive) {
             Some(s) => PathBuf::from(s),
             None => p,
         })
+    }
+}
+
+/// Whether reaching `p` could connect to another computer or open a device: `p` names
+/// one itself ([`unsupported_root`]), or a link on the way to it, the final component
+/// included, has such a target. Never on Unix, where links are followed as they always
+/// were. On Windows opening a link to `\\host\share\x` makes Windows sign in to that host
+/// with the user's credentials (an NTLM response the host can crack or relay), and a
+/// repository can hold one (git checks symlinks out with `core.symlinks`), so whatever
+/// Workbench opens by itself inside a project (detection, `.workbench.toml`, listings,
+/// ignore files, watchers) is checked here first. Each link is read without being
+/// followed and its target checked before the next step; a link whose target cannot be
+/// read counts as leaving. A missing component ends the check: nothing past it can be
+/// followed. See [`canonicalize`] for paths that must resolve.
+pub fn leaves_machine(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = p;
+        false
+    }
+    #[cfg(windows)]
+    {
+        leaves(None, p)
+    }
+}
+
+/// [`leaves_machine`] for `p` below `base`, a folder whose own path was checked already
+/// (a project root, a folder a walk reached without following links): only the part
+/// below `base` is read. A `p` that is not below `base` is checked whole.
+pub fn leaves_machine_below(base: &Path, p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = (base, p);
+        false
+    }
+    #[cfg(windows)]
+    {
+        leaves(Some(base), p)
+    }
+}
+
+/// Whether `leaves` holds for `p` or a folder above it, taken both as written and with
+/// `p`'s links resolved ([`canonicalize`]); true as well when `p` cannot be resolved
+/// without following a link [`canonicalize`] refuses. What is above a link to a folder is
+/// not what is above its target, and code that resolves a path before looking around it
+/// reads the latter: the `ignore` crate reads the ignore files of every folder above a
+/// walk's resolved start. `leaves` is one of the checks here ([`leaves_machine_below`] of
+/// what is read in a folder), so this too answers false on Unix without touching the disk.
+pub fn ancestors_leave(p: &Path, leaves: impl Fn(&Path) -> bool) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = (p, leaves);
+        false
+    }
+    #[cfg(windows)]
+    {
+        ancestors_leave_resolved(p, canonicalize(p), &leaves)
+    }
+}
+
+/// [`ancestors_leave`] given what [`canonicalize`] made of `p`.
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+fn ancestors_leave_resolved(p: &Path, resolved: io::Result<PathBuf>, leaves: &dyn Fn(&Path) -> bool) -> bool {
+    p.ancestors().any(leaves)
+        || match resolved {
+            Ok(r) => r != p && r.ancestors().any(leaves),
+            Err(e) => is_refused_link(&e),
+        }
+}
+
+#[cfg(windows)]
+fn leaves(base: Option<&Path>, p: &Path) -> bool {
+    let Ok(abs) = std::path::absolute(p) else { return false };
+    let base = base.filter(|b| b.is_absolute());
+    let (start, parts) = match base.and_then(|b| strip_prefix(&abs, b).map(|rest| (b, rest))) {
+        Some((b, rest)) => (b.to_path_buf(), links::split(rest).1),
+        None if unsupported_root(&abs).is_some() => return true,
+        None => links::split(&abs),
+    };
+    matches!(links::resolve(start, parts, &links::Disk, &refused_target), Err(links::Stop::Refused { .. }))
+}
+
+/// Whether a link's target (as `read_link` gives it) is one no link is followed to
+/// (Windows): see `win::remote_target`.
+#[cfg(windows)]
+fn refused_target(target: &Path) -> bool {
+    win::remote_target(&target.to_string_lossy())
+}
+
+/// Whether `e` is [`canonicalize`]'s refusal to follow a link to another computer or a
+/// device (or one whose target cannot be read). Only Windows refuses.
+pub fn is_refused_link(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<RefusedLink>())
+}
+
+/// A link [`canonicalize`] did not follow: the error's message says which and why.
+#[derive(Debug)]
+#[cfg_attr(unix, allow(dead_code))]
+struct RefusedLink {
+    link: PathBuf,
+    /// `None`: the target could not be read.
+    target: Option<PathBuf>,
+}
+
+impl std::fmt::Display for RefusedLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.target {
+            Some(t) => write!(f, "{} links to {}, a network path or a device: Workbench does not follow such links", self.link.display(), t.display()),
+            None => write!(f, "{} is a link whose target cannot be read: Workbench does not follow it", self.link.display()),
+        }
+    }
+}
+
+impl std::error::Error for RefusedLink {}
+
+/// Following links one at a time, each target read (never followed) and checked before
+/// the walk goes on: how Windows resolves paths ([`canonicalize`], [`leaves_machine`]).
+/// Written with `std::path` alone and the file system behind [`links::Fs`], so the walk
+/// is tested on every OS.
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod links {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+    use std::io;
+    use std::path::{Component, Path, PathBuf};
+
+    use super::RefusedLink;
+
+    /// Links followed for one path before giving up (Windows follows at most 63).
+    pub const MAX_HOPS: usize = 63;
+
+    /// What the walk asks the file system, neither following `p` itself.
+    pub trait Fs {
+        /// Whether `p` is a link (on Windows a symlink or a junction).
+        fn is_link(&self, p: &Path) -> io::Result<bool>;
+        /// The target of the link `p`, as stored.
+        fn target(&self, p: &Path) -> io::Result<PathBuf>;
+    }
+
+    /// The disk: `symlink_metadata` and `read_link`, which open the final component
+    /// itself (Windows: `FILE_FLAG_OPEN_REPARSE_POINT`); every component before it is one
+    /// the walk found no link at.
+    pub struct Disk;
+
+    impl Fs for Disk {
+        fn is_link(&self, p: &Path) -> io::Result<bool> {
+            Ok(std::fs::symlink_metadata(p)?.file_type().is_symlink())
+        }
+
+        fn target(&self, p: &Path) -> io::Result<PathBuf> {
+            std::fs::read_link(p)
+        }
+    }
+
+    /// A step of a path below its root.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Part {
+        Name(OsString),
+        Up,
+    }
+
+    /// `p` as its root (prefix and root directory: `C:\`, `\\server\share\`, `/`; empty for
+    /// a relative path) and the steps below it, `.` dropped.
+    pub fn split(p: &Path) -> (PathBuf, Vec<Part>) {
+        let mut root = PathBuf::new();
+        let mut parts = vec![];
+        for c in p.components() {
+            match c {
+                Component::Prefix(_) | Component::RootDir => root.push(c.as_os_str()),
+                Component::CurDir => {}
+                Component::ParentDir => parts.push(Part::Up),
+                Component::Normal(n) => parts.push(Part::Name(n.to_owned())),
+            }
+        }
+        (root, parts)
+    }
+
+    /// Why the walk stopped.
+    #[derive(Debug)]
+    pub enum Stop {
+        /// A link it does not follow: `refuse` said so of its target, or the target
+        /// cannot be read (`None`).
+        Refused { link: PathBuf, target: Option<PathBuf> },
+        /// A step that cannot be examined (missing, access denied), or too many links.
+        Io(io::Error),
+    }
+
+    impl Stop {
+        pub fn into_io(self) -> io::Error {
+            match self {
+                Stop::Refused { link, target } => io::Error::new(io::ErrorKind::PermissionDenied, RefusedLink { link, target }),
+                Stop::Io(e) => e,
+            }
+        }
+    }
+
+    /// `start` (taken as it is: no link is looked for in it) followed by `parts`, with
+    /// every link on the way replaced by its target: the path the file system would
+    /// reach, with no link left in it. A link whose target `refuse` rejects is not
+    /// followed. As on Windows, a target's `..` steps are taken by name: from the link's
+    /// folder for a relative target, from its own root for an absolute one.
+    pub fn resolve(start: PathBuf, parts: Vec<Part>, fs: &impl Fs, refuse: &dyn Fn(&Path) -> bool) -> Result<PathBuf, Stop> {
+        let mut out = start;
+        let mut todo: VecDeque<Part> = parts.into();
+        let mut hops = 0usize;
+        while let Some(part) = todo.pop_front() {
+            let name = match part {
+                Part::Up => {
+                    out.pop();
+                    continue;
+                }
+                Part::Name(n) => n,
+            };
+            let next = out.join(&name);
+            if !fs.is_link(&next).map_err(Stop::Io)? {
+                out = next;
+                continue;
+            }
+            let target = match fs.target(&next) {
+                Ok(t) => t,
+                Err(_) => return Err(Stop::Refused { link: next, target: None }),
+            };
+            hops += 1;
+            if hops > MAX_HOPS {
+                return Err(Stop::Io(io::Error::other(format!("{}: too many levels of links", next.display()))));
+            }
+            if refuse(&target) {
+                return Err(Stop::Refused { link: next, target: Some(target) });
+            }
+            let (root, steps) = split(&target);
+            if !root.as_os_str().is_empty() {
+                out = root;
+            }
+            let mut names: Vec<OsString> = vec![];
+            for step in steps {
+                match step {
+                    Part::Name(n) => names.push(n),
+                    Part::Up => {
+                        if names.pop().is_none() {
+                            out.pop();
+                        }
+                    }
+                }
+            }
+            for n in names.into_iter().rev() {
+                todo.push_front(Part::Name(n));
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -359,6 +619,31 @@ pub fn pgpass_file() -> Option<PathBuf> {
     }
 }
 
+/// Tests (Windows): `\\localhost\<drive>$\<rest of p>`, the local folder `p` through this
+/// computer's own file sharing. A link to it names a network path, yet nothing would leave
+/// the computer should one be followed.
+#[cfg(all(windows, test))]
+pub(crate) fn loopback_share(p: &Path) -> PathBuf {
+    let s = p.to_str().unwrap();
+    PathBuf::from(format!(r"\\localhost\{}$\{}", &s[..1], s[2..].trim_start_matches('\\')))
+}
+
+/// Tests (Windows): make the symbolic link `link` to `target` (a network path: nothing is
+/// read), or `false` where Windows does not let this user (ERROR_PRIVILEGE_NOT_HELD: no
+/// Developer Mode, not an administrator), and the test skips that part.
+#[cfg(all(windows, test))]
+pub(crate) fn remote_link_or_skip(target: &Path, link: &Path, dir: bool) -> bool {
+    let made = if dir { std::os::windows::fs::symlink_dir(target, link) } else { std::os::windows::fs::symlink_file(target, link) };
+    match made {
+        Ok(()) => true,
+        Err(e) if e.raw_os_error() == Some(1314) => {
+            eprintln!("skipped: creating symbolic links needs Developer Mode or an administrator");
+            false
+        }
+        Err(e) => panic!("symlink {}: {e}", link.display()),
+    }
+}
+
 /// Windows path rules as string logic.
 #[cfg(any(windows, test))]
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -464,6 +749,30 @@ mod win {
         };
         let host = host.split('\\').next().unwrap_or("").to_ascii_lowercase();
         Some(if host == "wsl$" || host == "wsl.localhost" { WSL } else { UNC })
+    }
+
+    /// Whether a link to `target` (as `read_link` gives it) is one never followed: it may
+    /// reach another computer, a device or the NT namespace. Kept: relative targets (the
+    /// walk checks what they reach), drive paths (`C:\x`, `\\?\C:\x`; a drive the user
+    /// mapped to a share is theirs) and volume paths (`\\?\Volume{…}\x`, a mount point).
+    /// Refused: UNC paths in every spelling (`\\host\share`, `//host/share`,
+    /// `\\?\UNC\…`, `\??\UNC\…`, WebDAV's `\\host@SSL\…`), devices (`\\.\pipe\x`,
+    /// `\\?\GLOBALROOT\Device\Mup\…`, `\\?\C:` without a folder), and rooted targets
+    /// (`\x`): read back, a target relative to the drive's root cannot be told from an NT
+    /// path such as `\Device\Mup\host\share` that a crafted link holds. So is an empty one.
+    pub fn remote_target(target: &str) -> bool {
+        let t = target.replace('/', "\\");
+        if let Some(rest) = t.strip_prefix(r"\\?\").or_else(|| t.strip_prefix(r"\??\")) {
+            let drive_dir = drive(rest).is_some() && rest[2..].starts_with('\\');
+            return !(drive_dir || is_volume_dir(rest));
+        }
+        t.is_empty() || t.starts_with('\\')
+    }
+
+    /// `Volume{01234567-89ab-cdef-0123-456789abcdef}\…`: a folder of a local volume.
+    fn is_volume_dir(s: &str) -> bool {
+        let Some(guid) = s.get(..7).filter(|p| p.eq_ignore_ascii_case("Volume{")).and_then(|_| s[7..].split_once('}')) else { return false };
+        guid.0.len() == 36 && guid.0.chars().all(|c| c.is_ascii_hexdigit() || c == '-') && guid.1.starts_with('\\')
     }
 
     /// A path's root as a key equal for every spelling of it (`C:\`, `c:/`, `\\?\C:\` and
@@ -616,6 +925,229 @@ mod tests {
         assert_eq!(uri_path("/x/y"), (String::new(), "/x/y".to_string()));
         assert_eq!(from_uri_path("/c:/x".into()).as_deref(), Some("/c:/x"));
         assert!(!CASE_INSENSITIVE);
+        // Links are followed as they always were: nothing is read to check them.
+        let dir = tempfile::tempdir().unwrap();
+        crate::util::os::fs::symlink("//server/share", dir.path().join("link")).unwrap();
+        assert!(!leaves_machine(&dir.path().join("link")) && !leaves_machine_below(dir.path(), &dir.path().join("link/x")));
+        assert!(!leaves_machine(Path::new(r"\\server\share\x")));
+        assert!(!ancestors_leave(&dir.path().join("link"), |_| true));
+        assert_eq!(canonicalize(dir.path().join("link")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn windows_links_to_other_computers_and_devices_are_refused() {
+        for remote in [
+            r"\\attacker\share\x",
+            "//attacker/share/x",
+            r"\\attacker",
+            r"\\attacker@SSL@443\DavWWWRoot\x",
+            r"\\?\UNC\attacker\share",
+            r"\\?\unc\attacker\share",
+            r"\??\UNC\attacker\share",
+            "//?/UNC/attacker/share",
+            r"\\?\GLOBALROOT\Device\Mup\attacker\share",
+            r"\\.\pipe\x",
+            r"\\.\C:\x",
+            r"\\?\C:",
+            r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}",
+            r"\\?\Volume{not-a-guid}\x",
+            r"\Device\Mup\attacker\share",
+            r"\x",
+            "/etc/passwd",
+            "",
+        ] {
+            assert!(win::remote_target(remote), "{remote:?}");
+        }
+        for local in [
+            "x.txt",
+            r"..\..\other\x",
+            "../x",
+            r"sub\dir",
+            r"C:\Users\me\x",
+            "c:/x",
+            "C:x",
+            r"\\?\C:\very\long",
+            r"\??\D:\x",
+            r"\\?\Volume{01234567-89ab-cdef-0123-456789ABCDEF}\x",
+        ] {
+            assert!(!win::remote_target(local), "{local:?}");
+        }
+    }
+
+    /// A file system of folders, files and links for the walk, recording what it was asked.
+    #[derive(Default)]
+    struct FakeFs {
+        links: std::collections::HashMap<PathBuf, Option<PathBuf>>,
+        entries: std::collections::HashSet<PathBuf>,
+        asked: std::cell::RefCell<Vec<PathBuf>>,
+    }
+
+    impl FakeFs {
+        fn with(entries: &[&str], links: &[(&str, Option<&str>)]) -> FakeFs {
+            FakeFs {
+                entries: entries.iter().map(PathBuf::from).collect(),
+                links: links.iter().map(|(l, t)| (PathBuf::from(l), t.map(PathBuf::from))).collect(),
+                ..Default::default()
+            }
+        }
+
+        fn resolve(&self, p: &str) -> Result<PathBuf, links::Stop> {
+            let (start, parts) = links::split(Path::new(p));
+            links::resolve(start, parts, self, &|t: &Path| t.to_string_lossy().starts_with("//"))
+        }
+    }
+
+    impl links::Fs for FakeFs {
+        fn is_link(&self, p: &Path) -> io::Result<bool> {
+            self.asked.borrow_mut().push(p.to_path_buf());
+            if self.links.contains_key(p) {
+                return Ok(true);
+            }
+            if self.entries.contains(p) { Ok(false) } else { Err(io::ErrorKind::NotFound.into()) }
+        }
+
+        fn target(&self, p: &Path) -> io::Result<PathBuf> {
+            self.links[p].clone().ok_or_else(|| io::Error::other("unreadable reparse data"))
+        }
+    }
+
+    #[test]
+    fn the_link_walk_follows_local_links_and_stops_before_refused_ones() {
+        let fs = FakeFs::with(
+            &["/p", "/p/a", "/p/a/f", "/p/sub", "/q", "/q/g"],
+            &[
+                ("/p/rel", Some("a")),
+                ("/p/abs", Some("/p/a")),
+                ("/p/sub/up", Some("../../q")),
+                ("/p/dotdot", Some("rel/../a")),
+                ("/p/chain", Some("rel")),
+                ("/p/remote", Some("//attacker/share")),
+                ("/p/to-remote", Some("sub/../remote")),
+                ("/p/a/back", Some("../remote/x")),
+                ("/p/loop", Some("loop")),
+                ("/p/unreadable", None),
+            ],
+        );
+        let ok = |p: &str| fs.resolve(p).unwrap_or_else(|e| panic!("{p}: {e:?}"));
+        assert_eq!(ok("/p/a/f"), Path::new("/p/a/f"));
+        assert_eq!(ok("/p/rel/f"), Path::new("/p/a/f"));
+        assert_eq!(ok("/p/abs/f"), Path::new("/p/a/f"));
+        assert_eq!(ok("/p/sub/up/g"), Path::new("/q/g"));
+        assert_eq!(ok("/p/chain/f"), Path::new("/p/a/f"));
+        assert_eq!(ok("/p/rel/../sub"), Path::new("/p/sub"));
+        // A target's `..` is taken by name, as Windows does: `rel/..` is `/p`, whatever `rel` is.
+        assert_eq!(ok("/p/dotdot/f"), Path::new("/p/a/f"));
+
+        for (p, link) in [("/p/remote", "/p/remote"), ("/p/remote/x/y", "/p/remote"), ("/p/to-remote/x", "/p/remote"), ("/p/rel/back", "/p/remote")] {
+            fs.asked.borrow_mut().clear();
+            match fs.resolve(p) {
+                Err(links::Stop::Refused { link: l, target: Some(t) }) => assert_eq!((l.as_path(), t.as_path()), (Path::new(link), Path::new("//attacker/share")), "{p}"),
+                other => panic!("{p}: {other:?}"),
+            }
+            // Nothing through the link was looked at.
+            let through = |a: &PathBuf| (a.starts_with("/p/remote") && a != Path::new("/p/remote")) || a.starts_with("//attacker");
+            assert!(!fs.asked.borrow().iter().any(through), "{p}: {:?}", fs.asked.borrow());
+        }
+        assert!(matches!(fs.resolve("/p/unreadable/x"), Err(links::Stop::Refused { target: None, .. })));
+        assert!(matches!(fs.resolve("/p/loop"), Err(links::Stop::Io(e)) if e.to_string().contains("too many levels")));
+        assert!(matches!(fs.resolve("/p/missing/x"), Err(links::Stop::Io(e)) if e.kind() == io::ErrorKind::NotFound));
+
+        // `canonicalize`'s refusal, as callers see it.
+        let e = links::Stop::Refused { link: "/p/remote".into(), target: Some("//attacker/share".into()) }.into_io();
+        assert!(is_refused_link(&e) && e.kind() == io::ErrorKind::PermissionDenied);
+        assert!(e.to_string().contains("/p/remote links to //attacker/share"), "{e}");
+        assert!(is_refused_link(&links::Stop::Refused { link: "/p/x".into(), target: None }.into_io()));
+        assert!(!is_refused_link(&io::ErrorKind::NotFound.into()) && !is_refused_link(&io::Error::other("x")));
+    }
+
+    /// The folders above a path are checked as written and where its links lead: a link
+    /// `/p/lnk` to `/p/inner/deep` puts `/p/inner` above it for whoever resolves it first.
+    #[test]
+    fn folders_above_a_link_are_checked_where_it_leads() {
+        let asked = std::cell::RefCell::new(vec![]);
+        let flags = |bad: &'static [&'static str]| {
+            let asked = &asked;
+            move |d: &Path| {
+                asked.borrow_mut().push(d.to_path_buf());
+                bad.iter().any(|b| d == Path::new(b))
+            }
+        };
+        let lnk = Path::new("/p/lnk");
+        let deep = || Ok(PathBuf::from("/p/inner/deep"));
+        assert!(ancestors_leave_resolved(lnk, deep(), &flags(&["/p/inner"])));
+        assert!(ancestors_leave_resolved(lnk, deep(), &flags(&["/p/lnk"])));
+        assert!(ancestors_leave_resolved(lnk, deep(), &flags(&["/"])));
+        asked.borrow_mut().clear();
+        assert!(!ancestors_leave_resolved(lnk, deep(), &flags(&["/q"])));
+        let seen: Vec<_> = asked.borrow().iter().map(|d| d.display().to_string()).collect();
+        assert_eq!(seen, ["/p/lnk", "/p", "/", "/p/inner/deep", "/p/inner", "/p", "/"]);
+
+        // No link on the way: each folder is asked once.
+        asked.borrow_mut().clear();
+        assert!(!ancestors_leave_resolved(lnk, Ok(lnk.to_path_buf()), &flags(&[])));
+        assert_eq!(asked.borrow().len(), 3);
+
+        // A start reached through a refused link leaves; one that is missing only as written.
+        let refused = || links::Stop::Refused { link: "/p/lnk".into(), target: Some("//attacker/share".into()) }.into_io();
+        assert!(ancestors_leave_resolved(lnk, Err(refused()), &flags(&[])));
+        assert!(!ancestors_leave_resolved(lnk, Err(io::ErrorKind::NotFound.into()), &flags(&[])));
+        assert!(ancestors_leave_resolved(lnk, Err(io::ErrorKind::NotFound.into()), &flags(&["/p"])));
+    }
+
+    /// The walk over real links (`links::Disk`), checked against the kernel's own answer.
+    #[cfg(unix)]
+    #[test]
+    fn the_link_walk_reaches_what_the_file_system_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::write(root.join("a/b/f"), "f").unwrap();
+        let link = |target: &str, at: &str| crate::util::os::fs::symlink(target, root.join(at)).unwrap();
+        link("a/b", "rel");
+        link(&root.join("a").display().to_string(), "abs");
+        link("../rel", "a/up");
+        link("//attacker/share", "remote");
+        link("../../remote/x", "a/b/via");
+        let refuse = |t: &Path| t.to_string_lossy().starts_with("//");
+        let walk = |p: &Path| {
+            let (start, parts) = links::split(p);
+            links::resolve(start, parts, &links::Disk, &refuse)
+        };
+        for p in ["rel/f", "abs/b/f", "a/up/f", "a/b/f"] {
+            assert_eq!(walk(&root.join(p)).unwrap(), std::fs::canonicalize(root.join(p)).unwrap(), "{p}");
+        }
+        for p in ["remote", "remote/x", "a/b/via", "rel/via/y"] {
+            assert!(matches!(walk(&root.join(p)), Err(links::Stop::Refused { target: Some(_), .. })), "{p}");
+        }
+        assert!(matches!(walk(&root.join("missing/x")), Err(links::Stop::Io(e)) if e.kind() == io::ErrorKind::NotFound));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_links_to_network_paths_are_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonicalize(dir.path()).unwrap();
+        std::fs::create_dir(root.join("real")).unwrap();
+        std::fs::write(root.join("real").join("x.txt"), "x").unwrap();
+        let share = loopback_share(&root.join("real"));
+        assert!(leaves_machine(&share) && leaves_machine(Path::new(r"\\server\share\x")));
+        if !remote_link_or_skip(&share.join("x.txt"), &root.join("file-link"), false) {
+            return;
+        }
+        assert!(remote_link_or_skip(&share, &root.join("dir-link"), true));
+        std::os::windows::fs::symlink_file("file-link", root.join("via")).unwrap();
+        std::os::windows::fs::symlink_dir(root.join("real"), root.join("local-link")).unwrap();
+
+        for p in [root.join("file-link"), root.join("dir-link").join("x.txt"), root.join("via")] {
+            assert!(leaves_machine(&p) && leaves_machine_below(&root, &p), "{}", p.display());
+            let e = canonicalize(&p).unwrap_err();
+            assert!(is_refused_link(&e) && e.kind() == io::ErrorKind::PermissionDenied, "{}: {e}", p.display());
+            assert!(e.to_string().contains("localhost"), "{e}");
+        }
+        let local = root.join("local-link").join("x.txt");
+        assert!(!leaves_machine(&local) && !leaves_machine_below(&root, &local) && !leaves_machine(&root.join("missing").join("x")));
+        assert_eq!(canonicalize(&local).unwrap(), root.join("real").join("x.txt"));
+        assert_eq!(canonicalize(root.join("local-link").join("..").join("real")).unwrap(), root.join("real"));
     }
 
     #[test]

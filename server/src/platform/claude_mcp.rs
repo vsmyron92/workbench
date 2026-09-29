@@ -93,6 +93,17 @@ impl Locations {
     }
 }
 
+/// [`read_json`] for a file of the project at `root` (repository content): never through a
+/// link to another computer (Windows, `os::path::leaves_machine_below`), which reading
+/// would connect to.
+fn read_project_json(root: &Path, path: &Path, files: &mut Vec<FileNote>) -> Option<Value> {
+    if crate::util::os::path::leaves_machine_below(root, path) {
+        files.push(FileNote { path: contract_tilde(path), status: "error", error: Some("a link to a network path or a device: not read".into()) });
+        return None;
+    }
+    read_json(path, files)
+}
+
 fn read_json(path: &Path, files: &mut Vec<FileNote>) -> Option<Value> {
     let note = |status, error| FileNote { path: contract_tilde(path), status, error };
     let meta = match std::fs::metadata(path) {
@@ -307,14 +318,19 @@ pub fn scan(loc: &Locations, root: Option<&Path>) -> Overview {
     });
 
     let mut settings = McpSettings::default();
-    let mut setting_files = vec![loc.claude_dir.join("settings.json")];
+    // (file, the project it belongs to)
+    let mut setting_files = vec![(loc.claude_dir.join("settings.json"), None)];
     if let Some(r) = root {
-        setting_files.push(r.join(".claude").join("settings.json"));
-        setting_files.push(r.join(".claude").join("settings.local.json"));
+        setting_files.push((r.join(".claude").join("settings.json"), Some(r)));
+        setting_files.push((r.join(".claude").join("settings.local.json"), Some(r)));
     }
-    setting_files.push(loc.managed_dir.join("managed-settings.json"));
-    for f in &setting_files {
-        if let Some(v) = read_json(f, files) {
+    setting_files.push((loc.managed_dir.join("managed-settings.json"), None));
+    for (f, project) in &setting_files {
+        let v = match project {
+            Some(r) => read_project_json(r, f, files),
+            None => read_json(f, files),
+        };
+        if let Some(v) = v {
             settings.absorb(&v);
         }
     }
@@ -335,7 +351,7 @@ pub fn scan(loc: &Locations, root: Option<&Path>) -> Overview {
     }
     if let Some(r) = root {
         let path = r.join(".mcp.json");
-        if let Some(v) = read_json(&path, files) {
+        if let Some(v) = read_project_json(r, &path, files) {
             for (n, d) in server_map(v.get("mcpServers")) {
                 raw.push((describe(&n, &d, "project", &path, None), d));
             }

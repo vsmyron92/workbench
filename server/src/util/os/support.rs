@@ -91,6 +91,18 @@ pub fn require_root(root: &Path) -> ApiResult<()> {
     }
 }
 
+/// [`require_root`] for a folder the user names (a project to add), which may also be
+/// reached through a link to another computer or a device (`os::path::leaves_machine`,
+/// Windows): refused too, before anything follows the link.
+pub fn require_local_root(root: &Path) -> ApiResult<()> {
+    require_root(root)?;
+    if super::path::leaves_machine(root) {
+        let why = format!("{} is reached through a link to a network path or a device; {WIN_NETWORK_ROOTS}", root.display());
+        return Err(ApiError::unsupported(Feature::NetworkRoots.key(), why));
+    }
+    Ok(())
+}
+
 /// `{key: reason}` of every feature that does not work on this OS.
 pub fn unsupported_all() -> BTreeMap<&'static str, &'static str> {
     Feature::ALL.into_iter().filter_map(|f| unsupported(f).map(|why| (f.key(), why))).collect()
@@ -176,7 +188,27 @@ mod tests {
     #[test]
     fn local_roots_are_served() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(require_root(dir.path()).is_ok());
+        assert!(require_root(dir.path()).is_ok() && require_local_root(dir.path()).is_ok());
+    }
+
+    /// A folder reached through a link to a network path is refused before the link is
+    /// followed (Windows).
+    #[cfg(windows)]
+    #[test]
+    fn roots_behind_links_to_network_paths_are_refused() {
+        use crate::util::os::path::{canonicalize, loopback_share, remote_link_or_skip};
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonicalize(dir.path()).unwrap();
+        std::fs::create_dir(root.join("real")).unwrap();
+        if !remote_link_or_skip(&loopback_share(&root.join("real")), &root.join("link"), true) {
+            return;
+        }
+        for p in [root.join("link"), root.join("link").join("proj")] {
+            assert!(require_root(&p).is_ok(), "the path itself names no network path");
+            let e = require_local_root(&p).unwrap_err();
+            assert_eq!((e.code, e.feature), ("unsupported_platform", Some("networkRoots")));
+            assert!(e.message.contains("reached through a link"), "{}", e.message);
+        }
     }
 
     #[cfg(windows)]

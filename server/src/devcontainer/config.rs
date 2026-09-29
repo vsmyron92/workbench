@@ -42,7 +42,10 @@ pub fn discover(root: &Path) -> Vec<String> {
             out.push(rel.to_string());
         }
     }
-    if let Ok(rd) = std::fs::read_dir(root.join(".devcontainer")) {
+    // Never through a link to another computer (Windows): project detection lists this.
+    let folder = root.join(".devcontainer");
+    let listed = if crate::util::os::path::leaves_machine_below(root, &folder) { None } else { std::fs::read_dir(&folder).ok() };
+    if let Some(rd) = listed {
         let mut names: Vec<String> = rd
             .flatten()
             .filter(|e| e.file_type().is_ok_and(|t| t.is_dir() || t.is_symlink()))

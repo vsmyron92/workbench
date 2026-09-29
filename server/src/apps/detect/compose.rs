@@ -193,7 +193,7 @@ pub fn detect(cx: &mut Ctx, files: &[PathBuf]) {
         let base = composes.iter().find(|(b, v)| v.is_empty() && b.parent() == Some(dir)).map(|(b, _)| b.clone());
         let mut files_arg = String::new();
         if variant.is_empty() {
-            let over = composes_override(dir, f);
+            let over = composes_override(cx, dir, f);
             if let Some(o) = over.and_then(|o| cx.read(&o)) {
                 merge(&mut svcs, services(&o, dir));
             }
@@ -271,7 +271,7 @@ pub fn detect(cx: &mut Ctx, files: &[PathBuf]) {
         }
         let Some(src) = cx.read(&d) else { continue };
         let root = cx.root;
-        let (cwd, file_arg) = if dir != root && copies_from_root(&src, dir, root) {
+        let (cwd, file_arg) = if dir != root && copies_from_root(cx, &src, dir) {
             (".".to_string(), format!(" -f {}", sh(&rel)))
         } else {
             (cx.rel(dir), String::new())
@@ -292,9 +292,9 @@ pub fn detect(cx: &mut Ctx, files: &[PathBuf]) {
 }
 
 /// `docker-compose.override.yml` & co. next to the default file.
-fn composes_override(dir: &Path, default: &Path) -> Option<PathBuf> {
+fn composes_override(cx: &Ctx, dir: &Path, default: &Path) -> Option<PathBuf> {
     let stem = if default.file_name().is_some_and(|n| n.to_string_lossy().starts_with("docker-compose")) { "docker-compose" } else { "compose" };
-    ["yml", "yaml"].iter().map(|x| dir.join(format!("{stem}.override.{x}"))).find(|p| p.is_file())
+    ["yml", "yaml"].iter().map(|x| dir.join(format!("{stem}.override.{x}"))).find(|p| cx.is_file(p))
 }
 
 /// Merge overlay services into `base` (ports appended, build replaced).
@@ -349,7 +349,7 @@ fn deploy_texts(cx: &mut Ctx) -> Vec<(PathBuf, String)> {
     }
     for name in ["Makefile", "makefile", "justfile", "Justfile", "Taskfile.yml", "Taskfile.yaml"] {
         let p = cx.root.join(name);
-        if p.is_file() {
+        if cx.is_file(&p) {
             let lines: String = cx
                 .read(&p)
                 .unwrap_or_default()
@@ -381,7 +381,7 @@ fn describes_remote(cx: &Ctx, f: &Path, variant: &str, deploy: &[(PathBuf, Strin
     let Some(dir) = f.parent() else { return false };
     // An override file next to the default one is the local-development convention:
     // the pair is a local stack even when a deploy script reuses the base file.
-    if variant.is_empty() && composes_override(dir, f).is_some() {
+    if variant.is_empty() && composes_override(cx, dir, f).is_some() {
         return false;
     }
     let is_root_default = variant.is_empty() && dir == cx.root;
@@ -402,7 +402,7 @@ fn describes_remote(cx: &Ctx, f: &Path, variant: &str, deploy: &[(PathBuf, Strin
         // runs in on the host: the root's, unless the script ships its own.
         let script_has_own = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
             .iter()
-            .any(|n| script_dir != cx.root && script_dir.join(n).is_file());
+            .any(|n| script_dir != cx.root && cx.is_file(&script_dir.join(n)));
         is_root_default
             && !script_has_own
             && COMPOSE_CALL.captures_iter(text).any(|c| !c[1].contains("-f ") && !c[1].contains("--file") && !c[1].contains("-f="))
@@ -437,7 +437,7 @@ fn mentions_exact(text: &str, name: &str) -> bool {
 
 /// Whether a Dockerfile's `COPY`/`ADD` sources exist only relative to the
 /// repository root (it is built with the root as context: `docker build -f x/Dockerfile .`).
-fn copies_from_root(src: &str, dir: &Path, root: &Path) -> bool {
+fn copies_from_root(cx: &Ctx, src: &str, dir: &Path) -> bool {
     let mut from_root = false;
     for c in COPY_SRC.captures_iter(src) {
         if c[1].contains("--from") {
@@ -452,10 +452,10 @@ fn copies_from_root(src: &str, dir: &Path, root: &Path) -> bool {
             if s.is_empty() || s == "." || s.contains(['*', '$', '?']) || s.starts_with("http") || !crate::util::os::path::stays_inside(s) {
                 continue;
             }
-            if dir.join(s).exists() {
+            if cx.exists(&dir.join(s)) {
                 return false;
             }
-            if root.join(s).exists() {
+            if cx.exists(&cx.root.join(s)) {
                 from_root = true;
             }
         }

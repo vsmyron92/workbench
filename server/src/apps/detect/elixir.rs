@@ -50,7 +50,7 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
     if phoenix {
         cx.tag("phoenix");
         let dev = dir.join("config/dev.exs");
-        let port = if dev.is_file() { cx.read(&dev).and_then(|s| endpoint_port(&s)) } else { None }.unwrap_or(4000);
+        let port = if cx.is_file(&dev) { cx.read(&dev).and_then(|s| endpoint_port(&s)) } else { None }.unwrap_or(4000);
         cx.add_run(RunConfig {
             name: scoped("phx.server", &cwd),
             kind: RunKind::Server,

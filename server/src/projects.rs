@@ -219,10 +219,15 @@ impl ProjectRegistry {
         };
         // Roots this OS does not serve (UNC and WSL paths on Windows) are skipped before
         // anything opens them, which would connect to their server; so are directories
-        // that resolve to one (a mapped network drive, a link to a share).
+        // reached through a link to one (`leaves_machine`) and those that resolve to one
+        // (a mapped network drive).
         let served = |p: &Path| match util::os::path::unsupported_root(p) {
             Some(why) => {
                 tracing::warn!("project {} skipped: {why}", p.display());
+                false
+            }
+            None if util::os::path::leaves_machine(p) => {
+                tracing::warn!("project {} skipped: it is reached through a link to a network path or a device", p.display());
                 false
             }
             None => true,
@@ -240,8 +245,11 @@ impl ProjectRegistry {
                 continue;
             }
             let Ok(rd) = std::fs::read_dir(&root) else { continue };
+            // An entry that links to another computer is not looked into (Windows), nor is
+            // a `.git` that does (the check reads every link on the way to it).
+            let local = |p: &Path| !util::os::path::leaves_machine_below(&root, &p.join(".git"));
             let mut found: Vec<PathBuf> =
-                rd.flatten().map(|e| e.path()).filter(|p| p.is_dir() && p.join(".git").exists()).collect();
+                rd.flatten().map(|e| e.path()).filter(|p| local(p) && p.is_dir() && p.join(".git").exists()).collect();
             found.sort();
             dirs.extend(found);
         }
@@ -468,8 +476,9 @@ async fn update_projects_config(state: &AppState, change: impl FnOnce(&mut Proje
 /// Add a directory as a project (persisted in `projects.include`).
 async fn add(State(state): State<AppState>, Json(body): Json<AddBody>) -> ApiResult<Json<serde_json::Value>> {
     let p = expand_tilde(body.path.trim());
-    // UNC and WSL paths on Windows: refused before `is_dir` connects to their server.
-    util::os::support::require_root(&p)?;
+    // UNC and WSL paths on Windows, and links to them: refused before `is_dir` connects
+    // to their server.
+    util::os::support::require_local_root(&p)?;
     if !p.is_dir() {
         return Err(ApiError::bad_request(format!("{} is not a directory", p.display())));
     }

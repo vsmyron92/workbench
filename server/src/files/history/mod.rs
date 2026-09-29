@@ -376,16 +376,7 @@ fn files_in_new_dirs(project: &Project, dirs: &[String], paths: &mut Vec<String>
         let budget = MAX_BATCH.saturating_sub(paths.len());
         let mut found = vec![];
         let mut too_many = false;
-        let walk = ignore::WalkBuilder::new(&abs)
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
-            .require_git(false)
-            .parents(true)
-            .follow_links(false)
-            .filter_entry(|e| !HARD_IGNORE.contains(&e.file_name().to_string_lossy().as_ref()))
-            .build();
+        let walk = super::gitignore::walk(&abs).parents(true).build();
         for e in walk.flatten() {
             entries += 1;
             if entries > MAX_NEW_DIR_ENTRIES {

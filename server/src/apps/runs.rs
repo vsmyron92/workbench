@@ -244,7 +244,15 @@ pub fn problems(project: &Project, c: &RunConfig, vars: &Vars, inside: bool) -> 
         }
     }
     for (name, path) in &project.config.toolchains {
-        if c.command.contains(&format!("{{{name}}}")) && !crate::config::expand_tilde(path).exists() {
+        if !c.command.contains(&format!("{{{name}}}")) {
+            continue;
+        }
+        // A repository's `.workbench.toml` may name any path: one on another computer, or
+        // behind a link to one (Windows), is not looked at while listing runs.
+        let p = crate::config::expand_tilde(path);
+        if crate::util::os::path::leaves_machine(&p) {
+            v.push(format!("toolchain {{{name}}} is on a network path or a device ({path}): not checked"));
+        } else if !p.exists() {
             v.push(format!("toolchain {{{name}}} not found at {path}"));
         }
     }
@@ -259,6 +267,9 @@ pub fn problems(project: &Project, c: &RunConfig, vars: &Vars, inside: bool) -> 
         }
     }
     match resolve_cwd(project, &c.cwd) {
+        Ok(p) if crate::util::os::path::leaves_machine(&p) => {
+            v.push(format!("working directory {} is on a network path or a device: not checked", c.cwd));
+        }
         Ok(p) if !p.is_dir() => v.push(format!("working directory {} does not exist", c.cwd)),
         Err(e) => v.push(e.message),
         _ => {}
@@ -1429,6 +1440,30 @@ mod tests {
         assert_eq!(since_restart("a\nb\n"), "a\nb\n");
         assert_eq!(since_restart("READY\n── restarted ──\nnew\n"), "new\n");
         assert_eq!(since_restart("x\n── restarted ──\nREADY\n── restarted ──\n"), "");
+    }
+
+    /// A working directory or a toolchain on another computer, which a repository's
+    /// `.workbench.toml` may name, is not looked at while runs are listed (Windows): looking
+    /// would connect to that computer.
+    #[cfg(windows)]
+    #[test]
+    fn network_paths_in_run_configs_are_not_looked_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::ProjectFile::default();
+        config.toolchains.insert("tool".into(), r"\\server\share\tool.exe".into());
+        let project = Project {
+            id: "p".into(),
+            name: "p".into(),
+            root: dir.path().to_path_buf(),
+            config,
+            remote: None,
+            warnings: vec![],
+            repo_secret_names: Default::default(),
+        };
+        let run = RunConfig { name: "x".into(), command: "{tool} go".into(), cwd: r"\\server\share\src".into(), ..Default::default() };
+        let found = problems(&project, &run, &expand::base_vars(&project), false);
+        assert!(found.iter().any(|p| p.starts_with("toolchain {tool} is on a network path")), "{found:?}");
+        assert!(found.iter().any(|p| p.contains(r"working directory \\server\share\src is on a network path")), "{found:?}");
     }
 
     #[test]

@@ -384,6 +384,23 @@ links (a copied folder's symlinks): without the privilege the copy fails with th
 and leaves nothing half-copied. Junctions list as links and are not followed out of the
 project.
 
+**Links to other computers.** Opening a link whose target is `\\host\share\x` makes
+Windows sign in to that host with the user's credentials (an NTLM response the host can
+crack or relay), and a repository cloned with `core.symlinks` can hold one (Git for
+Windows fixed the same attack on its own checkout). So Workbench never follows a link to
+a network path or a device: `os::path::canonicalize` follows links one at a time, reading
+each target first (`read_link`, which opens the link itself), and refuses UNC paths in
+every spelling, device and NT paths (`\\.\`, `\\?\` other than a drive or a volume,
+`\Device\…`) and rooted targets; `os::path::leaves_machine` answers the same question
+for a path about to be opened. Everything Workbench reads in a project by itself goes
+through them: containment (`resolve_in_root` refuses such a path), listings (a "broken"
+link), ignore files (`IgnoreChecker`, and the walks: in the folders they visit and above
+their start, above where its links lead too, since the `ignore` crate reads the ignore
+files above the resolved start), the watcher's new folders, detection's files looked up
+by name, `.workbench.toml`, the project's MCP files, run and debug configurations, `.git`
+files naming a git dir, and the projects under a root.
+Linux follows links as it always did.
+
 **Service: an HKCU `Run` value and a supervisor binary.** (Done: `platform/service_windows.rs`,
 `os::autostart`, `src/bin/workbenchw.rs`; see "Service install" in ARCHITECTURE.md.)
 

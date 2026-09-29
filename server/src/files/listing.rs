@@ -34,7 +34,8 @@ pub struct Entry {
     /// Matches the project's sensitive patterns.
     pub sensitive: bool,
     /// For symlinks: what the link points at — `file`, `dir`, or `broken`
-    /// (missing, or outside the project, which the file API refuses to follow).
+    /// (missing, or outside the project, which the file API refuses to follow; on
+    /// Windows also a link to another computer or a device, never followed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<&'static str>,
 }
@@ -72,6 +73,9 @@ struct Raw {
     is_dir: bool,
     is_symlink: bool,
     target: Option<&'static str>,
+    /// A link not followed (Windows: to another computer or a device): its size and time
+    /// are the link's own.
+    unfollowed: bool,
 }
 
 pub fn list_dir(root: &Path, dir: &Path, rel: &str, sensitive: &Sensitive) -> ApiResult<Listing> {
@@ -93,18 +97,24 @@ pub fn list_dir(root: &Path, dir: &Path, rel: &str, sensitive: &Sensitive) -> Ap
             continue;
         }
         let Ok(ft) = ent.file_type() else { continue };
+        let mut unfollowed = false;
         let (is_dir, target) = if ft.is_symlink() {
+            // `canonicalize` reads each link before following it and refuses one to another
+            // computer (Windows), which would connect to it: such a link is "broken".
             let target = match crate::util::os::path::canonicalize(ent.path()) {
                 Ok(t) if !crate::util::os::path::starts_with(&t, &canon_root) => "broken",
                 Ok(t) if t.is_dir() => "dir",
                 Ok(_) => "file",
-                Err(_) => "broken",
+                Err(e) => {
+                    unfollowed = crate::util::os::path::is_refused_link(&e);
+                    "broken"
+                }
             };
             (target == "dir", Some(target))
         } else {
             (ft.is_dir(), None)
         };
-        raw.push(Raw { name, is_dir, is_symlink: ft.is_symlink(), target });
+        raw.push(Raw { name, is_dir, is_symlink: ft.is_symlink(), target, unfollowed });
     }
     raw.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| natural_cmp(&a.name, &b.name)));
     let truncated = total > MAX_ENTRIES;
@@ -115,7 +125,7 @@ pub fn list_dir(root: &Path, dir: &Path, rel: &str, sensitive: &Sensitive) -> Ap
         .into_iter()
         .map(|r| {
             let abs = dir.join(&r.name);
-            let md = std::fs::metadata(&abs).or_else(|_| std::fs::symlink_metadata(&abs)).ok();
+            let md = if r.unfollowed { std::fs::symlink_metadata(&abs) } else { std::fs::metadata(&abs).or_else(|_| std::fs::symlink_metadata(&abs)) }.ok();
             let path = join_rel(rel, &r.name);
             Entry {
                 ignored: checker.is_ignored(&abs, r.is_dir),
@@ -240,6 +250,33 @@ mod tests {
         let get = |n: &str| l.entries.iter().find(|e| e.name == n).unwrap();
         assert_eq!((get("in-link").kind, get("in-link").target), ("symlink", Some("dir")));
         assert_eq!((get("out-link").kind, get("out-link").target), ("symlink", Some("broken")));
+    }
+
+    /// Links to a network path list as broken links and nothing is read through them: the
+    /// size is the link's own, and a `.gitignore` that is one is not read. (The linked files
+    /// sit on this computer's own share, so a followed link would show in both.)
+    #[cfg(windows)]
+    #[test]
+    fn links_to_network_paths_list_as_broken() {
+        use crate::util::os::path::{canonicalize, loopback_share, remote_link_or_skip};
+        let (dir, elsewhere) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (root, far) = (&canonicalize(dir.path()).unwrap(), canonicalize(elsewhere.path()).unwrap());
+        std::fs::write(far.join("x.txt"), "twelve bytes").unwrap();
+        std::fs::write(far.join("ignore"), "secret/\n").unwrap();
+        std::fs::create_dir(root.join("secret")).unwrap();
+        let share = loopback_share(&far);
+        if !remote_link_or_skip(&share, &root.join("remote-dir"), true) {
+            return;
+        }
+        assert!(remote_link_or_skip(&share.join("x.txt"), &root.join("remote-file"), false));
+        assert!(remote_link_or_skip(&share.join("ignore"), &root.join(".gitignore"), false));
+        let l = list_dir(root, root, "", &Sensitive::defaults()).unwrap();
+        let get = |n: &str| l.entries.iter().find(|e| e.name == n).unwrap();
+        for n in ["remote-dir", "remote-file", ".gitignore"] {
+            assert_eq!((get(n).kind, get(n).target), ("symlink", Some("broken")), "{n}");
+        }
+        assert_eq!(get("remote-file").size, 0);
+        assert!(!get("secret").ignored);
     }
 
     #[test]

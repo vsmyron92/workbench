@@ -273,9 +273,40 @@ impl<'a> Ctx<'a> {
         false
     }
 
+    /// Whether looking at `p` (below the root) follows no link to another computer. The
+    /// walk follows no link at all, but detectors also look up files by name
+    /// (`README.md`, `pytest.ini`, `.venv/…`), and those may be links: on Windows one to
+    /// `\\host\share\x` connects to that host as soon as it is opened, even for a
+    /// `metadata` (`os::path::leaves_machine_below`; never on Linux). Every look by name
+    /// goes through here: [`Ctx::read`], [`Ctx::is_file`], [`Ctx::is_dir`],
+    /// [`Ctx::exists`], [`Ctx::read_dir`].
+    fn local(&self, p: &Path) -> bool {
+        !crate::util::os::path::leaves_machine_below(self.root, p)
+    }
+
+    /// `p.is_file()` for a file detection looks up by name ([`Ctx::local`]).
+    pub fn is_file(&self, p: &Path) -> bool {
+        self.local(p) && p.is_file()
+    }
+
+    /// `p.is_dir()` for a folder detection looks up by name ([`Ctx::local`]).
+    pub fn is_dir(&self, p: &Path) -> bool {
+        self.local(p) && p.is_dir()
+    }
+
+    /// `p.exists()` for a path detection looks up by name ([`Ctx::local`]).
+    pub fn exists(&self, p: &Path) -> bool {
+        self.local(p) && p.exists()
+    }
+
+    /// The entries of a folder detection looks up by name ([`Ctx::local`]).
+    pub fn read_dir(&self, p: &Path) -> Option<std::fs::ReadDir> {
+        if self.local(p) { std::fs::read_dir(p).ok() } else { None }
+    }
+
     /// Read a text file (lossy UTF-8, at most `MAX_FILE` bytes, within the budget).
     pub fn read(&mut self, p: &Path) -> Option<String> {
-        if self.budget == 0 {
+        if self.budget == 0 || !self.local(p) {
             return None;
         }
         let cap = MAX_FILE.min(self.budget);
@@ -354,7 +385,7 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn has_file(&self, rel_path: &str) -> bool {
-        self.root.join(rel_path).is_file()
+        self.is_file(&self.root.join(rel_path))
     }
 
     fn finish(mut self) -> ProjectFile {
@@ -843,7 +874,7 @@ pub(crate) fn repository_command(cx: &Ctx, cmd: &str, cwd: &str) -> Option<Strin
         "python3" => python_words(),
         "curl" => "curl.exe".into(),
         "wget" => return None,
-        f if f.contains(['/', '\\']) && !f.starts_with(['/', '\\']) && !f.contains(':') && !runs_as_program(&cx.root.join(cwd), f) => return None,
+        f if f.contains(['/', '\\']) && !f.starts_with(['/', '\\']) && !f.contains(':') && !runs_as_program(cx, &cx.root.join(cwd), f) => return None,
         f => f.to_string(),
     };
     Some(format!("{first}{rest}"))
@@ -855,12 +886,13 @@ pub(crate) fn repository_command(cx: &Ctx, cmd: &str, cwd: &str) -> Option<Strin
 /// (a build's output: `./target/release/app` finds `app.exe`). Any other file PowerShell
 /// hands to its file association, which opens it in a window of its own or asks which
 /// program should.
-fn runs_as_program(dir: &Path, rel: &str) -> bool {
+fn runs_as_program(cx: &Ctx, dir: &Path, rel: &str) -> bool {
     const PROGRAMS: [&str; 5] = ["exe", "bat", "cmd", "com", "ps1"];
     let p = rel.split(['/', '\\']).filter(|s| !s.is_empty() && *s != ".").fold(dir.to_path_buf(), |p, s| p.join(s));
     match p.extension().and_then(|e| e.to_str()) {
         Some(e) => PROGRAMS.iter().any(|x| e.eq_ignore_ascii_case(x)),
-        None => PROGRAMS.iter().any(|x| p.with_extension(x).is_file()) || !p.exists(),
+        // A link to another computer is something there, not a program (`Ctx::local`).
+        None => PROGRAMS.iter().any(|x| cx.is_file(&p.with_extension(x))) || (cx.local(&p) && !p.exists()),
     }
 }
 

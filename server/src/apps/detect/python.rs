@@ -156,7 +156,12 @@ fn venv_program(cwd: &Path, venv: &Path, name: &str) -> String {
 pub(crate) fn venv_python(root: &Path, d: Dialect) -> Option<String> {
     let (bin, ext) = venv_layout(d);
     let sep = if d == Dialect::PowerShell { "\\" } else { "/" };
-    [".venv", "venv", "env"].into_iter().find(|v| root.join(v).join(bin).join(format!("python{ext}")).exists()).map(|v| format!("{v}{sep}{bin}{sep}python{ext}"))
+    [".venv", "venv", "env"]
+        .into_iter()
+        .find(|v| {
+            let p = root.join(v).join(bin).join(format!("python{ext}"));
+            !crate::util::os::path::leaves_machine_below(root, &p) && p.exists()
+        }).map(|v| format!("{v}{sep}{bin}{sep}python{ext}"))
 }
 
 fn join(parts: &[&str]) -> String {
@@ -251,12 +256,12 @@ impl Py {
 fn project(cx: &mut Ctx, dir: &Path, files: &[PathBuf], all_dirs: &[PathBuf]) {
     let cwd = cx.rel(dir);
     let pyproject = dir.join("pyproject.toml");
-    let raw = if pyproject.is_file() { cx.read(&pyproject).unwrap_or_default() } else { String::new() };
+    let raw = if cx.is_file(&pyproject) { cx.read(&pyproject).unwrap_or_default() } else { String::new() };
     let table = raw.parse::<toml::Table>().unwrap_or_default();
     let mut deps = raw.clone();
     for n in ["setup.cfg", "setup.py", "Pipfile"] {
         let p = dir.join(n);
-        if p.is_file() {
+        if cx.is_file(&p) {
             deps.push('\n');
             deps.push_str(&cx.read(&p).unwrap_or_default());
         }
@@ -273,7 +278,7 @@ fn project(cx: &mut Ctx, dir: &Path, files: &[PathBuf], all_dirs: &[PathBuf]) {
     }
     let marker = [pyproject.clone(), dir.join("setup.py"), dir.join("setup.cfg"), dir.join("Pipfile")]
         .into_iter()
-        .find(|p| p.is_file())
+        .find(|p| cx.is_file(p))
         .or_else(|| reqs.first().cloned())
         .unwrap_or_else(|| dir.join("manage.py"));
     let runner = choose_runner(cx, dir, &table);
@@ -309,7 +314,7 @@ fn choose_runner(cx: &Ctx, dir: &Path, t: &toml::Table) -> Runner {
     let lock_in = |d: &Path| {
         [("uv.lock", Runner::Uv), ("poetry.lock", Runner::Poetry), ("pdm.lock", Runner::Pdm), ("Pipfile.lock", Runner::Pipenv)]
             .into_iter()
-            .find(|(f, _)| d.join(f).is_file())
+            .find(|(f, _)| cx.is_file(&d.join(f)))
             .map(|(_, r)| r)
     };
     if let Some(r) = lock_in(dir) {
@@ -330,7 +335,7 @@ fn choose_runner(cx: &Ctx, dir: &Path, t: &toml::Table) -> Runner {
     if tool("hatch").is_some_and(|h| h.contains_key("envs")) {
         return Runner::Hatch;
     }
-    if dir.join("Pipfile").is_file() {
+    if cx.is_file(&dir.join("Pipfile")) {
         return Runner::Pipenv;
     }
     if tool("uv").is_some() {
@@ -353,7 +358,7 @@ fn find_venv(cx: &Ctx, dir: &Path) -> Option<PathBuf> {
     for base in [dir, cx.root] {
         for v in [".venv", "venv", "env", ".env"] {
             let p = base.join(v);
-            if p.join("pyvenv.cfg").is_file() && p.join(bin).join(format!("python{ext}")).exists() {
+            if cx.is_file(&p.join("pyvenv.cfg")) && cx.exists(&p.join(bin).join(format!("python{ext}"))) {
                 return Some(p);
             }
         }
@@ -412,7 +417,7 @@ fn scripts(cx: &mut Ctx, py: &Py) {
     let poe = |k: &str| py.runner.tool(&cwd_abs, "poe", &sh(k));
     tasks(py.tool("poe").and_then(|p| p.get("tasks")), &marker, "tool.poe.tasks", "poe", &poe, &mut entries);
     let pipfile = py.dir.join("Pipfile");
-    if pipfile.is_file() {
+    if cx.is_file(&pipfile) {
         if let Some(t) = cx.read(&pipfile).and_then(|s| s.parse::<toml::Table>().ok()) {
             let pipenv = |k: &str| format!("pipenv run {}", sh(k));
             tasks(t.get("scripts"), &pipfile, "scripts", "pipenv", &pipenv, &mut entries);
@@ -710,12 +715,12 @@ fn tests(cx: &mut Ctx, py: &Py, own: &[PathBuf], django: bool) {
     let dir = &py.dir;
     let read_has = |cx: &mut Ctx, name: &str, needle: &str| {
         let p = dir.join(name);
-        p.is_file() && cx.read(&p).is_some_and(|t| t.contains(needle))
+        cx.is_file(&p) && cx.read(&p).is_some_and(|t| t.contains(needle))
     };
     let configured = py.tool("pytest").is_some()
-        || dir.join("pytest.ini").is_file()
-        || dir.join("conftest.py").is_file()
-        || dir.join("tests/conftest.py").is_file()
+        || cx.is_file(&dir.join("pytest.ini"))
+        || cx.is_file(&dir.join("conftest.py"))
+        || cx.is_file(&dir.join("tests/conftest.py"))
         || read_has(cx, "setup.cfg", "[tool:pytest]")
         || read_has(cx, "tox.ini", "[pytest]");
     let tests_dir = ["tests", "test"].into_iter().find(|t| {
@@ -748,8 +753,8 @@ fn tests(cx: &mut Ctx, py: &Py, own: &[PathBuf], django: bool) {
             ..Default::default()
         });
     }
-    if dir.join("tox.ini").is_file() || py.tool("tox").is_some() {
-        let f = if dir.join("tox.ini").is_file() { dir.join("tox.ini") } else { file.clone() };
+    if cx.is_file(&dir.join("tox.ini")) || py.tool("tox").is_some() {
+        let f = if cx.is_file(&dir.join("tox.ini")) { dir.join("tox.ini") } else { file.clone() };
         cx.add_run(RunConfig {
             name: scoped("tox", &py.cwd),
             kind: RunKind::Test,
@@ -760,7 +765,7 @@ fn tests(cx: &mut Ctx, py: &Py, own: &[PathBuf], django: bool) {
             ..Default::default()
         });
     }
-    if dir.join("noxfile.py").is_file() {
+    if cx.is_file(&dir.join("noxfile.py")) {
         cx.add_run(RunConfig {
             name: scoped("nox", &py.cwd),
             kind: RunKind::Test,
@@ -776,7 +781,7 @@ fn tests(cx: &mut Ctx, py: &Py, own: &[PathBuf], django: bool) {
 /// `ruff check` and `mypy` when the project configures them.
 fn linters(cx: &mut Ctx, py: &Py) {
     let dir = &py.dir;
-    let ruff_cfg = [dir.join("ruff.toml"), dir.join(".ruff.toml")].into_iter().find(|p| p.is_file());
+    let ruff_cfg = [dir.join("ruff.toml"), dir.join(".ruff.toml")].into_iter().find(|p| cx.is_file(p));
     if py.tool("ruff").is_some() || ruff_cfg.is_some() {
         let f = ruff_cfg.unwrap_or_else(|| py.marker.clone());
         cx.add_run(RunConfig {
@@ -789,12 +794,12 @@ fn linters(cx: &mut Ctx, py: &Py) {
             ..Default::default()
         });
     }
-    let ini = [dir.join("mypy.ini"), dir.join(".mypy.ini")].into_iter().find(|p| p.is_file());
+    let ini = [dir.join("mypy.ini"), dir.join(".mypy.ini")].into_iter().find(|p| cx.is_file(p));
     let cfg_text = match &ini {
         Some(p) => cx.read(p),
         None => {
             let sc = dir.join("setup.cfg");
-            if sc.is_file() { cx.read(&sc).filter(|t| t.contains("[mypy]")) } else { None }
+            if cx.is_file(&sc) { cx.read(&sc).filter(|t| t.contains("[mypy]")) } else { None }
         }
     };
     let in_pyproject = py.tool("mypy");

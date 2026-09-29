@@ -74,7 +74,8 @@ pub fn read_text(path: &Path) -> io::Result<String> {
 }
 
 /// Create `link` pointing at `target`. Windows: a directory or a file link by what
-/// `target` is, seen from `link`'s folder (a missing target makes a file link); without
+/// `target` is, seen from `link`'s folder (a missing target makes a file link, and so does
+/// one on another computer, which is never looked at: `os::path::leaves_machine`); without
 /// Developer Mode or an administrator it fails with a clear `PermissionDenied`.
 #[cfg_attr(not(test), allow(dead_code))] // the tests' symlink; copies use `copy_symlink`
 pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
@@ -472,7 +473,10 @@ mod win {
         let w: Vec<u16> = target.as_os_str().encode_wide().map(|c| if c == u16::from(b'/') { u16::from(b'\\') } else { c }).collect();
         let target = PathBuf::from(OsString::from_wide(&w));
         let seen = link.parent().unwrap_or(Path::new("")).join(&target);
-        symlink_as(&target, link, std::fs::metadata(seen).is_ok_and(|m| m.is_dir()))
+        // The kind is the target's, never looked up on another computer (looking connects
+        // to it): a link to a network path is a file link, as Git for Windows makes one.
+        let dir = !crate::util::os::path::leaves_machine(&seen) && std::fs::metadata(seen).is_ok_and(|m| m.is_dir());
+        symlink_as(&target, link, dir)
     }
 
     pub fn copy_symlink(from: &Path, to: &Path) -> io::Result<()> {
@@ -781,6 +785,13 @@ mod tests {
             let kind = |p: &Path| std::fs::symlink_metadata(p).unwrap().file_type();
             assert!(kind(&dir.path().join("copy/dir-link")).is_symlink_dir());
             assert!(kind(&dir.path().join("copy/file-link")).is_symlink_file());
+            // A folder on another computer (here this one's own share) is not looked at to
+            // choose the kind: the link is a file link, as git makes it.
+            let root = crate::util::os::path::canonicalize(dir.path()).unwrap();
+            let share = crate::util::os::path::loopback_share(&root.join("inner").join("sub"));
+            symlink(&share, dir.path().join("remote-link")).unwrap();
+            assert!(kind(&dir.path().join("remote-link")).is_symlink_file());
+            assert!(crate::util::os::path::leaves_machine(&dir.path().join("remote-link")));
         }
     }
 
