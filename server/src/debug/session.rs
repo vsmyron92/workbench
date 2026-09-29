@@ -909,13 +909,11 @@ fn neutral_dir(state: &AppState) -> PathBuf {
     PathBuf::from("/")
 }
 
-/// Whether some process traces `pid` (`TracerPid` in `/proc/<pid>/status`), waiting
-/// up to three seconds for the debugger to get there.
+/// Whether some process traces `pid` (`os::proc::debugger_attached`), waiting up to
+/// three seconds for the debugger to get there.
 async fn traced(pid: u32) -> bool {
     for _ in 0..15 {
-        let status = tokio::fs::read_to_string(format!("/proc/{pid}/status")).await.unwrap_or_default();
-        let tracer = status.lines().find_map(|l| l.strip_prefix("TracerPid:")).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
-        if tracer != 0 {
+        if crate::util::os::proc::debugger_attached(pid).await {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1313,7 +1311,7 @@ async fn unexpected_end(s: &Arc<Session>) -> Option<String> {
     // Give the stderr reader a moment to catch the last lines.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let mut msg = match (&status, s.plan.connect.is_some()) {
-        (Some(st), _) => format!("{} exited unexpectedly ({})", s.adapter.label, describe_status(st)),
+        (Some(st), _) => format!("{} exited unexpectedly ({})", s.adapter.label, crate::util::os::proc::exit_text(st)),
         (None, true) => format!("the connection to {} closed unexpectedly", s.adapter.label),
         (None, false) => format!("{} exited unexpectedly", s.adapter.label),
     };
@@ -1323,18 +1321,6 @@ async fn unexpected_end(s: &Arc<Session>) -> Option<String> {
         msg.push_str(&tail.join(" / "));
     }
     Some(msg)
-}
-
-fn describe_status(st: &std::process::ExitStatus) -> String {
-    use std::os::unix::process::ExitStatusExt;
-    match (st.code(), st.signal()) {
-        (Some(c), _) => format!("exit code {c}"),
-        (None, Some(sig)) => match nix::sys::signal::Signal::try_from(sig) {
-            Ok(n) => format!("killed by {}", n.as_str()),
-            Err(_) => format!("killed by signal {sig}"),
-        },
-        _ => "no exit status".into(),
-    }
 }
 
 /// Apply one message; `true` when the adapter is gone.
@@ -1762,12 +1748,6 @@ fn stop_children(state: AppState, parent: String, terminate_debuggee: bool) -> f
     })
 }
 
-fn parent_of(pid: i32) -> Option<i32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = &stat[stat.rfind(')')? + 1..];
-    rest.split_whitespace().nth(1)?.parse().ok()
-}
-
 /// End the session (idempotent): the adapter, the debuggee Workbench launched, the
 /// debuggee's terminal, a pre-launch step still running.
 pub async fn finish(state: &AppState, s: &Arc<Session>) {
@@ -1790,8 +1770,8 @@ pub async fn finish(state: &AppState, s: &Arc<Session>) {
     if let Some(mut p) = s.proc_.lock().await.take() {
         // A debuggee we launched that is still the adapter's child: gone with it.
         if let (Some(dpid), Some(apid)) = (debuggee, p.child.id()) {
-            if parent_of(dpid) == Some(apid as i32) {
-                let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(dpid), nix::sys::signal::Signal::SIGKILL);
+            if crate::util::os::proc::parent_of(dpid) == Some(apid as i32) {
+                crate::util::os::proc::kill_pid(dpid);
             }
         }
         p.wait_exit(Duration::from_millis(500)).await;

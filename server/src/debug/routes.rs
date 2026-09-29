@@ -110,7 +110,7 @@ async fn configs(State(state): State<AppState>, Path(pid): Path<String>) -> ApiR
 
 async fn processes(State(state): State<AppState>, Path(pid): Path<String>) -> ApiResult<Json<procs::ProcessList>> {
     state.projects.require(&pid)?;
-    let l = tokio::task::spawn_blocking(|| procs::list(std::path::Path::new("/proc"))).await.map_err(|e| ApiError::internal(e.to_string()))?;
+    let l = tokio::task::spawn_blocking(procs::list).await.map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(Json(l))
 }
 

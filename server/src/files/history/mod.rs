@@ -456,14 +456,12 @@ fn git_output(root: &Path, args: &[&str], max: u64) -> Option<Vec<u8>> {
         cmd.env_remove(k);
     }
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
-    let pid = child.id() as libc::pid_t;
+    let pid = child.id() as i32;
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let watchdog = std::thread::spawn(move || {
         if done_rx.recv_timeout(Duration::from_secs(5)).is_err() {
-            // SAFETY: plain syscall; the child is not reaped before `done` is sent.
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
+            // The child is not reaped before `done` is sent: the pid is still its own.
+            util::os::proc::kill_pid(pid);
         }
     });
     let mut out = vec![];

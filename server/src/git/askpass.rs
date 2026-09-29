@@ -112,10 +112,8 @@ pub fn cli_askpass(prompt: &str) -> anyhow::Result<()> {
 
 /// Write `<data_dir>/git-askpass` (0700) that runs this binary's askpass helper.
 pub fn write_wrapper(data_dir: &Path) -> anyhow::Result<PathBuf> {
-    let exe = std::env::current_exe()?;
+    let exe = crate::util::os::proc::current_exe()?;
     let exe = exe.to_string_lossy();
-    // A rebuilt binary leaves /proc/self/exe pointing at "… (deleted)".
-    let exe = exe.strip_suffix(" (deleted)").unwrap_or(&exe);
     let quoted = format!("'{}'", exe.replace('\'', "'\\''"));
     let script = format!("#!/bin/sh\n# Written by Workbench: answers git credential prompts for the configured GitLab host.\nexec {quoted} askpass \"$1\"\n");
     let path = data_dir.join("git-askpass");

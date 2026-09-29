@@ -273,13 +273,11 @@ pub fn start(state: &AppState, repo: Arc<Repo>, spec: RemoteOpSpec, requested_id
 /// `run`), so its process group also holds the transport helper
 /// (`git-remote-https`, `ssh`) that inherited our pipes; killing only `git`
 /// would leave the op "running" until that helper gives up by itself.
-fn kill_group(child: &mut tokio::process::Child) {
-    if let Some(pid) = child.id() {
-        // SAFETY: plain syscall. The child is not reaped yet (`id()` is Some), so
-        // its pid, which is also its process-group id, cannot have been reused.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
+fn kill_group(child: &mut tokio::process::Child, group: &crate::util::os::proc::ProcGroup) {
+    if child.id().is_some() {
+        // The child is not reaped yet (`id()` is Some), so its pid, which is also its
+        // process-group id, cannot have been reused.
+        group.kill();
     }
     let _ = child.start_kill();
 }
@@ -323,17 +321,12 @@ async fn run(state: &AppState, repo: &Repo, spec: &RemoteOpSpec, op_id: &str, ca
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     // A new session has no controlling terminal, so ssh cannot open /dev/tty and
     // block on a passphrase prompt nobody can answer.
-    // SAFETY: setsid is async-signal-safe and runs in the child before exec.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    crate::util::os::proc::ProcGroup::prepare_session(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return OpResult::failed(format!("cannot run git: {e}")),
     };
+    let group = crate::util::os::proc::ProcGroup::attach(&child);
     let (tx, mut rx) = mpsc::channel::<(String, bool)>(256);
     let mut readers = vec![];
     for stream in [child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
@@ -399,12 +392,12 @@ async fn run(state: &AppState, repo: &Repo, spec: &RemoteOpSpec, op_id: &str, ca
                 None => break,
             },
             _ = cancel.cancelled(), if aborted.is_none() => {
-                kill_group(&mut child);
+                kill_group(&mut child, &group);
                 aborted = Some("cancelled");
                 grace.as_mut().reset(tokio::time::Instant::now() + KILL_GRACE);
             }
             _ = &mut deadline, if aborted.is_none() => {
-                kill_group(&mut child);
+                kill_group(&mut child, &group);
                 aborted = Some("timed out");
                 grace.as_mut().reset(tokio::time::Instant::now() + KILL_GRACE);
             }
