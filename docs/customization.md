@@ -114,6 +114,9 @@ command = "/usr/bin/lldb-dap"
 [devcontainer]
 docker = "docker"                  # or podman's docker-compatible CLI
 cli = ""                           # devcontainer CLI, for configs with features
+
+[terminals]
+shell = ["/bin/zsh", "-l"]         # new shells (default: $SHELL -l; PowerShell on Windows)
 ```
 
 Language servers and debug adapters run project code, so they start only after you

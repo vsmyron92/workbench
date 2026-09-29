@@ -1,7 +1,10 @@
 //! End-to-end tests of the slice against a real AppState: the Rust contract other slices
-//! use, the terminal WebSocket, and hook authorization. Everything runs in temp dirs.
+//! use, the terminal WebSocket, and hook authorization. Everything runs in temp dirs, on
+//! every OS: the terminals run small Python programs (`util::os::exe::python`) and the
+//! fake agent CLIs of `testdata/fake_cli.py`.
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
@@ -30,18 +33,49 @@ async fn test_state_with(dir: &std::path::Path, f: impl FnOnce(&mut crate::confi
     state
 }
 
-fn spec(cwd: &std::path::Path, script: &str) -> SpawnSpec {
+/// argv running the Python program `code`.
+fn python_argv(code: &str) -> Vec<String> {
+    let mut argv = crate::util::os::exe::python();
+    argv.extend(["-c".to_string(), code.to_string()]);
+    argv
+}
+
+/// `s` as a Python string literal (a JSON string is one).
+fn py_str(s: &str) -> String {
+    json!(s).to_string()
+}
+
+/// A command terminal running the Python program `code`.
+fn spec(cwd: &Path, code: &str) -> SpawnSpec {
     SpawnSpec {
         kind: TerminalKind::Command,
         title: "test".into(),
         project_id: None,
         cwd: cwd.to_path_buf(),
-        argv: vec!["bash".into(), "-c".into(), script.into()],
+        argv: python_argv(code),
         env: vec![("WB_TEST_VAR".into(), Some("from-spec".into()))],
         cols: Some(80),
         rows: Some(24),
         meta: json!({ "run": "demo" }),
     }
+}
+
+/// Programs the terminals below run.
+const SLEEP_5: &str = "import time\ntime.sleep(5)";
+const EXIT_0: &str = "pass";
+/// Prints the terminal's size (`rows cols`, as `stty size`) for every line read.
+const SIZE_PER_LINE: &str = "import os, sys\nfor l in sys.stdin:\n    s = os.get_terminal_size()\n    print(f'{s.lines} {s.columns}', flush=True)";
+
+/// A program that leaves a job running (in a process group of its own on Unix, as a
+/// shell's background job) and writes its pid to `pidfile`.
+fn leave_job(pidfile: &Path, secs: u32, say: &str) -> String {
+    format!(
+        "import os, subprocess, sys\nkw = {{'preexec_fn': os.setpgrp}} if os.name == 'posix' else {{}}\n\
+         c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep({secs})'], **kw)\n\
+         with open({}, 'w') as f:\n    f.write(str(c.pid))\nprint({}, flush=True)",
+        py_str(&pidfile.display().to_string()),
+        py_str(say)
+    )
 }
 
 async fn wait_exit(state: &AppState, id: &str) -> super::ExitInfo {
@@ -59,7 +93,7 @@ async fn contract_spawn_input_output_exit_restart_forget() {
     let state = test_state(dir.path()).await;
     let t = &state.terminals;
 
-    let mut s = spec(dir.path(), "read x; echo \"got:$x env:$WB_TEST_VAR\"; exit 3");
+    let mut s = spec(dir.path(), "import os, sys\nx = input()\nprint('got:' + x + ' env:' + os.environ['WB_TEST_VAR'])\nsys.exit(3)");
     // The spawner allows plain re-runs from the terminals UI.
     s.meta = json!({ "run": "demo", "restartable": true });
     let info = t.spawn(&state, s).await.unwrap();
@@ -105,7 +139,7 @@ async fn contract_spawn_input_output_exit_restart_forget() {
 async fn mcp_output_tool_reads_a_terminal() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path()).await;
-    let info = state.terminals.spawn(&state, spec(dir.path(), "echo mcp-visible-line; sleep 5")).await.unwrap();
+    let info = state.terminals.spawn(&state, spec(dir.path(), "import time\nprint('mcp-visible-line', flush=True)\ntime.sleep(5)")).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     let tool = super::mcp_tools().into_iter().find(|t| t.name == "workbench_terminal_output").unwrap();
     let out = (tool.handler)(state.clone(), Default::default(), json!({ "terminalId": info.id, "lines": 20 })).await.unwrap();
@@ -151,7 +185,7 @@ async fn websocket_snapshot_input_resize_and_reconnect() {
     let state = test_state(dir.path()).await;
     let info = state
         .terminals
-        .spawn(&state, spec(dir.path(), "stty -echo; while read -r l; do echo \"echo:$l\"; stty size; done"))
+        .spawn(&state, spec(dir.path(), "import os, sys\nfor l in sys.stdin:\n    s = os.get_terminal_size()\n    print('echo:' + l.strip() + f'\\n{s.lines} {s.columns}', flush=True)"))
         .await
         .unwrap();
     let addr = serve(&state).await;
@@ -205,7 +239,7 @@ async fn websocket_snapshot_input_resize_and_reconnect() {
 async fn hooks_require_the_terminals_agent_token() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path()).await;
-    let info = state.terminals.spawn(&state, spec(dir.path(), "sleep 5")).await.unwrap();
+    let info = state.terminals.spawn(&state, spec(dir.path(), SLEEP_5)).await.unwrap();
     let addr = serve(&state).await;
     let url = format!("http://{addr}/api/hooks/claude/{}", info.id);
     let client = reqwest::Client::new();
@@ -251,7 +285,7 @@ async fn deploys_env_commands_and_runs_are_never_rerun_by_restart() {
     let addr = serve(&state).await;
     let client = reqwest::Client::new();
     let log = dir.path().join("deploys.log");
-    let deploy = format!("echo DEPLOYED >> {}; sleep 30", log.display());
+    let deploy = format!("import time\nwith open({}, 'a') as f:\n    f.write('DEPLOYED\\n')\ntime.sleep(30)", py_str(&log.display().to_string()));
 
     // A deploy as apps spawns it; restart must neither re-run it nor kill it.
     let info = t.spawn(&state, command(dir.path(), &deploy, json!({ "env": "production", "action": "deploy" }))).await.unwrap();
@@ -277,14 +311,14 @@ async fn deploys_env_commands_and_runs_are_never_rerun_by_restart() {
         (TerminalKind::Run, json!({ "run": "api" })),
         (TerminalKind::Command, json!({})),
     ] {
-        let info = t.spawn(&state, SpawnSpec { kind, ..command(dir.path(), "exit 0", meta.clone()) }).await.unwrap();
+        let info = t.spawn(&state, SpawnSpec { kind, ..command(dir.path(), EXIT_0, meta.clone()) }).await.unwrap();
         wait_exit(&state, &info.id).await;
         let err = t.restart(&state, &info.id).await.unwrap_err();
         assert_eq!(err.code, "not_restartable", "{meta}");
     }
     // Log follows, Remote Control servers and opt-ins may re-run.
     for meta in [json!({ "env": "staging", "action": "logs" }), json!({ "remoteControlServer": true, "urls": [] }), json!({ "restartable": true })] {
-        let info = t.spawn(&state, command(dir.path(), "exit 0", meta.clone())).await.unwrap();
+        let info = t.spawn(&state, command(dir.path(), EXIT_0, meta.clone())).await.unwrap();
         wait_exit(&state, &info.id).await;
         t.restart(&state, &info.id).await.unwrap_or_else(|e| panic!("{meta}: {}", e.message));
         wait_exit(&state, &info.id).await;
@@ -302,7 +336,7 @@ async fn secrets_are_masked_for_every_reader() {
         .secrets
         .resolve_ref("test", &crate::config::SecretRef::File(secret_file.display().to_string()))
         .unwrap();
-    let mut s = command(dir.path(), "echo \"token is $MYTOK\"; sleep 5", json!({ "run": "leaky" }));
+    let mut s = command(dir.path(), "import os, time\nprint('token is ' + os.environ['MYTOK'], flush=True)\ntime.sleep(5)", json!({ "run": "leaky" }));
     s.env = vec![("MYTOK".into(), Some(secret.expose().to_string()))];
     let info = t.spawn_redacted(&state, s, vec![secret]).await.unwrap();
     wait_for("output", || t.screen_text(&info.id, 20).is_some_and(|x| x.contains("token is"))).await;
@@ -345,7 +379,7 @@ async fn typing_into_a_claude_dialog_through_input_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path()).await;
     let t = &state.terminals;
-    // A stand-in agent session: `cat` echoes whatever reaches it.
+    // A stand-in agent session that echoes whatever reaches it, like `cat`.
     let info = super::TerminalInfo {
         id: super::new_id(),
         kind: TerminalKind::Agent,
@@ -375,7 +409,7 @@ async fn typing_into_a_claude_dialog_through_input_is_refused() {
     let rec = super::store::Record { info, launch: None, title_locked: true, transcript_path: None, was_running: false, aider_history: None };
     let entry = t.insert(rec, super::AGENT_SCROLLBACK);
     let launch = super::pty::LaunchSpec {
-        argv: vec!["cat".into()],
+        argv: python_argv("import sys\nfor l in sys.stdin:\n    sys.stdout.write(l)\n    sys.stdout.flush()"),
         cwd: dir.path().to_path_buf(),
         env: vec![],
         cols: 80,
@@ -444,7 +478,7 @@ async fn a_phone_that_leaves_gives_the_desktop_its_size_back() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path()).await;
     let t = &state.terminals;
-    let info = t.spawn(&state, command(dir.path(), "stty -echo; while read -r l; do stty size; done", json!({}))).await.unwrap();
+    let info = t.spawn(&state, command(dir.path(), SIZE_PER_LINE, json!({}))).await.unwrap();
     let addr = serve(&state).await;
     let size = || {
         let i = t.info(&info.id).unwrap();
@@ -490,7 +524,7 @@ async fn a_restarted_terminal_starts_at_the_size_reported_while_it_was_exited() 
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path()).await;
     let t = &state.terminals;
-    let info = t.spawn(&state, command(dir.path(), "stty size; exit 0", json!({ "restartable": true }))).await.unwrap();
+    let info = t.spawn(&state, command(dir.path(), "import os\ns = os.get_terminal_size()\nprint(f'{s.lines} {s.columns}')", json!({ "restartable": true }))).await.unwrap();
     wait_exit(&state, &info.id).await;
     let addr = serve(&state).await;
     let mut ws = ws_connect(addr, &state, &info.id).await;
@@ -509,7 +543,7 @@ async fn background_jobs_left_behind_are_reported_and_killed() {
     let state = test_state(dir.path()).await;
     let t = &state.terminals;
     let pidfile = dir.path().join("job.pid");
-    let script = format!("set -m; sleep 4242 & echo $! > {}; echo started", pidfile.display());
+    let script = leave_job(&pidfile, 4242, "started");
     let info = t.spawn(&state, command(dir.path(), &script, json!({ "restartable": true }))).await.unwrap();
     wait_exit(&state, &info.id).await;
     wait_for("the pid file", || pidfile.is_file()).await;
@@ -524,7 +558,7 @@ async fn background_jobs_left_behind_are_reported_and_killed() {
 
     // Close (and forget) reach them too.
     let pidfile2 = dir.path().join("job2.pid");
-    let script = format!("set -m; sleep 4243 & echo $! > {}", pidfile2.display());
+    let script = leave_job(&pidfile2, 4243, "");
     let info = t.spawn(&state, command(dir.path(), &script, json!({}))).await.unwrap();
     wait_exit(&state, &info.id).await;
     wait_for("the second pid file", || pidfile2.is_file()).await;
@@ -539,7 +573,7 @@ async fn exited_terminals_hibernate_and_repeated_runs_are_pruned() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path()).await;
     let t = &state.terminals;
-    let info = t.spawn(&state, command(dir.path(), "seq 1 3000", json!({ "run": "gen" }))).await.unwrap();
+    let info = t.spawn(&state, command(dir.path(), "print('\\n'.join(str(i) for i in range(1, 3001)))", json!({ "run": "gen" }))).await.unwrap();
     wait_exit(&state, &info.id).await;
     let entry = t.get(&info.id).unwrap();
     wait_for("hibernation", || entry.screen.is_hibernated()).await;
@@ -560,17 +594,17 @@ async fn exited_terminals_hibernate_and_repeated_runs_are_pruned() {
     // Five more starts of the same run: only the newest few exited ones stay.
     let mut ids = vec![info.id.clone()];
     for _ in 0..5 {
-        let i = t.spawn(&state, command(dir.path(), "exit 0", json!({ "run": "gen" }))).await.unwrap();
+        let i = t.spawn(&state, command(dir.path(), EXIT_0, json!({ "run": "gen" }))).await.unwrap();
         wait_exit(&state, &i.id).await;
         ids.push(i.id);
     }
     // One more start prunes (pruning runs on spawn).
-    let last = t.spawn(&state, command(dir.path(), "sleep 5", json!({ "run": "gen" }))).await.unwrap();
+    let last = t.spawn(&state, command(dir.path(), SLEEP_5, json!({ "run": "gen" }))).await.unwrap();
     let kept: Vec<&String> = ids.iter().filter(|id| t.info(id).is_some()).collect();
     assert_eq!(kept, ids[ids.len() - super::KEEP_EXITED_PER_GROUP..].iter().collect::<Vec<_>>());
     assert!(!state.paths.data_dir.join("terminals").join(&ids[0]).exists(), "a pruned terminal's files stay");
     // Other groups are untouched.
-    let other = t.spawn(&state, command(dir.path(), "exit 0", json!({ "run": "other" }))).await.unwrap();
+    let other = t.spawn(&state, command(dir.path(), EXIT_0, json!({ "run": "other" }))).await.unwrap();
     wait_exit(&state, &other.id).await;
     assert!(t.info(&other.id).is_some());
     t.kill(&last.id).await.unwrap();
@@ -581,7 +615,7 @@ async fn a_restarted_remote_control_server_shows_its_new_link_only() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path()).await;
     let t = &state.terminals;
-    let script = "echo \"Remote Control ready: https://claude.ai/code?environment=env_$$\"; sleep 30";
+    let script = "import os, time\nprint(f'Remote Control ready: https://claude.ai/code?environment=env_{os.getpid()}', flush=True)\ntime.sleep(30)";
     let info = t.spawn(&state, command(dir.path(), script, json!({ "remoteControlServer": true, "urls": [] }))).await.unwrap();
     let entry = t.get(&info.id).unwrap();
     super::agent::watch_remote_control(&state, &entry);
@@ -599,12 +633,53 @@ async fn a_restarted_remote_control_server_shows_its_new_link_only() {
 
 // ---------------------------------------------------------------- agent providers
 
-/// Write an executable script into `dir`.
-pub(super) fn script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
-    let p = dir.join(name);
-    std::fs::write(&p, body).unwrap();
-    crate::util::os::perm::apply(&p, 0o755).unwrap();
-    p
+/// The file `fake_cli` writes for the CLI `name` into `dir`.
+fn fake_cli_file(dir: &Path, name: &str) -> PathBuf {
+    if cfg!(windows) { dir.join(format!("{name}.py")) } else { dir.join(name) }
+}
+
+/// The fake agent CLI `name` (`testdata/fake_cli.py`, which acts as the CLI it is named
+/// after) in `dir`: what a provider's `command` names. Unix: the script itself, executable.
+/// Windows: an npm-style shim, `name.cmd` with the `name.ps1` that Workbench reads to run
+/// Python on the script, so it starts the way npm's CLIs do.
+pub(super) fn fake_cli(dir: &Path, name: &str) -> PathBuf {
+    let script = fake_cli_file(dir, name);
+    std::fs::write(&script, include_str!("testdata/fake_cli.py")).unwrap();
+    #[cfg(unix)]
+    {
+        crate::util::os::perm::apply(&script, 0o755).unwrap();
+        script
+    }
+    #[cfg(windows)]
+    {
+        let python: Vec<String> = crate::util::os::exe::python().iter().map(|a| format!("\"{a}\"")).collect();
+        let python = python.join(" ");
+        let ps1 = format!("#!/usr/bin/env pwsh\n$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent\n\n& {python} \"$basedir/{name}.py\" $args\nexit $LASTEXITCODE\n");
+        std::fs::write(dir.join(format!("{name}.ps1")), ps1).unwrap();
+        let cmd = dir.join(format!("{name}.cmd"));
+        std::fs::write(&cmd, format!("@{python} \"%~dp0{name}.py\" %*\r\n")).unwrap();
+        cmd
+    }
+}
+
+/// argv running the fake CLI `name` of `dir` directly (a session outside Workbench).
+pub(super) fn fake_cli_argv(dir: &Path, name: &str) -> Vec<String> {
+    let mut argv = crate::util::os::exe::python();
+    argv.push(fake_cli_file(dir, name).display().to_string());
+    argv
+}
+
+/// `argv` as a process with its standard input open (and never written) and its output
+/// dropped.
+fn outside(argv: &[String], cwd: &Path) -> std::process::Command {
+    let mut c = std::process::Command::new(&argv[0]);
+    c.args(&argv[1..])
+        .current_dir(cwd)
+        .env("PWD", cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    c
 }
 
 /// A state with one project (`proj`) and the given providers.
@@ -640,7 +715,7 @@ pub(super) async fn wait_long(what: &str, secs: u64, mut ok: impl FnMut() -> boo
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn codex_sessions_are_discovered_tracked_and_resumed() {
     let dir = tempfile::tempdir().unwrap();
-    let fake = script(dir.path(), "codex", include_str!("testdata/fake-codex.sh"));
+    let fake = fake_cli(dir.path(), "codex");
     let home = dir.path().join("codex-home");
     std::fs::create_dir_all(&home).unwrap();
     let log = dir.path().join("argv.log");
@@ -740,7 +815,7 @@ async fn codex_sessions_are_discovered_tracked_and_resumed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn kimi_and_custom_sessions_follow_output_activity() {
     let dir = tempfile::tempdir().unwrap();
-    let fake = script(dir.path(), "kimi", include_str!("testdata/fake-kimi.sh"));
+    let fake = fake_cli(dir.path(), "kimi");
     let home = dir.path().join("kimi-home");
     std::fs::create_dir_all(&home).unwrap();
     let kimi = crate::config::global::ProviderConfig {
@@ -748,9 +823,12 @@ async fn kimi_and_custom_sessions_follow_output_activity() {
         env: [("KIMI_CODE_HOME".to_string(), home.display().to_string())].into(),
         ..Default::default()
     };
+    let mut scripted = python_argv(
+        "import sys, time\nprint('ready', flush=True)\nfor l in sys.stdin:\n    for i in range(1, 26):\n        print(f'step {i} of {l.strip()}', flush=True)\n        time.sleep(0.1)",
+    );
     let custom = crate::config::global::ProviderConfig {
-        command: Some("bash".into()),
-        args: vec!["-c".into(), "printf 'ready\\n'; while read -r l; do for i in $(seq 1 25); do printf 'step %s of %s\\n' $i \"$l\"; sleep 0.1; done; done".into()],
+        command: Some(scripted.remove(0)),
+        args: scripted,
         label: Some("Scripted".into()),
         ..Default::default()
     };
@@ -829,7 +907,7 @@ pub(super) fn log_lines(path: &std::path::Path, prefix: &str) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ask_never_types_into_a_codex_approval_dialog() {
     let dir = tempfile::tempdir().unwrap();
-    let fake = script(dir.path(), "codex", include_str!("testdata/fake-codex.sh"));
+    let fake = fake_cli(dir.path(), "codex");
     let home = dir.path().join("codex-home");
     std::fs::create_dir_all(&home).unwrap();
     let log = dir.path().join("codex.log");
@@ -914,7 +992,7 @@ async fn ask_never_types_into_a_codex_approval_dialog() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn codex_rollouts_of_sessions_outside_workbench_are_never_adopted() {
     let dir = tempfile::tempdir().unwrap();
-    let fake = script(dir.path(), "codex", include_str!("testdata/fake-codex.sh"));
+    let fake = fake_cli(dir.path(), "codex");
     let home = dir.path().join("codex-home");
     std::fs::create_dir_all(&home).unwrap();
     let codex = crate::config::global::ProviderConfig {
@@ -932,18 +1010,9 @@ async fn codex_rollouts_of_sessions_outside_workbench_are_never_adopted() {
     wait_long("a to settle", 20, || agent_of(&state, &a.id).state == super::AgentState::Idle).await;
 
     // The user's own Codex in the same folder, outside Workbench, keeps its rollout open.
-    let mut outside = std::process::Command::new("bash")
-        .arg(&fake)
-        .args(["--", "my own external task"])
-        .current_dir(&root)
-        .env("CODEX_HOME", &home)
-        .env("PWD", &root)
-        .env("FAKE_CODEX_TURN_SECS", "0.2")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut argv = fake_cli_argv(dir.path(), "codex");
+    argv.extend(["--".into(), "my own external task".into()]);
+    let mut outside = outside(&argv, &root).env("CODEX_HOME", &home).env("FAKE_CODEX_TURN_SECS", "0.2").spawn().unwrap();
     let rollouts = || -> Vec<std::path::PathBuf> {
         let day = home.join("sessions").join(chrono::Local::now().format("%Y/%m/%d").to_string());
         std::fs::read_dir(day).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default()
@@ -969,7 +1038,7 @@ async fn codex_rollouts_of_sessions_outside_workbench_are_never_adopted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn kimi_sessions_in_one_folder_find_their_own_ids() {
     let dir = tempfile::tempdir().unwrap();
-    let fake = script(dir.path(), "kimi", include_str!("testdata/fake-kimi.sh"));
+    let fake = fake_cli(dir.path(), "kimi");
     let home = dir.path().join("kimi-home");
     std::fs::create_dir_all(&home).unwrap();
     let log = dir.path().join("kimi.log");
@@ -1017,16 +1086,7 @@ async fn kimi_sessions_in_one_folder_find_their_own_ids() {
     // elimination alone; the session's own screen settles its id later.
     let c = t.spawn_agent(&state, start("kimi-lazy")).await.unwrap();
     wait_long("c to settle", 20, || agent_of(&state, &c.id).state == super::AgentState::Idle).await;
-    let mut outside = std::process::Command::new("bash")
-        .arg(&fake)
-        .current_dir(&root)
-        .env("KIMI_CODE_HOME", &home)
-        .env("PWD", &root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut outside = outside(&fake_cli_argv(dir.path(), "kimi"), &root).env("KIMI_CODE_HOME", &home).spawn().unwrap();
     wait_long("the outside entry", 10, || index().len() == 3).await;
     let theirs = index()[2].clone();
     tokio::time::sleep(Duration::from_secs(5)).await;

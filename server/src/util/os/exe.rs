@@ -29,7 +29,6 @@ pub struct Resolved {
     pub program: PathBuf,
     /// Arguments that go before the caller's own (an npm shim's package script).
     pub prefix_args: Vec<String>,
-    #[cfg_attr(unix, allow(dead_code))]
     pub kind: Kind,
 }
 
@@ -241,7 +240,6 @@ pub fn configured(argv: &[String]) -> std::io::Result<std::process::Command> {
 /// Whether cmd.exe passes `args` to a `.bat`/`.cmd` file as they are: none contains
 /// `% ! ^ & | < > "` or a line break. cmd.exe parses a batch file's command line again,
 /// so such an argument could expand variables or start commands of its own (BatBadBut).
-#[cfg_attr(unix, allow(dead_code))] // only Windows starts batch files
 pub fn batch_args_safe<S: AsRef<str>>(args: &[S]) -> bool {
     args.iter().all(|a| !a.as_ref().contains(['%', '!', '^', '&', '|', '<', '>', '"', '\n', '\r']))
 }
@@ -249,7 +247,6 @@ pub fn batch_args_safe<S: AsRef<str>>(args: &[S]) -> bool {
 /// A terminal's argv, ready for the PTY. Unix: unchanged. Windows: the program becomes an
 /// absolute path, an npm shim is unwrapped, and a batch file is refused when cmd.exe would
 /// misread an argument (the caller can paste the prompt instead).
-#[cfg_attr(unix, allow(dead_code))] // Unix: for the terminals slice's PTY spawn (docs/windows-port.md, step 7)
 pub fn launch_argv(argv: Vec<String>) -> Result<Vec<String>, String> {
     #[cfg(unix)]
     {

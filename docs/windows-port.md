@@ -1,11 +1,11 @@
 # Porting the server to Windows
 
-**Status: in progress.** The `util::os` areas `perm`, `fs`, `proc`, `shell`, `exe`, `path`,
-`net` and `desktop` are in (their shared Win32 helpers live in `util/os/win32.rs`); the
-server compiles for Windows except the terminals slice (`os::session`, §1.F), and nothing
-has run on Windows yet. This is the plan for a native `x86_64-pc-windows-msvc` build that
-works on Windows 10 and 11, with Linux behaviour unchanged. File and line references are
-from 0.1.0 (commit `493a66e`) and will drift.
+**Status: in progress.** The `util::os` areas `perm`, `fs`, `proc`, `session`, `shell`,
+`exe`, `path`, `net` and `desktop` are in (their shared Win32 helpers live in
+`util/os/win32.rs`); the server compiles for Windows, and nothing has run on Windows yet.
+This is the plan for a native `x86_64-pc-windows-msvc` build that works on Windows 10 and 11,
+with Linux behaviour unchanged. File and line references are from 0.1.0 (commit `493a66e`)
+and will drift.
 
 Estimated size: 6–8 engineer-weeks, in 14 steps that each compile and pass on Linux.
 
@@ -109,6 +109,14 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   `i32 sid` keys keep working. Hang-up is `ClosePseudoConsole` (CTRL_CLOSE_EVENT to every
   attached process), then `TerminateJobObject` after the grace period. The redaction hold-back
   uses a reader thread feeding a channel with `recv_timeout(HOLD_BACK)`.
+- Done (`util/os/session.rs`): the session registry holds a `ProcGroup` and the closure that
+  closes the pseudoconsole (the session owns it until it is over, so a `Pty` dropped early
+  does not hang up its background jobs). The pump thread always drains the pipe, also after
+  the reader stopped, so `ClosePseudoConsole` never waits for good. A secret is also masked
+  when ConPTY's repainting puts escape sequences between its characters
+  (`session::REPAINTS`). A GUI program started from a terminal joins its job, keeps a lingering
+  count and ends with it (Linux: it stays in the session likewise; `xdg-open`-style launchers
+  detach, `start` on Windows does not).
 
 **G. `/proc` introspection**
 
@@ -313,8 +321,9 @@ clearly. Reading and containment are unaffected.
   device names and alternate data streams, drive-letter URIs, npm-shim parsing, `RmGetList`
   holders, CRLF line staging with `autocrlf=true`, the ConPTY DSR answer.
 - `fake_ls.py` and `fake_dap.py` only need `python3` → `python()` (`lsp/tests.rs:58, 226`,
-  `debug/tests.rs:15, 86`). The five bash fakes (`terminals/testdata/fake-*.sh`) become one
-  `fake_cli.py`.
+  `debug/tests.rs:15, 86`). The five bash fakes (`terminals/testdata/fake-*.sh`) became one
+  `fake_cli.py`, used on every OS (on Windows through an npm-style shim, so the tests take
+  the shim unwrapping path); the terminals' end-to-end tests run Python programs.
 - CI runs `git config --global core.autocrlf false`; test repositories set it too. End-to-end
   timeouts scale by 2–3× on Windows.
 

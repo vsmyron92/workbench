@@ -85,7 +85,7 @@ packaging/linux/   install.sh shipped in the release archive
 ## Configuration
 
 - `~/.config/workbench/config.toml` holds global settings (`config/global.rs`). It is written with detected defaults on first run.
-  - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions` and `permission_wait`) and `[agents.providers.*]`, `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
+  - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions` and `permission_wait`) and `[agents.providers.*]`, `[terminals]` (`shell`: the argv of new shells; default `$SHELL -l`, on Windows PowerShell), `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
   - Settings saves edit config.toml in place (`platform::config_edit`): comments and layout survive, for every section.
   - Settings saves apply at once. Edits made outside Workbench (an editor, a setup hint followed by hand) apply too: `platform::settings::watch_config` watches the config directory and applies a valid `config.toml` like a raw save (config swapped, secret cache cleared, projects reloaded, `settings.changed`). A file that does not parse or fails the hard checks is reported once (`ui.notify`) and the running config stays; the watcher never writes the file.
 - **Project ids** are the directory name as a slug (`api`, then `api-2`… for another directory of that name) and are bound to the directory for good in `data_dir/project-ids.json` (canonical path → id). Everything keyed by an id belongs to that directory: the overlay `projects/<id>.toml` with its secrets, `data_dir/workspace/<id>`, terminals and agent sessions (`projectId`, hence their MCP confinement). Scan order (roots, then includes) only decides the id the first time a directory is seen; adding a root with a same-named repository or removing the first of two never moves an id, and a new directory never gets an id the file gives to another one, even one that is gone or excluded. A moved repository therefore gets a new id: rename its overlay to follow it.
@@ -183,9 +183,10 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 | `lsp::LspConfig`, `debug::DebugConfig`, `platform::push::PushConfig` | lsp, debug, platform | core config (`GlobalConfig.{lsp, debug, push}`: config.toml `[lsp]`, `[debug]`, `[push]`) |
 
 **Terminals spawned by other slices:**
-- `spawn_redacted(state, spec, secrets)` masks the given secret values (`${secret:…}` in a run's env) in the output at the source: the screen, saved screens, the WebSocket, `screen_text` and MCP never see them.
+- `spawn_redacted(state, spec, secrets)` masks the given secret values (`${secret:…}` in a run's env) in the output at the source: the screen, saved screens, the WebSocket, `screen_text` and MCP never see them. On Windows a value is also masked when ConPTY's repainting puts escape sequences between its characters.
 - `POST /api/terminals/{id}/restart` re-runs a run/command terminal only when that is safe without its owner: log follows (`meta.action = "logs"`), Remote Control servers, or `meta.restartable = true`. Run configurations restart through apps; deploys and env commands only from their environment, so gates and confirmation run again. Others get `409 not_restartable`.
 - `TerminalInfo.lingering` counts processes the exited process left running in its session; kill, close and restart end them.
+- A terminal's processes are a session of `util::os::session`, keyed by the leader's pid: a Unix session (hang-up: SIGHUP and SIGCONT to its process groups, SIGKILL after the grace period), on Windows a Job Object the leader joins right after the spawn, in a pseudoconsole (ConPTY). There the hang-up closes the pseudoconsole (CTRL_CLOSE_EVENT to every attached process) and `TerminateJobObject` ends the rest; the pseudoconsole also closes once the leader has exited and the job is empty, since ConPTY gives no EOF of its own; `lingering` counts the job's live processes. `Pty::spawn` always hands portable-pty an absolute program (`util::os::exe::launch_argv`): npm shims run as node and their script, a batch file only with arguments cmd.exe reads as they are, and an agent's initial prompt is pasted instead of passed to a batch file when it holds `% ! ^ & | < > "` or a line break.
 
 **Handlers:**
 - Return `ApiResult<Json<T>>`. JSON is camelCase (`#[serde(rename_all = "camelCase")]`).
@@ -697,10 +698,11 @@ always for custom CLIs.
   `--no-daemon` keeps the session in our process, since a shared daemon would not see its
   environment. Its rollout (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`, local
   dates, created at the first turn) is found among files created after the launch whose
-  `session_meta` names the cwd: the one our own processes hold open (`/proc/<pid>/fd`), or else
-  the only one while no other Codex session of that home and cwd waits for its id, and only if
-  no process outside the waiting sessions holds it open or runs Codex in that folder (a Codex
-  in another terminal or an editor writes rollouts there too; such a file is never taken). It
+  `session_meta` names the cwd: the one our own processes hold open (`/proc/<pid>/fd`; on
+  Windows the Restart Manager), or else the only one while no other Codex session of that home
+  and cwd waits for its id, and only if no process outside the waiting sessions holds it open
+  or runs Codex in that folder (a Codex in another terminal or an editor writes rollouts there
+  too; such a file is never taken). It
   is tailed for `task_started` / `task_complete` / `turn_aborted`, model, effort and context.
   Approval prompts, questions and the trust prompt are not in the rollout: their texts (as
   0.157.1 prints them) are recognized on the bottom of the screen, and the session needs
@@ -2280,8 +2282,9 @@ So Workbench can hold the hook's HTTP response until a device answers:
   whole, multi-line feedback, the awaited answer's `Closed` / `Ignored` looks, the input-time
   look, `ExitPlanMode` observed only),
   an end-to-end test through the real PTY, hook route and a device session against a fake Claude
-  (`testdata/fake-claude.sh`: allow, deny, allow for the session, answered in the terminal with the
-  late hook getting `{}`, answered in the terminal at once while the allowed tool runs 12 s,
+  (`testdata/fake_cli.py` as `claude`: allow, deny, allow for the session, answered in the
+  terminal with the late hook getting `{}`, answered in the terminal at once while the allowed
+  tool runs 12 s,
   an allow Claude ignores (`sticky:`), a plan approval (`plan:`), observe-only mode, exit while
   pending, 401/403/409/400/404), headless screenshots of the card, tab strip, toasts and phone
   views in both themes (isolated instance, fake Claude), and a real
@@ -2332,7 +2335,8 @@ custom CLI of that name). Unavailable unless the command is found; nothing was r
   model's context. A repository's own `.aider.conf.yml` can still set `restore-chat-history`,
   as with Aider outside Workbench.
 - Fake-CLI end-to-end tests: `gemini_sessions_start_under_their_id_ask_on_screen_and_resume`,
-  `aider_sessions_confirm_on_screen_and_restore_their_chat` (`testdata/fake-{gemini,aider}.sh`).
+  `aider_sessions_confirm_on_screen_and_restore_their_chat` (`testdata/fake_cli.py` as
+  `gemini` and `aider`).
 
 New here: route `POST /api/agents/{id}/permission`; event field `agent.attention.permission`;
 TS `AgentInfo.pendingPermission`, `PendingPermission` (+ `detail`, `complete` from the review),
