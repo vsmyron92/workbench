@@ -69,8 +69,10 @@ in the Workspace tool window, pinned or by freshness, and open them next to the 
 Reports are HTML files served sandboxed: they cannot read Workbench's cookies or storage,
 reach the page around them, or call its API. Reports that link `../_shared/report.css`
 and `../_shared/report.js` and set `data-wb-report="document"` on `<html>` get the
-standard dark look and a click-to-zoom image lightbox. A repository with a
-`workspace/workspace.json` in Mr. Mak Workspace's format shows those cards too.
+standard dark look and a click-to-zoom image lightbox. The **Hand work to an agent**
+example in Home has prompts to try and a report template that uses all of it. A
+repository with a `workspace/workspace.json` in Mr. Mak Workspace's format shows those
+cards too.
 
 ## Other agent CLIs
 

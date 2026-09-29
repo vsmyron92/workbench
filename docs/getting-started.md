@@ -81,6 +81,9 @@ and the first answer wins. See [working with agents](agents.md).
 - **The top bar** switches projects and branches and starts run configurations.
 - **The status bar** shows the language server, the branch, CI status and the dev
   container.
+- **The Workspace** (left stripe) starts with four example cards in Home: a welcome
+  guide, a tour in screenshots, a report template for agents and a checklist for
+  connecting your services. They stay until you archive them.
 
 ![The Services window with a compose project, next to its compose file](assets/services.png)
 

@@ -59,7 +59,7 @@ server/            Rust crate `workbench`
   src/debug/         SLICE debug: Debug Adapter Protocol sessions, launch configurations, breakpoints
   src/gitlab/        SLICE gitlab: MRs, pipelines, jobs, envs, issues, registry
   src/github/        SLICE github: PRs, Actions runs/jobs/logs, issues, releases
-  src/workspace/     SLICE workspace: Mr. Mak-style deliverable cards, sandboxed report serving, trash
+  src/workspace/     SLICE workspace: Mr. Mak-style deliverable cards and Home examples, sandboxed report serving, trash
   src/forge.rs       core: GitLab/GitHub dispatch (commit_ci_status) for forge-agnostic features
   src/atlassian/     SLICE atlassian: Confluence + Jira
   src/apps/          SLICE apps: run configurations, environments, auto-detection
@@ -513,6 +513,13 @@ a project id or `home` (not tied to a project). No project gets the id `home` or
   as origin `repo` with id `repo:<id>`. They are repository content: folders must be one plain path
   component, paths are contained, and only `status`, `pinned` and `updated` (a local day) are written
   back, with the same compare-and-swap. Steps, files and deletion stay with the repository.
+- **Examples** (`examples.rs`; files in `examples/`, screenshots from `docs/assets`). At start,
+  while `data_dir/workspace/home/workspace.json` does not exist, four `sample` cards go into Home
+  (Welcome to Workbench, pinned; A tour of Workbench; Hand work to an agent; Connect your
+  services), in folders `<day>_<id>`, one second apart in freshness so they list in that order.
+  The files are written first and the registry last, only while it still has no entries (else the
+  folders are removed again). Once Home has a registry, even an empty one, nothing is added, so an
+  archived or deleted example stays that way.
 - **REST** `/api/workspace/`: `GET scopes`; `GET cards` (every scope); `GET|POST {scope}/cards`;
   `GET|PATCH|DELETE {scope}/cards/{id}` (delete moves the folder to `data_dir/workspace-trash/`);
   `POST …/steps`, `PATCH|DELETE …/steps/{index}` (with the expected path: 409 when steps moved);

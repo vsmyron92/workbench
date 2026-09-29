@@ -690,7 +690,7 @@ pub fn check_viewer(v: Option<&str>) -> ApiResult<Option<String>> {
     }
 }
 
-fn step_doc(name: &str, path: &str, viewer: Option<&str>) -> Doc {
+pub(super) fn step_doc(name: &str, path: &str, viewer: Option<&str>) -> Doc {
     let mut fields = vec![("name", Doc::str(name)), ("path", Doc::str(path))];
     if let Some(v) = viewer {
         fields.push(("viewer", Doc::str(v)));

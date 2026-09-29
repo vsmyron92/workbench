@@ -7,6 +7,7 @@
 //! Adapted from Mr. Mak Workspace (MIT): registry schema, freshness sort, auto-archive,
 //! report chrome and the report lightbox.
 //!
+//! * `examples` — the example cards a first start puts into Home.
 //! * `model`  — the registry schema, order-preserving JSON, dates, sort and archive rules.
 //! * `store`  — scopes, compare-and-swap registry writes, card files, text content.
 //! * `view`   — capability grants and the sandboxed content server (`/view/{grant}/**`).
@@ -15,6 +16,7 @@
 //! * `trash`  — deleted cards: list, restore, delete for good (`…/{scope}/trash/**`).
 //! * `watch`  — registry and card-file watching → `workspace.changed`.
 
+mod examples;
 mod model;
 mod routes;
 mod store;
@@ -73,6 +75,16 @@ pub fn router() -> Router<AppState> {
 }
 
 pub async fn start(state: &AppState) {
+    let added = {
+        let _w = state.workspace.write_lock.lock().await;
+        let st = state.clone();
+        blocking(move || examples::seed(&store::scope(&st, store::HOME)?)).await
+    };
+    match added {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("workspace: added {n} example cards to Home"),
+        Err(e) => tracing::warn!("workspace: cannot add the example cards to Home: {}", e.message),
+    }
     watch::start(state).await;
 }
 

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en" data-wb-report="document">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect your services</title>
+<link rel="stylesheet" href="../_shared/report.css">
+<script defer src="../_shared/report.js"></script>
+</head>
+<body>
+<main>
+<h1>Connect your services</h1>
+<p class="meta">Workbench example · a checklist, not a setup: this card connects nothing by itself</p>
+
+<div class="card">
+  <h3>Connect only what your work needs</h3>
+  <p>Everything below is optional. Workbench is useful with a git repository and one agent
+  CLI; each service you add brings its own window and MCP tools for your agents. Tokens stay
+  where you keep them: configuration names them by <em>reference</em>, and their values
+  never reach the browser, a command line or a log.</p>
+</div>
+
+<h2>Forges, docs and tickets</h2>
+<table>
+  <thead><tr><th>Service</th><th>What you get</th><th>What it needs</th><th>Where it is set</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><b>GitLab</b></td>
+      <td>Merge requests, pipelines, job logs, failed tests, retries</td>
+      <td>A personal access token: <code>read_api</code> to read; <code>api</code> to comment, retry and open merge requests</td>
+      <td><code>[gitlab]</code> host and token; <code>~/.gitlab_token</code> is picked up on the first start</td>
+    </tr>
+    <tr>
+      <td><b>GitHub</b></td>
+      <td>Pull requests, Actions runs, logs and artifacts, issues, releases</td>
+      <td>Nothing for public repositories (read-only, 60 requests an hour); a token for private ones and for any change</td>
+      <td><code>[github]</code> host and token; <code>~/.github_token</code></td>
+    </tr>
+    <tr>
+      <td><b>Confluence</b></td>
+      <td>Pages to read and write, inline comments, attachments, labels</td>
+      <td>Your Atlassian site, email and an API token</td>
+      <td><code>[atlassian]</code> site, email and token; <code>~/.atlassian_token</code></td>
+    </tr>
+    <tr>
+      <td><b>Jira</b></td>
+      <td>Issues, transitions and boards</td>
+      <td>The same Atlassian connection, on a site that has Jira</td>
+      <td><code>[atlassian]</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>On this machine</h2>
+<table>
+  <thead><tr><th>Tool</th><th>What you get</th><th>What it needs</th><th>Where it is set</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><b>Docker</b></td>
+      <td>The Services window, dev containers</td>
+      <td><code>docker</code>, or podman's docker-compatible CLI</td>
+      <td><code>[devcontainer] docker</code>, else PATH</td>
+    </tr>
+    <tr>
+      <td><b>PostgreSQL</b></td>
+      <td>The Database window: schemas and SQL consoles</td>
+      <td>Host, database, user, and the <em>name</em> of a secret with the password or a connection URL; else <code>~/.pgpass</code></td>
+      <td>Database › Add Data Source</td>
+    </tr>
+    <tr>
+      <td><b>Language servers</b></td>
+      <td>Diagnostics, Go to Declaration, Find Usages, Structure</td>
+      <td>rust-analyzer, typescript-language-server, pyright, gopls, clangd, Verible, vhdl_ls…</td>
+      <td>PATH, or <code>[lsp.servers.&lt;name&gt;]</code>; enabled per project</td>
+    </tr>
+    <tr>
+      <td><b>Debuggers</b></td>
+      <td>Breakpoints, stepping, variables</td>
+      <td>GDB, lldb-dap, CodeLLDB, debugpy or delve</td>
+      <td>PATH, or <code>[debug.adapters.&lt;name&gt;]</code></td>
+    </tr>
+    <tr>
+      <td><b>Your phone</b></td>
+      <td>The phone app and push notifications</td>
+      <td>An address the phone can reach, and TLS in front</td>
+      <td><code>[server] bind</code>; Settings › Remote access</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Check your own setup</h2>
+<ol>
+  <li>Open <b>Settings › Secrets</b>: every reference, whether it resolves, and a fix for token files others can read.</li>
+  <li>Open <b>Settings › Integrations</b> and fill in only the services you use.</li>
+  <li>Try one read-only action per service: list merge requests, open a Confluence page, run <code>select 1</code> in a console.</li>
+  <li>Start an agent session and ask it to do the same through its tools, for example “list the open merge requests”.</li>
+  <li>Keep writes for when you are watching: comments, retries and new merge requests all happen with your token.</li>
+</ol>
+
+<div class="grid-3">
+  <div class="card"><h3 class="good">Safe to share</h3><p><code>.workbench.toml</code> in the repository: run configurations and the <em>names</em> of secrets.</p></div>
+  <div class="card"><h3 class="warn">Machine only</h3><p><code>~/.config/workbench/projects/&lt;id&gt;.toml</code>: hosts, deploys, secret references.</p></div>
+  <div class="card"><h3 class="bad">Never in a file you commit</h3><p>A token's value. Use a file, an environment variable, a <code>.env</code> key, the keyring or a command.</p></div>
+</div>
+</main>
+</body>
+</html>

@@ -1,0 +1,79 @@
+<!doctype html>
+<!-- Report template: copy this file into a card folder and replace the content.
+     Keep it self-contained: relative files only, no CDN scripts, web fonts or remote images. -->
+<html lang="en" data-wb-report="document">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Search latency after caching</title>
+<link rel="stylesheet" href="../_shared/report.css">
+<script defer src="../_shared/report.js"></script>
+</head>
+<body>
+<main>
+<!-- Title, then one line of context: who prepared it, from what, when. -->
+<h1>Search latency after caching</h1>
+<p class="meta">Example report · prepared by an agent · branch <code>feature/search-cache</code> · load test of 10 minutes at 600 requests per second</p>
+
+<!-- KPIs: three to five numbers that answer the question. Colour them with good, warn or bad. -->
+<div class="kpis">
+  <div class="kpi">p95 <code>/search</code><b class="good">140 ms</b></div>
+  <div class="kpi">Change<b class="good">−67%</b></div>
+  <div class="kpi">Cache hit rate<b>81%</b></div>
+  <div class="kpi"><code>/cart</code> p95<b class="warn">250 ms</b></div>
+  <div class="kpi">Errors<b class="bad">3</b></div>
+</div>
+
+<!-- The answer first, in a card. -->
+<div class="card">
+  <h3>Summary</h3>
+  <p>Caching search results cut the p95 of <code>/search</code> from 420 ms to 140 ms and of
+  <code>/suggest</code> from 310 ms to 95 ms. <code>/item</code> and <code>/cart</code> barely
+  moved, because they do not use the cache. Three requests failed while the cache warmed up;
+  they need a look before this ships.</p>
+</div>
+
+<!-- Figures: every image gets alt text and loading="lazy"; a click opens it full size. -->
+<h2>Measurements</h2>
+<div class="grid-2">
+  <figure>
+    <img src="img/latency.svg" alt="p95 latency by endpoint, before and after caching" loading="lazy">
+    <figcaption>p95 latency per endpoint, before (grey) and after (blue).</figcaption>
+  </figure>
+  <figure>
+    <img src="img/traffic.svg" alt="Requests per second over a day, peaking at about 650" loading="lazy">
+    <figcaption>The load profile the test replayed.</figcaption>
+  </figure>
+</div>
+
+<!-- Tables scroll sideways by themselves when they are wide. -->
+<h3>By endpoint</h3>
+<table>
+  <thead><tr><th>Endpoint</th><th>p95 before</th><th>p95 after</th><th>Change</th><th>Uses the cache</th></tr></thead>
+  <tbody>
+    <tr><td><code>/search</code></td><td>420 ms</td><td>140 ms</td><td class="good">−67%</td><td>yes</td></tr>
+    <tr><td><code>/suggest</code></td><td>310 ms</td><td>95 ms</td><td class="good">−69%</td><td>yes</td></tr>
+    <tr><td><code>/item</code></td><td>180 ms</td><td>170 ms</td><td>−6%</td><td>no</td></tr>
+    <tr><td><code>/cart</code></td><td>260 ms</td><td>250 ms</td><td class="warn">−4%</td><td>no</td></tr>
+  </tbody>
+</table>
+
+<!-- Options or findings side by side. -->
+<h2>What to do next</h2>
+<div class="grid-3">
+  <div class="card"><h3 class="good">Ship</h3><p>The cache for <code>/search</code> and <code>/suggest</code>, behind the existing flag.</p></div>
+  <div class="card"><h3 class="warn">Decide</h3><p>Whether <code>/cart</code> is worth caching; it changes on every request.</p></div>
+  <div class="card"><h3 class="bad">Fix first</h3><p>The three errors during warm-up: a missing timeout on the first fill.</p></div>
+</div>
+
+<!-- Commands and output in pre blocks, so they can be copied. -->
+<h2>How it was measured</h2>
+<pre>k6 run --vus 200 --duration 10m load/search.js
+git diff --stat main...feature/search-cache</pre>
+
+<!-- End with what was checked and what was not. -->
+<p class="meta">Checked: latency, errors and hit rate on a local build with production-like data.
+Not checked: memory growth over hours, behaviour after a cache flush.</p>
+</main>
+</body>
+</html>

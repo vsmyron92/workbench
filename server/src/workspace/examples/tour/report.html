@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en" data-wb-report="document">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A tour of Workbench</title>
+<link rel="stylesheet" href="../_shared/report.css">
+<script defer src="../_shared/report.js"></script>
+</head>
+<body>
+<main>
+<h1>A tour of Workbench</h1>
+<p class="meta">Workbench example · screenshots from scratch projects · click a picture to see it full size</p>
+
+<div class="kpis">
+  <div class="kpi">Agent CLI presets<b>5</b></div>
+  <div class="kpi">Forges<b>2</b></div>
+  <div class="kpi">Programs to install<b>1</b></div>
+  <div class="kpi">Telemetry<b class="good">None</b></div>
+</div>
+
+<h2>Agents in the middle</h2>
+<p>A Claude Code session sits next to everything it touches. Here its changes are under
+review: <b>Review Changes</b> lists every file the session wrote against its version from
+before the session, with Revert per file or for all, while the project tree and the git log
+stay in view. Claude Code, Codex, Kimi Code, Gemini CLI and Aider are presets; any other CLI
+is a line in <code>config.toml</code>. GitLab and GitHub, Confluence and Jira sit on the right,
+and all of it is one program with the UI built in.</p>
+<figure>
+  <img src="screens/workbench-overview.png" alt="An agent session's changes under review, with the project tree and the git log" loading="lazy">
+  <figcaption>Agents, Review Changes and the Git Log in one window.</figcaption>
+</figure>
+
+<h2>CI with a way out</h2>
+<p>GitLab pipelines and GitHub Actions runs show their jobs, logs and failed tests. <b>Ask
+agent to fix</b> on a failed job or test starts a session whose prompt already carries the
+output, so the agent starts from the failure instead of from a description of it.</p>
+<figure>
+  <img src="screens/ci-tests.png" alt="A pipeline's failed tests, with the test output and Ask agent to fix" loading="lazy">
+  <figcaption>Failed tests from a pipeline, one click away from an agent.</figcaption>
+</figure>
+
+<h2>Deliverables, not scrollback</h2>
+<p>When an answer needs more than terminal text, an agent hands it back as a Workspace card:
+a report, a gallery, a PDF, a 3D comparison. Reports are served sandboxed, so they cannot
+read Workbench's cookies, storage or API. This page is one of them.</p>
+<figure>
+  <img src="screens/workspace.png" alt="A Workspace card holding a release readiness report prepared by an agent" loading="lazy">
+  <figcaption>A release readiness report, as an agent wrote it.</figcaption>
+</figure>
+
+<h2>Everything that runs</h2>
+<div class="grid-2">
+  <figure>
+    <img src="screens/services.png" alt="The Services window with a compose project, next to its compose file" loading="lazy">
+    <figcaption>Services: Docker containers and compose projects.</figcaption>
+  </figure>
+  <figure>
+    <img src="screens/database.png" alt="The Database window: a schema tree and a SQL console with results" loading="lazy">
+    <figcaption>Database: PostgreSQL schemas and SQL consoles.</figcaption>
+  </figure>
+</div>
+<p>Run configurations come from your project files, environments get health checks and
+previews, and deploys always ask first.</p>
+
+<h2>In your pocket</h2>
+<div class="grid-2">
+  <div>
+    <p>Pair a phone, add Workbench to its home screen and turn on push. An agent that needs
+    you sends a notification with <b>Allow</b> and <b>Deny</b> on it, and a failed
+    pipeline opens with <b>Retry</b> and <b>Ask agent</b> at hand.</p>
+    <div class="card">
+      <h3>Before you open it up</h3>
+      <p>Put TLS in front (<code>tailscale serve</code>, a reverse proxy or
+      <code>[server.tls]</code>) and pair only devices you own. A signed-in device can type
+      into terminals.</p>
+    </div>
+  </div>
+  <figure style="max-width: 300px; justify-self: center;">
+    <img src="screens/phone.png" alt="The phone app showing a failed pipeline with Retry and Ask agent" loading="lazy">
+    <figcaption>The phone app on a failed pipeline.</figcaption>
+  </figure>
+</div>
+
+<h2>How this card is made</h2>
+<table>
+  <thead><tr><th>Tab</th><th>File</th><th>Viewer</th></tr></thead>
+  <tbody>
+    <tr><td>Tour</td><td><code>report.html</code></td><td>HTML report, with <code>../_shared/report.css</code> and <code>report.js</code></td></tr>
+    <tr><td>Screenshots</td><td><code>screens/</code></td><td>A folder is a gallery</td></tr>
+  </tbody>
+</table>
+<p>Open the card's folder from its header to see the files. An agent builds a card the same
+way: it writes files into the folder and registers each one as a tab.</p>
+</main>
+</body>
+</html>

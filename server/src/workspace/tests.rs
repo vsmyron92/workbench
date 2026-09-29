@@ -492,3 +492,48 @@ async fn trash_round_trip() {
     let (_, all) = env.json(Method::GET, "/api/workspace/all/trash", None).await;
     assert!(all["items"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn a_first_start_puts_the_examples_into_home_once() {
+    let env = setup().await;
+    let home = || super::store::scope(&env.state, "home").unwrap();
+    assert_eq!(super::examples::seed(&home()).unwrap(), 4);
+    let (_, list) = env.json(Method::GET, "/api/workspace/home/cards", None).await;
+    let cards = list["cards"].as_array().unwrap();
+    let ids: Vec<&str> = cards.iter().map(|c| c["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["welcome-to-workbench", "workbench-tour", "hand-work-to-an-agent", "connect-your-services"]);
+    assert_eq!((&cards[0]["pinned"], &cards[0]["thumb"]), (&json!(true), &json!("cover.svg")));
+    for c in cards {
+        assert_eq!((c["sample"].as_bool(), c["archived"].as_bool(), c["editable"].as_bool()), (Some(true), Some(false), Some(true)), "{c}");
+        assert!(c["steps"].as_array().unwrap().iter().all(|s| s["exists"] == true), "{c}");
+    }
+    assert_eq!(cards[1]["steps"][1]["kind"], "gallery");
+    assert_eq!(cards[1]["thumb"], "screens/workbench-overview.png", "the tour report's first image");
+
+    // The report and its shared styles are served through the card's grant.
+    let base = cards[1]["base"].as_str().unwrap();
+    let (s, _, body) = env.call(Method::GET, &format!("{base}report.html"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(String::from_utf8(body).unwrap().contains("../_shared/report.css"));
+    let (s, _, _) = env.call(Method::GET, &format!("{base}screens/phone.png"), None).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Home has a registry now: deleted examples stay deleted.
+    for id in ["workbench-tour", "hand-work-to-an-agent", "connect-your-services", "welcome-to-workbench"] {
+        let (s, _) = env.json(Method::DELETE, &format!("/api/workspace/home/cards/{id}"), None).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+    assert_eq!(super::examples::seed(&home()).unwrap(), 0);
+    let (_, list) = env.json(Method::GET, "/api/workspace/home/cards", None).await;
+    assert!(list["cards"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn examples_never_join_cards_that_are_already_there() {
+    let env = setup().await;
+    let (s, _) = env.json(Method::POST, "/api/workspace/home/cards", Some(json!({ "title": "Mine" }))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(super::examples::seed(&super::store::scope(&env.state, "home").unwrap()).unwrap(), 0);
+    let (_, list) = env.json(Method::GET, "/api/workspace/home/cards", None).await;
+    assert_eq!(list["cards"].as_array().unwrap().len(), 1);
+}

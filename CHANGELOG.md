@@ -10,6 +10,9 @@
   (built-in presets; install either and enable code intelligence). clangd also serves the
   new C++ extensions. `code_symbols` says so when the running servers cannot search
   symbols by name, instead of reporting that none runs.
+- **Workspace:** four example cards in Home on the first start, as in Mr. Mak Workspace:
+  Welcome to Workbench, A tour of Workbench, Hand work to an agent (with a report
+  template) and Connect your services. They stay until you archive them.
 
 ## 0.1.0 - 2026-09-28
 

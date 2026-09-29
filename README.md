@@ -97,6 +97,18 @@ whole setup.
 
 Search Everywhere is a double Shift; the command palette is Ctrl+K.
 
+The Workspace's Home starts with four examples:
+
+| Example | What it shows |
+| --- | --- |
+| **Welcome to Workbench** | Getting started, everyday use and what to change, as Markdown tabs. |
+| **A tour of Workbench** | A report with screenshots, and the same screenshots as a gallery. |
+| **Hand work to an agent** | What to ask an agent for, its Workspace tools, and a report template to copy. |
+| **Connect your services** | A checklist for GitLab, GitHub, Atlassian, Docker, databases and the phone. |
+
+The examples stay visible until you archive them. Create your own cards next to them, or
+archive all four when you are ready.
+
 ![A pipeline's failed tests, with the output and Ask agent to fix](docs/assets/ci-tests.png)
 
 ## Where your data stays
