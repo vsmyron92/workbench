@@ -219,10 +219,8 @@ impl Notifier {
         let command_status = match command {
             None => "none",
             Some(command) => {
-                let mut cmd = tokio::process::Command::new("sh");
-                cmd.arg("-c")
-                    .arg(command)
-                    .env("WORKBENCH_TITLE", &title)
+                let mut cmd = util::os::shell::plain_command(&command);
+                cmd.env("WORKBENCH_TITLE", &title)
                     .env("WORKBENCH_MESSAGE", &body)
                     .env("WORKBENCH_LEVEL", note.level.as_str())
                     .env("WORKBENCH_EVENT", note.event)

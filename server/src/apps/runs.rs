@@ -376,7 +376,7 @@ fn program_available(prog: &str) -> bool {
             return *ok;
         }
     }
-    let ok = crate::util::which(prog) || user_bin_dirs().iter().any(|d| d.join(prog).is_file());
+    let ok = crate::util::which(prog) || crate::util::os::exe::find_in(&user_bin_dirs(), prog).is_some();
     let mut cache = CACHE.lock();
     if cache.len() > 512 {
         cache.clear();
@@ -795,7 +795,7 @@ async fn supervise(
         title: name.clone(),
         project_id: Some(pid.clone()),
         cwd: p.cwd.clone(),
-        argv: vec!["bash".into(), "-lc".into(), p.command.clone()],
+        argv: crate::util::os::shell::run_argv(&p.command),
         env: p.env.clone(),
         cols: None,
         rows: None,
@@ -1215,8 +1215,8 @@ async fn finish(state: &AppState, pid: &str, name: &str, epoch: u64, p: &Prepare
 
 /// Run a short command (service status/stop) with the run's cwd and env; `Some(success)`.
 async fn run_quiet(cmd: &str, p: &Prepared, timeout: Duration) -> Option<bool> {
-    let mut c = tokio::process::Command::new("bash");
-    c.arg("-lc").arg(cmd).current_dir(&p.cwd);
+    let mut c = crate::util::os::shell::run_command(cmd);
+    c.current_dir(&p.cwd);
     for (k, v) in &p.env {
         match v {
             Some(v) => c.env(k, v),
@@ -1245,8 +1245,8 @@ pub async fn stop(state: &AppState, project: &Project, name: &str) -> Result<Run
         if let Some(stop_cmd) = &c.stop {
             let vars = expand::base_vars(project);
             let cwd = resolve_cwd(project, &c.cwd)?;
-            let mut cmd = tokio::process::Command::new("bash");
-            cmd.arg("-lc").arg(expand::placeholders(stop_cmd, &vars)).current_dir(&cwd);
+            let mut cmd = crate::util::os::shell::run_command(&expand::placeholders(stop_cmd, &vars));
+            cmd.current_dir(&cwd);
             match crate::util::proc::run_cmd(cmd, Duration::from_secs(60)).await {
                 Ok(o) if !o.ok() => {
                     error = Some(format!("stop command failed: {}", crate::apps::detect::text::ellipsize(&o.message(), 300)))
@@ -1345,8 +1345,8 @@ fn refresh_services(state: &AppState, project: &Project) {
         let cwd = resolve_cwd(project, &c.cwd).unwrap_or(root);
         tokio::spawn(async move {
             let Some(status) = c.status.as_deref() else { return };
-            let mut cmd = tokio::process::Command::new("bash");
-            cmd.arg("-lc").arg(expand::placeholders(status, &vars)).current_dir(&cwd);
+            let mut cmd = crate::util::os::shell::run_command(&expand::placeholders(status, &vars));
+            cmd.current_dir(&cwd);
             let Ok(out) = crate::util::proc::run_cmd(cmd, Duration::from_secs(3)).await else { return };
             let up = out.ok();
             let live = {

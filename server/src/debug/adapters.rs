@@ -167,16 +167,22 @@ fn preset(id: &str) -> Option<Adapter> {
             "lldb",
             "Download CodeLLDB from github.com/vadimcn/codelldb/releases, unpack the .vsix (a zip) and set [debug.adapters.codelldb] command to its extension/adapter/codelldb.",
         ),
-        "debugpy" => base(
-            AdapterKind::Debugpy,
-            "debugpy",
-            "python3",
-            &["-m", "debugpy.adapter"],
-            &["python"],
-            Transport::Stdio,
-            "debugpy",
-            "Install debugpy for the interpreter in `command` (`python3 -m pip install debugpy`), or point [debug.adapters.debugpy] env.PYTHONPATH at a folder where it is installed.",
-        ),
+        "debugpy" => {
+            // `python3`; on Windows `python`, or `py -3` (its `-3` goes first in `args`).
+            let python = crate::util::os::exe::python();
+            let mut a = base(
+                AdapterKind::Debugpy,
+                "debugpy",
+                &python[0],
+                &["-m", "debugpy.adapter"],
+                &["python"],
+                Transport::Stdio,
+                "debugpy",
+                "Install debugpy for the interpreter in `command` (`python3 -m pip install debugpy`), or point [debug.adapters.debugpy] env.PYTHONPATH at a folder where it is installed.",
+            );
+            a.args.splice(0..0, python[1..].iter().cloned());
+            a
+        }
         "delve" => base(
             AdapterKind::Delve,
             "Delve",
@@ -359,9 +365,12 @@ async fn probe_uncached(a: &Adapter) -> Availability {
         return Availability::missing(format!("`{}` was not found on PATH", a.command));
     };
     let path_s = path.display().to_string();
+    // The Python launcher's own leading arguments (`py -3` on Windows) stay in front.
+    let python = crate::util::os::exe::python();
+    let lead: &[String] = if a.kind == AdapterKind::Debugpy && a.args.starts_with(&python[1..]) { &python[1..] } else { &[] };
     let run = |args: Vec<&'static str>| {
         let mut cmd = tokio::process::Command::new(&path);
-        cmd.args(args).current_dir("/");
+        cmd.args(lead).args(args).current_dir("/");
         for (k, v) in &a.env {
             cmd.env(k, v);
         }
@@ -383,7 +392,7 @@ async fn probe_uncached(a: &Adapter) -> Availability {
             }
             Err(e) => Availability::missing(format!("`{} --version` failed: {}", a.command, e.message)),
         },
-        AdapterKind::Debugpy if a.args.first().map(String::as_str) == Some("-m") => {
+        AdapterKind::Debugpy if a.args.get(lead.len()).map(String::as_str) == Some("-m") => {
             match run(vec!["-c", "import debugpy; print(debugpy.__version__)"]).await {
                 Ok(out) if out.ok() => Availability {
                     available: true,

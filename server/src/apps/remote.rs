@@ -99,7 +99,7 @@ pub fn ssh_argv(h: &SshHost, cmd: &str, tty: bool) -> Vec<String> {
 /// argv for running `cmd` on `target`.
 pub fn argv(target: &Target, cmd: &str, tty: bool) -> Vec<String> {
     match target {
-        Target::Local => vec!["bash".into(), "-lc".into(), cmd.to_string()],
+        Target::Local => crate::util::os::shell::run_argv(cmd),
         Target::Ssh(h) => ssh_argv(h, cmd, tty),
     }
 }
@@ -133,6 +133,8 @@ mod tests {
 
     #[test]
     fn local_commands_run_through_bash() {
+        assert_eq!(argv(&Target::Local, "echo hi", true), crate::util::os::shell::run_argv("echo hi"));
+        #[cfg(unix)]
         assert_eq!(argv(&Target::Local, "echo hi", true), vec!["bash", "-lc", "echo hi"]);
         assert_eq!(Target::Ssh(host()).label(), "root@203.0.113.10");
     }

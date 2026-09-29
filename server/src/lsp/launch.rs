@@ -119,18 +119,22 @@ pub fn launch(project: &Project, spec: &ServerSpec, placement: Placement) -> Res
     let command = if spec.command.contains('/') { crate::config::contract_tilde(&crate::config::expand_tilde(&spec.command)) } else { spec.command.clone() };
     let display = std::iter::once(command).chain(spec.args.iter().cloned()).collect::<Vec<_>>().join(" ");
     match placement {
-        Placement::Host(path) => Ok(Launch {
-            program: path.to_string_lossy().into_owned(),
-            args: spec.args.clone(),
-            env: host_env(spec),
-            cwd: project.root.clone(),
-            map: PathMap::host(),
-            origin: Origin::Host,
-            side: "host",
-            display,
-            container: None,
-            root_server: project.root.to_string_lossy().into_owned(),
-        }),
+        Placement::Host(path) => {
+            // An npm shim (Windows) runs as node and its script, not through cmd.exe.
+            let r = crate::util::os::exe::classify(path);
+            Ok(Launch {
+                program: r.program.to_string_lossy().into_owned(),
+                args: r.prefix_args.into_iter().chain(spec.args.iter().cloned()).collect(),
+                env: host_env(spec),
+                cwd: project.root.clone(),
+                map: PathMap::host(),
+                origin: Origin::Host,
+                side: "host",
+                display,
+                container: None,
+                root_server: project.root.to_string_lossy().into_owned(),
+            })
+        }
         Placement::Container(target, path) => {
             let (src, dst) = target
                 .map

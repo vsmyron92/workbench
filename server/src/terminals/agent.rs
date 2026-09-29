@@ -259,14 +259,6 @@ fn helper_fallback(exe: &Path, pid: u32) -> Option<PathBuf> {
     proc_exe.exists().then_some(proc_exe)
 }
 
-fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+".contains(c)) {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', r"'\''"))
-    }
-}
-
 /// Find the Claude Code executable: as configured, on PATH, or in the usual install spots
 /// (a desktop-launched Workbench often lacks `~/.local/bin` on PATH).
 pub fn resolve_command(cmd: &str) -> Option<PathBuf> {
@@ -274,19 +266,19 @@ pub fn resolve_command(cmd: &str) -> Option<PathBuf> {
     if cmd.is_empty() {
         return None;
     }
-    if cmd.contains('/') || cmd.starts_with('~') {
-        let p = crate::config::expand_tilde(cmd);
-        return p.is_file().then_some(p);
+    if util::os::exe::names_path(cmd) || cmd.starts_with('~') {
+        return util::os::exe::program_file(crate::config::expand_tilde(cmd));
     }
     if let Some(p) = util::which_path(cmd) {
         return Some(p);
     }
     let home = dirs::home_dir()?;
-    [".local/bin", ".claude/local", ".npm-global/bin", "bin", ".bun/bin"]
+    let spots: Vec<PathBuf> = [".local/bin", ".claude/local", ".npm-global/bin", "bin", ".bun/bin"]
         .iter()
-        .map(|d| home.join(d).join(cmd))
-        .chain(std::iter::once(PathBuf::from("/usr/local/bin").join(cmd)))
-        .find(|p| p.is_file())
+        .map(|d| home.join(d))
+        .chain(std::iter::once(PathBuf::from("/usr/local/bin")))
+        .collect();
+    util::os::exe::find_in(&spots, cmd)
 }
 
 use providers::valid_model;
@@ -818,7 +810,7 @@ impl Terminals {
         // Per-session files, 0600.
         let settings_path = dir.join("claude-settings.json");
         let mcp_path = dir.join("mcp.json");
-        let helper = helper_exe().map(|exe| format!("{} statusline", shell_quote(&exe.to_string_lossy())));
+        let helper = helper_exe().map(|exe| util::os::shell::helper_command(&exe, &["statusline"]));
         let statusline = cfg.statusline && {
             let mut dirs: Vec<&Path> = vec![&cwd];
             if let Some(p) = &project {
@@ -2820,12 +2812,6 @@ mod tests {
         let t = "Visit: https://claude.ai/code?workspace=http://localhost:6/ and \x1b]8;;https://claude.ai/code/session_AB1\x07here\x1b]8;;\x07.";
         assert_eq!(claude_urls(t), vec!["https://claude.ai/code?workspace=http://localhost:6/", "https://claude.ai/code/session_AB1"]);
         assert!(claude_urls("https://claude.ai/login").is_empty());
-    }
-
-    #[test]
-    fn quoting_for_the_status_line_command() {
-        assert_eq!(shell_quote("/home/u/.cache/wb/debug/workbench"), "/home/u/.cache/wb/debug/workbench");
-        assert_eq!(shell_quote("/opt/my apps/wb"), "'/opt/my apps/wb'");
     }
 
     #[test]

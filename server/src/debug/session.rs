@@ -984,8 +984,8 @@ async fn run_prelaunch_config(state: &AppState, project: &Arc<Project>, s: &Arc<
     }
 }
 
-/// Run `command` (`bash -lc`) in a visible terminal of the project (in its dev
-/// container when the session uses it) and wait for it to succeed.
+/// Run `command` in the run shell (`bash -lc` on Unix) in a visible terminal of the
+/// project (in its dev container when the session uses it) and wait for it to succeed.
 async fn run_in_terminal(state: &AppState, s: &Arc<Session>, plan: &Plan, title: &str, command: &str) -> Result<String, String> {
     let mut meta = json!({ "debug": s.id, "debugPreLaunch": true });
     if plan.target.is_some() {
@@ -996,7 +996,7 @@ async fn run_in_terminal(state: &AppState, s: &Arc<Session>, plan: &Plan, title:
         title: title.to_string(),
         project_id: Some(s.project_id.clone()),
         cwd: plan.cwd.clone(),
-        argv: vec!["bash".into(), "-lc".into(), command.to_string()],
+        argv: crate::util::os::shell::run_argv(command),
         env: vec![],
         cols: None,
         rows: None,

@@ -52,15 +52,9 @@ pub fn which(cmd: &str) -> bool {
     which_path(cmd).is_some()
 }
 
+/// The program file `cmd` names (`os::exe::which`).
 pub fn which_path(cmd: &str) -> Option<std::path::PathBuf> {
-    if cmd.contains('/') {
-        let p = crate::config::expand_tilde(cmd);
-        return p.is_file().then_some(p);
-    }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|d| d.join(cmd))
-        .find(|p| p.is_file())
+    os::exe::which(cmd)
 }
 
 /// Milliseconds since the Unix epoch.

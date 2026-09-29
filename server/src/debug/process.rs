@@ -178,9 +178,9 @@ pub async fn spawn(adapter: &Adapter, session_id: &str, dir: AdapterDir<'_>, tar
             inside = Some((t.docker.clone(), t.container_id.clone()));
         }
         None => {
-            let path = crate::util::which_path(&adapter.command).ok_or_else(|| format!("`{}` was not found on PATH. {}", adapter.command, adapter.install_hint))?;
-            cmd = Command::new(path);
-            cmd.args(&args);
+            let r = crate::util::os::exe::resolve(&adapter.command).ok_or_else(|| format!("`{}` was not found on PATH. {}", adapter.command, adapter.install_hint))?;
+            cmd = Command::new(&r.program);
+            cmd.args(&r.prefix_args).args(&args);
             for (k, v) in &adapter.env {
                 cmd.env(k, v);
             }

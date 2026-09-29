@@ -361,9 +361,10 @@ pub fn cmake_targets(root: &Path) -> Vec<CmakeTarget> {
     out
 }
 
-/// The newest executable file named `name` under `dir` (a CMake build tree).
+/// The newest executable file named `name` (`name.exe` on Windows) under `dir` (a CMake
+/// build tree).
 pub fn find_executable(dir: &Path, name: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
+    let file_name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     let mut stack = vec![(dir.to_path_buf(), 0usize)];
     let mut seen = 0usize;
@@ -381,9 +382,9 @@ pub fn find_executable(dir: &Path, name: &str) -> Option<PathBuf> {
                 if depth < 8 && n != "CMakeFiles" && !n.to_string_lossy().starts_with('.') {
                     stack.push((p, depth + 1));
                 }
-            } else if ft.is_file() && e.file_name().to_string_lossy() == name {
+            } else if ft.is_file() && e.file_name().to_string_lossy() == file_name {
                 let Ok(m) = e.metadata() else { continue };
-                if m.permissions().mode() & 0o111 == 0 {
+                if !crate::util::os::exe::is_executable_file(&p, &m) {
                     continue;
                 }
                 let t = m.modified().unwrap_or(std::time::UNIX_EPOCH);
@@ -654,11 +655,15 @@ not json at all
         assert_eq!(t.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), vec!["app", "gen"]);
         assert_eq!(t[0].build_dir, "build");
         // The executable is found after the build.
-        write(r, "build/tools/gen", "bin");
-        write(r, "build/CMakeFiles/gen", "not this one");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(r.join("build/tools/gen"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(find_executable(&r.join("build"), "gen"), Some(r.join("build/tools/gen")));
+        let gen_exe = format!("gen{}", std::env::consts::EXE_SUFFIX);
+        write(r, &format!("build/tools/{gen_exe}"), "bin");
+        write(r, &format!("build/CMakeFiles/{gen_exe}"), "not this one");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(r.join("build/tools/gen"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(find_executable(&r.join("build"), "gen"), Some(r.join("build/tools").join(&gen_exe)));
         assert_eq!(find_executable(&r.join("build"), "app"), None);
     }
 

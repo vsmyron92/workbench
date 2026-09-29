@@ -65,13 +65,9 @@ pub fn sniff_image(data: &[u8]) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Quote a path for insertion at a shell or agent prompt.
+/// Quote a path for insertion at a shell or agent prompt (`util::os::shell::quote_path`).
 pub fn quote_path(p: &str) -> String {
-    if !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+,:@%".contains(c)) {
-        p.to_string()
-    } else {
-        format!("'{}'", p.replace('\'', r"'\''"))
-    }
+    crate::util::os::shell::quote_path(p)
 }
 
 #[cfg(test)]
@@ -108,6 +104,7 @@ mod tests {
     fn quotes_paths_for_prompts() {
         assert_eq!(quote_path("/tmp/a.png"), "/tmp/a.png");
         assert_eq!(quote_path("/tmp/my file.png"), "'/tmp/my file.png'");
+        #[cfg(unix)]
         assert_eq!(quote_path("/tmp/it's"), r"'/tmp/it'\''s'");
     }
 
