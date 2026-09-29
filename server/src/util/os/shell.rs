@@ -150,12 +150,12 @@ const CLIXML_HEADER: &str = "#< CLIXML";
 
 /// PowerShell's stderr as the text its console would show. Started with `-EncodedCommand`,
 /// not interactive and with stderr redirected, PowerShell serializes its own records there
-/// as CLIXML (`#< CLIXML`, then `<Objs …><S S="Error">…_x000D__x000A_</S>…</Objs>`):
-/// Windows PowerShell 5.1 always, pwsh without `-OutputFormat Text` (`win::argv_for` passes
-/// it). Error strings stay as they are, warning, verbose and debug ones get the console's
-/// `WARNING: ` prefix, objects (progress, information) are dropped, and any other text (a
-/// native program's own stderr, which PowerShell leaves raw) is kept. Colour escapes (pwsh
-/// 7's error view writes them in either format) and carriage returns are removed.
+/// as CLIXML (`#< CLIXML`, then `<Objs …><S S="Error">…_x000D__x000A_</S>…</Objs>`), in
+/// Windows PowerShell 5.1 and pwsh alike (`win::argv_for`). Error strings stay as they are,
+/// warning, verbose and debug ones get the console's `WARNING: ` prefix, objects (progress,
+/// information) are dropped, and any other text (a native program's own stderr, which
+/// PowerShell leaves raw) is kept. Colour escapes (pwsh 7's error view writes them into its
+/// CLIXML strings too) and carriage returns are removed.
 #[cfg(any(windows, test))]
 fn powershell_stderr(s: &str) -> String {
     let text = if s.contains(CLIXML_HEADER) { from_clixml(s) } else { s.to_string() };
@@ -329,7 +329,8 @@ fn xml_unescape(s: &str) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
-        let decoded = rest.find(';').filter(|&e| e <= 10).and_then(|e| {
+        // A reference is short (`&#x10FFFF;`): look no further for its `;`.
+        let decoded = rest.as_bytes().iter().take(11).position(|&b| b == b';').and_then(|e| {
             let c = match &rest[1..e] {
                 "amp" => '&',
                 "lt" => '<',
@@ -533,17 +534,20 @@ mod win {
     }
 
     /// The PowerShell `ps` running `command` (`ps_script`).
-    /// - `-OutputFormat Text`: pwsh (6.2 and later) then writes its own errors to a
-    ///   redirected stderr as text. Without it, and always in Windows PowerShell 5.1 (which
-    ///   has no such exception), they are CLIXML there when the command came as
-    ///   `-EncodedCommand`; `readable_stderr` reads that. It is the default output format:
-    ///   nothing else changes.
+    /// - No `-OutputFormat`: started so (`-EncodedCommand`, not interactive) and with stderr
+    ///   redirected, both PowerShells write their own records (errors, warnings, verbose
+    ///   and debug lines, progress) to stderr as CLIXML, which `readable_stderr` reads, and
+    ///   stdout carries only the command's output. Given `-OutputFormat Text`, pwsh writes
+    ///   its errors as text instead, but its warning, verbose and debug lines, coloured, to
+    ///   stdout, where a version probe reads the version
+    ///   (`ConsoleHostUserInterface.WriteWarningLine`); Windows PowerShell 5.1 has no such
+    ///   exception.
     /// - Windows PowerShell's default execution policy (Restricted) blocks every script,
     ///   `npm.ps1` included, which PowerShell picks over `npm.cmd`: it gets pwsh's default,
     ///   RemoteSigned, for this process only (Group Policy still wins; pwsh keeps what the
     ///   user set).
     pub(super) fn argv_for(ps: &Path, command: &str) -> Vec<String> {
-        let mut argv = vec![ps.display().to_string(), "-NoLogo".into(), "-NoProfile".into(), "-OutputFormat".into(), "Text".into()];
+        let mut argv = vec![ps.display().to_string(), "-NoLogo".into(), "-NoProfile".into()];
         if !ps.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("pwsh")) {
             argv.extend(["-ExecutionPolicy".into(), "RemoteSigned".into()]);
         }
@@ -634,7 +638,8 @@ mod tests {
         r#"<S S="Error">_x001B_[31;1m_x001B_[31;1mCheck the spelling of the name, or if a path was included, verify that the path is correct and try again._x001B_[0m_x000A_</S>"#,
         "</Objs>"
     );
-    /// The same with `-OutputFormat Text`: plain text, colour escapes included.
+    /// The same as text (pwsh given `-OutputFormat Text`, which the run shell does not pass):
+    /// colour escapes included.
     const PWSH_NOT_FOUND_TEXT: &str = "\x1b[31;1mno-such-cmd-xyz: \x1b[31;1mThe term 'no-such-cmd-xyz' is not recognized as a name of a cmdlet, function, script file, or executable program.\x1b[0m\n\x1b[31;1m\x1b[31;1mCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\x1b[0m\n";
     const PWSH_NOT_FOUND: &str = "no-such-cmd-xyz: The term 'no-such-cmd-xyz' is not recognized as a name of a cmdlet, function, script file, or executable program.\nCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\n";
 
@@ -719,6 +724,19 @@ mod tests {
         assert_eq!(clixml_string("_xD83D_!"), "\u{FFFD}!");
     }
 
+    /// Reading stays linear in what a program wrote: an `&` looks no further than a
+    /// reference's length for its `;` (searching the whole rest took a minute here).
+    #[test]
+    fn powershell_stderr_reads_in_linear_time() {
+        let n = 1_000_000;
+        let objs = r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">"#;
+        let started = std::time::Instant::now();
+        let text = powershell_stderr(&format!("#< CLIXML\n{objs}<S S=\"Error\">{}&amp;;</S></Objs>", "&".repeat(n)));
+        assert_eq!(text, format!("{}&;\n", "&".repeat(n)));
+        assert_eq!(xml_unescape(&format!("{};", "&".repeat(n))).len(), n + 1);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_shells_and_quoting() {
@@ -740,7 +758,9 @@ mod tests {
     #[test]
     fn windows_shells_and_quoting() {
         let argv = run_argv("cargo run");
-        assert_eq!(argv[1..5], ["-NoLogo", "-NoProfile", "-OutputFormat", "Text"]);
+        assert_eq!(argv[1..3], ["-NoLogo", "-NoProfile"]);
+        // pwsh would write its warnings to stdout (`win::argv_for`).
+        assert!(!argv.iter().any(|a| a.eq_ignore_ascii_case("-OutputFormat")), "{argv:?}");
         assert_eq!(argv[argv.len() - 2], "-EncodedCommand");
         assert_eq!(argv[argv.len() - 1], encode_command(&ps_script("cargo run")));
         assert!(Path::new(&argv[0]).is_absolute() || argv[0] == "powershell.exe", "{}", argv[0]);
@@ -754,8 +774,8 @@ mod tests {
     }
 
     /// A failing command's message, as a stop command's or a version probe's error shows it,
-    /// is text in both PowerShells: Windows PowerShell 5.1 writes CLIXML to the pipe, pwsh
-    /// plain text (`-OutputFormat Text`) with colour escapes.
+    /// is text in both PowerShells, which write CLIXML to the pipe (pwsh with colour escapes
+    /// in it), and a warning stays off stdout, where a version probe reads the version.
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_powershell_errors_read_as_text() {
@@ -777,6 +797,10 @@ mod tests {
             let msg = out.message();
             assert_eq!(out.code, Some(1), "{}: {msg}", ps.display());
             assert!(words(&msg).contains("e & <y>") && !msg.contains("CLIXML") && !msg.contains("&lt;") && !msg.contains('\u{1b}'), "{}: {msg:?}", ps.display());
+            let out = run("Write-Warning 'w & <x>'; Write-Verbose 'loud' -Verbose; Write-Output 'v1.2.3'").await.unwrap();
+            assert_eq!((out.code, out.stdout.trim()), (Some(0), "v1.2.3"), "{}: {out:?}", ps.display());
+            let lines: Vec<&str> = out.stderr.lines().collect();
+            assert!(lines.contains(&"WARNING: w & <x>") && lines.contains(&"VERBOSE: loud") && !out.stderr.contains("CLIXML"), "{}: {out:?}", ps.display());
         }
     }
 }

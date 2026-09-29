@@ -300,13 +300,14 @@ Windows PowerShell; there is no `run_shell`.) Add `WT_SESSION` and `WT_PROFILE_I
 stderr redirected (a service's stop command, a local version or health probe: `run_cmd`),
 PowerShell writes its own error, warning, verbose, debug, progress and information records
 to stderr as CLIXML (`#< CLIXML` then `<Objs …><S S="Error">…_x000D__x000A_</S>…`),
-assuming PowerShell reads it. pwsh 6.2 and later skip that when `-OutputFormat` is given, so
-the run shell passes `-OutputFormat Text` (the default format: nothing else changes); Windows
-PowerShell 5.1 has no such exception. `os::shell::readable_stderr` turns CLIXML back into
-what the console would show (error lines as they are, `WARNING: `… prefixes, records that
-are objects dropped, a native program's raw stderr kept) and drops colour escapes, which
-pwsh 7's error view writes on a pipe too. Terminals are unaffected: their stderr is the
-console.
+assuming PowerShell reads it. `os::shell::readable_stderr` turns CLIXML back into what the
+console would show (error lines as they are, `WARNING: `… prefixes, records that are objects
+dropped, a native program's raw stderr kept) and drops the colour escapes pwsh 7's error
+view puts in it. The run shell passes no `-OutputFormat`: pwsh 6.2 and later given
+`-OutputFormat Text` write errors as text, but warning, verbose and debug lines, coloured,
+to stdout, where a version probe reads the version (Windows PowerShell 5.1 has no such
+exception). Stdout thus carries only the command's output in both PowerShells. Terminals
+are unaffected: their stderr is the console.
 
 **Detected commands.** Detection writes POSIX forms (`.venv/bin/python`, `python3`, `cmake
 --build … && ./bin`, `cd dir && ./x.sh`), and the `health.via_host` probe is `curl -o
