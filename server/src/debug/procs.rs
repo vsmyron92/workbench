@@ -144,7 +144,16 @@ mod tests {
     #[test]
     fn lists_own_processes_with_a_child() {
         let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
-        let l = list(Path::new("/proc"));
+        // `spawn` can return a moment before the kernel renames the child from our thread's
+        // name to `sleep` (exec closes the status pipe first), so wait for the name.
+        let mut l = list(Path::new("/proc"));
+        for _ in 0..100 {
+            if l.processes.iter().any(|p| p.pid == child.id() && p.name == "sleep") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            l = list(Path::new("/proc"));
+        }
         let found = l.processes.iter().find(|p| p.pid == child.id());
         let _ = child.kill();
         let _ = child.wait();
