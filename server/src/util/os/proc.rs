@@ -77,7 +77,7 @@ impl ProcGroup {
     }
 
     /// The pids in the group, the leader included while it runs (Unix: scans `/proc`).
-    #[allow(dead_code)] // for the terminals' port (docs/windows-port.md §1.F)
+    #[cfg_attr(unix, allow(dead_code))] // Windows: a terminal's session (`os::session`)
     pub fn members(&self) -> Vec<u32> {
         self.0.members()
     }

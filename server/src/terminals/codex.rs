@@ -17,11 +17,12 @@
 //!
 //! Which rollout belongs to which hosted session: candidates are files created after the
 //! launch whose `session_meta` names the session's cwd. The file the session's own
-//! processes hold open (`/proc/<pid>/fd`) is its file; without that evidence a candidate
-//! is taken only when it is the only one, no other hosted Codex session in that cwd is
-//! still waiting for its id, and nothing outside the waiting sessions holds it open or
-//! runs Codex in that folder (`held_elsewhere`, `pty::cli_running_in`). Two sessions
-//! sharing a cwd are never guessed, and neither is a Codex outside Workbench.
+//! processes hold open (`/proc/<pid>/fd`; on Windows the Restart Manager) is its file;
+//! without that evidence a candidate is taken only when it is the only one, no other hosted
+//! Codex session in that cwd is still waiting for its id, and nothing outside the waiting
+//! sessions holds it open or runs Codex in that folder (`held_elsewhere`,
+//! `pty::cli_running_in`). Two sessions sharing a cwd are never guessed, and neither is a
+//! Codex outside Workbench.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Read, Seek, SeekFrom};
@@ -317,14 +318,10 @@ pub struct Candidate {
 /// Slack for clocks and file timestamps.
 const LAUNCH_SLACK_MS: i64 = 2000;
 
-fn same_dir(a: &str, b: &str) -> bool {
-    a.trim_end_matches('/') == b.trim_end_matches('/')
-}
-
 /// Whether `c` fits `p` at all (cwd, time, kind of session).
 fn fits(p: &Pending, c: &Candidate) -> bool {
     interactive(&c.meta)
-        && same_dir(&c.meta.cwd, &p.cwd)
+        && crate::util::os::path::same_dir(&c.meta.cwd, &p.cwd)
         && c.created_at >= p.launched_at - LAUNCH_SLACK_MS
         && c.meta.forked_from == p.fork_of
 }
@@ -336,7 +333,8 @@ pub enum Choice<'a> {
     Certain(&'a Candidate),
     /// The only fitting file none of the waiting sessions holds, while no other hosted
     /// session there waits for one. It is `me`'s only if nothing outside the hosted
-    /// sessions has it open or runs Codex in that folder (the caller checks `/proc`).
+    /// sessions has it open or runs Codex in that folder (the caller checks, through
+    /// `util::os::session`).
     Unproven(&'a Candidate),
     Unknown,
 }
@@ -354,7 +352,7 @@ pub fn choose<'a>(me: &Pending, pending: &[Pending], candidates: &'a [Candidate]
     // Without that evidence: the only candidate no waiting session holds, and nobody else
     // in this cwd (and of the same launch kind) is waiting for one.
     let free: Vec<&&Candidate> = fitting.iter().filter(|c| c.holders.is_empty()).collect();
-    let rivals = pending.iter().filter(|o| o.terminal_id != me.terminal_id && same_dir(&o.cwd, &me.cwd) && o.fork_of == me.fork_of).count();
+    let rivals = pending.iter().filter(|o| o.terminal_id != me.terminal_id && crate::util::os::path::same_dir(&o.cwd, &me.cwd) && o.fork_of == me.fork_of).count();
     match (free.as_slice(), rivals) {
         ([only], 0) => Choice::Unproven(only),
         _ => Choice::Unknown,
@@ -362,13 +360,11 @@ pub fn choose<'a>(me: &Pending, pending: &[Pending], candidates: &'a [Candidate]
 }
 
 /// Whether a process outside the process sessions `ours` holds `path` open (blocking;
-/// reads every readable `/proc/<pid>/fd`). A rollout another Codex keeps open (one in a
-/// terminal outside Workbench, an editor extension) is that session's, never ours.
+/// reads every readable `/proc/<pid>/fd`, on Windows asks the Restart Manager). A rollout
+/// another Codex keeps open (one in a terminal outside Workbench, an editor extension) is
+/// that session's, never ours.
 pub fn held_elsewhere(path: &Path, ours: &HashSet<i32>) -> bool {
-    let want = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    super::pty::processes().into_iter().filter(|(_, sid)| !ours.contains(sid)).any(|(pid, _)| {
-        std::fs::read_dir(format!("/proc/{pid}/fd")).is_ok_and(|rd| rd.flatten().any(|fd| std::fs::read_link(fd.path()).is_ok_and(|t| t == want)))
-    })
+    crate::util::os::session::held_outside(path, ours)
 }
 
 /// Date folders to look in for sessions started at `since` (local time) until now.
@@ -441,29 +437,17 @@ pub fn recent_candidates(home: &Path, since_ms: i64) -> Vec<Candidate> {
 }
 
 /// Which of `paths` the processes of each session (`(terminal, session id = leader
-/// pid)`) hold open (blocking; reads `/proc/<pid>/fd` of our own children). Keys are the
-/// given paths.
+/// pid)`) hold open (blocking; reads `/proc/<pid>/fd` of our own children, on Windows asks
+/// the Restart Manager). Keys are the given paths.
 pub fn holders(sessions: &[(String, i32)], paths: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
-    // `/proc/<pid>/fd` links are canonical paths.
-    let wanted: HashMap<PathBuf, &PathBuf> = paths.iter().map(|p| (std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()), p)).collect();
+    let sids: Vec<i32> = sessions.iter().map(|(_, sid)| *sid).collect();
+    let held = crate::util::os::session::holders(&sids, paths);
     let mut out: HashMap<PathBuf, Vec<String>> = HashMap::new();
-    if wanted.is_empty() {
-        return out;
-    }
-    for (terminal, sid) in sessions {
-        if *sid <= 1 {
-            continue;
-        }
-        for (pid, _) in super::pty::session_members(*sid) {
-            let Ok(rd) = std::fs::read_dir(format!("/proc/{pid}/fd")) else { continue };
-            for fd in rd.flatten() {
-                let Ok(target) = std::fs::read_link(fd.path()) else { continue };
-                if let Some(orig) = wanted.get(&target) {
-                    let v = out.entry((*orig).clone()).or_default();
-                    if !v.contains(terminal) {
-                        v.push(terminal.clone());
-                    }
-                }
+    for (path, by) in held {
+        let v = out.entry(path).or_default();
+        for (terminal, sid) in sessions {
+            if by.contains(sid) && !v.contains(terminal) {
+                v.push(terminal.clone());
             }
         }
     }
@@ -619,11 +603,8 @@ const SCAN_MAX: usize = 3000;
 impl HistoryCache {
     /// Sessions whose cwd is `root` or inside it, newest first: `(summary, mtime ms, size)`.
     pub fn list(&mut self, home: &Path, root: &Path, limit: usize) -> Vec<(Summary, i64, u64)> {
-        let root_s = root.to_string_lossy().trim_end_matches('/').to_string();
-        let inside = |cwd: &str| {
-            let c = cwd.trim_end_matches('/');
-            c == root_s || c.starts_with(&format!("{root_s}/"))
-        };
+        let root_s = root.to_string_lossy();
+        let inside = |cwd: &str| crate::util::os::path::dir_within(cwd, &root_s);
         let mut files: Vec<(PathBuf, SystemTime, u64)> = vec![];
         for day in sorted_day_dirs(home, 400) {
             let Ok(rd) = std::fs::read_dir(&day) else { continue };
@@ -899,6 +880,9 @@ mod tests {
         }
     }
 
+    /// Unix: this test process stands in for a session. The Windows counterpart (a job and
+    /// the Restart Manager) is in `util::os::session`.
+    #[cfg(unix)]
     #[test]
     fn open_files_of_our_processes_are_found() {
         let dir = tempfile::tempdir().unwrap();

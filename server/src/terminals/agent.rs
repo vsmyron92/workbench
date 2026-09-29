@@ -440,10 +440,18 @@ fn missing_command(p: &Provider) -> ApiError {
     ApiError::not_configured(format!("{} ({:?}) was not found. Install it{hint}, or set {key} in config.toml", p.label, p.command))
 }
 
-/// An initial prompt goes into argv unless it is huge or must not be submitted.
-fn split_prompt(prompt: Option<String>, submit: bool) -> (Option<String>, Option<String>) {
+/// Whether `command` runs through cmd.exe, which parses its arguments again: a batch file
+/// that is not an npm shim (Windows only; `util::os::exe::launch`).
+fn is_batch(command: &Path) -> bool {
+    util::os::exe::classify(command.to_path_buf()).kind == util::os::exe::Kind::Batch
+}
+
+/// An initial prompt goes into argv unless it is huge or must not be submitted, or the
+/// command is a batch file (`batch`) and cmd.exe could read the prompt as commands of its
+/// own (`util::os::exe::batch_args_safe`): it is pasted then.
+fn split_prompt(prompt: Option<String>, submit: bool, batch: bool) -> (Option<String>, Option<String>) {
     match prompt {
-        Some(p) if p.len() <= MAX_ARGV_PROMPT && submit => (Some(p), None),
+        Some(p) if p.len() <= MAX_ARGV_PROMPT && submit && (!batch || util::os::exe::batch_args_safe(&[&p])) => (Some(p), None),
         Some(p) => (None, Some(p)),
         None => (None, None),
     }
@@ -820,7 +828,7 @@ impl Terminals {
         }
         env.push(("WORKBENCH_AGENT_TOKEN".into(), Some(token)));
 
-        let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt);
+        let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt, is_batch(&command));
         let mut argv = build_argv(&command.to_string_lossy(), &session, &settings_path, &mcp_path, &launch, argv_prompt.as_deref());
         // Extra arguments from `[agents.providers.claude] args` go before the prompt.
         if !provider.args.is_empty() {
@@ -915,7 +923,8 @@ impl Terminals {
         crate::devcontainer::write_into(&t, &mcp_path, &serde_json::to_vec_pretty(&mcp)?).await.map_err(ApiError::conflict)?;
         env.push(("WORKBENCH_AGENT_TOKEN".into(), Some(token)));
 
-        let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt);
+        // The command runs in the container, through `docker exec`.
+        let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt, false);
         let mut argv = build_argv(&command.to_string_lossy(), &session, Path::new(&settings_path), Path::new(&mcp_path), &launch, argv_prompt.as_deref());
         if !provider.args.is_empty() {
             let at = argv.iter().position(|a| a == "--").unwrap_or(argv.len());
@@ -989,7 +998,7 @@ impl Terminals {
         // The MCP bearer token is read from this variable by Codex (`bearer_token_env_var`).
         env.push(("WORKBENCH_AGENT_TOKEN".into(), Some(token)));
         let mcp_url = format!("{}/mcp", state.local_base_url());
-        let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt);
+        let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt, is_batch(&command));
         let args = LaunchArgs {
             model: launch.model.as_deref(),
             effort: launch.effort.as_deref(),
@@ -1157,7 +1166,16 @@ impl Terminals {
             }
         }
         let cwd = std::env::temp_dir();
-        match util::proc::run(&command.to_string_lossy(), &["--help"], &cwd, Duration::from_secs(15)).await {
+        let help = match util::os::exe::resolve(&command.to_string_lossy()) {
+            // Windows: an npm shim runs as node and its script, not through cmd.exe.
+            Some(r) => {
+                let mut cmd = util::os::exe::command(&r);
+                cmd.arg("--help").current_dir(&cwd);
+                util::proc::run_cmd(cmd, Duration::from_secs(15)).await
+            }
+            None => util::proc::run(&command.to_string_lossy(), &["--help"], &cwd, Duration::from_secs(15)).await,
+        };
+        match help {
             Ok(out) if out.ok() => {
                 let f = providers::CodexFeatures::from_help(&out.stdout);
                 if let Some(t) = mtime {
@@ -1233,7 +1251,7 @@ impl Terminals {
         let (home, foreign) = (w.home.clone(), w.foreign.clone());
         let (found, not_ours) = tokio::task::spawn_blocking(move || {
             let mut candidates = codex::recent_candidates(&home, me.launched_at);
-            candidates.retain(|c| c.meta.cwd.trim_end_matches('/') == me.cwd.trim_end_matches('/') && !foreign.contains(&c.path));
+            candidates.retain(|c| util::os::path::same_dir(&c.meta.cwd, &me.cwd) && !foreign.contains(&c.path));
             if candidates.is_empty() {
                 return (None, None);
             }
@@ -1277,7 +1295,7 @@ impl Terminals {
         let cwd = waiting.iter().find(|(p, _, _)| p.terminal_id == entry.id)?.0.cwd.clone();
         let waiting: Vec<(String, Arc<HashSet<String>>, Arc<Entry>)> = waiting
             .into_iter()
-            .filter(|(p, _, _)| p.cwd.trim_end_matches('/') == cwd.trim_end_matches('/'))
+            .filter(|(p, _, _)| util::os::path::same_dir(&p.cwd, &cwd))
             .filter_map(|(p, _, e)| {
                 let known = e.rt.lock().kimi_known.clone()?;
                 Some((p.terminal_id, known, e))
@@ -2187,14 +2205,9 @@ impl Terminals {
             ProviderKind::Kimi => {
                 let home = kimi::kimi_home(env_dir("KIMI_CODE_HOME").as_deref());
                 tokio::task::spawn_blocking(move || {
-                    let root_s = root.to_string_lossy().trim_end_matches('/').to_string();
-                    let entries: Vec<kimi::IndexEntry> = kimi::load_index(&home)
-                        .into_iter()
-                        .filter(|e| {
-                            let w = e.work_dir.trim_end_matches('/');
-                            w == root_s || w.starts_with(&format!("{root_s}/"))
-                        })
-                        .collect();
+                    let root_s = root.to_string_lossy();
+                    let entries: Vec<kimi::IndexEntry> =
+                        kimi::load_index(&home).into_iter().filter(|e| util::os::path::dir_within(&e.work_dir, &root_s)).collect();
                     // Newest entries last in the index; read at most a few hundred.
                     let mut rows: Vec<HistoryEntry> = entries
                         .iter()

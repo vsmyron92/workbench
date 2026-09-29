@@ -97,10 +97,6 @@ pub fn load_index(home: &Path) -> Vec<IndexEntry> {
     }
 }
 
-fn same_dir(a: &str, b: &str) -> bool {
-    a.trim_end_matches('/') == b.trim_end_matches('/')
-}
-
 /// A hosted Kimi session waiting for its id (all of one cwd and Kimi home).
 #[derive(Debug, Clone)]
 pub struct Waiting {
@@ -132,7 +128,7 @@ pub enum Evidence {
 pub fn assign(cwd: &str, entries: &[IndexEntry], waiting: &[Waiting], claimed: &HashSet<String>) -> HashMap<String, (String, Evidence)> {
     let fresh: Vec<&str> = entries
         .iter()
-        .filter(|e| same_dir(&e.work_dir, cwd) && !claimed.contains(&e.session_id))
+        .filter(|e| crate::util::os::path::same_dir(&e.work_dir, cwd) && !claimed.contains(&e.session_id))
         .map(|e| e.session_id.as_str())
         .collect();
     let mut possible: HashMap<&str, Vec<&str>> =

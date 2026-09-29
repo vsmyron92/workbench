@@ -860,7 +860,7 @@ impl Terminals {
         if sids.is_empty() {
             return;
         }
-        futures::future::join_all(sids.iter().map(|sid| pty::kill_session(*sid, KILL_GRACE, || true))).await;
+        futures::future::join_all(sids.iter().map(|sid| util::os::session::kill(*sid, KILL_GRACE, || true))).await;
         entry.lingering.lock().retain(|(sid, _)| !sids.contains(sid));
         self.note_lingering(entry);
     }
@@ -1133,7 +1133,7 @@ impl Terminals {
             (PathBuf::from(&r.info.cwd), r.info.argv.clone())
         };
         let cwd = if cwd.is_dir() { cwd } else { dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")) };
-        let argv = if argv.is_empty() { util::os::shell::interactive() } else { argv };
+        let argv = if argv.is_empty() { shell_argv(state) } else { argv };
         pty::LaunchSpec { argv, cwd, env: base_env(state, &entry.id), cols: 0, rows: 0, redact: vec![] }
     }
 
@@ -1172,7 +1172,7 @@ impl Terminals {
         let (argv, meta) = match &target {
             // The container user's login shell.
             Some(t) => (vec![t.shell.clone(), "-l".into()], json!({ "inContainer": true, "container": t.describe() })),
-            None => (util::os::shell::interactive(), json!({})),
+            None => (shell_argv(state), json!({})),
         };
         self.spawn(state, SpawnSpec { kind: TerminalKind::Shell, title, project_id, cwd, argv, env: vec![], cols, rows, meta }).await
     }
@@ -1245,6 +1245,21 @@ pub(crate) fn resolve_cwd(base: &Path, cwd: Option<&str>) -> Result<PathBuf, Api
     Ok(dir)
 }
 
+/// The shell new terminals run: `[terminals] shell` (a leading `~` expanded), else the
+/// user's (`util::os::shell::interactive`).
+fn shell_argv(state: &AppState) -> Vec<String> {
+    let mut argv = state.config.read().terminals.shell.clone();
+    match argv.first_mut() {
+        Some(program) if !program.trim().is_empty() => {
+            if util::os::path::home_relative(program).is_some() {
+                *program = crate::config::expand_tilde(program).display().to_string();
+            }
+            argv
+        }
+        _ => util::os::shell::interactive(),
+    }
+}
+
 /// Variables describing whatever terminal Workbench itself was started from; wrong for ours.
 const PARENT_TERMINAL_VARS: &[&str] = &[
     "TERM_PROGRAM",
@@ -1263,6 +1278,9 @@ const PARENT_TERMINAL_VARS: &[&str] = &[
     "COLUMNS",
     "LINES",
 ];
+
+/// Windows Terminal's, likewise (only on Windows: elsewhere these names are not its).
+const PARENT_WINDOWS_TERMINAL_VARS: &[&str] = if cfg!(windows) { &["WT_SESSION", "WT_PROFILE_ID"] } else { &[] };
 
 /// Variables Codex sets for the commands it runs: they describe the Codex session
 /// Workbench itself may have been started from, never ours.
@@ -1286,7 +1304,7 @@ pub(crate) fn base_env(state: &AppState, id: &str) -> Vec<(String, Option<String
         ("WORKBENCH_URL".into(), Some(state.local_base_url())),
         ("WORKBENCH_TERMINAL_ID".into(), Some(id.to_string())),
     ];
-    for k in PARENT_TERMINAL_VARS.iter().chain(PARENT_AGENT_VARS) {
+    for k in PARENT_TERMINAL_VARS.iter().chain(PARENT_WINDOWS_TERMINAL_VARS).chain(PARENT_AGENT_VARS) {
         env.push((k.to_string(), None));
     }
     for (k, _) in std::env::vars_os() {
@@ -1390,7 +1408,7 @@ pub async fn shutdown(state: &AppState) {
     .await;
     let kills = running.iter().map(|(_, p)| p.kill(Duration::from_secs(2)));
     let lingering: Vec<i32> = t.all().iter().flat_map(|e| e.lingering.lock().iter().map(|(sid, _)| *sid).collect::<Vec<_>>()).collect();
-    let leftovers = lingering.iter().map(|sid| pty::kill_session(*sid, Duration::from_secs(2), || true));
+    let leftovers = lingering.iter().map(|sid| util::os::session::kill(*sid, Duration::from_secs(2), || true));
     let _ = tokio::time::timeout(
         Duration::from_secs(4),
         futures::future::join(futures::future::join_all(kills), futures::future::join_all(leftovers)),
@@ -1452,7 +1470,7 @@ async fn watch_lingering(state: AppState, entry: Arc<Entry>, sid: i32) {
     // Children commonly need a moment to notice their parent is gone.
     tokio::time::sleep(Duration::from_secs(1)).await;
     loop {
-        let n = tokio::task::spawn_blocking(move || pty::session_members(sid).len()).await.unwrap_or(0) as u32;
+        let n = tokio::task::spawn_blocking(move || util::os::session::members(sid).len()).await.unwrap_or(0) as u32;
         let t = &state.terminals;
         let known = t.is_registered(&entry);
         {

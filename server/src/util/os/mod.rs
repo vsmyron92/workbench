@@ -10,6 +10,7 @@ pub mod net;
 pub mod path;
 pub mod perm;
 pub mod proc;
+pub mod session;
 pub mod shell;
 #[cfg(windows)]
 mod win32;
