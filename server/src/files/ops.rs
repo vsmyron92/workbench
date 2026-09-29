@@ -4,9 +4,7 @@
 //! create files exclusively, and deletes go to the trash. The project root and
 //! anything inside `.git` are off limits.
 
-use std::ffi::CString;
 use std::io::ErrorKind;
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use axum::Json;
@@ -17,9 +15,10 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
-use super::{Resolved, basename, blocking, in_git_dir, join_rel, resolve, resolve_entry, trash, valid_name};
+use super::{Resolved, basename, blocking, in_git_dir, join_rel, resolve, resolve_entry, valid_name};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::util::os::fs::{copy_symlink, rename_noreplace, trash};
 use crate::util::os::perm;
 
 /// Largest single upload.
@@ -44,7 +43,7 @@ pub struct OpResult {
     pub ok: bool,
     /// The resulting path (the new one for rename/copy).
     pub path: String,
-    /// For deletes: `gio` or `trash-spec`.
+    /// For deletes: `gio`, `trash-spec` or `recycle-bin`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trashed_with: Option<&'static str>,
 }
@@ -149,7 +148,7 @@ pub async fn op(
             if std::fs::symlink_metadata(&src.abs).is_err() {
                 return Err(ApiError::not_found(format!("{} does not exist", src.rel)));
             }
-            let with = trash::trash(&src.abs).await?;
+            let with = trash(&src.abs).await?;
             Ok(Json(OpResult { ok: true, path: src.rel, trashed_with: Some(with) }))
         }
         other => Err(ApiError::bad_request(format!("unknown op {other:?}"))),
@@ -164,29 +163,6 @@ fn map_exists(e: std::io::Error, rel: &str) -> ApiError {
     }
 }
 
-/// `rename(2)` that fails with `AlreadyExists` instead of replacing the destination.
-pub fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
-    let f = CString::new(from.as_os_str().as_bytes())?;
-    let t = CString::new(to.as_os_str().as_bytes())?;
-    // SAFETY: both pointers are valid NUL-terminated strings for the call's duration.
-    let rc = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
-    if rc == 0 {
-        return Ok(());
-    }
-    let err = std::io::Error::last_os_error();
-    match err.raw_os_error() {
-        // Filesystems without RENAME_NOREPLACE: check, then rename (small race, still never silently).
-        Some(libc::EINVAL) | Some(libc::ENOSYS) => {
-            if std::fs::symlink_metadata(to).is_ok() {
-                return Err(ErrorKind::AlreadyExists.into());
-            }
-            std::fs::rename(from, to)
-        }
-        Some(libc::EXDEV) => Err(std::io::Error::other("cannot move across filesystems")),
-        _ => Err(err),
-    }
-}
-
 /// Copy a file, symlink or directory tree without overwriting anything.
 fn copy_recursive(from: &Path, to: &Path, budget: &mut usize) -> std::io::Result<()> {
     if *budget == 0 {
@@ -196,7 +172,7 @@ fn copy_recursive(from: &Path, to: &Path, budget: &mut usize) -> std::io::Result
     let md = std::fs::symlink_metadata(from)?;
     let ft = md.file_type();
     if ft.is_symlink() {
-        std::os::unix::fs::symlink(std::fs::read_link(from)?, to)?;
+        copy_symlink(from, to)?;
     } else if ft.is_dir() {
         std::fs::create_dir(to)?;
         for ent in std::fs::read_dir(from)? {
@@ -334,25 +310,13 @@ mod tests {
     }
 
     #[test]
-    fn rename_never_replaces() {
-        let dir = tempfile::tempdir().unwrap();
-        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
-        std::fs::write(&a, "a").unwrap();
-        std::fs::write(&b, "b").unwrap();
-        assert_eq!(rename_noreplace(&a, &b).unwrap_err().kind(), ErrorKind::AlreadyExists);
-        assert_eq!(std::fs::read_to_string(&b).unwrap(), "b");
-        rename_noreplace(&a, &dir.path().join("c")).unwrap();
-        assert!(!a.exists());
-    }
-
-    #[test]
     fn copies_trees_without_overwriting() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         std::fs::create_dir_all(src.join("inner")).unwrap();
         std::fs::write(src.join("inner/x.sh"), "echo").unwrap();
         perm::apply(&src.join("inner/x.sh"), 0o755).unwrap();
-        std::os::unix::fs::symlink("inner/x.sh", src.join("link")).unwrap();
+        crate::util::os::fs::symlink("inner/x.sh", src.join("link")).unwrap();
         let mut budget = 100;
         copy_recursive(&src, &dir.path().join("dst"), &mut budget).unwrap();
         let x = dir.path().join("dst/inner/x.sh");

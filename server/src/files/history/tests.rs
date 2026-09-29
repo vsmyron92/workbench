@@ -386,7 +386,7 @@ fn new_folders_stay_within_the_batch_budget() {
     for i in 0..(super::MAX_BATCH + 1) {
         std::fs::write(root.join(format!("big/f{i}.txt")), "x").unwrap();
     }
-    std::os::unix::fs::symlink("/etc", root.join("small/etc")).unwrap();
+    crate::util::os::fs::symlink("/etc", root.join("small/etc")).unwrap();
     let file: crate::config::ProjectFile = toml::from_str("schema = 1\n[project]\nid = \"p\"\nname = \"p\"\nroot = \".\"\n").unwrap();
     let project = crate::projects::Project {
         id: "p".into(),

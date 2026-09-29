@@ -57,7 +57,7 @@ export interface WriteResult {
 export interface OpResult {
   ok: boolean
   path: string
-  trashedWith?: 'gio' | 'trash-spec'
+  trashedWith?: 'gio' | 'trash-spec' | 'recycle-bin'
 }
 
 export interface UploadResult {

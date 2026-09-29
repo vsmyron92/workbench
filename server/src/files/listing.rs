@@ -194,8 +194,8 @@ mod tests {
         std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
         std::fs::write(root.join("README.md"), "hi").unwrap();
         std::fs::write(root.join(".env"), "SECRET=1").unwrap();
-        std::os::unix::fs::symlink(root.join("src"), root.join("src-link")).unwrap();
-        std::os::unix::fs::symlink("/etc", root.join("etc-link")).unwrap();
+        crate::util::os::fs::symlink(root.join("src"), root.join("src-link")).unwrap();
+        crate::util::os::fs::symlink("/etc", root.join("etc-link")).unwrap();
 
         let l = list_dir(root, root, "", &Sensitive::defaults()).unwrap();
         let names: Vec<_> = l.entries.iter().map(|e| e.name.as_str()).collect();

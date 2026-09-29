@@ -433,7 +433,7 @@ fn escapes_through_links_parents_and_features_are_flagged() {
     ]);
     let root = d.path();
     // A link inside the project to the host's root.
-    std::os::unix::fs::symlink("/", root.join("rootlink")).unwrap();
+    crate::util::os::fs::symlink("/", root.join("rootlink")).unwrap();
     let c = config::load(root, ".devcontainer/devcontainer.json", LocalEnv::Keep).unwrap();
     let p = plan::build(root, c.clone(), b"", &engines(true, false));
     let danger = |needle: &str| p.risks.iter().any(|r| r.level == Level::Danger && r.item.contains(needle));
@@ -455,7 +455,7 @@ fn escapes_through_links_parents_and_features_are_flagged() {
 fn discovery_ignores_escapes() {
     let outside = project(&[("devcontainer.json", "{\"image\":\"x\"}")]);
     let d = project(&[(".devcontainer/a/devcontainer.json", "{\"image\":\"a\"}"), (".devcontainer/b/devcontainer.json", "{\"image\":\"b\"}")]);
-    std::os::unix::fs::symlink(outside.path(), d.path().join(".devcontainer/zz")).unwrap();
+    crate::util::os::fs::symlink(outside.path(), d.path().join(".devcontainer/zz")).unwrap();
     assert_eq!(config::discover(d.path()), vec![".devcontainer/a/devcontainer.json", ".devcontainer/b/devcontainer.json"]);
     assert!(!config::is_config(d.path(), ".devcontainer/zz/devcontainer.json"));
     assert!(config::load(d.path(), "../x/devcontainer.json", LocalEnv::Keep).is_err());

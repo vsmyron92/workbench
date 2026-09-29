@@ -166,6 +166,11 @@ Windows-only behaviour is always `cfg(windows)`.
   `--app=`, else `ShellExecuteW`; never `cmd /c start` (cmd interprets `&` in a URL).
 - Trash (`files/trash.rs`, `git/ops.rs:182-185`) → `SHFileOperationW(FO_DELETE,
   FOF_ALLOWUNDO | …)`.
+  - What the bin will not take is refused first: no bin on the drive, the bin turned off, a
+    file larger than the bin.
+  - An item Windows still cannot recycle (a folder larger than the bin) gets Windows' question
+    on the desktop, and the request stops waiting after 60 s. Later: `IFileOperation` with a
+    progress sink that refuses the item instead.
 - `notify.rs:198` (`notify-send`) reports `desktop: "unavailable"` in the first version.
 
 **M. Service:** `platform/service.rs` (systemd unit, `.desktop` file, `systemctl`) gets a

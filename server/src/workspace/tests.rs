@@ -262,8 +262,8 @@ async fn imports_never_write_through_a_planted_symlink() {
     let folder = std::path::PathBuf::from(created["folder"].as_str().unwrap());
     let outside = env._dir.path().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
-    std::os::unix::fs::symlink(outside.join("notes.md"), folder.join("notes.md")).unwrap();
-    std::os::unix::fs::symlink(outside.join("newdir"), folder.join("docs")).unwrap();
+    crate::util::os::fs::symlink(outside.join("notes.md"), folder.join("notes.md")).unwrap();
+    crate::util::os::fs::symlink(outside.join("newdir"), folder.join("docs")).unwrap();
 
     let notes = env.project.join("docs/notes.md").display().to_string();
     let step = env.tool("workspace_add_step", &session(), json!({ "cardId": "planted", "name": "Notes", "path": notes })).await.unwrap();
@@ -428,7 +428,7 @@ async fn view_serves_sandboxed_content_inside_the_grant_only() {
         assert_eq!(h["content-security-policy"], super::view::CSP, "{path}");
     }
     // A symlink out of the card folder is not followed.
-    std::os::unix::fs::symlink("/etc", env.project.join("workspace/2026-09-15_my-dream-game/etc")).unwrap();
+    crate::util::os::fs::symlink("/etc", env.project.join("workspace/2026-09-15_my-dream-game/etc")).unwrap();
     let (s, _, _) = env.call(Method::GET, &format!("{base}etc/hostname"), None).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
 }

@@ -31,7 +31,6 @@ mod search;
 mod sensitive;
 mod todo;
 mod tools;
-mod trash;
 mod watch;
 
 use std::collections::HashMap;

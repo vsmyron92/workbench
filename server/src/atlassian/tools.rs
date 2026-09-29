@@ -885,7 +885,7 @@ mod tests {
         std::fs::write(root.join("config/secrets/db.txt"), "pw").unwrap();
         std::fs::write(root.join("docs/real.txt"), "fine").unwrap();
         std::fs::write(&outside, "outside").unwrap();
-        let link = |target: &str, at: &str| std::os::unix::fs::symlink(target, root.join(at)).unwrap();
+        let link = |target: &str, at: &str| crate::util::os::fs::symlink(target, root.join(at)).unwrap();
         link("../.env", "docs/notes.txt");
         link("../.git", "docs/repo");
         link("../config/secrets", "docs/cfg");
