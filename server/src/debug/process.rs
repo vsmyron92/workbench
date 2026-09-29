@@ -148,6 +148,8 @@ pub async fn spawn(adapter: &Adapter, session_id: &str, dir: AdapterDir<'_>, tar
         None => adapter.args.clone(),
     };
     args.extend(extra_args.iter().cloned());
+    // The Python launcher's `-3` (debugpy through `py` on Windows) goes before them all.
+    args.splice(0..0, super::adapters::launcher_args(adapter));
     let mut cmd;
     let mut inside = None;
     match target {
@@ -179,8 +181,8 @@ pub async fn spawn(adapter: &Adapter, session_id: &str, dir: AdapterDir<'_>, tar
         }
         None => {
             let r = crate::util::os::exe::resolve(&adapter.command).ok_or_else(|| format!("`{}` was not found on PATH. {}", adapter.command, adapter.install_hint))?;
-            cmd = Command::new(&r.program);
-            cmd.args(&r.prefix_args).args(&args);
+            cmd = crate::util::os::exe::command(&r);
+            cmd.args(&args);
             for (k, v) in &adapter.env {
                 cmd.env(k, v);
             }

@@ -120,12 +120,14 @@ pub fn launch(project: &Project, spec: &ServerSpec, placement: Placement) -> Res
     let display = std::iter::once(command).chain(spec.args.iter().cloned()).collect::<Vec<_>>().join(" ");
     match placement {
         Placement::Host(path) => {
-            // An npm shim (Windows) runs as node and its script, not through cmd.exe.
+            // An npm shim (Windows) runs as node and its script, not through cmd.exe; another
+            // batch file's cmd.exe never takes a program from the project (`child_env`).
             let r = crate::util::os::exe::classify(path);
+            let own = crate::util::os::exe::child_env().iter().map(|(k, v)| (k.to_string(), Some(v.to_string())));
             Ok(Launch {
                 program: r.program.to_string_lossy().into_owned(),
                 args: r.prefix_args.into_iter().chain(spec.args.iter().cloned()).collect(),
-                env: host_env(spec),
+                env: own.chain(host_env(spec)).collect(),
                 cwd: project.root.clone(),
                 map: PathMap::host(),
                 origin: Origin::Host,

@@ -167,22 +167,17 @@ fn preset(id: &str) -> Option<Adapter> {
             "lldb",
             "Download CodeLLDB from github.com/vadimcn/codelldb/releases, unpack the .vsix (a zip) and set [debug.adapters.codelldb] command to its extension/adapter/codelldb.",
         ),
-        "debugpy" => {
-            // `python3`; on Windows `python`, or `py -3` (its `-3` goes first in `args`).
-            let python = crate::util::os::exe::python();
-            let mut a = base(
-                AdapterKind::Debugpy,
-                "debugpy",
-                &python[0],
-                &["-m", "debugpy.adapter"],
-                &["python"],
-                Transport::Stdio,
-                "debugpy",
-                "Install debugpy for the interpreter in `command` (`python3 -m pip install debugpy`), or point [debug.adapters.debugpy] env.PYTHONPATH at a folder where it is installed.",
-            );
-            a.args.splice(0..0, python[1..].iter().cloned());
-            a
-        }
+        // `python3`; on Windows `python`, or `py` (whose `-3` is `launcher_args`).
+        "debugpy" => base(
+            AdapterKind::Debugpy,
+            "debugpy",
+            &crate::util::os::exe::python()[0],
+            &["-m", "debugpy.adapter"],
+            &["python"],
+            Transport::Stdio,
+            "debugpy",
+            "Install debugpy for the interpreter in `command` (`python3 -m pip install debugpy`), or point [debug.adapters.debugpy] env.PYTHONPATH at a folder where it is installed.",
+        ),
         "delve" => base(
             AdapterKind::Delve,
             "Delve",
@@ -198,6 +193,14 @@ fn preset(id: &str) -> Option<Adapter> {
 }
 
 pub const PRESETS: &[&str] = &["gdb", "lldb-dap", "codelldb", "debugpy", "delve"];
+
+/// Arguments before the adapter's `args`: the Python launcher's `-3` while debugpy runs
+/// the preset's `py` (Windows without `python`). Kept out of `args`, so a `command` of the
+/// user's own (a venv's python.exe) never gets it. None on Unix.
+pub fn launcher_args(a: &Adapter) -> Vec<String> {
+    let python = crate::util::os::exe::python();
+    if a.kind == AdapterKind::Debugpy && a.command == python[0] { python[1..].to_vec() } else { vec![] }
+}
 
 /// lldb-dap's executable: `lldb-dap`, the older `lldb-vscode`, or a versioned one
 /// (`lldb-dap-19`), whichever is on PATH.
@@ -365,12 +368,10 @@ async fn probe_uncached(a: &Adapter) -> Availability {
         return Availability::missing(format!("`{}` was not found on PATH", a.command));
     };
     let path_s = path.display().to_string();
-    // The Python launcher's own leading arguments (`py -3` on Windows) stay in front.
-    let python = crate::util::os::exe::python();
-    let lead: &[String] = if a.kind == AdapterKind::Debugpy && a.args.starts_with(&python[1..]) { &python[1..] } else { &[] };
+    let lead = launcher_args(a);
     let run = |args: Vec<&'static str>| {
         let mut cmd = tokio::process::Command::new(&path);
-        cmd.args(lead).args(args).current_dir("/");
+        cmd.args(&lead).args(args).current_dir("/").envs(crate::util::os::exe::child_env().iter().copied());
         for (k, v) in &a.env {
             cmd.env(k, v);
         }
@@ -392,7 +393,7 @@ async fn probe_uncached(a: &Adapter) -> Availability {
             }
             Err(e) => Availability::missing(format!("`{} --version` failed: {}", a.command, e.message)),
         },
-        AdapterKind::Debugpy if a.args.get(lead.len()).map(String::as_str) == Some("-m") => {
+        AdapterKind::Debugpy if a.args.first().map(String::as_str) == Some("-m") => {
             match run(vec!["-c", "import debugpy; print(debugpy.__version__)"]).await {
                 Ok(out) if out.ok() => Availability {
                     available: true,
@@ -502,6 +503,20 @@ mod tests {
         // Round-trips through TOML (config.toml is rewritten by Settings).
         let text = toml::to_string(&cfg).unwrap();
         assert_eq!(toml::from_str::<DebugConfig>(&text).unwrap(), cfg);
+    }
+
+    #[test]
+    fn launcher_arguments_only_for_the_preset_python() {
+        // `py -3` on Windows without `python`: the `-3` belongs to the launcher, not to a
+        // venv interpreter set as `command`.
+        let preset = find(&DebugConfig::default(), "debugpy").unwrap();
+        assert_eq!(preset.args, vec!["-m", "debugpy.adapter"]);
+        assert_eq!(launcher_args(&preset), crate::util::os::exe::python()[1..]);
+        let cfg: DebugConfig = toml::from_str("[adapters.debugpy]\ncommand = \"/work/.venv/bin/python\"\n").unwrap();
+        let own = find(&cfg, "debugpy").unwrap();
+        assert_eq!(own.args, vec!["-m", "debugpy.adapter"]);
+        assert!(launcher_args(&own).is_empty());
+        assert!(launcher_args(&find(&cfg, "gdb").unwrap()).is_empty());
     }
 
     #[test]

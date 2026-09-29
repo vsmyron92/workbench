@@ -269,7 +269,7 @@ pub fn resolve_command(cmd: &str) -> Option<PathBuf> {
     if util::os::exe::names_path(cmd) || cmd.starts_with('~') {
         return util::os::exe::program_file(crate::config::expand_tilde(cmd));
     }
-    if let Some(p) = util::which_path(cmd) {
+    if let Some(p) = util::os::exe::which_preferring_native(cmd) {
         return Some(p);
     }
     let home = dirs::home_dir()?;

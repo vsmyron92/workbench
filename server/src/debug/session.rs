@@ -1042,7 +1042,7 @@ async fn cargo_build(state: &AppState, s: &Arc<Session>, plan: &Plan, t: &derive
     };
     let args: Vec<String> = t.build_args().iter().map(|a| q(a)).collect();
     // JSON messages go to the file; the human-readable diagnostics stay in the terminal.
-    let cmd = format!("cargo {} > {}", args.join(" "), q(&file_arg));
+    let cmd = crate::util::os::shell::redirect_stdout(&format!("cargo {}", args.join(" ")), &q(&file_arg));
     let mut root_plan = plan.clone();
     root_plan.cwd = s.paths.root.join(&t.workspace);
     let title = format!("Build {}", t.config_name().trim_start_matches("Cargo: "));
@@ -1052,7 +1052,7 @@ async fn cargo_build(state: &AppState, s: &Arc<Session>, plan: &Plan, t: &derive
             let f = f.clone();
             tokio::task::spawn_blocking(move || {
                 let meta = std::fs::metadata(&f).ok()?;
-                (meta.len() < 64 * 1024 * 1024).then(|| std::fs::read_to_string(&f).ok()).flatten()
+                (meta.len() < 64 * 1024 * 1024).then(|| crate::util::os::shell::read_output(&f)).flatten()
             })
             .await
             .ok()

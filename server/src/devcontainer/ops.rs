@@ -190,7 +190,7 @@ async fn launch(state: &AppState, p: &Arc<Project>, rel: &str, plan: &Plan, engi
         title,
         project_id: Some(pid.clone()),
         cwd: p.root.clone(),
-        argv: crate::util::os::shell::script_argv(&script_path),
+        argv: crate::util::os::shell::script_argv(&script_path)?,
         env,
         cols: None,
         rows: None,

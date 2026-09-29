@@ -44,7 +44,7 @@ pub fn run_argv(command: &str) -> Vec<String> {
 
 /// `run_argv` as a process to spawn.
 pub fn run_command(command: &str) -> tokio::process::Command {
-    command_of(run_argv(command))
+    self::command(&run_argv(command))
 }
 
 /// A short command from config.toml (the notify command) as a process to spawn: `sh -c`
@@ -52,36 +52,81 @@ pub fn run_command(command: &str) -> tokio::process::Command {
 pub fn plain_command(command: &str) -> tokio::process::Command {
     #[cfg(unix)]
     {
-        command_of(vec!["sh".into(), "-c".into(), command.to_string()])
+        self::command(&["sh".into(), "-c".into(), command.to_string()])
     }
     #[cfg(windows)]
     {
-        command_of(win::encoded_argv(command))
+        self::command(&win::encoded_argv(command))
     }
 }
 
-/// On Windows with `NoDefaultCurrentDirectoryInExePath`, so a cmd.exe started from the
-/// command never runs a program from the current directory (a repository).
-fn command_of(argv: Vec<String>) -> tokio::process::Command {
+/// A shell's argv (`run_argv`, or `apps::remote::argv`'s ssh) as a process to spawn, with
+/// `exe::child_env`: on Windows a cmd.exe started from the command never runs a program
+/// from the current directory (a repository).
+pub fn command(argv: &[String]) -> tokio::process::Command {
     let mut c = tokio::process::Command::new(&argv[0]);
-    c.args(&argv[1..]);
-    #[cfg(windows)]
-    c.env("NoDefaultCurrentDirectoryInExePath", "1");
+    c.args(&argv[1..]).envs(super::exe::child_env().iter().copied());
     c
 }
 
 /// argv running the bash script `script` on this computer (the dev container setup):
-/// `bash <script>`; on Windows Git for Windows' bash, which takes `C:/…` paths.
-pub fn script_argv(script: &Path) -> Vec<String> {
+/// `bash <script>`; on Windows Git for Windows' bash, which takes `C:/…` paths (an error
+/// without it: a bare `bash.exe` would be WSL's).
+pub fn script_argv(script: &Path) -> std::io::Result<Vec<String>> {
     #[cfg(unix)]
     {
-        vec!["bash".into(), script.display().to_string()]
+        Ok(vec!["bash".into(), script.display().to_string()])
     }
     #[cfg(windows)]
     {
-        let bash = win::git_bash().map_or_else(|| "bash.exe".into(), |p| p.display().to_string());
-        vec![bash, script.display().to_string().replace('\\', "/")]
+        let bash = win::git_bash().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Git for Windows' bash.exe was not found: install Git for Windows"))?;
+        Ok(vec![bash.display().to_string(), script.display().to_string().replace('\\', "/")])
     }
+}
+
+/// `command` in the run shell with its standard output written to `file` (a `quote`d
+/// path): `command > file` on Unix. On Windows the console code page becomes UTF-8 first,
+/// since PowerShell before 7.4 decodes a program's output with it; Windows PowerShell 5.1
+/// writes the file as UTF-16LE, so read it with `read_output`.
+pub fn redirect_stdout(command: &str, file: &str) -> String {
+    #[cfg(unix)]
+    {
+        format!("{command} > {file}")
+    }
+    #[cfg(windows)]
+    {
+        format!("try {{ [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) }} catch {{ }}\n{command} > {file}")
+    }
+}
+
+/// The text a `redirect_stdout` command wrote to `path`: UTF-8 on Unix; on Windows also
+/// UTF-16LE with its byte order mark (Windows PowerShell 5.1), a UTF-8 one dropped.
+pub fn read_output(path: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        std::fs::read_to_string(path).ok()
+    }
+    #[cfg(windows)]
+    {
+        decode_output(std::fs::read(path).ok()?)
+    }
+}
+
+/// `bytes` as text by their byte order mark: UTF-16LE (`FF FE`), else UTF-8 (a BOM dropped).
+#[cfg(any(windows, test))]
+fn decode_output(bytes: Vec<u8>) -> Option<String> {
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        if rest.len() % 2 != 0 {
+            return None;
+        }
+        let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        return String::from_utf16(&units).ok();
+    }
+    let bytes = match bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        Some(rest) => rest.to_vec(),
+        None => bytes,
+    };
+    String::from_utf8(bytes).ok()
 }
 
 /// `s` as one word of the run shell (`run_argv`): unchanged when it is plain, else
@@ -159,6 +204,17 @@ fn ps_quote(s: &str) -> String {
     out
 }
 
+/// The script PowerShell runs for `command`: the command, then on its own line a
+/// statement that keeps its exit status. `-Command` alone ends with 1 for any failure; this
+/// exits with the failed program's code, 127 when the command was not found (as bash
+/// does), else 1. A command that ends with `exit N` keeps N.
+#[cfg(any(windows, test))]
+fn ps_script(command: &str) -> String {
+    format!(
+        "{command}\nif (-not $?) {{ if ($LASTEXITCODE) {{ exit $LASTEXITCODE }}; if ($Error[0].Exception -is [System.Management.Automation.CommandNotFoundException]) {{ exit 127 }}; exit 1 }}"
+    )
+}
+
 /// `-EncodedCommand`'s value: the command as UTF-16LE, base64.
 #[cfg(any(windows, test))]
 fn encode_command(command: &str) -> String {
@@ -182,14 +238,18 @@ mod win {
         inbox.filter(|p| p.is_file()).or_else(|| exe::which("powershell")).unwrap_or_else(|| "powershell.exe".into())
     }
 
+    /// PowerShell running `command` (`ps_script`). Windows PowerShell's default execution
+    /// policy (Restricted) blocks every script, `npm.ps1` included, which PowerShell picks
+    /// over `npm.cmd`: it gets pwsh's default, RemoteSigned, for this process only (Group
+    /// Policy still wins; pwsh keeps what the user set).
     pub(super) fn encoded_argv(command: &str) -> Vec<String> {
-        vec![
-            powershell().display().to_string(),
-            "-NoLogo".into(),
-            "-NoProfile".into(),
-            "-EncodedCommand".into(),
-            super::encode_command(command),
-        ]
+        let ps = powershell();
+        let mut argv = vec![ps.display().to_string(), "-NoLogo".into(), "-NoProfile".into()];
+        if !ps.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("pwsh")) {
+            argv.extend(["-ExecutionPolicy".into(), "RemoteSigned".into()]);
+        }
+        argv.extend(["-EncodedCommand".into(), super::encode_command(&super::ps_script(command))]);
+        argv
     }
 
     /// Git for Windows' bash (`<Git>\bin\bash.exe`, found from `git.exe`), never WSL's
@@ -223,11 +283,30 @@ mod tests {
         assert_eq!(encode_command(""), "");
     }
 
+    #[test]
+    fn powershell_scripts_keep_the_exit_status() {
+        let s = ps_script("npm run dev # watch");
+        let (first, rest) = s.split_once('\n').unwrap();
+        assert_eq!(first, "npm run dev # watch");
+        assert!(rest.starts_with("if (-not $?) {") && rest.contains("exit $LASTEXITCODE") && rest.contains("exit 127"), "{rest}");
+    }
+
+    #[test]
+    fn redirected_output_is_read_by_its_byte_order_mark() {
+        let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain("{\"é\":1}\r\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        assert_eq!(decode_output(utf16).as_deref(), Some("{\"é\":1}\r\n"));
+        assert_eq!(decode_output(b"\xEF\xBB\xBF{}".to_vec()).as_deref(), Some("{}"));
+        assert_eq!(decode_output(b"{}\n".to_vec()).as_deref(), Some("{}\n"));
+        assert_eq!(decode_output(vec![0xFF, 0xFE, 0x41]), None);
+        assert_eq!(decode_output(vec![0xC3]), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_shells_and_quoting() {
         assert_eq!(run_argv("cargo run"), vec!["bash", "-lc", "cargo run"]);
-        assert_eq!(script_argv(Path::new("/d/up.sh")), vec!["bash", "/d/up.sh"]);
+        assert_eq!(script_argv(Path::new("/d/up.sh")).unwrap(), vec!["bash", "/d/up.sh"]);
+        assert_eq!(redirect_stdout("cargo build", "/tmp/x.json"), "cargo build > /tmp/x.json");
         assert_eq!(interactive()[1], "-l");
         assert_eq!(quote("http://127.0.0.1:8081/api/health"), "http://127.0.0.1:8081/api/health");
         assert_eq!(quote("a b"), "'a b'");
@@ -243,8 +322,9 @@ mod tests {
     #[test]
     fn windows_shells_and_quoting() {
         let argv = run_argv("cargo run");
-        assert_eq!(argv[1..4], ["-NoLogo", "-NoProfile", "-EncodedCommand"]);
-        assert_eq!(argv[4], encode_command("cargo run"));
+        assert_eq!(argv[1..3], ["-NoLogo", "-NoProfile"]);
+        assert_eq!(argv[argv.len() - 2], "-EncodedCommand");
+        assert_eq!(argv[argv.len() - 1], encode_command(&ps_script("cargo run")));
         assert!(Path::new(&argv[0]).is_absolute() || argv[0] == "powershell.exe", "{}", argv[0]);
         assert_eq!(interactive()[1], "-NoLogo");
         assert_eq!(quote("it's"), "'it''s'");

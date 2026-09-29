@@ -73,9 +73,33 @@ pub fn which(cmd: &str) -> Option<PathBuf> {
     find_in(&dirs, cmd)
 }
 
-/// The first `dir/name` among `dirs` that is a program file (`program_file`).
+/// The first `dir/name` among `dirs` that is a program file (`program_file`). On Windows
+/// only absolute directories count: `/usr/local/bin` would be `C:\usr\local\bin`, which
+/// any local user can create.
 pub fn find_in(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
-    dirs.iter().find_map(|d| program_file(d.join(name)))
+    #[cfg(unix)]
+    {
+        dirs.iter().find_map(|d| program_file(d.join(name)))
+    }
+    #[cfg(windows)]
+    {
+        dirs.iter().filter(|d| d.is_absolute()).find_map(|d| program_file(d.join(name)))
+    }
+}
+
+/// `which(cmd)` for an agent CLI. On Windows a native `<cmd>.exe` in `~\.local\bin` (where
+/// Claude Code's installer puts it) wins over a batch file found first (an npm shim in
+/// `%APPDATA%\npm`, which npm puts on `PATH`).
+pub fn which_preferring_native(cmd: &str) -> Option<PathBuf> {
+    let found = which(cmd);
+    #[cfg(windows)]
+    if !names_path(cmd) && found.as_deref().is_some_and(win::is_batch) {
+        let native = dirs::home_dir().map(|h| h.join(".local").join("bin").join(format!("{cmd}.exe")));
+        if let Some(native) = native.filter(|p| win::is_file(p)) {
+            return Some(native);
+        }
+    }
+    found
 }
 
 /// `path` when it is a program file: a regular file on Unix. On Windows the path itself
@@ -169,6 +193,29 @@ pub fn python() -> Vec<String> {
     {
         win::python()
     }
+}
+
+/// Environment for a program Workbench starts by itself (not a terminal's shell): on
+/// Windows `NoDefaultCurrentDirectoryInExePath=1`, so a cmd.exe among its processes (a
+/// batch file, a shim's bare `node`) never takes a program from its current directory, a
+/// repository. Nothing on Unix.
+pub fn child_env() -> &'static [(&'static str, &'static str)] {
+    #[cfg(unix)]
+    {
+        &[]
+    }
+    #[cfg(windows)]
+    {
+        &[("NoDefaultCurrentDirectoryInExePath", "1")]
+    }
+}
+
+/// A process starting `r`: its program and `prefix_args`, with `child_env`. The caller
+/// adds its own arguments.
+pub fn command(r: &Resolved) -> tokio::process::Command {
+    let mut c = tokio::process::Command::new(&r.program);
+    c.args(&r.prefix_args).envs(child_env().iter().copied());
+    c
 }
 
 /// Whether cmd.exe passes `args` to a `.bat`/`.cmd` file as they are: none contains
@@ -296,6 +343,11 @@ mod win {
         p.extension().map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase()))
     }
 
+    /// A `.bat` or `.cmd` file (cmd.exe runs it).
+    pub(super) fn is_batch(p: &Path) -> bool {
+        matches!(ext_of(p).as_deref(), Some(".bat" | ".cmd"))
+    }
+
     pub(super) fn has_pathext(p: &Path) -> bool {
         ext_of(p).is_some_and(|e| pathext().contains(&e))
     }
@@ -342,12 +394,12 @@ mod win {
 
     pub(super) fn classify(path: PathBuf) -> Resolved {
         let path = std::path::absolute(&path).unwrap_or(path);
-        match ext_of(&path).as_deref() {
-            Some(".cmd" | ".bat") => match npm_shim(&path) {
-                Some((program, prefix_args)) => Resolved { program, prefix_args, kind: Kind::NpmShim },
-                None => Resolved { program: path, prefix_args: vec![], kind: Kind::Batch },
-            },
-            _ => Resolved { program: path, prefix_args: vec![], kind: Kind::Exe },
+        if !is_batch(&path) {
+            return Resolved { program: path, prefix_args: vec![], kind: Kind::Exe };
+        }
+        match npm_shim(&path) {
+            Some((program, prefix_args)) => Resolved { program, prefix_args, kind: Kind::NpmShim },
+            None => Resolved { program: path, prefix_args: vec![], kind: Kind::Batch },
         }
     }
 
@@ -535,6 +587,10 @@ exit $ret
         assert_eq!(find_in(&[d.to_path_buf()], "tool"), Some(found.clone()));
         assert!(is_executable(&found) && !is_executable(&d.join("tool")));
         assert!(names_path(r"C:\x") && names_path("C:x") && names_path(r"bin\x") && !names_path("x"));
+        // A directory without a drive (`/usr/local/bin` is `C:\usr\local\bin`) is never searched.
+        let rootless: PathBuf = d.components().skip(1).collect();
+        assert!(!rootless.is_absolute());
+        assert_eq!(find_in(&[rootless], "tool"), None);
         // An npm shim runs node with the package script; without the script it stays a batch file.
         std::fs::create_dir_all(d.join("node_modules/@anthropic-ai/claude-code")).unwrap();
         std::fs::write(d.join("node_modules/@anthropic-ai/claude-code/cli.js"), "").unwrap();
