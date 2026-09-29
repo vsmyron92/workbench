@@ -8,7 +8,8 @@
 //!
 //! Windows: the leader joins a Job Object right after the spawn (what it starts joins too,
 //! unless it asks to leave with `CREATE_BREAKAWAY_FROM_JOB`, as a daemon leaves a Unix
-//! session), registered under the leader's pid, so the same `i32` session ids work. The hang-up
+//! session), registered under the leader's pid, so the same `i32` session ids work (a
+//! `Handle` keeps it registered, so its pid is not reused for a later session). The hang-up
 //! closes the pseudoconsole (ConPTY sends CTRL_CLOSE_EVENT to every process attached to
 //! it); `TerminateJobObject` ends what is left after the grace period. ConPTY gives the
 //! reader no EOF when its processes exit: `leader_exited` closes the pseudoconsole once the
@@ -18,6 +19,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use portable_pty::MasterPty;
@@ -26,14 +28,32 @@ use portable_pty::MasterPty;
 /// `hang_up` closes the PTY (Windows: the pseudoconsole, which the session then owns until
 /// it is over). Unix does nothing here: the session exists already, and the kernel hangs
 /// it up when the PTY closes.
-pub fn register(pid: i32, hang_up: impl FnOnce() + Send + 'static) {
-    imp::register(pid, Box::new(hang_up));
+pub fn register(pid: i32, hang_up: impl FnOnce() + Send + 'static) -> Handle {
+    Handle { sid: pid, _hold: imp::register(pid, Box::new(hang_up)).map(Arc::new) }
+}
+
+/// A session `register` took charge of. While a clone of it lives, its sid names this
+/// session and no later one whose leader got the same pid: whoever follows a session after
+/// its leader exited (lingering processes, their kill) keeps one. Unix: the kernel gives no
+/// process the pid of a session that still has members, and allocates pids in turn. Windows
+/// reuses a pid as soon as its process is gone: the session stays registered, its job
+/// keeping a handle to the leader, until every clone is dropped and `leader_exited` is done.
+#[derive(Clone)]
+pub struct Handle {
+    sid: i32,
+    _hold: Option<Arc<imp::Hold>>,
+}
+
+impl Handle {
+    pub fn sid(&self) -> i32 {
+        self.sid
+    }
 }
 
 /// Blocking, on the thread that saw the leader of session `sid` exit. Unix returns at once
 /// (the reader sees EOF once no process has the PTY open). Windows waits until no process
 /// of the session runs, then closes its pseudoconsole, so the reader sees EOF, and forgets
-/// the session.
+/// the session once no `Handle` of it is left.
 pub fn leader_exited(sid: i32) {
     imp::leader_exited(sid);
 }
@@ -137,7 +157,12 @@ mod imp {
 
     use portable_pty::MasterPty;
 
-    pub fn register(_pid: i32, _hang_up: Box<dyn FnOnce() + Send>) {}
+    /// Nothing to hold: the kernel keeps a session's pid while it has members.
+    pub enum Hold {}
+
+    pub fn register(_pid: i32, _hang_up: Box<dyn FnOnce() + Send>) -> Option<Hold> {
+        None
+    }
 
     pub fn leader_exited(_sid: i32) {}
 
@@ -283,6 +308,7 @@ mod imp {
     use std::collections::{HashMap, HashSet};
     use std::io::Read;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::sync::{Arc, LazyLock};
     use std::time::Duration;
@@ -302,6 +328,9 @@ mod imp {
     struct Session {
         group: ProcGroup,
         hang_up: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        /// What keeps it registered: its `Hold` (the `Handle`s) and the waiter, until
+        /// `leader_exited` is done.
+        holds: AtomicUsize,
     }
 
     /// Sessions by their leader's pid. The job keeps a handle to the leader, so that pid
@@ -312,10 +341,39 @@ mod imp {
         SESSIONS.lock().get(&sid).cloned()
     }
 
-    pub fn register(pid: i32, hang_up: Box<dyn FnOnce() + Send>) {
-        let Some(p) = u32::try_from(pid).ok().filter(|p| *p > 1) else { return };
-        let s = Session { group: ProcGroup::attach_terminal(p), hang_up: Mutex::new(Some(hang_up)) };
-        SESSIONS.lock().insert(pid, Arc::new(s));
+    /// The `Handle`s' part in keeping a session registered; dropped with the last of them.
+    pub struct Hold {
+        sid: i32,
+        session: Arc<Session>,
+    }
+
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            release(self.sid, &self.session);
+        }
+    }
+
+    /// One of what keeps `s` registered lets go; the last one forgets it.
+    fn release(sid: i32, s: &Arc<Session>) {
+        if s.holds.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let mut map = SESSIONS.lock();
+            if map.get(&sid).is_some_and(|x| Arc::ptr_eq(x, s)) {
+                map.remove(&sid);
+            }
+        }
+    }
+
+    pub fn register(pid: i32, hang_up: Box<dyn FnOnce() + Send>) -> Option<Hold> {
+        let p = u32::try_from(pid).ok().filter(|p| *p > 1)?;
+        let s = Arc::new(Session { group: ProcGroup::attach_terminal(p), hang_up: Mutex::new(Some(hang_up)), holds: AtomicUsize::new(2) });
+        SESSIONS.lock().insert(pid, s.clone());
+        Some(Hold { sid: pid, session: s })
+    }
+
+    /// Whether a session is registered under `sid` (tests).
+    #[cfg(test)]
+    pub fn registered(sid: i32) -> bool {
+        session(sid).is_some()
     }
 
     /// The session's live processes. A job lists a process until its object is gone, and a
@@ -337,10 +395,7 @@ mod imp {
         if let Some(close) = close {
             close();
         }
-        let mut map = SESSIONS.lock();
-        if map.get(&sid).is_some_and(|x| Arc::ptr_eq(x, &s)) {
-            map.remove(&sid);
-        }
+        release(sid, &s);
     }
 
     pub fn members(sid: i32) -> Vec<(i32, i32)> {
@@ -607,7 +662,8 @@ mod tests {
         let sid = child.id() as i32;
         let hung_up = Arc::new(AtomicBool::new(false));
         let h = hung_up.clone();
-        register(sid, move || h.store(true, Ordering::Release));
+        let handle = register(sid, move || h.store(true, Ordering::Release));
+        assert_eq!(handle.sid(), sid);
         assert!(eventually(|| members(sid).len() >= 2).await, "the leader and its ping: {:?}", members(sid));
         assert!(members(sid).iter().all(|(_, g)| *g == sid));
         assert!(eventually(|| holders(&[sid], std::slice::from_ref(&file)).get(&file) == Some(&vec![sid])).await, "the job holds the file");
@@ -623,8 +679,14 @@ mod tests {
         assert!(!status.success());
         assert!(eventually(|| pids.iter().all(|p| !crate::util::os::proc::pid_alive(*p as i32))).await, "{pids:?} outlived the kill");
         assert!(members(sid).is_empty());
-        // The waiter's part: the empty session is forgotten.
+        // The waiter's part: the pseudoconsole closes. The session is forgotten only once
+        // no handle is left: until then, its pid cannot be another session's.
         leader_exited(sid);
         assert!(holders(&[sid], std::slice::from_ref(&file)).is_empty());
+        let copy = handle.clone();
+        drop(handle);
+        assert!(imp::registered(sid), "a handle is left");
+        drop(copy);
+        assert!(!imp::registered(sid));
     }
 }

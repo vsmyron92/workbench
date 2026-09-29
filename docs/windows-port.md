@@ -131,9 +131,11 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   uses a reader thread feeding a channel with `recv_timeout(HOLD_BACK)`.
 - Done (`util/os/session.rs`): the session registry holds a `ProcGroup` and the closure that
   closes the pseudoconsole (the session owns it until it is over, so a `Pty` dropped early
-  does not hang up its background jobs). The pump thread always drains the pipe, also after
-  the reader stopped, so `ClosePseudoConsole` never waits for good. A secret is also masked
-  when ConPTY's repainting puts escape sequences between its characters
+  does not hang up its background jobs). It stays registered while a `session::Handle` of it
+  lives (the `Pty`, the lingering-process watch), so a reused leader pid never makes a
+  terminal follow or kill another terminal's session. The pump thread always drains the
+  pipe, also after the reader stopped, so `ClosePseudoConsole` never waits for good. A secret
+  is also masked when ConPTY's repainting puts escape sequences between its characters
   (`session::REPAINTS`). A GUI program started from a terminal joins its job, keeps a lingering
   count and ends with it (Linux: it stays in the session likewise; `xdg-open`-style launchers
   detach, `start` on Windows does not). A process that asks to leave the job

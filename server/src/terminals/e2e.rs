@@ -115,10 +115,11 @@ async fn contract_spawn_input_output_exit_restart_forget() {
     // The mirror keeps the final screen.
     let text = t.screen_text(&info.id, 50).unwrap();
     assert!(text.contains("got:hello env:from-spec"), "screen: {text:?}");
-    // Saved to disk with the final screen, right after the exit was announced.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Saved to disk with the final screen by the time the exit was announced.
     let tdir = state.paths.data_dir.join("terminals").join(&info.id);
     assert!(tdir.join("meta.json").is_file() && tdir.join("screen.bin").is_file());
+    let saved: super::store::Record = crate::util::fs::read_json(&tdir.join("meta.json")).unwrap().unwrap();
+    assert_eq!((saved.info.status, saved.info.exit.and_then(|e| e.code)), (TerminalStatus::Exited, Some(3)));
 
     // Restart re-runs the command below the old output.
     t.restart(&state, &info.id).await.unwrap();
@@ -135,6 +136,29 @@ async fn contract_spawn_input_output_exit_restart_forget() {
     t.close(&state, &info.id, true).await.unwrap();
     assert!(t.info(&info.id).is_none());
     assert!(!tdir.exists());
+}
+
+/// A terminal forgotten while its process runs stays forgotten: neither the save of its
+/// exit nor a save already under way (the flusher's) brings its files back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_terminal_forgotten_while_it_runs_stays_forgotten() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let t = &state.terminals;
+    let info = t.spawn(&state, spec(dir.path(), "import time
+print('up', flush=True)
+time.sleep(30)")).await.unwrap();
+    let entry = t.get(&info.id).unwrap();
+    let tdir = state.paths.data_dir.join("terminals").join(&info.id);
+    t.save_now(&entry).await;
+    assert!(tdir.join("meta.json").is_file());
+
+    t.close(&state, &info.id, true).await.unwrap();
+    assert!(t.info(&info.id).is_none());
+    assert!(!tdir.exists());
+    t.save_now(&entry).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!tdir.exists(), "a forgotten terminal's files came back");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
