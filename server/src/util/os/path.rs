@@ -219,6 +219,14 @@ pub fn same_name(a: impl AsRef<OsStr>, b: &str) -> bool {
     }
 }
 
+/// Whether `name` has the form of an 8.3 short name (`GIT~1`, `ENV~12.TXT`), another
+/// spelling of a long name (`watch`: change notifications may use it). `file.txt~` and
+/// `~$doc.docx` do not.
+#[cfg(windows)]
+pub(super) fn is_short_name(name: &OsStr) -> bool {
+    name.to_str().is_some_and(win::is_short_name)
+}
+
 /// A host path as the path of a `file://` URI: a part that goes into the URI as it is
 /// (`/C:` on Windows, empty elsewhere) and the rest with `/` separators, still to be
 /// percent-encoded.
@@ -604,6 +612,16 @@ mod tests {
             assert!(win::check_component(ok).is_ok(), "{ok:?}");
         }
         assert!(win::check_component(r"a\b").unwrap_err().contains("use /"));
+    }
+
+    #[test]
+    fn editor_backups_and_lock_files_are_not_short_names() {
+        for long in ["file.txt~", "~$doc.docx", "~WRL0001.tmp", ".~lock.x.odt#", "x~", "a.b~1"] {
+            assert!(!win::is_short_name(long), "{long:?}");
+        }
+        for short in ["GIT~1", "LONGFO~1", "ENV~12.TXT"] {
+            assert!(win::is_short_name(short), "{short:?}");
+        }
     }
 
     #[test]

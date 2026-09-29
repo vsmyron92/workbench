@@ -43,6 +43,16 @@ pub fn rename_unsupported(e: &io::Error) -> bool {
     sys::rename_unsupported(e)
 }
 
+/// Whether text files natively end their lines with CRLF (Windows): what git's `core.eol`
+/// means by `native`, and its default.
+pub const NATIVE_CRLF: bool = cfg!(windows);
+
+/// `e`, from opening `path` as a file, says `path` is a folder: `IsADirectory`, and on
+/// Windows the "access denied" it gives a folder opened as a file.
+pub fn is_a_directory(e: &io::Error, path: &Path) -> bool {
+    e.kind() == io::ErrorKind::IsADirectory || (cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied && path.is_dir())
+}
+
 /// Create `link` pointing at `target`. Windows: a directory or a file link by what
 /// `target` is, seen from `link`'s folder (a missing target makes a file link); without
 /// Developer Mode or an administrator it fails with a clear `PermissionDenied`.

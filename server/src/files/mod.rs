@@ -9,7 +9,8 @@
 //! * `content`   — read / stat / raw (Range) / write (sha256 etag, atomic, re-checked).
 //! * `ops`       — mkdir, create, rename, copy, delete (to the trash), uploads.
 //! * `abs`       — read-only access to absolute paths inside project and extra roots.
-//! * `watch`     — one inotify watcher per project (ignore-aware, capped).
+//! * `watch`     — one watcher per project (ignore-aware; inotify per directory, capped;
+//!   one recursive watch on Windows).
 //! * `search`    — find/replace in files with ripgrep's libraries.
 //! * `quickopen` + `fuzzy` — cached file list and fuzzy ranking for "Go to file".
 //! * `tools`     — MCP tools (`workbench_open_file`, `workbench_open_markdown`).
@@ -222,6 +223,20 @@ pub(crate) fn valid_name(name: &str) -> bool {
         && !util::os::path::has_separator(name)
         && !name.contains('\0')
         && util::os::path::check_component(name).is_ok()
+}
+
+/// Tests: create the symlink `link`, or `false` where Windows does not let this user
+/// (no Developer Mode, not an administrator): the part of the test that needs it is skipped.
+#[cfg(test)]
+pub(crate) fn symlink_or_skip(target: impl AsRef<Path>, link: impl AsRef<Path>) -> bool {
+    match util::os::fs::symlink(target, &link) {
+        Ok(()) => true,
+        Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("skipped: {e}");
+            false
+        }
+        Err(e) => panic!("symlink {}: {e}", link.as_ref().display()),
+    }
 }
 
 #[cfg(test)]

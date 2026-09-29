@@ -332,7 +332,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `ui.notify` | `{level, message}` | anyone |
 | `terminal.created` / `terminal.updated` / `terminal.exited` / `terminal.removed` | `TerminalInfo` (removed: `{id}`) | terminals |
 | `agent.attention` | `{terminalId, state, message, title, permission}`; `permission`: the `PendingPermission` Workbench can answer, or null (each answerable request gets its own event) | terminals |
-| `fs.changed` | `{paths: string[], overflow?}` (project-relative; `overflow`: too many to list, refresh everything) | files |
+| `fs.changed` | `{paths: string[], overflow?}` (project-relative, `/`-separated on every OS; `overflow`: too many to list, or the watcher lost events, refresh everything) | files |
 | `files.history` | `{paths}` (Local History recorded versions or labels of these paths) | files |
 | `git.changed` | `{}` (HEAD, index or refs moved) | files watcher / git ops |
 | `git.op` | `{opId, op, title?, line?, done?, ok?, message?}` | git |
@@ -359,6 +359,8 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `push.changed` | `{}` (a device's push subscription was added, changed or removed) | platform |
 | `mcp.call` | one activity record (tool, ok, ms, terminalId…) | platform |
 | `platform.activity` | one activity record (kinds `attention`, `env`, `deploy`, `pipeline` for GitLab pipelines and GitHub workflow runs, `notify`) | platform |
+
+**Files watcher** (`files/watch.rs` over `util::os::watch`): one per project, 200 ms debounce, 500 paths per event. Linux: an inotify watch per directory the tree shows (gitignore-aware, at most 8000), added as folders appear. Windows: one recursive `ReadDirectoryChangesW` watch on the root, since an open directory handle keeps the folders above it from being renamed; only changes in the folders the same walk covers are kept (not in hard-ignored or gitignored ones), and a folder Windows reports as modified because its entries changed is dropped, so both report the same paths. On Windows a lost batch of notifications (the 64 KB buffer overflowed) is `overflow: true`, and a watch that stops on an error is made again (after 1 s, doubling), also with `overflow: true`; inotify's queue overflow is not reported. `GET …/files/watch` reports `dirs` (the folders covered), `capped` and `errors`.
 
 **Terminal socket** (`/api/terminals/{id}/ws`): the server sends `{t:"snapshot", cols, rows}` followed by a binary snapshot, then binary output; `{t:"resync", cols, rows}` + a binary snapshot when the client fell behind; `{t:"exit", code, signal}` and `{t:"running"}`. The client sends binary input, `{t:"resize", cols, rows}` and `{t:"ping"}` (answered with `{t:"pong"}`).
 
@@ -2457,8 +2459,10 @@ sees, per project in `data_dir/local-history/<pid>/`.
   an agent's shell commands carry no path and stay "Changed on disk" (no guessing).
   `base` "Opened in Workbench" (the first version the editor read) and "Last commit
   (HEAD)" (before the first recorded change of a git-tracked file with no history, its
-  committed version from a bounded `git cat-file`; watcher batches of up to 20 files and
-  hooks only). `deleted` (a tracked path, or everything tracked below a folder, is gone),
+  committed version from a bounded `git cat-file`, with the line ends a checkout writes by
+  git's rules (`core.autocrlf`, `core.eol`, the `text`/`eol`/`crlf` attributes, read with
+  bounded `git config`/`git check-attr`); watcher batches of up to 20 files and hooks
+  only). `deleted` (a tracked path, or everything tracked below a folder, is gone),
   `label` (Put Label…) and `auto` ("Before git pull": the first `git.op` line of any op
   but fetch, push and remote-branch deletion).
 - **Never recorded:** sensitive paths (the slice's rules; the pruner also drops a path's

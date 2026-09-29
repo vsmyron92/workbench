@@ -20,7 +20,7 @@ struct Env {
 
 async fn setup() -> Env {
     let (cfg, data, proj) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let root = proj.path().canonicalize().unwrap().join("app");
+    let root = crate::util::os::path::canonicalize(proj.path()).unwrap().join("app");
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(root.join("ignored")).unwrap();
     std::fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
@@ -277,9 +277,13 @@ async fn first_change_of_a_committed_file_keeps_head() {
         return;
     }
     let (cfg, data, proj) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let root = proj.path().canonicalize().unwrap().join("repo");
+    let root = crate::util::os::path::canonicalize(proj.path()).unwrap().join("repo");
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+    std::fs::write(root.join("src/unix.rs"), "pub fn u() {}\n").unwrap();
+    // CRLF on disk, LF in the repository: what `core.autocrlf` (Git for Windows' default) leaves.
+    std::fs::write(root.join("src/crlf.rs"), "pub fn x() {}\r\npub fn y() {}\r\n").unwrap();
+    std::fs::write(root.join("src/same.rs"), "pub fn s() {}\r\n").unwrap();
     let git = |args: &[&str]| {
         let ok = std::process::Command::new("git")
             .arg("-C")
@@ -293,7 +297,10 @@ async fn first_change_of_a_committed_file_keeps_head() {
         assert!(ok, "git {args:?}");
     };
     git(&["init", "-q", "-b", "main"]);
-    git(&["add", "-A"]);
+    // Checkouts keep LF, whatever the machine's settings (Git for Windows' say CRLF).
+    git(&["config", "core.autocrlf", "false"]);
+    git(&["config", "core.eol", "lf"]);
+    git(&["-c", "core.autocrlf=true", "-c", "core.safecrlf=false", "add", "-A"]);
     git(&["commit", "-qm", "init"]);
     let mut config = GlobalConfig::default();
     config.projects.roots = vec![];
@@ -319,6 +326,84 @@ async fn first_change_of_a_committed_file_keeps_head() {
     std::fs::write(root.join("src/lib.rs"), "pub fn c() {}\n").unwrap();
     let h = env.wait_for("src/lib.rs", 3).await;
     assert_eq!(kinds(&h), ["disk", "agent", "base"]);
+
+    // With LF checkouts, a file rewritten with CRLF keeps HEAD as committed.
+    std::fs::write(root.join("src/unix.rs"), "pub fn u() {}\r\n").unwrap();
+    let h = env.wait_for("src/unix.rs", 2).await;
+    assert_eq!(kinds(&h), ["disk", "base"]);
+    let base = env.api(Method::GET, &format!("/files/history/revision?id={}", h[1]["id"]), None).await.unwrap();
+    assert_eq!(base["content"], "pub fn u() {}\n");
+
+    // A CRLF checkout keeps HEAD with its line ends: the diff shows the line added…
+    git(&["config", "core.autocrlf", "true"]);
+    std::fs::write(root.join("src/crlf.rs"), "pub fn x() {}\r\npub fn y() {}\r\npub fn z() {}\r\n").unwrap();
+    let hook = json!({ "hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": { "file_path": root.join("src").join("crlf.rs").display().to_string() } });
+    super::agent_edit(&env.state, &session("t-agent", Some(&env.pid), &root), &hook);
+    let h = env.wait_for("src/crlf.rs", 2).await;
+    assert_eq!(kinds(&h), ["agent", "base"]);
+    let base = env.api(Method::GET, &format!("/files/history/revision?id={}", h[1]["id"]), None).await.unwrap();
+    assert_eq!(base["content"], "pub fn x() {}\r\npub fn y() {}\r\n");
+    let d = env.api(Method::GET, &format!("/files/history/diff?id={}", h[0]["id"]), None).await.unwrap();
+    let diff = d["diff"].as_str().unwrap();
+    assert!(diff.contains("+pub fn z() {}\r\n") && !diff.contains("-pub fn x() {}"), "{diff}");
+    // …and a file that only went through the checkout has no older version to keep.
+    std::fs::write(root.join("src/same.rs"), "pub fn s() {}\r\n").unwrap();
+    env.wait_for("src/same.rs", 1).await;
+    env.settle().await;
+    assert_eq!(kinds(&env.history("src/same.rs").await), ["disk"]);
+}
+
+/// Git's rules for the line ends of a checkout (`convert.c`), from its settings and the
+/// file's attributes.
+#[test]
+fn head_takes_the_line_ends_of_the_checkout() {
+    use super::{Eol, EolAttrs, EolConfig, to_worktree};
+    let config = |out: &str| EolConfig::parse(out, false);
+    let attrs = |text: &str, eol: &str| EolAttrs { text: text.into(), eol: eol.into(), crlf: "unspecified".into() };
+    let none = attrs("unspecified", "unspecified");
+
+    // Settings: the last value wins; a key alone is true.
+    assert_eq!(config(""), EolConfig { autocrlf: None, eol_crlf: false });
+    assert_eq!(EolConfig::parse("", true), EolConfig { autocrlf: None, eol_crlf: true });
+    assert_eq!(config("core.autocrlf\nTrue\0"), EolConfig { autocrlf: Some(true), eol_crlf: false });
+    assert_eq!(config("core.autocrlf\0").autocrlf, Some(true));
+    assert_eq!(config("core.autocrlf\ntrue\0core.autocrlf\ninput\0").autocrlf, Some(false));
+    assert_eq!(config("core.autocrlf\nfalse\0core.eol\ncrlf\0"), EolConfig { autocrlf: None, eol_crlf: true });
+    assert!(!EolConfig::parse("core.eol\nlf\0", true).eol_crlf);
+
+    // A stock Linux repository: as committed, whatever the attributes short of eol=crlf.
+    let stock = config("");
+    assert_eq!(stock.eol(&none), Eol::AsCommitted);
+    assert_eq!(stock.eol(&attrs("set", "unspecified")), Eol::AsCommitted);
+    assert_eq!(stock.eol(&attrs("auto", "unspecified")), Eol::AsCommitted);
+    assert_eq!(stock.eol(&attrs("unspecified", "crlf")), Eol::Crlf);
+    assert_eq!(stock.eol(&attrs("auto", "crlf")), Eol::AutoCrlf);
+    assert_eq!(stock.eol(&attrs("unset", "crlf")), Eol::AsCommitted);
+    // core.autocrlf=true (Git for Windows): CRLF unless the attributes say otherwise.
+    let autocrlf = config("core.autocrlf\ntrue\0");
+    assert_eq!(autocrlf.eol(&none), Eol::AutoCrlf);
+    assert_eq!(autocrlf.eol(&attrs("set", "unspecified")), Eol::Crlf);
+    assert_eq!(autocrlf.eol(&attrs("unset", "unspecified")), Eol::AsCommitted);
+    assert_eq!(autocrlf.eol(&attrs("unspecified", "lf")), Eol::AsCommitted);
+    assert_eq!(config("core.autocrlf\ninput\0").eol(&none), Eol::AsCommitted);
+    // No autocrlf where the native line end is CRLF: text files get it.
+    let native = EolConfig::parse("", true);
+    assert_eq!(native.eol(&none), Eol::AsCommitted);
+    assert_eq!(native.eol(&attrs("auto", "unspecified")), Eol::AutoCrlf);
+    // The older `crlf` attribute counts when `text` is not given.
+    let legacy = EolAttrs { text: "unspecified".into(), eol: "unspecified".into(), crlf: "unset".into() };
+    assert_eq!(autocrlf.eol(&legacy), Eol::AsCommitted);
+
+    let parsed = EolAttrs::parse(b"a b.rs\0text\0auto\0a b.rs\0eol\0crlf\0a b.rs\0crlf\0unspecified\0");
+    assert_eq!((parsed.text.as_str(), parsed.eol.as_str(), parsed.crlf.as_str()), ("auto", "crlf", "unspecified"));
+
+    // Lone LFs become CRLF; auto leaves a file that has a CR, or a NUL, alone.
+    assert_eq!(&*to_worktree(b"a\nb\n", Eol::Crlf), b"a\r\nb\r\n");
+    assert_eq!(&*to_worktree(b"a\r\nb\n", Eol::Crlf), b"a\r\nb\r\n");
+    assert_eq!(&*to_worktree(b"a\nb", Eol::AutoCrlf), b"a\r\nb");
+    assert_eq!(&*to_worktree(b"a\r\nb\n", Eol::AutoCrlf), b"a\r\nb\n");
+    assert_eq!(&*to_worktree(b"a\0\nb\n", Eol::AutoCrlf), b"a\0\nb\n");
+    assert_eq!(&*to_worktree(b"a\nb\n", Eol::AsCommitted), b"a\nb\n");
 }
 
 /// Git operations that rewrite the working tree get a label first.
@@ -378,7 +463,7 @@ async fn files_in_a_new_folder_are_recorded() {
 #[test]
 fn new_folders_stay_within_the_batch_budget() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = crate::util::os::path::canonicalize(tmp.path()).unwrap();
     std::fs::create_dir_all(root.join("small/sub")).unwrap();
     std::fs::write(root.join("small/a.txt"), "a").unwrap();
     std::fs::write(root.join("small/sub/b.txt"), "b").unwrap();
@@ -386,7 +471,8 @@ fn new_folders_stay_within_the_batch_budget() {
     for i in 0..(super::MAX_BATCH + 1) {
         std::fs::write(root.join(format!("big/f{i}.txt")), "x").unwrap();
     }
-    crate::util::os::fs::symlink("/etc", root.join("small/etc")).unwrap();
+    // A link is never followed (skipped where Windows does not allow creating one).
+    crate::files::symlink_or_skip("/etc", root.join("small/etc"));
     let file: crate::config::ProjectFile = toml::from_str("schema = 1\n[project]\nid = \"p\"\nname = \"p\"\nroot = \".\"\n").unwrap();
     let project = crate::projects::Project {
         id: "p".into(),
@@ -407,7 +493,7 @@ fn new_folders_stay_within_the_batch_budget() {
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_hooks_are_confined_to_the_session_project() {
     let (cfg, data, proj) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let base = proj.path().canonicalize().unwrap();
+    let base = crate::util::os::path::canonicalize(proj.path()).unwrap();
     let (mine, other) = (base.join("mine"), base.join("other"));
     for r in [&mine, &other] {
         std::fs::create_dir_all(r.join("src")).unwrap();
@@ -452,7 +538,9 @@ async fn agent_hooks_are_confined_to_the_session_project() {
 }
 
 /// Container paths map through the workspace mount, whatever the workspace folder
-/// (`/` for compose, or a folder below the mount).
+/// (`/` for compose, or a folder below the mount). POSIX paths on both sides: dev
+/// containers are not supported on Windows.
+#[cfg(unix)]
 #[test]
 fn container_paths_map_through_the_workspace_mount() {
     use std::path::{Path, PathBuf};
@@ -472,15 +560,27 @@ fn container_paths_map_through_the_workspace_mount() {
     assert_eq!(super::host_file("/workspaces/repo/a", cwd, Some(None)), None);
     // A host session: as named.
     assert_eq!(super::host_file("/home/u/repo/a", cwd, None), Some(PathBuf::from("/home/u/repo/a")));
+}
 
-    // The project may sit below the mounted folder; its paths stay inside it.
+/// A host path an agent names lands in its project, never outside it.
+#[test]
+fn agent_paths_stay_inside_the_project() {
+    use std::path::Path;
     let root = tempfile::tempdir().unwrap();
-    let root = root.path().canonicalize().unwrap();
+    let root = crate::util::os::path::canonicalize(root.path()).unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
     assert_eq!(super::rel_in_project(&root, &root.join("src/a.rs")).as_deref(), Some("src/a.rs"));
+    assert_eq!(super::rel_in_project(&root, &root.join("src").join("a.rs")).as_deref(), Some("src/a.rs"));
     assert_eq!(super::rel_in_project(&root, &root.join("src/../../x")), None);
     assert_eq!(super::rel_in_project(&root, &root), None);
     assert_eq!(super::rel_in_project(&root, Path::new("/etc/passwd")), None);
+    // Windows: the root spelled in another case is the same folder.
+    #[cfg(windows)]
+    {
+        let lower = std::path::PathBuf::from(root.display().to_string().to_ascii_lowercase());
+        assert_eq!(super::rel_in_project(&root, &lower.join("src").join("a.rs")).as_deref(), Some("src/a.rs"));
+        assert_eq!(super::rel_in_project(&root, Path::new(r"C:\Windows\win.ini")), None);
+    }
 }
 
 /// Review Changes: the files a session edited, what they were before its first

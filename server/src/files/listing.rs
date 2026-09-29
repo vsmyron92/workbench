@@ -194,23 +194,52 @@ mod tests {
         std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
         std::fs::write(root.join("README.md"), "hi").unwrap();
         std::fs::write(root.join(".env"), "SECRET=1").unwrap();
-        crate::util::os::fs::symlink(root.join("src"), root.join("src-link")).unwrap();
-        crate::util::os::fs::symlink("/etc", root.join("etc-link")).unwrap();
+        // A link out of the project (`/etc` is `\etc` on Windows: outside, or missing).
+        let linked = super::super::symlink_or_skip(root.join("src"), root.join("src-link"))
+            && super::super::symlink_or_skip("/etc", root.join("etc-link"));
 
         let l = list_dir(root, root, "", &Sensitive::defaults()).unwrap();
         let names: Vec<_> = l.entries.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, vec!["src", "src-link", "target", ".env", ".gitignore", "etc-link", "README.md"]);
+        let links = |with: Vec<&'static str>, without: Vec<&'static str>| if linked { with } else { without };
+        assert_eq!(
+            names,
+            links(
+                vec!["src", "src-link", "target", ".env", ".gitignore", "etc-link", "README.md"],
+                vec!["src", "target", ".env", ".gitignore", "README.md"]
+            )
+        );
         let get = |n: &str| l.entries.iter().find(|e| e.name == n).unwrap();
         assert_eq!(get("src").kind, "dir");
         assert!(get("target").ignored);
         assert!(!get("src").ignored);
         assert!(get(".env").sensitive && get(".env").hidden);
         assert_eq!(get("README.md").size, 2);
-        assert_eq!(get("src-link").kind, "symlink");
-        assert_eq!(get("src-link").target, Some("dir"));
-        assert_eq!(get("etc-link").target, Some("broken"));
+        if linked {
+            assert_eq!(get("src-link").kind, "symlink");
+            assert_eq!(get("src-link").target, Some("dir"));
+            assert_eq!(get("etc-link").target, Some("broken"));
+        }
         assert!(!l.truncated);
-        assert_eq!(l.total, 7);
+        assert_eq!(l.total, if linked { 7 } else { 5 });
+    }
+
+    /// A junction (Windows' directory link that needs no privilege) lists as a link, and
+    /// one leaving the project as broken: the file API does not follow it.
+    #[cfg(windows)]
+    #[test]
+    fn junctions_list_as_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("src")).unwrap();
+        for (link, target) in [("in-link", root.join("src")), ("out-link", outside.path().to_path_buf())] {
+            let made = std::process::Command::new("cmd").arg("/c").arg("mklink").arg("/J").arg(root.join(link)).arg(&target).output().unwrap();
+            assert!(made.status.success(), "mklink /J: {}", String::from_utf8_lossy(&made.stderr));
+        }
+        let l = list_dir(root, root, "", &Sensitive::defaults()).unwrap();
+        let get = |n: &str| l.entries.iter().find(|e| e.name == n).unwrap();
+        assert_eq!((get("in-link").kind, get("in-link").target), ("symlink", Some("dir")));
+        assert_eq!((get("out-link").kind, get("out-link").target), ("symlink", Some("broken")));
     }
 
     #[test]

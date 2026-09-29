@@ -403,7 +403,7 @@ fn read_existing(path: &Path) -> ApiResult<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(b) => Ok(Some(b)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => Err(ApiError::bad_request("path is a directory")),
+        Err(e) if crate::util::os::fs::is_a_directory(&e, path) => Err(ApiError::bad_request("path is a directory")),
         Err(e) => Err(e.into()),
     }
 }
@@ -549,6 +549,9 @@ mod tests {
         // No temp files left behind.
         let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("sub")).unwrap().flatten().collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+        // A folder is not a file to write, on every OS.
+        let err = write_checked(&dir.path().join("sub"), b"x".to_vec(), None, true).unwrap_err();
+        assert_eq!((err.code, err.message.as_str()), ("bad_request", "path is a directory"));
     }
 
     #[test]
@@ -564,7 +567,9 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"\xEF\xBB\xBFecho bye\n");
 
         let link = dir.path().join("link.sh");
-        crate::util::os::fs::symlink(&p, &link).unwrap();
+        if !super::super::symlink_or_skip(&p, &link) {
+            return;
+        }
         let etag = sha256_hex(&std::fs::read(&p).unwrap());
         write_checked(&link, b"echo link\n".to_vec(), Some(&etag), false).unwrap();
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
