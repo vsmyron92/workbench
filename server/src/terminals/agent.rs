@@ -2926,12 +2926,11 @@ mod tests {
 
     #[test]
     fn workspace_folders_are_created_private() {
-        use std::os::unix::fs::PermissionsExt;
         let data = tempfile::tempdir().unwrap();
         let dirs = workspace_dirs(data.path(), Some("shop"));
         assert_eq!(dirs, [data.path().join("workspace/shop").display().to_string(), data.path().join("workspace/home").display().to_string()]);
         for d in &dirs {
-            assert_eq!(std::fs::metadata(d).unwrap().permissions().mode() & 0o777, 0o700);
+            crate::util::os::perm::assert_mode(Path::new(d), 0o700);
         }
         // Ids that are not plain names get only the home folder.
         assert_eq!(workspace_dirs(data.path(), Some("../etc")).len(), 1);

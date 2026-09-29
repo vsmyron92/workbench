@@ -3,7 +3,6 @@
 //! the browser or put in a child's argv.
 
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,6 +12,7 @@ use serde::Serialize;
 
 use crate::config::{SecretRef, expand_tilde};
 use crate::error::ApiError;
+use crate::util::os::perm::{self, Privacy};
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -111,9 +111,8 @@ pub fn resolve(r: &SecretRef, warnings: &mut Vec<String>) -> anyhow::Result<Secr
     let v = match r {
         SecretRef::File(p) => {
             let path = expand_tilde(p);
-            let mode = std::fs::metadata(&path)?.permissions().mode();
-            if mode & 0o077 != 0 {
-                warnings.push(format!("{p} is readable by other users (mode {:o}); run chmod 600", mode & 0o777));
+            if let Privacy::Exposed(why) = perm::privacy(&path)? {
+                warnings.push(format!("{p} is readable by other users ({why}); {}", perm::MAKE_PRIVATE));
             }
             std::fs::read_to_string(&path)?.trim().to_string()
         }

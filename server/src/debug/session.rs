@@ -902,8 +902,7 @@ async fn startup(state: &AppState, project: &Arc<Project>, s: &Arc<Session>, pla
 fn neutral_dir(state: &AppState) -> PathBuf {
     let dir = state.paths.data_dir.join("debug").join("adapter");
     if std::fs::create_dir_all(&dir).is_ok() {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        crate::util::fs::set_mode(&dir, 0o700);
         return dir;
     }
     PathBuf::from("/")

@@ -4,7 +4,6 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -258,8 +257,7 @@ async fn test_push_is_encrypted_signed_and_decryptable() {
     // Stored 0600 in data_dir/push.
     let dir = s.state.paths.data_dir.join("push");
     for f in ["subscriptions.json", "vapid.json"] {
-        let mode = std::fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "{f}");
+        crate::util::os::perm::assert_mode(&dir.join(f), 0o600);
     }
     let stored = std::fs::read_to_string(dir.join("subscriptions.json")).unwrap();
     assert!(stored.contains("lastOkAt") && stored.contains(&device.endpoint));

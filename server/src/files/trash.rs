@@ -4,11 +4,12 @@
 //! (if the admin created a sticky `.Trash`) or `$topdir/.Trash-$uid`.
 
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::{ApiError, ApiResult};
+use crate::util::os::perm;
 
 /// Trash `path`. Returns which mechanism was used (`gio` or `trash-spec`).
 pub async fn trash(path: &Path) -> ApiResult<&'static str> {
@@ -52,7 +53,7 @@ pub fn trash_spec(path: &Path, home_trash: &Path, uid: u32) -> std::io::Result<P
         (dir, rel)
     };
     for sub in ["files", "info"] {
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(trash_dir.join(sub))?;
+        perm::create_dir_private(&trash_dir.join(sub))?;
     }
     let name = abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
     let date = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
@@ -62,7 +63,7 @@ pub fn trash_spec(path: &Path, home_trash: &Path, uid: u32) -> std::io::Result<P
         let info = trash_dir.join("info").join(format!("{candidate}.trashinfo"));
         let dest = trash_dir.join("files").join(&candidate);
         // The .trashinfo file is the lock on the name (spec: create it with O_EXCL first).
-        let mut f = match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&info) {
+        let mut f = match perm::open_new(&info, 0o600, false) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),

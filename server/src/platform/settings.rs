@@ -7,7 +7,6 @@
 //! reloaded. Settings that only take effect on restart are reported back.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -23,6 +22,7 @@ use crate::config::{GlobalConfig, ProjectFile, SecretRef, contract_tilde, expand
 use crate::error::{ApiError, ApiResult};
 use crate::secrets::SecretStatus;
 use crate::util;
+use crate::util::os::perm;
 
 use super::{config_edit, restart_required, sha256_hex};
 
@@ -604,9 +604,13 @@ fn project_secret_uses(p: &ProjectFile) -> Vec<(String, String)> {
     out
 }
 
-fn file_mode(r: &SecretRef) -> Option<u32> {
+/// A file reference's permissions as shown (`perm::describe`) and whether others can read it.
+fn file_mode(r: &SecretRef) -> Option<(String, bool)> {
     match r {
-        SecretRef::File(p) => std::fs::metadata(expand_tilde(p)).ok().map(|m| m.permissions().mode() & 0o777),
+        SecretRef::File(p) => {
+            let path = expand_tilde(p);
+            Some((perm::describe(&path).ok()?, perm::privacy(&path).ok()?.is_exposed()))
+        }
         _ => None,
     }
 }
@@ -646,8 +650,8 @@ async fn secret_row(state: &AppState, name: &str, r: &SecretRef, project_id: Opt
         status,
         scope: if project_id.is_some() { "project" } else { "global" },
         used_by,
-        fixable: mode.is_some_and(|m| m & 0o077 != 0),
-        mode: mode.map(|m| format!("{m:o}")),
+        fixable: mode.as_ref().is_some_and(|(_, exposed)| *exposed),
+        mode: mode.map(|(shown, _)| shown),
     }
 }
 
@@ -729,11 +733,10 @@ pub async fn chmod_secret(
     if !meta.is_file() {
         return Err(ApiError::bad_request(format!("{p} is not a regular file")));
     }
-    if meta.uid() != nix::unistd::getuid().as_raw() {
+    if !perm::owned_by_me(&path).map_err(|e| ApiError::not_found(format!("{p}: {e}")))? {
         return Err(ApiError::forbidden(format!("{p} belongs to another user")));
     }
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| ApiError::internal(format!("chmod {p}: {e}")))?;
+    perm::apply(&path, 0o600).map_err(|e| ApiError::internal(format!("chmod {p}: {e}")))?;
     tracing::info!("secret file {p} set to mode 600");
     Ok(Json(secret_row(&state, &name, &r, q.project_id.as_deref(), vec![]).await))
 }
@@ -1147,7 +1150,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("tok");
         std::fs::write(&f, "supersecretvalue123").unwrap();
-        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o664)).unwrap();
+        perm::expose(&f, 0o664);
         let mut cfg = GlobalConfig::default();
         cfg.projects.roots.clear();
         cfg.notify.desktop = false;
@@ -1166,7 +1169,7 @@ mod tests {
         let gl = rows.iter().find(|r| r["name"] == "gitlab").unwrap();
         assert_eq!(gl["resolved"], true);
         assert_eq!(gl["fixable"], true);
-        assert_eq!(gl["mode"], "664");
+        assert_eq!(gl["mode"], if cfg!(unix) { "664" } else { "shared" });
         assert_eq!(gl["usedBy"], json!(["gitlab.token"]));
         let gh = rows.iter().find(|r| r["name"] == "github").unwrap();
         assert_eq!(gh["usedBy"], json!(["github.token"]));
@@ -1177,7 +1180,7 @@ mod tests {
         let (s, v) = call(&app, "POST", "/api/settings/secrets/gitlab/chmod", None).await;
         assert_eq!(s, StatusCode::OK, "{v}");
         assert_eq!(v["fixable"], false);
-        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        perm::assert_mode(&f, 0o600);
         let (s, _) = call(&app, "POST", "/api/settings/secrets/env-missing/chmod", None).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
     }
