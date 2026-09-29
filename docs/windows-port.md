@@ -25,6 +25,14 @@ run on a Windows 10 or 11 desktop yet.
   and tests that assumed `sh`, `/etc` or `/`-joined paths.
 - **Second `windows-latest` run:** 1033 passed, 0 failed, 3 ignored (the same three as on
   Linux), and `install.ps1` installed the build. The job is required from here on.
+- **Merge-readiness review:** fixed since (the paragraphs named are in §2): Workbench's
+  GitLab token kept out of git's credential helpers, Credential Manager included, and
+  askpass's reading of prompts ("Git", every OS); repository links to network paths never
+  followed ("Links to other computers"); PowerShell's CLIXML errors on a pipe;
+  `NoDefaultCurrentDirectoryInExePath` for the programs terminals start ("Program lookup");
+  a restart during an exit's save that left the new process reading as exited (every OS);
+  setup messages that named `~/.config/workbench`; `workbench service` from another Windows
+  session ("Service"); and Local History after a watcher overflow ("File watching").
 - **Next:** real Windows 10 and 11 desktops (§5): ConPTY terminals with agent CLIs, the
   service and its Start Menu shortcut, git over SSH and HTTPS, language servers. Until then a
   tag publishes the Linux archive alone: the release workflow builds the Windows archive on

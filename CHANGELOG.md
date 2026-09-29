@@ -64,7 +64,9 @@
   `%LOCALAPPDATA%\Programs\Workbench`, adds it to PATH and can install over a running
   Workbench. The job installs the archive and starts the server before publishing it. A tag
   publishes it only once the repository variable `RELEASE_WINDOWS` is `true`; until then
-  releases stay Linux-only.
+  releases stay Linux-only. A build from source also makes `workbenchw`, which on Linux is
+  a stub that only prints a message and is not installed; the Linux archive still holds
+  `workbench` alone (every OS).
 
 ## 0.2.0 - 2026-09-29
 
