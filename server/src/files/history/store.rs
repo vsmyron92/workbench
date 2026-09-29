@@ -374,7 +374,7 @@ impl Store {
             let mut f = perm::open_new(&tmp, 0o600, false)?;
             f.write_all(&packed)?;
             f.sync_data()?;
-            std::fs::rename(&tmp, &path)
+            perm::rename_into_place(&tmp, &path)
         })();
         if written.is_err() {
             let _ = std::fs::remove_file(&tmp);
@@ -392,7 +392,7 @@ impl Store {
         let written = f.write_all(&line);
         if written.is_err() {
             // A full disk mid-line: take the fragment back, or the next line joins it.
-            let _ = f.set_len(before);
+            let _ = perm::set_len(&f, before);
         }
         written
     }
@@ -684,7 +684,7 @@ impl Store {
             }
             let f = w.into_inner().map_err(|e| e.into_error())?;
             f.sync_all()?;
-            std::fs::rename(&tmp, &path)
+            perm::rename_into_place(&tmp, &path)
         })();
         if written.is_err() {
             let _ = std::fs::remove_file(&tmp);

@@ -37,8 +37,7 @@ pub fn apply(path: &Path, mode: u32) -> io::Result<()> {
     imp::apply(path, mode)
 }
 
-/// `apply` on an open file (fchmod). Windows: `file` must be a file from `open_new` or
-/// `create_replacement`, whose handles may change the DACL.
+/// `apply` on an open file (fchmod).
 pub fn apply_to(file: &File, mode: u32) -> io::Result<()> {
     imp::apply_to(file, mode)
 }
@@ -54,8 +53,8 @@ pub fn create_dir_private(path: &Path) -> io::Result<()> {
     imp::create_dir_private(path)
 }
 
-/// Create the file `path` for writing, failing if anything exists there; `mode` applies from
-/// the start. `nofollow` refuses a symlink at `path` (`O_NOFOLLOW`).
+/// Create the file `path` for writing, failing if anything exists there, even a dangling
+/// symlink; `mode` applies from the start. `nofollow` adds `O_NOFOLLOW` on Unix.
 pub fn open_new(path: &Path, mode: u32, nofollow: bool) -> io::Result<File> {
     imp::open_new(path, mode, nofollow)
 }
@@ -63,6 +62,12 @@ pub fn open_new(path: &Path, mode: u32, nofollow: bool) -> io::Result<File> {
 /// Open `path` for appending, creating it with `mode` if it does not exist.
 pub fn open_append(path: &Path, mode: u32) -> io::Result<File> {
     imp::open_append(path, mode)
+}
+
+/// `file.set_len(len)`, also for a file from `open_append` (whose Windows handle may only
+/// append).
+pub fn set_len(file: &File, len: u64) -> io::Result<()> {
+    imp::set_len(file, len)
 }
 
 /// Create `tmp` (which must not exist) to be renamed over `target` later
@@ -158,6 +163,10 @@ mod imp {
         OpenOptions::new().create(true).append(true).mode(mode).open(path)
     }
 
+    pub fn set_len(file: &File, len: u64) -> io::Result<()> {
+        file.set_len(len)
+    }
+
     pub fn create_replacement(tmp: &Path, target: &Path, mode: Option<u32>) -> io::Result<File> {
         let keep_mode = std::fs::metadata(target).ok().map(|m| m.permissions().mode());
         let f = OpenOptions::new().write(true).create_new(true).open(tmp)?;
@@ -222,7 +231,7 @@ mod imp {
     use windows_sys::Win32::Storage::FileSystem::{
         CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL, FILE_CREATION_DISPOSITION,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FILE_WRITE_DATA, OPEN_ALWAYS, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+        FILE_WRITE_DATA, OPEN_ALWAYS, READ_CONTROL, ReOpenFile, WRITE_DAC, WRITE_OWNER,
     };
     use windows_sys::Win32::System::SystemServices::{
         ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
@@ -231,9 +240,9 @@ mod imp {
 
     use super::Privacy;
 
-    /// What a new file's handle may do: write (as std's), read its attributes (`metadata`) and
-    /// read and change its DACL (`apply_to`).
-    const NEW_FILE_ACCESS: u32 = GENERIC_WRITE | FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC;
+    /// What a new file's handle may do: write (as std's) and read its attributes (`metadata`).
+    /// Not change its DACL: a share may refuse that right (`apply_to` asks for it itself).
+    const NEW_FILE_ACCESS: u32 = GENERIC_WRITE | FILE_READ_ATTRIBUTES;
 
     /// Rights that let an account read a file (or get itself the right to).
     const READ_RIGHTS: u32 = FILE_READ_DATA | GENERIC_READ | GENERIC_ALL | WRITE_DAC | WRITE_OWNER;
@@ -260,9 +269,10 @@ mod imp {
             return Ok(());
         }
         let acl = private_acl(false)?;
+        let h = reopen(file, READ_CONTROL | WRITE_DAC)?;
         let info = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
         // SAFETY: a valid handle for the call's duration; the ACL is ours and well formed.
-        let rc = unsafe { SetSecurityInfo(file.as_raw_handle(), SE_FILE_OBJECT, info, null_mut(), null_mut(), acl.ptr(), null()) };
+        let rc = unsafe { SetSecurityInfo(h.as_raw_handle(), SE_FILE_OBJECT, info, null_mut(), null_mut(), acl.ptr(), null()) };
         check(rc)
     }
 
@@ -307,15 +317,20 @@ mod imp {
         Ok(())
     }
 
-    pub fn open_new(path: &Path, mode: u32, nofollow: bool) -> io::Result<File> {
+    /// `nofollow` changes nothing: `CREATE_NEW` never goes through a symlink (`create_file`).
+    pub fn open_new(path: &Path, mode: u32, _nofollow: bool) -> io::Result<File> {
         let sd = for_mode(mode)?;
-        create_file(path, sd.as_ref(), NEW_FILE_ACCESS, CREATE_NEW, nofollow)
+        create_file(path, sd.as_ref(), NEW_FILE_ACCESS, CREATE_NEW)
     }
 
     pub fn open_append(path: &Path, mode: u32) -> io::Result<File> {
         let sd = for_mode(mode)?;
         // As std opens for appending: every write goes to the end.
-        create_file(path, sd.as_ref(), FILE_GENERIC_WRITE & !FILE_WRITE_DATA, OPEN_ALWAYS, false)
+        create_file(path, sd.as_ref(), FILE_GENERIC_WRITE & !FILE_WRITE_DATA, OPEN_ALWAYS)
+    }
+
+    pub fn set_len(file: &File, len: u64) -> io::Result<()> {
+        reopen(file, GENERIC_WRITE)?.set_len(len)
     }
 
     pub fn create_replacement(tmp: &Path, target: &Path, mode: Option<u32>) -> io::Result<File> {
@@ -326,7 +341,7 @@ mod imp {
                 None => None,
             },
         };
-        create_file(tmp, sd.as_ref(), NEW_FILE_ACCESS, CREATE_NEW, false)
+        create_file(tmp, sd.as_ref(), NEW_FILE_ACCESS, CREATE_NEW)
     }
 
     pub fn rename_into_place(tmp: &Path, target: &Path) -> io::Result<()> {
@@ -349,7 +364,7 @@ mod imp {
             return Ok(Privacy::Exposed("it has no DACL, so everyone has full access".into()));
         }
         let mut names: Vec<String> = vec![];
-        for sid in readers(&s)? {
+        for sid in readers(&s, false)? {
             let name = account_name(sid);
             if !names.contains(&name) {
                 names.push(name);
@@ -359,7 +374,10 @@ mod imp {
     }
 
     pub fn describe(path: &Path) -> io::Result<String> {
-        Ok(if privacy(path)?.is_exposed() { "shared" } else { "private" }.into())
+        // As `privacy`, without looking up names.
+        let s = Security::of(path, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION)?;
+        let shared = s.dacl.is_null() || !readers(&s, false)?.is_empty();
+        Ok(if shared { "shared" } else { "private" }.into())
     }
 
     pub fn owned_by_me(path: &Path) -> io::Result<bool> {
@@ -558,7 +576,7 @@ mod imp {
         kind: u32,
         pub(super) flags: u32,
         size: u16,
-        /// The access mask and SID: meaningful for (callback) allow entries only.
+        /// The access mask and SID of a (callback) allow entry; 0 and null for other entries.
         mask: u32,
         sid: PSID,
         raw: *const c_void,
@@ -578,31 +596,37 @@ mod imp {
             if unsafe { GetAce(acl, i, &mut raw) } == 0 {
                 continue;
             }
-            // SAFETY: every entry is at least a header, a mask and the first 4 bytes of a SID.
-            let ace = unsafe { std::ptr::read_unaligned(raw as *const ACCESS_ALLOWED_ACE) };
-            let h: ACE_HEADER = ace.Header;
-            out.push(Ace {
-                kind: h.AceType.into(),
-                flags: h.AceFlags.into(),
-                size: h.AceSize,
-                mask: ace.Mask,
+            // SAFETY: every entry starts with a header.
+            let h = unsafe { std::ptr::read_unaligned(raw as *const ACE_HEADER) };
+            let kind = u32::from(h.AceType);
+            // An allow entry with room for its mask and a SID (8 bytes at least).
+            let sid_at = offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+            let allow = matches!(kind, ACCESS_ALLOWED_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_ACE_TYPE) && usize::from(h.AceSize) >= sid_at + 8;
+            let (mask, sid) = if allow {
+                // SAFETY: the entry holds a whole ACCESS_ALLOWED_ACE (checked above).
+                let ace = unsafe { std::ptr::read_unaligned(raw as *const ACCESS_ALLOWED_ACE) };
                 // SAFETY: within the entry (see above).
-                sid: unsafe { raw.cast::<u8>().add(offset_of!(ACCESS_ALLOWED_ACE, SidStart)) }.cast(),
-                raw,
-            });
+                (ace.Mask, unsafe { raw.cast::<u8>().add(sid_at) }.cast())
+            } else {
+                (0, null_mut())
+            };
+            out.push(Ace { kind, flags: h.AceFlags.into(), size: h.AceSize, mask, sid, raw });
         }
         out
     }
 
     /// The SIDs (pointing into `s`) other than the owner, the current user, SYSTEM and
-    /// Administrators that an entry lets read the file.
-    fn readers(s: &Security) -> io::Result<Vec<PSID>> {
+    /// Administrators that an entry lets read the file; with `children`, also those an entry
+    /// only passes on to what is created inside a directory.
+    fn readers(s: &Security, children: bool) -> io::Result<Vec<PSID>> {
         let sids = sids()?;
         let trusted = [s.owner, sids.user.ptr(), sids.system.ptr(), sids.admins.ptr(), sids.owner_rights.ptr()];
+        let inherits = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
         Ok(aces(s.dacl)
             .into_iter()
             .filter(|a| matches!(a.kind, ACCESS_ALLOWED_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_ACE_TYPE))
-            .filter(|a| a.flags & INHERIT_ONLY_ACE == 0 && a.mask & READ_RIGHTS != 0)
+            .filter(|a| a.flags & INHERIT_ONLY_ACE == 0 || children && a.flags & inherits != 0)
+            .filter(|a| a.mask & READ_RIGHTS != 0)
             // SAFETY: valid SIDs.
             .filter(|a| !trusted.iter().any(|t| !t.is_null() && unsafe { EqualSid(*t, a.sid) } != 0))
             .map(|a| a.sid)
@@ -620,7 +644,7 @@ mod imp {
         if dir && !aces(s.dacl).iter().any(|a| a.flags & both == both) {
             return Ok(false);
         }
-        Ok(readers(&s)?.is_empty())
+        Ok(readers(&s, dir)?.is_empty())
     }
 
     // ---------------------------------------------------------------- descriptors
@@ -738,15 +762,29 @@ mod imp {
         }
     }
 
+    /// Another handle to `file`, with the rights `access`.
+    fn reopen(file: &File, access: u32) -> io::Result<File> {
+        let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+        // SAFETY: a valid handle for the call's duration.
+        let h = unsafe { ReOpenFile(file.as_raw_handle(), access, share, 0) };
+        if h == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: a fresh handle nobody else owns; `File` closes it.
+        Ok(unsafe { File::from_raw_handle(h) })
+    }
+
     fn check(rc: WIN32_ERROR) -> io::Result<()> {
         if rc == ERROR_SUCCESS { Ok(()) } else { Err(io::Error::from_raw_os_error(rc as i32)) }
     }
 
-    fn create_file(path: &Path, sd: Option<&Descriptor>, access: u32, disposition: FILE_CREATION_DISPOSITION, nofollow: bool) -> io::Result<File> {
+    fn create_file(path: &Path, sd: Option<&Descriptor>, access: u32, disposition: FILE_CREATION_DISPOSITION) -> io::Result<File> {
         let w = wide(path)?;
         let sa = sd.map(Descriptor::attributes);
         let sa_ptr = sa.as_ref().map_or(null(), |a| a as *const SECURITY_ATTRIBUTES);
-        let flags = FILE_ATTRIBUTE_NORMAL | if nofollow { FILE_FLAG_OPEN_REPARSE_POINT } else { 0 };
+        // As std's `create_new`, a new file is never created through a symlink or junction,
+        // even a dangling one (Unix: `O_EXCL`). Appending follows them, as `O_APPEND` does.
+        let flags = FILE_ATTRIBUTE_NORMAL | if disposition == CREATE_NEW { FILE_FLAG_OPEN_REPARSE_POINT } else { 0 };
         // std's default sharing, so the file behaves like one std opened.
         let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
         // SAFETY: `w` is NUL-terminated; `sa` and the descriptor it points to outlive the call.
@@ -778,6 +816,37 @@ mod imp {
         }
         w.push(0);
         Ok(w)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A directory whose entry passes read access on to new files only is not private:
+        /// `apply` protects it again, so what is created inside is born private.
+        #[test]
+        fn inherit_only_readers_make_a_directory_shared() {
+            use windows_sys::Win32::Security::WinWorldSid;
+            use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+            let d = tempfile::tempdir().unwrap();
+            let dir = d.path().join("d");
+            create_dir_private(&dir).unwrap();
+            assert!(already_private(&dir, true).unwrap());
+
+            let (user, everyone) = (&sids().unwrap().user, Sid::well_known(WinWorldSid).unwrap());
+            let mut acl = Acl::new(size_of::<ACL>() + ace_size(user) + ace_size(&everyone), ACL_REVISION).unwrap();
+            acl.allow(user, FILE_ALL_ACCESS, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE).unwrap();
+            acl.allow(&everyone, FILE_GENERIC_READ, OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE).unwrap();
+            set_dacl(&dir, &acl, true).unwrap();
+            assert_eq!(privacy(&dir).unwrap(), Privacy::Private, "the directory itself");
+            assert!(!already_private(&dir, true).unwrap());
+            std::fs::write(dir.join("before"), "x").unwrap();
+            assert!(privacy(&dir.join("before")).unwrap().is_exposed());
+
+            apply(&dir, 0o700).unwrap();
+            std::fs::write(dir.join("after"), "x").unwrap();
+            assert_eq!(privacy(&dir.join("after")).unwrap(), Privacy::Private);
+        }
     }
 }
 
@@ -861,6 +930,27 @@ mod tests {
         drop(create_replacement(&fresh, &d.path().join("fresh"), Some(0o600)).unwrap());
         assert_mode(&fresh, 0o600);
         assert_eq!(create_replacement(&fresh, &target, None).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn new_files_never_go_through_a_symlink() {
+        let d = tempfile::tempdir().unwrap();
+        let (link, target) = (d.path().join("link"), d.path().join("target"));
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        // Windows: creating a symlink needs Developer Mode or an administrator.
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_file(&target, &link).is_err() {
+                return;
+            }
+        }
+        for nofollow in [false, true] {
+            assert_eq!(open_new(&link, 0o600, nofollow).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        }
+        let err = create_replacement(&link, &d.path().join("file"), Some(0o600)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(!target.exists(), "nothing was created at the link's target");
     }
 
     #[test]

@@ -285,18 +285,30 @@ pub fn update_registry<R>(path: &Path, create: bool, mut f: impl FnMut(&mut Doc)
     Err(ApiError::conflict("the workspace registry is being changed by someone else right now; try again"))
 }
 
-/// Write `bytes` to a synced temp file beside `path` (the registry's mode, else 0600).
+/// Write `bytes` to a synced temp file beside `path` (the registry's mode, else 0600;
+/// Windows: the registry's DACL, else private).
 fn stage_registry(path: &Path, bytes: &[u8]) -> ApiResult<PathBuf> {
     use std::io::Write;
     use util::os::perm;
     let dir = path.parent().ok_or_else(|| ApiError::internal("registry path without a directory"))?;
     std::fs::create_dir_all(dir)?;
-    let mode = std::fs::metadata(path).ok().and_then(|m| perm::mode(&m)).map_or(0o600, |m| m & 0o777);
+    // `None` when the registry exists on Windows, which has no mode.
+    let mode = match std::fs::metadata(path) {
+        Ok(m) => perm::mode(&m).map(|m| m & 0o777),
+        Err(_) => Some(0o600),
+    };
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "workspace.json".into());
     let tmp = dir.join(format!(".{name}.wb-tmp-{}", util::random_token(6)));
     let written = (|| -> std::io::Result<()> {
-        let mut f = perm::open_new(&tmp, mode, true)?;
-        perm::apply_to(&f, mode)?;
+        let mut f = match mode {
+            Some(mode) => {
+                let f = perm::open_new(&tmp, mode, true)?;
+                perm::apply_to(&f, mode)?;
+                f
+            }
+            // A repository's registry keeps its DACL.
+            None => perm::create_replacement(&tmp, path, Some(0o600))?,
+        };
         f.write_all(bytes)?;
         f.sync_all()
     })();
