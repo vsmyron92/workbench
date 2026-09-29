@@ -156,9 +156,14 @@ Windows-only behaviour is always `cfg(windows)`.
 
 - `netif.rs:13-46` (`getifaddrs`) → `GetAdaptersAddresses` with the adapter's friendly name;
   add `vEthernet`, `VMware`, `VirtualBox` to the virtual-interface list (`netif.rs:71`).
-- `app.rs:160-170`: `[::]` is v6-only on Windows, so also listen on 127.0.0.1.
-- `apps/runs.rs:480-497` (`fuser -k`) → `GetExtendedTcpTable` for the owning pid; only the
-  same user's processes are terminated.
+- `app.rs:160-170`: `[::]` is v6-only on Windows unless asked, so `os::net::bind` clears
+  `IPV6_V6ONLY` for it: one dual-stack socket takes IPv4 (loopback included) as on Linux,
+  and TLS covers both families.
+- `apps/runs.rs:480-497` (`fuser -k`) → `GetExtendedTcpTable` for the owning pid and bind
+  time. Windows names only the process that bound the socket, so the owner and the processes
+  it started after binding (which can hold an inherited copy, as a reloader's worker does) are
+  terminated, parents first. Only the same user's processes are terminated, and a pid that
+  another process has taken since the bind is left alone.
 
 **L. Desktop integration**
 

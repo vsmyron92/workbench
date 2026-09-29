@@ -393,7 +393,7 @@ mod tests {
     async fn dual_stack_listener_serves_ipv4_loopback_plain_http() {
         let dir = tempfile::tempdir().unwrap();
         let Some(acc) = test_acceptor(dir.path()) else { return };
-        let Ok(tcp) = TcpListener::bind("[::]:0").await else {
+        let Ok(tcp) = crate::util::os::net::bind("[::]:0".parse().unwrap()).await else {
             eprintln!("no IPv6; skipping");
             return;
         };
