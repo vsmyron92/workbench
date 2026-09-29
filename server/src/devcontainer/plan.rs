@@ -151,11 +151,16 @@ pub fn choose_engine(c: &DevConfig, e: &Engines) -> (Option<Engine>, String, Vec
     (engine, note, problems)
 }
 
+/// `path` with `..` removed lexically.
+fn lexical(path: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(super::config::parse_path_rel(Path::new("/"), path))
+}
+
 /// `path` as the host resolves it: `..` removed lexically, then symlinks resolved for the
 /// longest part that exists (Docker follows symlinks in bind sources: a link in the
 /// repository to `/` would otherwise look like a folder of the project).
 pub fn resolved(path: &str) -> std::path::PathBuf {
-    let lexical = std::path::PathBuf::from(super::config::parse_path_rel(Path::new("/"), path));
+    let lexical = lexical(path);
     let mut existing = lexical.clone();
     let mut rest: Vec<std::ffi::OsString> = vec![];
     loop {
@@ -201,6 +206,16 @@ fn bind_risk(root: &Path, source: &str, target: &str, item: &str, risks: &mut Ve
         risks.push(Risk { level: Level::Danger, item: item.into(), message: format!("mounts a host path from your environment into {target}") });
     } else if !crate::util::os::path::is_absolute_str(source) {
         // A named volume (a host path is absolute: `/x`, and `C:\x` on Windows).
+    } else if crate::util::os::path::leaves_machine(Path::new(source)) || crate::util::os::path::leaves_machine(&lexical(source)) {
+        // Windows only: a network path, or a link on the way that Workbench does not follow.
+        // Checked before anything resolves it, so the host is never contacted; and the link's
+        // own path, which is in the project, must not pass for an ordinary folder. The source
+        // as written too: rebuilt from its components, `//host/share` could lose its prefix.
+        risks.push(Risk {
+            level: Level::Danger,
+            item: item.into(),
+            message: format!("mounts {source}, which is or leads through a network path or a device, into the container at {target}"),
+        });
     } else if !inside(root, source) {
         let real = resolved(source);
         // `/` (Windows: a drive's root).

