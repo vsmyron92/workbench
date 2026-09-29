@@ -31,7 +31,7 @@ fn dotnet_cmd(cx: &mut Ctx) -> String {
 pub fn detect(cx: &mut Ctx, sln: &Path) {
     let Some(dir) = sln.parent() else { return };
     // Unity regenerates a .sln at its project root; that one is not a .NET solution to build.
-    if dir.join("ProjectSettings/ProjectVersion.txt").is_file() {
+    if cx.is_file(&dir.join("ProjectSettings/ProjectVersion.txt")) {
         return;
     }
     let Some(text) = cx.read(sln) else { return };

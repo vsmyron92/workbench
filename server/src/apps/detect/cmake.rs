@@ -222,7 +222,7 @@ fn read_presets(cx: &mut Ctx, dir: &Path) -> Presets {
     let mut raw: Vec<(String, serde_json::Value)> = vec![]; // (kind, preset)
     for name in ["CMakePresets.json", "CMakeUserPresets.json"] {
         let p = dir.join(name);
-        if !p.is_file() {
+        if !cx.is_file(&p) {
             continue;
         }
         let Some(src) = cx.read(&p) else { continue };

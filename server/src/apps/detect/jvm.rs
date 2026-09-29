@@ -34,12 +34,12 @@ static SERVER_PORT: LazyLock<Regex> =
 /// The project's build wrapper in `dir` as a command's first word: the script
 /// (`gradlew`, `./gradlew`), or on Windows (`super::dialect`) its batch file
 /// (`gradlew.bat`, `.\gradlew.bat`). `None` without one.
-fn wrapper(dir: &Path, posix: (&str, &'static str), windows: (&str, &'static str)) -> Option<&'static str> {
+fn wrapper(cx: &Ctx, dir: &Path, posix: (&str, &'static str), windows: (&str, &'static str)) -> Option<&'static str> {
     let (file, command) = match super::dialect() {
         Dialect::Posix => posix,
         Dialect::PowerShell => windows,
     };
-    dir.join(file).is_file().then_some(command)
+    cx.is_file(&dir.join(file)).then_some(command)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,7 +73,7 @@ fn gradle_app(src: &str) -> Option<App> {
 fn spring_port(cx: &mut Ctx, module: &Path) -> u16 {
     for n in ["application.properties", "application.yml", "application.yaml"] {
         let p = module.join("src/main/resources").join(n);
-        if p.is_file() {
+        if cx.is_file(&p) {
             if let Some(port) = cx.read(&p).and_then(|t| {
                 // YAML: only a `port:` under a `server:` block counts.
                 if n.ends_with("properties") {
@@ -114,9 +114,9 @@ pub fn detect_gradle(cx: &mut Ctx, f: &Path) {
         return;
     }
     let cwd = cx.rel(dir);
-    let gradle = wrapper(dir, ("gradlew", "./gradlew"), ("gradlew.bat", r".\gradlew.bat")).unwrap_or("gradle");
-    let settings = ["settings.gradle.kts", "settings.gradle"].iter().map(|n| dir.join(n)).find(|p| p.is_file());
-    let build = ["build.gradle.kts", "build.gradle"].iter().map(|n| dir.join(n)).find(|p| p.is_file());
+    let gradle = wrapper(cx, dir, ("gradlew", "./gradlew"), ("gradlew.bat", r".\gradlew.bat")).unwrap_or("gradle");
+    let settings = ["settings.gradle.kts", "settings.gradle"].iter().map(|n| dir.join(n)).find(|p| cx.is_file(p));
+    let build = ["build.gradle.kts", "build.gradle"].iter().map(|n| dir.join(n)).find(|p| cx.is_file(p));
     let manifest = build.clone().or(settings.clone()).unwrap_or_else(|| f.to_path_buf());
     cx.tag("gradle");
     cx.tag("jvm");
@@ -144,7 +144,7 @@ pub fn detect_gradle(cx: &mut Ctx, f: &Path) {
                 continue;
             }
             let mdir = dir.join(rel);
-            let Some(mb) = ["build.gradle.kts", "build.gradle"].iter().map(|x| mdir.join(x)).find(|p| p.is_file()) else { continue };
+            let Some(mb) = ["build.gradle.kts", "build.gradle"].iter().map(|x| mdir.join(x)).find(|p| cx.is_file(p)) else { continue };
             cx.mark(format!("gradle:{}", mdir.display()));
             modules.push((format!(":{n}:"), mdir, cx.read(&mb).unwrap_or_default()));
         }
@@ -175,7 +175,7 @@ pub fn detect_gradle(cx: &mut Ctx, f: &Path) {
         }
         let Some(app) = gradle_app(text) else { continue };
         let label = if prefix.is_empty() { String::new() } else { format!(" {}", prefix.trim_matches(':')) };
-        let src = source(cx, &mdir.join(if mdir.join("build.gradle.kts").is_file() { "build.gradle.kts" } else { "build.gradle" }), "");
+        let src = source(cx, &mdir.join(if cx.is_file(&mdir.join("build.gradle.kts")) { "build.gradle.kts" } else { "build.gradle" }), "");
         let run = match app {
             App::SpringBoot => {
                 let port = spring_port(cx, mdir);
@@ -218,7 +218,7 @@ pub fn detect_maven(cx: &mut Ctx, f: &Path) {
         return;
     }
     let cwd = cx.rel(dir);
-    let mvn = wrapper(dir, ("mvnw", "./mvnw"), ("mvnw.cmd", r".\mvnw.cmd")).unwrap_or("mvn");
+    let mvn = wrapper(cx, dir, ("mvnw", "./mvnw"), ("mvnw.cmd", r".\mvnw.cmd")).unwrap_or("mvn");
     cx.tag("maven");
     cx.tag("jvm");
     cx.pf.components.push(Component { name: scoped("maven", &cwd), path: cwd.clone(), kind: "maven".into(), version: None });

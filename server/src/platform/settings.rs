@@ -786,7 +786,8 @@ pub async fn get_project(State(state): State<AppState>, UrlPath(pid): UrlPath<St
         .map_err(|e| ApiError::internal(format!("detection failed: {e}")))?;
     let repo_path = p.root.join(".workbench.toml");
     let overlay_path = state.paths.project_overlay(&pid);
-    let repo_file = read_optional(&repo_path)?;
+    // One that links to another computer is not read (the project's warnings say so).
+    let repo_file = if crate::config::project::repo_layer_linked_away(&p.root) { None } else { read_optional(&repo_path)? };
     let overlay_file = read_optional(&overlay_path)?;
     let hash = |t: &Option<String>| sha256_hex(t.as_deref().unwrap_or(""));
     Ok(Json(json!({
@@ -811,6 +812,9 @@ async fn put_layer(state: AppState, pid: String, layer: Layer, body: TextBody) -
     let _serial = state.platform.save_lock.lock().await;
     let p = state.projects.require(&pid)?;
     let path = match layer {
+        Layer::Repo if crate::config::project::repo_layer_linked_away(&p.root) => {
+            return Err(ApiError::forbidden(format!(".workbench.toml is {}", crate::config::project::REPO_LAYER_LINKED_AWAY)));
+        }
         Layer::Repo => p.root.join(".workbench.toml"),
         Layer::Overlay => state.paths.project_overlay(&pid),
     };

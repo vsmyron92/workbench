@@ -80,16 +80,18 @@ pub fn resolve_absolute_in(roots: &[PathBuf], abs: &str) -> Result<PathBuf, ApiE
 }
 
 /// For existing paths (or their nearest existing ancestor), the canonical path
-/// must stay under the canonical root.
+/// must stay under the canonical root. A path through a link that canonicalizing does
+/// not follow (Windows: to another computer or a device, `os::path::is_refused_link`) is
+/// refused, not taken for a missing one: opening it would follow that link.
 fn check_contained(root: &Path, joined: &Path) -> Result<(), ApiError> {
     let canon_root = os::path::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut probe = joined.to_path_buf();
     loop {
-        if let Ok(canon) = os::path::canonicalize(&probe) {
-            if os::path::starts_with(&canon, &canon_root) {
-                return Ok(());
-            }
-            return Err(ApiError::forbidden("path resolves outside the project root"));
+        match os::path::canonicalize(&probe) {
+            Ok(canon) if os::path::starts_with(&canon, &canon_root) => return Ok(()),
+            Ok(_) => return Err(ApiError::forbidden("path resolves outside the project root")),
+            Err(e) if os::path::is_refused_link(&e) => return Err(ApiError::forbidden(e.to_string())),
+            Err(_) => {}
         }
         if !probe.pop() {
             return Ok(());
@@ -195,6 +197,32 @@ mod tests {
         let unc = resolve_in_root(std::path::Path::new(r"\\wsl$\Ubuntu\home\u"), "x").unwrap_err();
         assert!(unc.message.contains("WSL"), "{}", unc.message);
         assert_eq!((unc.code, unc.feature), ("unsupported_platform", Some("networkRoots")));
+    }
+
+    /// A link to a network path is refused before anything follows it (the path through
+    /// it included), not taken for a missing file that may be created.
+    #[cfg(windows)]
+    #[test]
+    fn windows_links_to_network_paths_are_refused() {
+        use crate::util::os::path::{loopback_share, remote_link_or_skip};
+        let dir = tempfile::tempdir().unwrap();
+        let root = &crate::util::os::path::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir(root.join("real")).unwrap();
+        std::fs::write(root.join("real").join("x.txt"), "x").unwrap();
+        let share = loopback_share(&root.join("real"));
+        if !remote_link_or_skip(&share, &root.join("dir-link"), true) {
+            return;
+        }
+        assert!(remote_link_or_skip(&share.join("x.txt"), &root.join("file-link"), false));
+        for rel in ["dir-link", "dir-link/x.txt", "dir-link/new.txt", "dir-link/sub/new.txt", "file-link"] {
+            let e = resolve_in_root(root, rel).unwrap_err();
+            assert_eq!(e.status.as_u16(), 403, "{rel}: {}", e.message);
+            assert!(e.message.contains("network path"), "{rel}: {}", e.message);
+        }
+        assert!(resolve_in_root(root, "real/x.txt").is_ok() && resolve_in_root(root, "new/x.txt").is_ok());
+        // The link itself can still be trashed or renamed; nothing below it is reachable.
+        assert_eq!(resolve_entry_in_root(root, "dir-link").unwrap(), root.join("dir-link"));
+        assert!(resolve_entry_in_root(root, "dir-link/x.txt").is_err());
     }
 
     /// A junction needs no privilege; canonicalize follows it, so it cannot leave the root.

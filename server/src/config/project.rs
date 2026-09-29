@@ -776,11 +776,26 @@ pub fn read_layer(path: &Path) -> Result<Option<ProjectFile>, String> {
     }
 }
 
+/// Why `<root>/.workbench.toml` is not read, when it is a link to another computer or a
+/// device (Windows, `os::path::leaves_machine_below`): reading it would connect there.
+pub const REPO_LAYER_LINKED_AWAY: &str = "a link to a network path or a device: Workbench does not follow it";
+
+/// Whether `<root>/.workbench.toml` is such a link ([`REPO_LAYER_LINKED_AWAY`]).
+pub fn repo_layer_linked_away(root: &Path) -> bool {
+    crate::util::os::path::leaves_machine_below(root, &root.join(".workbench.toml"))
+}
+
 /// Read `<root>/.workbench.toml` and the machine overlay at `overlay_path`, and merge
-/// them over `detected` (see `merge_layers`). Unreadable layers become warnings.
+/// them over `detected` (see `merge_layers`). Unreadable layers become warnings, and so
+/// does a `.workbench.toml` that links to another computer ([`repo_layer_linked_away`]).
 pub fn load_layers(detected: ProjectFile, root: &Path, overlay_path: &Path, global_atlassian_site: Option<&str>) -> Layered {
     let overlay_label = super::contract_tilde(overlay_path);
     let mut warnings = vec![];
+    let repo_path = root.join(".workbench.toml");
+    let linked_away = repo_layer_linked_away(root);
+    if linked_away {
+        warnings.push(format!(".workbench.toml ({}): {REPO_LAYER_LINKED_AWAY}", super::contract_tilde(&repo_path)));
+    }
     let mut read = |label: &str, path: &Path| match read_layer(path) {
         Ok(layer) => layer,
         Err(e) => {
@@ -788,7 +803,7 @@ pub fn load_layers(detected: ProjectFile, root: &Path, overlay_path: &Path, glob
             None
         }
     };
-    let repo = read(".workbench.toml", &root.join(".workbench.toml"));
+    let repo = if linked_away { None } else { read(".workbench.toml", &repo_path) };
     let overlay = read("machine overlay", overlay_path);
     let mut out = merge_layers(detected, repo, overlay, &overlay_label, global_atlassian_site);
     warnings.append(&mut out.warnings);
@@ -1080,5 +1095,24 @@ mod tests {
         assert!(l.warnings.iter().any(|w| w.starts_with("machine overlay (")), "{:?}", l.warnings);
         assert!(l.config.secrets.is_empty() && l.repo_secret_names.contains("mock"));
         assert_eq!(l.secret_ref("mock", &global), None, "never config.toml's secret of that name");
+    }
+
+    /// A `.workbench.toml` that links to another computer (Windows) is not read, and a
+    /// warning says so. (The linked file sits on this computer's own share, so a followed
+    /// link would show.)
+    #[cfg(windows)]
+    #[test]
+    fn a_repo_layer_linked_to_a_network_path_is_not_read() {
+        use crate::util::os::path::{canonicalize, loopback_share, remote_link_or_skip};
+        let (dir, elsewhere) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (root, far) = (canonicalize(dir.path()).unwrap(), canonicalize(elsewhere.path()).unwrap());
+        std::fs::write(far.join("wb.toml"), "[project]\nname = \"from the share\"\n").unwrap();
+        if !remote_link_or_skip(&loopback_share(&far).join("wb.toml"), &root.join(".workbench.toml"), false) {
+            return;
+        }
+        assert!(repo_layer_linked_away(&root));
+        let l = load_layers(ProjectFile::default(), &root, &root.join("overlay.toml"), None);
+        assert!(l.config.project.name.is_empty(), "{:?}", l.config.project.name);
+        assert!(l.warnings.iter().any(|w| w.starts_with(".workbench.toml (") && w.contains(REPO_LAYER_LINKED_AWAY)), "{:?}", l.warnings);
     }
 }

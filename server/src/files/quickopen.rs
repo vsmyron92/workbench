@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use super::fuzzy;
-use super::{HARD_IGNORE, blocking};
+use super::blocking;
 use crate::app::AppState;
 use crate::error::ApiResult;
 use crate::projects::Project;
@@ -67,15 +67,7 @@ impl QuickOpenCache {
 pub fn build_index(root: &Path) -> (Vec<String>, bool) {
     let mut files = vec![];
     let mut truncated = false;
-    let walk = ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .require_git(false)
-        .follow_links(false)
-        .filter_entry(|e| !HARD_IGNORE.contains(&e.file_name().to_string_lossy().as_ref()))
-        .build();
+    let walk = super::gitignore::walk(root).build();
     for ent in walk.flatten() {
         if !ent.file_type().is_some_and(|t| t.is_file() || t.is_symlink()) {
             continue;

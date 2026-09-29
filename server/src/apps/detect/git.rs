@@ -60,19 +60,28 @@ fn is_github_host(host: &str) -> bool {
 
 /// The repository's git directory: `.git/`, or the directory a `.git` file points
 /// at (worktrees, submodules) — using its `commondir` for shared config and refs.
+/// Those files may name any folder (an unpacked archive's `.git` file too): never one
+/// on another computer (Windows, `os::path::leaves_machine`), which reading connects to.
 pub(super) fn git_dir(root: &Path) -> Option<PathBuf> {
     let dot = root.join(".git");
     let meta = std::fs::symlink_metadata(&dot).ok()?;
     if meta.is_dir() {
         return Some(dot);
     }
+    if crate::util::os::path::leaves_machine_below(root, &dot) {
+        return None;
+    }
     let text = std::fs::read_to_string(&dot).ok()?;
     let gd = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
     let gd = if Path::new(gd).is_absolute() { PathBuf::from(gd) } else { root.join(gd) };
+    if crate::util::os::path::leaves_machine(&gd) {
+        return None;
+    }
     match std::fs::read_to_string(gd.join("commondir")) {
         Ok(c) => {
             let c = c.trim();
-            Some(if Path::new(c).is_absolute() { PathBuf::from(c) } else { gd.join(c) })
+            let common = if Path::new(c).is_absolute() { PathBuf::from(c) } else { gd.join(c) };
+            (!crate::util::os::path::leaves_machine(&common)).then_some(common)
         }
         Err(_) => Some(gd),
     }

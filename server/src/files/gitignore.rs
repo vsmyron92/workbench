@@ -7,8 +7,42 @@
 
 use std::path::Path;
 
-use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::{Match, WalkBuilder};
+
+use super::HARD_IGNORE;
+use crate::util::os;
+
+/// The ignore files the `ignore` crate reads in each folder a walk visits, and in every
+/// folder above where it starts (`.git/info/exclude` is git's own).
+const IGNORE_FILES: [&str; 2] = [".gitignore", ".ignore"];
+
+/// Whether an ignore file of `dir` is a link that leaves this computer (Windows:
+/// `os::path::leaves_machine_below`), which reading would connect to.
+fn ignore_file_leaves(dir: &Path) -> bool {
+    IGNORE_FILES.iter().any(|n| os::path::leaves_machine_below(dir, &dir.join(n)))
+}
+
+/// A walk of `start` as the files slice makes them (the tree's index, search, watches,
+/// Local History): gitignore-aware (ignore files above `start`, `.git/info/exclude` and
+/// the global excludes included; no repository needed), hidden files included, links
+/// never followed, `HARD_IGNORE` folders left out. No ignore file is read through a link
+/// to another computer (Windows): a folder holding one is left out, and when `start` or a
+/// folder above it holds one the walk reads no `.gitignore` or `.ignore` at all. Callers
+/// may add options, but must not turn ignore files on again or replace `filter_entry`.
+pub fn walk(start: &Path) -> WalkBuilder {
+    let keep = |e: &ignore::DirEntry| {
+        !HARD_IGNORE.contains(&e.file_name().to_string_lossy().as_ref())
+            && !(e.file_type().is_some_and(|t| t.is_dir()) && ignore_file_leaves(e.path()))
+    };
+    let mut b = WalkBuilder::new(start);
+    b.hidden(false).git_ignore(true).git_global(true).git_exclude(true).require_git(false).follow_links(false).filter_entry(keep);
+    if start.ancestors().any(ignore_file_leaves) {
+        tracing::warn!("{}: an ignore file there or above it links to another computer; walking it without ignore files", start.display());
+        b.git_ignore(false).ignore(false);
+    }
+    b
+}
 
 pub struct IgnoreChecker {
     /// Highest precedence first.
@@ -16,7 +50,8 @@ pub struct IgnoreChecker {
 }
 
 impl IgnoreChecker {
-    /// Matchers that apply to entries of `dir` (which must be inside `root`).
+    /// Matchers that apply to entries of `dir` (which must be inside `root`). A
+    /// `.gitignore` that is a link to another computer (Windows) is not read.
     pub fn for_dir(root: &Path, dir: &Path) -> Self {
         let mut layers = vec![];
         let mut cur = Some(dir);
@@ -25,7 +60,7 @@ impl IgnoreChecker {
                 break;
             }
             let f = d.join(".gitignore");
-            if f.is_file() {
+            if !os::path::leaves_machine_below(d, &f) && f.is_file() {
                 let (gi, _err) = Gitignore::new(&f);
                 if !gi.is_empty() {
                     layers.push(gi);
@@ -97,6 +132,34 @@ mod tests {
         // Listing inside an ignored directory: every child is ignored.
         let inner = IgnoreChecker::for_dir(root, &root.join("target/debug"));
         assert!(inner.is_ignored(&root.join("target/debug/app"), false));
+    }
+
+    /// An ignore file that links to another computer is never read (Windows): a folder
+    /// holding one is left out of walks, a walk starting there reads no ignore files, and
+    /// `IgnoreChecker` skips it. (Its target is this computer's own share, where it would
+    /// be found and would ignore `*.log`.)
+    #[cfg(windows)]
+    #[test]
+    fn ignore_files_linked_to_network_paths_are_not_read() {
+        use crate::util::os::path::{canonicalize, loopback_share, remote_link_or_skip};
+        let (dir, elsewhere) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (root, far) = (canonicalize(dir.path()).unwrap(), canonicalize(elsewhere.path()).unwrap());
+        std::fs::write(far.join("ignore"), "*.log\n").unwrap();
+        for d in ["a", "b"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+            std::fs::write(root.join(d).join("x.log"), "").unwrap();
+        }
+        if !remote_link_or_skip(&loopback_share(&far).join("ignore"), &root.join("a").join(".gitignore"), false) {
+            return;
+        }
+        let entries = |start: &Path| -> Vec<String> {
+            let mut v: Vec<String> = walk(start).build().flatten().filter(|e| e.depth() > 0).map(|e| crate::util::os::path::to_slash(e.path().strip_prefix(start).unwrap())).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(entries(&root), ["b", "b/x.log"]);
+        assert_eq!(entries(&root.join("a")), [".gitignore", "x.log"]);
+        assert!(!IgnoreChecker::for_dir(&root, &root.join("a")).is_ignored(&root.join("a").join("x.log"), false));
     }
 
     #[test]

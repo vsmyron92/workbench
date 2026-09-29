@@ -104,10 +104,15 @@ struct GitDirs {
 /// `root` or an ancestor, so a project rooted in a subdirectory of a repository
 /// still hears about commits, checkouts and staging.
 fn git_dirs(root: &Path) -> Option<GitDirs> {
+    // A `.git` that is a link to another computer (Windows) ends the search unread.
+    let leaves = |dir: &Path, dotgit: &Path| os::path::leaves_machine_below(dir, dotgit);
     let (top, dotgit) = root.ancestors().find_map(|dir| {
         let dotgit = dir.join(".git");
-        std::fs::metadata(&dotgit).is_ok().then(|| (dir.to_path_buf(), dotgit))
+        (leaves(dir, &dotgit) || std::fs::metadata(&dotgit).is_ok()).then(|| (dir.to_path_buf(), dotgit))
     })?;
+    if leaves(&top, &dotgit) {
+        return None;
+    }
     let gitdir = if dotgit.is_dir() {
         dotgit
     } else {
@@ -117,11 +122,19 @@ fn git_dirs(root: &Path) -> Option<GitDirs> {
         // Relative to the directory holding the `.git` file.
         if p.is_absolute() { p } else { top.join(p) }
     };
+    // The `gitdir:` and `commondir` files name any folder (an unpacked archive's too): never
+    // one on another computer (Windows), which watching would connect to.
+    if os::path::leaves_machine(&gitdir) {
+        return None;
+    }
     let gitdir = crate::util::os::path::canonicalize(&gitdir).unwrap_or(gitdir);
     let commondir = match std::fs::read_to_string(gitdir.join("commondir")) {
         Ok(t) => {
             let p = PathBuf::from(t.trim());
             let p = if p.is_absolute() { p } else { gitdir.join(p) };
+            if os::path::leaves_machine(&p) {
+                return None;
+            }
             crate::util::os::path::canonicalize(&p).unwrap_or(p)
         }
         Err(_) => gitdir.clone(),
@@ -186,15 +199,8 @@ fn hard_ignored(name: &str) -> bool {
 
 /// Directories to watch under `start` (inclusive), honouring .gitignore.
 fn walk_dirs(start: &Path) -> impl Iterator<Item = PathBuf> {
-    ignore::WalkBuilder::new(start)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .require_git(false)
+    super::gitignore::walk(start)
         .parents(true)
-        .follow_links(false)
-        .filter_entry(|e| !hard_ignored(&e.file_name().to_string_lossy()))
         .build()
         .flatten()
         .filter(|e| e.file_type().is_some_and(|t| t.is_dir()))
@@ -274,7 +280,7 @@ impl Inner {
                     // directory would have seen.
                     Class::File(_) if os::watch::RECURSIVE && !self.covers(path) => {}
                     // A folder "modified" by its entries: they are reported themselves.
-                    Class::File(_) if os::watch::FOLDERS_MODIFY && ev.kind == EventKind::Modify(ModifyKind::Any) && path.is_dir() => {}
+                    Class::File(_) if os::watch::FOLDERS_MODIFY && ev.kind == EventKind::Modify(ModifyKind::Any) && self.is_dir(path) => {}
                     Class::File(rel) => {
                         any = true;
                         if p.paths.len() < MAX_EVENT_PATHS {
@@ -293,6 +299,13 @@ impl Inner {
         if any {
             self.wake.notify_one();
         }
+    }
+
+    /// Whether `path`, below the root, is a folder. What changed is whatever repository
+    /// content made, links included: one to another computer (Windows) is not followed
+    /// (`os::path::leaves_machine_below`), since looking connects to that computer.
+    fn is_dir(&self, path: &Path) -> bool {
+        !os::path::leaves_machine_below(&self.root, path) && path.is_dir()
     }
 
     /// Whether a change of `path` is one a watch per directory reports: its folder is
@@ -376,13 +389,13 @@ impl Inner {
             let prune = batch.prune;
             let _ = tokio::task::spawn_blocking(move || {
                 if prune {
-                    w.dirs.lock().retain(|d| d.is_dir());
+                    w.dirs.lock().retain(|d| w.is_dir(d));
                     if w.dirs.lock().len() < MAX_WATCHED_DIRS {
                         w.capped.store(false, Ordering::Relaxed);
                     }
                 }
                 for d in new_dirs {
-                    if d.is_dir() {
+                    if w.is_dir(&d) {
                         w.add_tree(&d, true);
                     }
                 }
@@ -810,6 +823,31 @@ mod tests {
         std::fs::write(root.join("src/after.rs"), "x").unwrap();
         let (paths, _, _) = collect(&inner).await;
         assert!(paths.contains("src/after.rs"), "{paths:?}");
+    }
+
+    /// Links to another computer in a watched project (a checkout makes them) are not
+    /// followed (Windows): an ignore file that is one is not read, and a linked folder gets
+    /// no watch or walk. The linked files sit on this computer's own share, so a followed
+    /// link would show.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn links_to_network_paths_are_not_followed() {
+        use crate::util::os::path::{loopback_share, remote_link_or_skip};
+        let (dir, elsewhere) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (root, far) = (os::path::canonicalize(dir.path()).unwrap(), os::path::canonicalize(elsewhere.path()).unwrap());
+        std::fs::create_dir_all(far.join("sub")).unwrap();
+        std::fs::write(far.join("ignore"), "src/\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let share = loopback_share(&far);
+        if !remote_link_or_skip(&share.join("ignore"), &root.join(".gitignore"), false) {
+            return;
+        }
+        let inner = watching(&root).await;
+        assert!(inner.covers(&root.join("src").join("a.rs")), "the linked .gitignore was read");
+        assert!(remote_link_or_skip(&share, &root.join("remote-dir"), true));
+        let (paths, _, _) = collect(&inner).await;
+        assert!(paths.contains("remote-dir"), "{paths:?}");
+        assert!(!inner.dirs.lock().iter().any(|d| d.starts_with(root.join("remote-dir"))), "{:?}", inner.dirs.lock());
     }
 
     /// The folders whose changes are reported: those the walk enters, as a watch each
