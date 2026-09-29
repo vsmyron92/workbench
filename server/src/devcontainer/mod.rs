@@ -78,12 +78,14 @@ pub fn sh_quote_always(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// A path for display: project-relative when inside `root`.
+/// A path for display: project-relative with `/` (as repository paths are written, on
+/// Windows too) when inside `root`.
 pub fn rel_display(root: &Path, abs: &str) -> String {
-    match Path::new(abs).strip_prefix(root) {
-        Ok(r) if r.as_os_str().is_empty() => ".".into(),
-        Ok(r) => r.display().to_string(),
-        Err(_) => abs.to_string(),
+    use crate::util::os::path;
+    match path::strip_prefix(Path::new(abs), root) {
+        Some(r) if r.as_os_str().is_empty() => ".".into(),
+        Some(r) => path::to_slash(r),
+        None => abs.to_string(),
     }
 }
 

@@ -267,8 +267,15 @@ pub struct Vars<'a> {
     pub container_env: Option<&'a BTreeMap<String, String>>,
 }
 
+/// The last name of a container path.
 fn basename(p: &str) -> &str {
     p.trim_end_matches('/').rsplit('/').next().unwrap_or(p)
+}
+
+/// The last name of a path on this computer (`${localWorkspaceFolderBasename}`, the default
+/// `/workspaces/<name>`): its separators are this OS's (`\` too on Windows).
+fn local_basename(p: &str) -> &str {
+    crate::util::os::path::segments(p).filter(|s| !s.is_empty()).last().unwrap_or("")
 }
 
 /// Substitute variables in `s`. Unknown variables stay as written.
@@ -286,7 +293,7 @@ pub fn substitute(s: &str, v: &Vars, used_env: &mut BTreeSet<String>) -> String 
         let whole = &rest[start..start + 2 + end + 1];
         let replacement: Option<String> = match inner {
             "localWorkspaceFolder" => Some(v.local_folder.to_string()),
-            "localWorkspaceFolderBasename" => Some(basename(v.local_folder).to_string()),
+            "localWorkspaceFolderBasename" => Some(local_basename(v.local_folder).to_string()),
             "containerWorkspaceFolder" => v.container_folder.map(str::to_string),
             "containerWorkspaceFolderBasename" => v.container_folder.map(|f| basename(f).to_string()),
             "devcontainerId" => Some(v.devcontainer_id.to_string()),
@@ -409,7 +416,7 @@ pub fn parse(root: &Path, rel: &str, abs: &Path, raw: &Value, local_env: LocalEn
     let pre = Vars { local_folder: &local_folder, container_folder: None, devcontainer_id: &id, local_env, container_env: None };
     let compose_files = strings_of(raw.get("dockerComposeFile"));
     let is_compose = !compose_files.is_empty();
-    let default_folder = if is_compose { "/".to_string() } else { format!("/workspaces/{}", basename(&local_folder)) };
+    let default_folder = if is_compose { "/".to_string() } else { format!("/workspaces/{}", local_basename(&local_folder)) };
     let workspace_folder = str_of(raw, "workspaceFolder").map(|s| substitute(&s, &pre, &mut used_env)).unwrap_or(default_folder);
     let vars = Vars { container_folder: Some(&workspace_folder), ..pre };
     let raw = substitute_value(raw, &vars, &mut used_env);
@@ -457,7 +464,7 @@ pub fn parse(root: &Path, rel: &str, abs: &Path, raw: &Value, local_env: LocalEn
         match str_of(&raw, "workspaceMount") {
             Some(m) => Some(parse_mount_str(&m).ok_or_else(|| format!("{rel}: workspaceMount {m:?} is not a mount"))?),
             None => {
-                let target = format!("/workspaces/{}", basename(&local_folder));
+                let target = format!("/workspaces/{}", local_basename(&local_folder));
                 let spec = format!("type=bind,source={local_folder},target={target}");
                 Some(Mount { kind: "bind".into(), source: local_folder.clone(), target, readonly: false, spec })
             }
@@ -684,6 +691,10 @@ mod tests {
         );
         assert_eq!(substitute("${localEnv:HOME}/.ssh", &v, &mut used), "${localEnv:HOME}/.ssh");
         assert!(used.contains("HOME"));
+        // A folder on this computer is named with its OS's separators (`C:\…\shop` on Windows).
+        let folder = std::env::temp_dir().join("shop").display().to_string();
+        let local = Vars { local_folder: &folder, container_folder: None, devcontainer_id: "abc", local_env: LocalEnv::Keep, container_env: None };
+        assert_eq!(substitute("/workspaces/${localWorkspaceFolderBasename}", &local, &mut used), "/workspaces/shop");
         let env: BTreeMap<String, String> = [("PATH".to_string(), "/usr/bin".to_string())].into();
         let v2 = Vars { container_env: Some(&env), local_env: LocalEnv::Resolve, ..v };
         assert_eq!(substitute("${containerEnv:PATH}:/x", &v2, &mut used), "/usr/bin:/x");
