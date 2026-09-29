@@ -39,6 +39,7 @@ pub mod routes;
 pub mod store;
 mod tools;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -420,18 +421,40 @@ fn files_in_new_dirs(project: &Project, dirs: &[String], paths: &mut Vec<String>
 /// Before the first recorded change of a file with no history, keep its version in
 /// the last commit (when git tracks it and it differs), so that change can be
 /// compared with something. Labelled as what it is: it may predate edits made while
-/// Workbench was not running.
+/// Workbench was not running. It is kept with the line ends of the file on disk
+/// ([`as_checked_out`]).
 fn seed_from_head(store: &mut Store, root: &Path, rel: &str, now: &[u8], ts: i64) -> std::io::Result<()> {
     if store.latest(rel).is_some() {
         return Ok(());
     }
     let Some(head) = head_blob(root, rel) else { return Ok(()) };
-    if head == now || decode_text(&head) == Decoded::Binary {
+    let head = as_checked_out(&head, now);
+    if *head == *now || decode_text(&head) == Decoded::Binary {
         return Ok(());
     }
     let mut r = NewRevision::content(rel, Kind::Base, ts - 1, &head);
     r.label = Some("Last commit (HEAD)".into());
     store.record(r).map(|_| ())
+}
+
+/// `head`, a committed version, as a checkout writes it: with CRLF line ends when the
+/// file on disk (`now`) ends every line so and `head` has none (`core.autocrlf`, the
+/// default of Git for Windows, or `eol=crlf`: the repository keeps LF). Compared as
+/// committed, every line of such a file would differ.
+fn as_checked_out<'a>(head: &'a [u8], now: &[u8]) -> Cow<'a, [u8]> {
+    let lf = |t: &[u8]| t.iter().filter(|&&b| b == b'\n').count();
+    let crlf = now.windows(2).filter(|w| w[0] == b'\r' && w[1] == b'\n').count();
+    if head.contains(&b'\r') || crlf == 0 || crlf != lf(now) {
+        return Cow::Borrowed(head);
+    }
+    let mut out = Vec::with_capacity(head.len() + lf(head));
+    for &b in head {
+        if b == b'\n' {
+            out.push(b'\r');
+        }
+        out.push(b);
+    }
+    Cow::Owned(out)
 }
 
 /// `rel` as committed in HEAD (`git cat-file`, bounded in size and time). Blocking.

@@ -11,5 +11,6 @@ pub mod path;
 pub mod perm;
 pub mod proc;
 pub mod shell;
+pub mod watch;
 #[cfg(windows)]
 mod win32;

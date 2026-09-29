@@ -1,7 +1,7 @@
 # Porting the server to Windows
 
 **Status: in progress.** The `util::os` areas `perm`, `fs`, `proc`, `shell`, `exe`, `path`,
-`net` and `desktop` are in (their shared Win32 helpers live in `util/os/win32.rs`); the
+`net`, `desktop` and `watch` are in (their shared Win32 helpers live in `util/os/win32.rs`); the
 server compiles for Windows except the terminals slice (`os::session`, §1.F), and nothing
 has run on Windows yet. This is the plan for a native `x86_64-pc-windows-msvc` build that
 works on Windows 10 and 11, with Linux behaviour unchanged. File and line references are
@@ -276,10 +276,25 @@ and `statusLine` helpers are commands. On Windows emit `"C:/…/workbench.exe" s
 **File watching.** `files/watch.rs:224` adds a watch per directory (up to 8000); on Windows
 each open directory handle blocks renaming its parents. Use one recursive
 `ReadDirectoryChangesW` watch on the root, filtered through `IgnoreChecker`; a buffer
-overflow maps to `overflow: true`.
+overflow maps to `overflow: true`. Done in `util::os::watch`: notify 8's Windows watcher
+drops overflows silently (the rescan event is in notify 9, a release candidate) and
+notify-debouncer-full's Windows file-id cache walks the whole tree, following links, on
+every watch and created folder, so Windows gets its own watcher (a thread per watched
+directory, 64 KB buffer, 8.3 names in notifications made long again, `Flag::Rescan` on
+overflow) under the same debouncer with no cache. Git dirs outside the root (a
+subdirectory project, a linked worktree) keep their own watches.
+
+What Windows users notice: the folders that contain an open project cannot be renamed or
+moved while Workbench runs (as with any IDE); a linked worktree's project also holds its
+main checkout's `.git`. Folders inside the project can be renamed freely. Names that
+differ only in case are one file: creating `A.txt` next to `a.txt` reports that it
+exists, and renaming `a.txt` to `A.txt` changes only the case.
 
 **Symlinks.** Creating one needs Developer Mode or admin: report `ERROR_PRIVILEGE_NOT_HELD`
-clearly. Reading and containment are unaffected.
+clearly. Reading and containment are unaffected. In the files slice only a copy creates
+links (a copied folder's symlinks): without the privilege the copy fails with that message
+and leaves nothing half-copied. Junctions list as links and are not followed out of the
+project.
 
 **Service: an HKCU `Run` value and a supervisor binary.**
 

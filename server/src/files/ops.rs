@@ -19,7 +19,7 @@ use super::{Resolved, basename, blocking, in_git_dir, join_rel, resolve, resolve
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
 use crate::util::os::fs::{copy_symlink, rename_noreplace, trash};
-use crate::util::os::perm;
+use crate::util::os::{self, perm};
 
 /// Largest single upload.
 pub const MAX_UPLOAD_BYTES: u64 = 200 * 1024 * 1024;
@@ -107,7 +107,7 @@ pub async fn op(
             let to = body.to.as_deref().ok_or_else(|| ApiError::bad_request("`to` is required"))?;
             let dst = resolve(&state, &pid, to)?;
             writable(&dst, "overwrite")?;
-            if dst.abs.starts_with(&src.abs) && dst.abs != src.abs {
+            if into_itself(&src.abs, &dst.abs) {
                 return Err(ApiError::bad_request("cannot move or copy a folder into itself"));
             }
             let is_rename = body.op == "rename";
@@ -153,6 +153,12 @@ pub async fn op(
         }
         other => Err(ApiError::bad_request(format!("unknown op {other:?}"))),
     }
+}
+
+/// Whether `dst` lies below `src`, as the file system compares names (`Foo` → `foo/Foo`
+/// on Windows). `src` itself does not: `a.txt` → `A.txt` only changes the case.
+fn into_itself(src: &Path, dst: &Path) -> bool {
+    os::path::strip_prefix(dst, src).is_some_and(|rest| !rest.as_os_str().is_empty())
 }
 
 fn map_exists(e: std::io::Error, rel: &str) -> ApiError {
@@ -316,18 +322,54 @@ mod tests {
         std::fs::create_dir_all(src.join("inner")).unwrap();
         std::fs::write(src.join("inner/x.sh"), "echo").unwrap();
         perm::apply(&src.join("inner/x.sh"), 0o755).unwrap();
-        crate::util::os::fs::symlink("inner/x.sh", src.join("link")).unwrap();
+        let linked = super::super::symlink_or_skip("inner/x.sh", src.join("link"));
         let mut budget = 100;
         copy_recursive(&src, &dir.path().join("dst"), &mut budget).unwrap();
         let x = dir.path().join("dst/inner/x.sh");
         assert_eq!(std::fs::read_to_string(&x).unwrap(), "echo");
         perm::assert_mode(&x, 0o755);
-        assert!(std::fs::symlink_metadata(dir.path().join("dst/link")).unwrap().file_type().is_symlink());
+        if linked {
+            assert!(std::fs::symlink_metadata(dir.path().join("dst/link")).unwrap().file_type().is_symlink());
+        }
         // Copying onto an existing destination fails.
         let mut budget = 100;
         assert_eq!(copy_recursive(&src, &dir.path().join("dst"), &mut budget).unwrap_err().kind(), ErrorKind::AlreadyExists);
         // The budget caps huge trees.
         let mut budget = 2;
         assert!(copy_recursive(&src, &dir.path().join("dst2"), &mut budget).is_err());
+    }
+
+    #[test]
+    fn folders_do_not_move_into_themselves() {
+        let root = Path::new("/p");
+        assert!(into_itself(&root.join("a"), &root.join("a/b")));
+        assert!(into_itself(&root.join("a"), &root.join("a/b/c")));
+        assert!(!into_itself(&root.join("a"), &root.join("a")));
+        assert!(!into_itself(&root.join("a"), &root.join("ab")));
+        assert!(!into_itself(&root.join("a/b"), &root.join("a")));
+        // Windows compares names without regard to case: `Foo/x` is inside `foo`, and
+        // `a.txt` → `A.txt` renames the file itself.
+        assert_eq!(into_itself(&root.join("foo"), &root.join("Foo/x")), cfg!(windows));
+        assert!(!into_itself(&root.join("a.txt"), &root.join("A.txt")));
+    }
+
+    /// A name that differs only in case is the same file where names ignore case (NTFS):
+    /// creating it again is refused rather than overwriting, and renaming to it changes
+    /// only the case.
+    #[test]
+    fn names_differing_in_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let (lower, upper) = (dir.path().join("a.txt"), dir.path().join("A.txt"));
+        std::fs::write(&lower, "a").unwrap();
+        let insensitive = upper.exists();
+        let created = std::fs::OpenOptions::new().write(true).create_new(true).open(&upper);
+        assert_eq!(created.is_err(), insensitive);
+        if insensitive {
+            assert_eq!(created.unwrap_err().kind(), ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read_to_string(&lower).unwrap(), "a");
+            rename_noreplace(&lower, &upper).unwrap();
+            let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+            assert_eq!(names, ["A.txt"]);
+        }
     }
 }
