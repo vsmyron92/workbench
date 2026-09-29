@@ -18,9 +18,7 @@ use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
     RegDeleteKeyValueW, RegGetValueW, RegSetValueExW,
 };
-use windows_sys::Win32::System::Threading::{
-    CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW,
-};
+use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
 use windows_sys::Win32::UI::Shell::{FOLDERID_Programs, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellLink};
 use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW};
 use windows_sys::core::{GUID, HRESULT, PCWSTR, PWSTR};
@@ -350,10 +348,11 @@ pub fn command_line(program: &Path, args: &[&str]) -> io::Result<String> {
 
 /// Starts `program args…` on its own and returns: it inherits no handles (a terminal's or
 /// a pipe's would stay open while it runs), gets no console window (a console program gets
-/// a hidden console of its own), leads a new process group, and starts in `cwd` (not the
-/// caller's folder, which it would keep from being deleted). It also leaves the caller's
-/// job when the job allows that: a terminal that ends its job when it closes would end it
-/// too. `Ok(false)`: it had to stay in the caller's job.
+/// a hidden console of its own, so the caller's Ctrl-C never reaches it), and starts in
+/// `cwd` (not the caller's folder, which it would keep from being deleted). Not in a new
+/// process group: that would make it, and everything it starts, ignore Ctrl-C (terminals
+/// included). It also leaves the caller's job when the job allows that: a terminal that ends
+/// its job when it closes would end it too. `Ok(false)`: it had to stay in the caller's job.
 pub fn start_detached(program: &Path, args: &[&str], cwd: Option<&Path>) -> io::Result<bool> {
     match create_detached(program, args, cwd, true) {
         Ok(()) => Ok(true),
@@ -381,7 +380,7 @@ fn create_detached(program: &Path, args: &[&str], cwd: Option<&Path>, breakaway:
     let mut line = wide(&command_line(program, args)?);
     let app = wide_os(program)?;
     let cwd = cwd.map(wide_os).transpose()?;
-    let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | if breakaway { CREATE_BREAKAWAY_FROM_JOB } else { 0 };
+    let flags = CREATE_NO_WINDOW | if breakaway { CREATE_BREAKAWAY_FROM_JOB } else { 0 };
     let si = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };
     let mut pi = PROCESS_INFORMATION::default();
     // SAFETY: NUL-terminated program, command line and folder that outlive the call;

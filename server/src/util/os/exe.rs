@@ -10,6 +10,14 @@
 
 use std::path::{Path, PathBuf};
 
+/// Ends a "not found on PATH" message: what to do about a program installed after Workbench
+/// started. On Windows installers change `PATH` in the registry only, so the server and
+/// everything it starts keep the old one until it restarts. Nothing on Unix.
+#[cfg(unix)]
+pub const INSTALLED_SINCE: &str = "";
+#[cfg(windows)]
+pub const INSTALLED_SINCE: &str = "; if you installed it while Workbench was running, restart Workbench from the Start Menu or a new terminal (`workbench service stop` first): a running program keeps its old PATH";
+
 /// What a lookup found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(unix, allow(dead_code))] // Unix finds only `Exe`

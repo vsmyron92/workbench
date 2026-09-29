@@ -9,9 +9,16 @@
 //! with edited text is written back with CRLF. Every other file (LF, CRLF the automatic
 //! conversions leave alone because the index has CRs too, no conversion configured) is read
 //! and written byte for byte.
+//!
+//! Only where checkouts write CRLF by default ([`FOLLOWS_GIT`], Windows). Elsewhere every
+//! file is read and written byte for byte with no lookup, as it always was (following git
+//! there too would be a Linux change for the owner to decide).
 
 use super::cmd::{literal, split_z};
 use super::repo::Repo;
+
+/// Whether Workbench reads and writes converted files as git does (see the module).
+pub const FOLLOWS_GIT: bool = crate::util::os::fs::NATIVE_CRLF;
 
 /// How git converts one working-tree file on its way into the index.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

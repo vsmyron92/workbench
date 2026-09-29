@@ -184,7 +184,7 @@ impl Git {
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                ApiError::not_configured("git is not installed (no `git` on PATH)")
+                ApiError::not_configured(format!("git is not installed (no `git` on PATH){}", crate::util::os::exe::INSTALLED_SINCE))
             } else {
                 ApiError::internal(format!("cannot run git: {e}"))
             }
@@ -327,8 +327,14 @@ pub fn git_error(out: &GitOutput) -> ApiError {
 /// Git refusing a repository that another user owns (the `safe.directory` check: "detected
 /// dubious ownership", "unsafe repository" in older gits; common on Windows for folders an
 /// administrator created and on drives without owners): 403 `unsafe_repository` with git's
-/// message verbatim, which names the owners and the command that trusts the folder.
+/// message verbatim, which names the owners and the command that trusts the folder. Only
+/// where such folders are common (`os::fs::FOREIGN_OWNERS`, Windows); elsewhere the refusal
+/// reads as it always did (reporting it there too would be a Linux change for the owner to
+/// decide).
 pub fn unsafe_repository(out: &GitOutput) -> Option<ApiError> {
+    if !crate::util::os::fs::FOREIGN_OWNERS {
+        return None;
+    }
     let text = out.stderr.trim();
     (text.contains("detected dubious ownership") || text.contains("fatal: unsafe repository"))
         .then(|| ApiError::new(StatusCode::FORBIDDEN, "unsafe_repository", text.to_string()))

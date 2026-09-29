@@ -851,6 +851,7 @@ async fn submodule_changes_are_reported_not_faked() {
     assert!(sd.submodule && sd.submodule_summary.as_deref().unwrap_or_default().contains("lib change"), "{sd:?}");
 }
 
+/// On Windows (`os::fs::FOREIGN_OWNERS`); elsewhere git's refusal reads as before.
 #[tokio::test]
 async fn a_repository_git_refuses_for_its_owner_is_reported_in_gits_words() {
     let d = init_repo();
@@ -870,10 +871,16 @@ async fn a_repository_git_refuses_for_its_owner_is_reported_in_gits_words() {
         .unwrap();
     assert!(!out.ok());
     let e = super::repo::discover_error(&out, p);
-    assert_eq!((e.status.as_u16(), e.code), (403, "unsafe_repository"), "{}", e.message);
-    assert_eq!(e.message, out.stderr.trim(), "verbatim");
-    assert!(e.message.contains("--add safe.directory"), "{}", e.message);
-    assert_eq!(super::cmd::git_error(&out).code, "unsafe_repository");
+    if crate::util::os::fs::FOREIGN_OWNERS {
+        assert_eq!((e.status.as_u16(), e.code), (403, "unsafe_repository"), "{}", e.message);
+        assert_eq!(e.message, out.stderr.trim(), "verbatim");
+        assert!(e.message.contains("--add safe.directory"), "{}", e.message);
+        assert_eq!(super::cmd::git_error(&out).code, "unsafe_repository");
+    } else {
+        // Linux: as it always was.
+        assert_eq!((e.status.as_u16(), e.code), (404, "not_a_repo"), "{}", e.message);
+        assert_ne!(super::cmd::git_error(&out).code, "unsafe_repository");
+    }
     // A folder that is no repository still says so.
     let plain = tempfile::tempdir().unwrap();
     assert_eq!(Repo::discover("plain", plain.path()).await.unwrap_err().code, "not_a_repo");

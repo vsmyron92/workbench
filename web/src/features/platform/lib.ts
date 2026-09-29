@@ -81,6 +81,17 @@ export function hostEntryError(h: string): string | null {
   return null
 }
 
+/**
+ * `null` when `p` can be a path in Settings › Projects, else the problem: absolute or under
+ * `~`, and on a Windows server also `C:\…`, `C:/…` and `\\server\share` (which the server
+ * then refuses with its own reason), as `util::os::path::is_absolute_str` reads them.
+ */
+export function projectPathError(p: string, os: string | null | undefined): string | null {
+  if (p.startsWith('/') || p.startsWith('~')) return null
+  if (os !== 'windows') return 'Use an absolute path or ~/…'
+  return /^([A-Za-z]:)?[\\/]/.test(p) ? null : 'Use an absolute path (C:\\…) or ~\\…'
+}
+
 /** `null` when `u` can be the public URL, else the problem. */
 export function publicUrlError(u: string): string | null {
   const v = u.trim()

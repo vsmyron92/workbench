@@ -420,8 +420,13 @@ program = "prog.bin"
     // No breakpoints: the fake program runs to its end.
     let end = env.wait_session(&sid, "the end", |v| v["state"] == "terminated").await;
     assert!(end["prelaunchTerminalId"].is_string());
-    // (Windows PowerShell 5.1 writes UTF-16 and CRLF.)
-    assert_eq!(crate::util::os::shell::read_output(&env.root.join("built.txt")).unwrap().trim_end(), "built");
+    // Byte for byte on Unix (Windows PowerShell 5.1 writes UTF-16 and CRLF).
+    let built = crate::util::os::shell::read_output(&env.root.join("built.txt")).unwrap();
+    if cfg!(unix) {
+        assert_eq!(built, "built\n");
+    } else {
+        assert_eq!(built.trim_end(), "built");
+    }
     assert_eq!(end["exitCode"], 0);
 
     let info = env.post("sessions", json!({ "config": "broken" })).await;

@@ -64,7 +64,7 @@ agent CLI) and paste:
 2. Or build it yourself, with Rust (1.97 or newer), Node.js 22 and git:
    ```bash
    cd web && npm ci && npm run build && cd ..
-   cd server && cargo build --release        # one binary, the UI embedded
+   cd server && cargo build --release        # workbench, the UI embedded (and workbenchw, a stub off Windows)
    install -m 0755 target/release/workbench ~/.local/bin/
    ```
 3. Start it and open a signed-in window:

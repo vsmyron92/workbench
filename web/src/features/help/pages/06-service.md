@@ -26,6 +26,8 @@ Use `workbench service status` to see the real unit name. Agent sessions are bro
 
 Download the new release archive, unpack it and run its `install.sh`, which replaces `~/.local/bin/workbench` (a running Workbench keeps using the old file until it restarts). Then restart the service as above. Your configuration and `~/.local/share/workbench` stay as they are.
 
+On Windows, run the new archive's `install.ps1`, which works while Workbench runs (it also updates `conpty.dll` and `OpenConsole.exe`), then `workbench service stop` and open Workbench from the Start Menu.
+
 ## Checking that it is up
 
 ```bash
@@ -52,4 +54,5 @@ workbench service uninstall
 - Task Manager › Startup apps lists the entry; turning it off there keeps Windows from starting Workbench at sign-in, and `workbench service status` shows it as turned off.
 - `workbench service stop` asks Workbench to stop and waits until its port is free. `install --enable` over a running service restarts it with the new settings. Run from a Workbench terminal, that terminal closes as the old Workbench stops; from a terminal that keeps everything it starts (one whose processes cannot leave its job), it restarts nothing and tells you what to do instead.
 - In a terminal started with *Run as administrator*, `install --enable` writes everything but starts nothing: Workbench and its agents would run as administrator too. The sign-in entry and the Start Menu start it as you.
-- To update, stop the service, replace `workbench.exe` and `workbenchw.exe`, and open Workbench from the Start Menu.
+- To update, run the new archive's `install.ps1` (see Updating above).
+- `install --enable` starts Workbench with the environment of the shell you run it from (an activated virtual environment's `PATH` included) until you next sign in. A program you install later, such as Git for Windows, Node.js or Python, is found only after a restart: `workbench service stop`, then open Workbench from the Start Menu.

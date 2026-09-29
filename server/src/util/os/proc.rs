@@ -191,6 +191,15 @@ pub async fn shutdown_signal(data_dir: &Path) {
     imp::shutdown_signal(data_dir).await;
 }
 
+/// Lets Ctrl-C through to this process and to what it starts from now on. Windows keeps
+/// "ignore Ctrl-C" per process and hands it down to the processes it starts, and a process
+/// started in a new process group gets it: a server started that way, or below such a
+/// process, would open every terminal with Ctrl-C doing nothing. `serve` calls it before it
+/// starts anything. Nothing to do on Unix.
+pub fn enable_ctrl_c() {
+    imp::enable_ctrl_c();
+}
+
 #[cfg(windows)]
 pub use imp::{Event, request_stop, server_running, stop_event_name};
 
@@ -416,6 +425,8 @@ mod imp {
         let tracer = status.lines().find_map(|l| l.strip_prefix("TracerPid:")).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
         tracer != 0
     }
+
+    pub fn enable_ctrl_c() {}
 
     pub async fn shutdown_signal(_data_dir: &Path) {
         let ctrl_c = async {
@@ -726,6 +737,13 @@ mod imp {
         ok != 0 && present != 0
     }
 
+    pub fn enable_ctrl_c() {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        // SAFETY: with no handler, FALSE only clears this process's "ignore Ctrl-C"
+        // attribute (what the processes it starts inherit); handlers stay as they are.
+        unsafe { SetConsoleCtrlHandler(None, 0) };
+    }
+
     pub async fn shutdown_signal(data_dir: &Path) {
         use tokio::signal::windows;
         let ctrl_c = async {
@@ -993,6 +1011,60 @@ mod tests {
         assert!(!own_pid_alive(pid as u32));
         assert!(!pid_alive(0) && !pid_alive(-1));
         kill_pid(0); // ignored, not Workbench's own group
+    }
+
+    /// A process started in a new process group ignores Ctrl-C (and would hand that down to
+    /// every terminal it opens) until `enable_ctrl_c`. It runs in a child with a console of
+    /// its own, the only process there that Ctrl-C reaches.
+    #[cfg(windows)]
+    #[test]
+    fn ctrl_c_works_again_after_a_new_process_group() {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+        if std::env::var_os("WB_CTRL_C_CHILD").is_some() {
+            return ctrl_c_child();
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "--quiet", "--test-threads=1", "util::os::proc::tests::ctrl_c_works_again_after_a_new_process_group"])
+            .env("WB_CTRL_C_CHILD", "1")
+            .stdin(Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && text.contains("1 passed"), "{text}");
+    }
+
+    #[cfg(windows)]
+    fn ctrl_c_child() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use windows_sys::Win32::System::Console::{CTRL_C_EVENT, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler};
+        static SEEN: AtomicU32 = AtomicU32::new(0);
+        unsafe extern "system" fn count(kind: u32) -> windows_sys::core::BOOL {
+            if kind == CTRL_C_EVENT {
+                SEEN.fetch_add(1, Ordering::SeqCst);
+            }
+            1
+        }
+        let seen = || {
+            for _ in 0..40 {
+                if SEEN.load(Ordering::SeqCst) > 0 {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            false
+        };
+        // SAFETY: a handler that only counts and says it handled the event, so the process
+        // stays; it stays registered for the process's life.
+        assert_ne!(unsafe { SetConsoleCtrlHandler(Some(count), 1) }, 0);
+        // SAFETY: Ctrl-C to every process on this process's own hidden console: itself.
+        assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
+        assert!(!seen(), "a new process group ignores Ctrl-C");
+        enable_ctrl_c();
+        // SAFETY: as above.
+        assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
+        assert!(seen(), "Ctrl-C reaches the process again");
     }
 
     #[cfg(windows)]

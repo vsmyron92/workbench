@@ -114,7 +114,7 @@ pub fn resolve(r: &SecretRef, warnings: &mut Vec<String>) -> anyhow::Result<Secr
             if let Privacy::Exposed(why) = perm::privacy(&path)? {
                 warnings.push(format!("{p} is readable by other users ({why}); {}", perm::MAKE_PRIVATE));
             }
-            std::fs::read_to_string(&path)?.trim().to_string()
+            crate::util::os::fs::read_text(&path)?.trim().to_string()
         }
         SecretRef::Env(k) => std::env::var(k).map_err(|_| anyhow::anyhow!("environment variable {k} is not set"))?,
         SecretRef::Keyring(sa) => {
@@ -123,7 +123,7 @@ pub fn resolve(r: &SecretRef, warnings: &mut Vec<String>) -> anyhow::Result<Secr
             keyring::Entry::new(service, account)?.get_password()?
         }
         SecretRef::Dotenv { path, key } => {
-            let text = std::fs::read_to_string(expand_tilde(path))?;
+            let text = crate::util::os::fs::read_text(&expand_tilde(path))?;
             text.lines()
                 .filter(|l| !l.trim_start().starts_with('#'))
                 .filter_map(|l| l.split_once('='))

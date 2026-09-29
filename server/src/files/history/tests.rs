@@ -334,7 +334,9 @@ async fn first_change_of_a_committed_file_keeps_head() {
     let base = env.api(Method::GET, &format!("/files/history/revision?id={}", h[1]["id"]), None).await.unwrap();
     assert_eq!(base["content"], "pub fn u() {}\n");
 
-    // A CRLF checkout keeps HEAD with its line ends: the diff shows the line added…
+    // A CRLF checkout keeps HEAD with its line ends on Windows: the diff shows the line
+    // added… Elsewhere HEAD is kept as committed, as it always was.
+    let crlf = crate::util::os::fs::NATIVE_CRLF;
     git(&["config", "core.autocrlf", "true"]);
     std::fs::write(root.join("src/crlf.rs"), "pub fn x() {}\r\npub fn y() {}\r\npub fn z() {}\r\n").unwrap();
     let hook = json!({ "hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": { "file_path": root.join("src").join("crlf.rs").display().to_string() } });
@@ -342,15 +344,15 @@ async fn first_change_of_a_committed_file_keeps_head() {
     let h = env.wait_for("src/crlf.rs", 2).await;
     assert_eq!(kinds(&h), ["agent", "base"]);
     let base = env.api(Method::GET, &format!("/files/history/revision?id={}", h[1]["id"]), None).await.unwrap();
-    assert_eq!(base["content"], "pub fn x() {}\r\npub fn y() {}\r\n");
+    assert_eq!(base["content"], if crlf { "pub fn x() {}\r\npub fn y() {}\r\n" } else { "pub fn x() {}\npub fn y() {}\n" });
     let d = env.api(Method::GET, &format!("/files/history/diff?id={}", h[0]["id"]), None).await.unwrap();
     let diff = d["diff"].as_str().unwrap();
-    assert!(diff.contains("+pub fn z() {}\r\n") && !diff.contains("-pub fn x() {}"), "{diff}");
+    assert!(diff.contains("+pub fn z() {}\r\n") && diff.contains("-pub fn x() {}") != crlf, "{diff}");
     // …and a file that only went through the checkout has no older version to keep.
     std::fs::write(root.join("src/same.rs"), "pub fn s() {}\r\n").unwrap();
     env.wait_for("src/same.rs", 1).await;
     env.settle().await;
-    assert_eq!(kinds(&env.history("src/same.rs").await), ["disk"]);
+    assert_eq!(kinds(&env.history("src/same.rs").await), if crlf { &["disk"][..] } else { &["disk", "base"][..] });
 }
 
 /// Git's rules for the line ends of a checkout (`convert.c`), from its settings and the

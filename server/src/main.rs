@@ -119,6 +119,8 @@ fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {
     util::proc::scrub_own_env();
     // Libraries loaded by name (conpty.dll) only from beside the executable or the system.
     util::os::dll::restrict_search();
+    // Ctrl-C works in the terminals whoever started the server (Windows).
+    util::os::proc::enable_ctrl_c();
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {

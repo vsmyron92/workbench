@@ -5,26 +5,33 @@
 - **Windows (experimental):** the server is being ported to Windows 10 (1809 or newer) and
   11 on x86_64 ([plan and status](docs/windows-port.md)). Nothing of it has been tested on
   a real Windows machine yet. Operating-system code now goes through one layer
-  (`util::os`), and Linux behaviour is unchanged. On Windows, private files get an access
-  list for you and SYSTEM only, child processes run in Job Objects, programs are found
-  through `PATHEXT` (npm's `.cmd` shims start through `node.exe`), run commands go through
-  PowerShell, a DLL loaded by name comes only from Workbench's own folder or System32, the
-  configuration is in `%APPDATA%\workbench` and the state in `%LOCALAPPDATA%\workbench`.
-  Terminals run in a pseudoconsole (ConPTY), PowerShell by default; `workbench service`
-  installs a sign-in entry and a Start Menu shortcut that start `workbenchw.exe`, which
-  supervises the server without a console window; git and ssh ask Workbench itself for
-  credentials; each project has one recursive file watch, so its folders stay renamable;
-  language servers, debuggers and detected run commands take their Windows forms.
+  (`util::os`), and Linux behaviour is unchanged (apart from the Unity item below). On
+  Windows, private files get an access list for you and SYSTEM only, child processes run in
+  Job Objects, programs are found through `PATHEXT` (npm's `.cmd` shims start through
+  `node.exe`), run commands go through PowerShell, a DLL loaded by name comes only from
+  Workbench's own folder or System32, the configuration is in `%APPDATA%\workbench` and the
+  state in `%LOCALAPPDATA%\workbench`. Terminals run in a pseudoconsole (ConPTY),
+  PowerShell by default; `workbench service` installs a sign-in entry and a Start Menu
+  shortcut that start `workbenchw.exe`, which supervises the server without a console
+  window; git and ssh ask Workbench itself for credentials; each project has one recursive
+  file watch, so its folders stay renamable; language servers, debuggers and detected run
+  commands take their Windows forms; secret files written by Windows PowerShell 5.1
+  (UTF-16, or UTF-8 with a byte order mark) read as text. A program installed while
+  Workbench runs is found once it restarts, as the "not found" messages say.
   `GET /api/health` reports the OS and what it leaves out (dev containers, desktop
   notifications, gdb attach and rust-gdb's pretty printers, projects on network or WSL
   paths), and those features answer `unsupported_platform` with the reason.
 - **Terminals:** `[terminals] shell` in `config.toml` sets the program and arguments of new
   shells (default: `$SHELL -l`).
-- **Git:** a working tree git checks out with CRLF over an LF index (`core.autocrlf`,
-  `eol=crlf` attributes) shows in diffs and conflicts as git reads it, with LF; a conflict
-  resolved with edited text is written back with CRLF. A repository git refuses for its
-  owner (`safe.directory`) reports git's own message (`unsafe_repository`) instead of "not a
-  repository".
+- **Git on Windows:** a working tree git checks out with CRLF over an LF index
+  (`core.autocrlf`, Git for Windows' default, or `eol=crlf` attributes) shows in diffs and
+  conflicts as git reads it, with LF; a conflict resolved with edited text is written back
+  with CRLF; Local History keeps the last commit with the checkout's line ends. A
+  repository git refuses for its owner (`safe.directory`) reports git's own message
+  (`unsafe_repository`) instead of "not a repository". On Linux all of this stays as it was.
+- **Run configurations:** Unity detection takes the editor version from
+  `ProjectVersion.txt` only when it consists of version characters (letters, digits, `.`,
+  `_`, `-`), since it becomes part of the detected commands (every OS).
 - **Releases:** the release workflow can also build
   `workbench-X.Y.Z-x86_64-pc-windows-msvc.zip` with `workbench.exe` (no Visual C++ runtime
   needed), `workbenchw.exe`, `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY

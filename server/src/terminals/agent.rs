@@ -437,7 +437,12 @@ pub fn find_provider(cfg: &AgentsConfig, id: Option<&str>) -> Result<Provider, A
 fn missing_command(p: &Provider) -> ApiError {
     let key = if p.id == "claude" { "[agents].command".to_string() } else { format!("[agents.providers.{}].command", p.id) };
     let hint = if p.install_hint.is_empty() { String::new() } else { format!(" (`{}`)", p.install_hint) };
-    ApiError::not_configured(format!("{} ({:?}) was not found. Install it{hint}, or set {key} in config.toml", p.label, p.command))
+    ApiError::not_configured(format!(
+        "{} ({:?}) was not found. Install it{hint}, or set {key} in config.toml{}",
+        p.label,
+        p.command,
+        util::os::exe::INSTALLED_SINCE
+    ))
 }
 
 /// Whether `command` runs through cmd.exe, which parses its arguments again: a batch file

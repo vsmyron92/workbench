@@ -51,8 +51,8 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   - `dunce` (already in the lock). The Start Menu shortcut is written through the shell's
     ShellLink COM object with windows-sys (`os::autostart`), not `mslnk` (unmaintained since
     2022, bitflags 1, a subset of the format).
-- Windows dev-dependency `junction`; build-dependency `winresource` (icon and version
-  resource, a no-op elsewhere).
+- Build-dependency `winresource` (icon and version resource, a no-op elsewhere). Not done:
+  the Windows dev-dependency `junction`, since the tests make junctions with `cmd /c mklink /J`.
 - Not needed: `if-addrs`, `trash`, `winreg`, `windows` (each replacement is under 80 lines of
   windows-sys).
 - Code that does not compile on Windows: `tokio::process::Command::{process_group,
@@ -247,12 +247,16 @@ case-insensitive drive letter (servers often lowercase it); `lsp-src://pid/C:/â€
 `eol=crlf`). In the git slice read `git ls-files --eol <path>`: when the index has LF and the
 working tree CRLF, strip `\r` from the working-tree side for the diff and for the patch given
 to `git apply --cached`, and put CRLF back when rolling lines back into the working tree.
-Done (`git/eol.rs`, on every OS): git's own diffs already read such a file with LF, so the
-staging patches were right and `git apply` writes CRLF back by itself; what was missing is
-the diff's `modified` side and a conflict's `merged` text (now LF, like the hunks) and a
-conflict resolved with edited text (written back with CRLF). "Converted" follows git:
-`ls-files --eol` (`i/lf`, `w/crlf`, the `attr/` column) and `core.autocrlf` when no attribute
-decides; anything else keeps its bytes.
+Done (`git/eol.rs`, on Windows: `eol::FOLLOWS_GIT`): git's own diffs already read such a
+file with LF, so the staging patches were right and `git apply` writes CRLF back by itself;
+what was missing is the diff's `modified` side and a conflict's `merged` text (now LF, like
+the hunks) and a conflict resolved with edited text (written back with CRLF). "Converted"
+follows git: `ls-files --eol` (`i/lf`, `w/crlf`, the `attr/` column) and `core.autocrlf` when
+no attribute decides; anything else keeps its bytes. Local History keeps "Last commit (HEAD)"
+of a file with CRLFs on disk with the line ends a checkout writes (`files/history`). Linux
+keeps every file byte for byte, with no extra git call: following git's conversions there
+too (they matter with `core.autocrlf` or `eol=crlf` attributes) would be a Linux change for
+the owner to decide.
 
 **Program lookup, `.cmd` shims and BatBadBut.** portable-pty resolves PATHEXT and launches
 `claude.cmd` with MSVCRT quoting (`cmdbuilder.rs:581-606, 702`): command injection through
@@ -269,7 +273,8 @@ shells Workbench starts.
 `[terminals] shell`. Runs, pre-launch steps and the notify command: `pwsh -NoLogo -NoProfile
 -EncodedCommand <base64 UTF-16LE>`, which survives portable-pty's quoting. `run_shell = "cmd"
 | "powershell" | "bash"` selects cmd, PowerShell 5.1 (no `&&`) or Git Bash, shown in the
-run's argv; `quote()` follows the choice. Add `WT_SESSION` and `WT_PROFILE_ID` to
+run's argv; `quote()` follows the choice. (Not done: runs always use PowerShell, `pwsh` else
+Windows PowerShell; there is no `run_shell`.) Add `WT_SESSION` and `WT_PROFILE_ID` to
 `PARENT_TERMINAL_VARS`.
 
 **Detected commands.** Detection writes POSIX forms (`.venv/bin/python`, `python3`, `cmake
@@ -286,7 +291,11 @@ Linux, where closing the PTY hangs up its processes.
 
 **Signals.** `\x03` typed in a terminal becomes CTRL_C_EVENT through ConPTY. Non-PTY children
 get a hidden console of their own, so the server's Ctrl-C never reaches them (the
-counterpart of `process_group(0)`). `ExitInfo.signal` is always `None`.
+counterpart of `process_group(0)`). `ExitInfo.signal` is always `None`. Windows keeps
+"ignore Ctrl-C" per process and hands it down: a process started with
+`CREATE_NEW_PROCESS_GROUP` has it, so a server below one would start every terminal with
+Ctrl-C dead. `serve` clears it first (`os::proc::enable_ctrl_c`, as Windows Terminal does),
+and `os::autostart` starts the supervisor without a new process group.
 
 **Terminals (ConPTY).** Resize is `ResizePseudoConsole`. ConPTY gives no EOF when the child
 exits: close the pseudoconsole once the leader has exited and the job is empty, on a blocking
@@ -322,7 +331,9 @@ helpers, so Credential Manager may keep that token afterwards. An ssh key with a
 can reach, and a new host must be accepted once in a terminal (`known_hosts`): remote
 operations cannot prompt and fail instead. A repository an administrator created, or one
 on a drive without owners (FAT, exFAT, some network shares), stops with git's
-`safe.directory` message, which names the command that trusts it.
+`safe.directory` message, which names the command that trusts it (`403 unsafe_repository`,
+Windows only: `os::fs::FOREIGN_OWNERS`; on Linux such a folder still reads as "not a git
+repository", a change there being the owner's to decide).
 
 **Agent hooks.** Claude's hooks are HTTP hooks (`agent.rs:175-205`); only the `SessionStart`
 and `statusLine` helpers are commands. On Windows emit `"C:/â€¦/workbench.exe" statusline`
@@ -469,6 +480,11 @@ manifest can come later; revisit MSI once the binaries are code-signed. Users ru
 block on Windows 10 if output is not drained). A child can start grandchildren in the gap
 before it joins its Job (portable-pty has no suspended start; fork it if that matters).
 `.cmd` injection wherever the resolver is bypassed. CRLF handling in line staging.
+Installers change `PATH` in the registry only: a program installed while Workbench runs
+(Git for Windows, Node.js, Python, rustup) stays unknown to it, its terminals and runs until
+it restarts. The "not found on PATH" messages say so (`os::exe::INSTALLED_SINCE`); building
+new terminals' `PATH` from the `Environment` registry keys, as Windows Terminal does, could
+come later.
 `aws-lc-sys` on MSVC: 0.45 builds with its `cc` builder (no CMake) and, without NASM, links
 the prebuilt NASM objects that rustls's `aws_lc_rs` feature enables (`prebuilt-nasm`), so
 no setup-nasm step should be needed; check the first run. Sharing violations on rename and

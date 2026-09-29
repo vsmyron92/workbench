@@ -113,7 +113,7 @@ pub fn read_output(path: &Path) -> Option<String> {
 
 /// `bytes` as text by their byte order mark: UTF-16LE (`FF FE`), else UTF-8 (a BOM dropped).
 #[cfg(any(windows, test))]
-fn decode_output(bytes: Vec<u8>) -> Option<String> {
+pub(super) fn decode_output(bytes: Vec<u8>) -> Option<String> {
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         if rest.len() % 2 != 0 {
             return None;

@@ -363,7 +363,7 @@ async fn probe_uncached(a: &Adapter) -> Availability {
     }
     // An npm shim (a Node.js adapter on Windows) is probed as node and its script.
     let Some(resolved) = crate::util::os::exe::resolve(&a.command) else {
-        return Availability::missing(format!("`{}` was not found on PATH", a.command));
+        return Availability::missing(format!("`{}` was not found on PATH{}", a.command, crate::util::os::exe::INSTALLED_SINCE));
     };
     let path_s = resolved.program.display().to_string();
     let lead = launcher_args(a);

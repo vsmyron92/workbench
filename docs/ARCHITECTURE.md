@@ -211,10 +211,10 @@ The plan and its status are in [windows-port.md](windows-port.md).
 | Area | What callers get | Where Windows differs |
 |---|---|---|
 | `perm` | private files and directories: `apply(path, mode)`, `create_dir_private`, `open_new`, `privacy`, `owned_by_me`; `util::fs::write_atomic` sits on it | A mode without group or other bits (0600, 0700) is a protected DACL for the user and SYSTEM, set at creation and inherited inside a directory; other modes inherit the folder's ACL. `privacy` reads the DACL; a replacement gets the replaced file's DACL. |
-| `fs` | `rename_noreplace`, `rename_exchange`, symlinks, `trash` | `MoveFileExW` without replacing; no atomic exchange (`rename_unsupported`, callers fall back); creating a symlink needs Developer Mode or an administrator; the Recycle Bin. |
-| `proc` | `ProcGroup` (a child and what it starts), `pid_alive`, `kill_pid`, `exit_text`, `current_exe`, `user_processes`, `debugger_attached`, `shutdown_signal(data_dir)` | Job Objects instead of process groups: a child gets a hidden console of its own and joins a job with `KILL_ON_JOB_CLOSE`; `terminate` and `kill` both end the job (the graceful step is the protocol's: LSP exit, DAP disconnect). Process lists through sysinfo. The server stops on Ctrl-C, Ctrl-Break, the console closing or the event `Local\workbench-<hash of data_dir>` (`request_stop`). |
+| `fs` | `rename_noreplace`, `rename_exchange`, symlinks, `trash`, `read_text` (a text file the user wrote), `NATIVE_CRLF`, `FOREIGN_OWNERS` | `MoveFileExW` without replacing; no atomic exchange (`rename_unsupported`, callers fall back); creating a symlink needs Developer Mode or an administrator; the Recycle Bin; `read_text` also decodes UTF-16LE and UTF-8 with a byte order mark (Windows PowerShell 5.1's files). |
+| `proc` | `ProcGroup` (a child and what it starts), `pid_alive`, `kill_pid`, `exit_text`, `current_exe`, `user_processes`, `debugger_attached`, `shutdown_signal(data_dir)`, `enable_ctrl_c` | Job Objects instead of process groups: a child gets a hidden console of its own and joins a job with `KILL_ON_JOB_CLOSE`; `terminate` and `kill` both end the job (the graceful step is the protocol's: LSP exit, DAP disconnect). Process lists through sysinfo. The server stops on Ctrl-C, Ctrl-Break, the console closing or the event `Local\workbench-<hash of data_dir>` (`request_stop`). `serve` clears the inherited "ignore Ctrl-C" first (`enable_ctrl_c`), so Ctrl-C works in its terminals however it was started. |
 | `shell` | `interactive()` (terminals), `run_argv` / `run_command` (runs, pre-launch steps, service commands), `plain_command` (the notify command), `quote` for that shell, `posix_quote` for POSIX shells elsewhere (ssh hosts, containers), `helper_command` | PowerShell: `pwsh`, else Windows PowerShell. Commands run as `-NoProfile -EncodedCommand` (UTF-16LE, base64), which no argv quoting can alter, and keep the failing program's exit code (127 when not found). |
-| `exe` | `resolve` / `which`, `is_executable`, `configured(argv)` (a config.toml command), `launch_argv` (a terminal's argv), `python()`, `rustup_proxy`, `child_env` | Lookup over `PATH` × `PATHEXT`, then `%USERPROFILE%\.local\bin` and `%APPDATA%\npm`, never the current directory. An npm `.cmd` shim starts as `node.exe <script>` (`Kind::NpmShim`); another batch file only when `batch_args_safe` (BatBadBut). Children get `NoDefaultCurrentDirectoryInExePath=1`. |
+| `exe` | `resolve` / `which`, `is_executable`, `configured(argv)` (a config.toml command), `launch_argv` (a terminal's argv), `python()`, `rustup_proxy`, `child_env`, `INSTALLED_SINCE` (the end of a "not found on PATH" message) | Lookup over `PATH` × `PATHEXT`, then `%USERPROFILE%\.local\bin` and `%APPDATA%\npm`, never the current directory. An npm `.cmd` shim starts as `node.exe <script>` (`Kind::NpmShim`); another batch file only when `batch_args_safe` (BatBadBut). Children get `NoDefaultCurrentDirectoryInExePath=1`. A program installed after the server started stays off its `PATH` until it restarts; the messages say so. |
 | `path` | `is_absolute_str`, `check_component` / `check_relative`, `stays_inside`, `to_slash`, `canonicalize`, `strip_prefix`, file-URI helpers, `data_home`, `private_dirs`, `pgpass_file` | Drive letters and `\`; device names, `:` streams, 8.3 names and trailing dots refused; UNC roots unsupported; dunce and an uppercase drive letter; case-insensitive comparisons (see "Paths" in the security model). Data in `%LOCALAPPDATA%`, config in `%APPDATA%`. |
 | `net` | `interfaces`, `bind` (the server's socket), `kill_port_holders` | `GetAdaptersAddresses`; `[::]` made dual-stack; port owners from `GetExtendedTcpTable`, only the same user's processes. |
 | `desktop` | `open_url`, `notify_send` | A Chromium browser from App Paths with `--app=`, else `ShellExecuteW`, for http(s) URLs only; no desktop notifications yet. |
@@ -449,8 +449,8 @@ interface GitStatus {
 // git — GET /api/projects/{pid}/git/diff?path=&mode=working|staged|commit|compare&sha=&base=&head=
 interface GitFileDiff {
   path: string; oldPath?: string
-  original: string; modified: string          // full texts ('' when absent); the working tree as git reads it
-                                               // (LF where git turns its CRLFs into LFs, like the hunks)
+  original: string; modified: string          // full texts ('' when absent); on Windows the working tree as git
+                                               // reads it (LF where git turns its CRLFs into LFs, like the hunks)
   binary: boolean; tooLarge: boolean
   hunks: { header: string; oldStart: number; oldLines: number; newStart: number; newLines: number }[]
   fingerprint: string                          // pass back when staging hunks or lines
@@ -1704,15 +1704,15 @@ A line without a final newline stays last on its side: when turning a change int
 context would put lines after it, the change is kept and a copy with a newline is
 emitted (the smallest valid patch). Lines are raw bytes (CRLF and any encoding
 round-trip). A working tree git checks out with CRLF over an LF index (`core.autocrlf`,
-`text`/`eol=crlf` attributes; `eol.rs` reads `git ls-files --eol` and `core.autocrlf`): git's
-diffs already show it with LF, so the staging patches are LF, `git apply` writes CRLF back
-when rolling back, and Workbench shows the working-tree side (`modified`, a conflict's
-`merged`) with LF too and writes a conflict resolved with edited text back with CRLF;
-files git does not convert keep their bytes. Part of an untracked file
-becomes a `new file` patch; an intent-to-add entry gets a modification patch; renames
-patch the new path; every line of a new/deleted file becomes the file-level operation;
-partial roll back of a deleted file and partial unstage of a staged deletion are
-refused. Binary, LFS, symlink, submodule and conflicted diffs offer no lines.
+`text`/`eol=crlf` attributes): git's diffs already show it with LF, so the staging patches
+are LF and `git apply` writes CRLF back when rolling back. On Windows (`eol::FOLLOWS_GIT`;
+`eol.rs` reads `git ls-files --eol` and `core.autocrlf`) Workbench also shows the
+working-tree side (`modified`, a conflict's `merged`) with LF and writes a conflict resolved
+with edited text back with CRLF; files git does not convert keep their bytes, and on Linux
+every file does. Part of an untracked file becomes a `new file` patch; an intent-to-add
+entry gets a modification patch; renames patch the new path; every line of a new/deleted
+file becomes the file-level operation; partial roll back of a deleted file and partial
+unstage of a staged deletion are refused. Binary, LFS, symlink, submodule and conflicted diffs offer no lines.
 
 **Partial commit** (CLion's line checkboxes). `POST …/git/commit` takes `partial: [{path,
 fingerprint, lines}]` next to `paths`: lines of the HEAD → working tree diff (`compare`
@@ -1825,10 +1825,10 @@ Manager, which git asks first, never opens a sign-in window. `main.rs` answers s
 anything: the variable set and a single argument that is not a subcommand or an option
 (`askpass_prompt`), so hooks and the rebase editor, which inherit the variable, still run
 their commands. `GIT_EDITOR`/`GIT_SEQUENCE_EDITOR` quote their paths for sh with `/`
-separators (`rebase_i::sh_path`; Git for Windows runs them with its sh). A repository git
-refuses for its owner (`safe.directory`, "detected dubious ownership") answers
-`403 unsafe_repository` with git's message verbatim (it names the owners and the command
-that trusts the folder) instead of `not_a_repo`.
+separators (`rebase_i::sh_path`; Git for Windows runs them with its sh). On Windows
+(`os::fs::FOREIGN_OWNERS`) a repository git refuses for its owner (`safe.directory`,
+"detected dubious ownership") answers `403 unsafe_repository` with git's message verbatim
+(it names the owners and the command that trusts the folder) instead of `not_a_repo`.
 
 **UI.** Commit tool window: tabs **Changes / Stash / Shelf**; Changes groups by the
 staging area (as before) or by **changelists** (toolbar ▸ Group by), with a checkbox per
@@ -2553,12 +2553,12 @@ sees, per project in `data_dir/local-history/<pid>/`.
   an agent's shell commands carry no path and stay "Changed on disk" (no guessing).
   `base` "Opened in Workbench" (the first version the editor read) and "Last commit
   (HEAD)" (before the first recorded change of a git-tracked file with no history, its
-  committed version from a bounded `git cat-file`, with the line ends a checkout writes by
-  git's rules (`core.autocrlf`, `core.eol`, the `text`/`eol`/`crlf` attributes, read with
-  bounded `git config`/`git check-attr`); watcher batches of up to 20 files and hooks
-  only). `deleted` (a tracked path, or everything tracked below a folder, is gone),
-  `label` (Put Label…) and `auto` ("Before git pull": the first `git.op` line of any op
-  but fetch, push and remote-branch deletion).
+  committed version from a bounded `git cat-file`; on Windows, for a file with CRLFs on
+  disk, with the line ends a checkout writes by git's rules (`core.autocrlf`, `core.eol`,
+  the `text`/`eol`/`crlf` attributes, read with bounded `git config`/`git check-attr`);
+  watcher batches of up to 20 files and hooks only). `deleted` (a tracked path, or
+  everything tracked below a folder, is gone), `label` (Put Label…) and `auto` ("Before
+  git pull": the first `git.op` line of any op but fetch, push and remote-branch deletion).
 - **Never recorded:** sensitive paths (the slice's rules; the pruner also drops a path's
   history when it becomes sensitive, and no route serves one), `.git`, hard-ignored and
   gitignored paths, binary files, files over 2 MB, symlinks leaving the project.

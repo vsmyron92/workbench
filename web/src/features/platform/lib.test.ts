@@ -8,6 +8,7 @@ import {
   makeSecretRef,
   panelIdFor,
   prependCapped,
+  projectPathError,
   publicUrlError,
   restartText,
   secretRefFields,
@@ -91,6 +92,20 @@ describe('validation', () => {
     expect(publicUrlError('https://u:p@x')).not.toBeNull()
     expect(publicUrlError('nope')).not.toBeNull()
     expect(hostOf('https://box.ts.net:8443/x')).toBe('box.ts.net:8443')
+  })
+  it('checks project paths as the server OS reads them', () => {
+    for (const os of ['linux', undefined, 'windows']) {
+      expect(projectPathError('/srv/code', os)).toBeNull()
+      expect(projectPathError('~/workspace', os)).toBeNull()
+      expect(projectPathError('workspace', os)).not.toBeNull()
+    }
+    // Windows forms only for a Windows server.
+    for (const p of ['D:\\code', 'C:/Users/me/src', '~\\src', '\\\\server\\share']) {
+      expect(projectPathError(p, 'windows')).toBeNull()
+    }
+    expect(projectPathError('D:\\code', 'linux')).toBe('Use an absolute path or ~/…')
+    expect(projectPathError('D:code', 'windows')).not.toBeNull()
+    expect(projectPathError('code\\app', 'windows')).not.toBeNull()
   })
 })
 

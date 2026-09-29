@@ -29,7 +29,8 @@ pub struct Repo {
 pub(super) const DISCOVER_ARGS: [&str; 5] = ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir", "--show-prefix"];
 
 /// Why `root` is no repository Workbench can use: git's own words when it refuses a
-/// folder another user owns, else "not a git repository".
+/// folder another user owns (`cmd::unsafe_repository`, Windows), else "not a git
+/// repository".
 pub(super) fn discover_error(out: &GitOutput, root: &Path) -> ApiError {
     super::cmd::unsafe_repository(out).unwrap_or_else(|| {
         ApiError::new(StatusCode::NOT_FOUND, "not_a_repo", format!("{} is not a git repository", crate::config::contract_tilde(root)))

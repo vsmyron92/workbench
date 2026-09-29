@@ -105,10 +105,17 @@ Good to know:
   PowerShell, so a command written for bash needs a PowerShell form (Windows PowerShell 5.1
   has no `&&`: install PowerShell 7).
 - Version control needs [Git for Windows](https://git-scm.com/download/win).
+- Installers put their programs on PATH for programs started afterwards: Workbench, and the
+  terminals and runs it starts, find Git, Node.js, Python or rustup installed while it runs
+  only once it restarts (`workbench service stop`, then Workbench from the Start Menu, or
+  `workbench serve` in a new terminal).
 - A `keyring` secret reference reads Windows Credential Manager: `{ keyring =
   "workbench/atlassian" }` is the generic credential named `atlassian.workbench`.
 - The binaries are not code-signed, so SmartScreen or an antivirus may warn about
-  `workbench.exe`, a program that starts terminals and other programs.
+  `workbench.exe`, a program that starts terminals and other programs. Windows 11's Smart
+  App Control blocks unsigned programs outright, with no exception per program: with it on,
+  `install.ps1` fails when it runs `workbench.exe --version`. Turn it off (Windows Security ›
+  App & browser control) or wait for signed releases.
 - Binding an address other than loopback (remote access) makes Windows Firewall ask whether
   to allow it.
 - The folders that contain an open project cannot be renamed or moved while Workbench runs
@@ -128,8 +135,9 @@ The first version leaves a few things out; where one of them is asked for, Workb
   (Settings › General), which then also notify on the computer Workbench runs on, or push.
 - **gdb attaching to a running process**, and rust-gdb's pretty printers. Attach to
   Process… uses lldb-dap or CodeLLDB for native programs and debugpy for Python.
-- **Projects on a network share or inside WSL** (`\\server\share`, `\\wsl$\…`). Clone the
-  repository to a local drive, or run the Linux Workbench inside WSL for those projects.
+- **Projects on a network share or inside WSL** (`\\server\share`, `\\wsl$\…`, and a mapped
+  network drive such as `H:`, which is a share too). Clone the repository to a local drive,
+  or run the Linux Workbench inside WSL for those projects.
 
 Building from source on Windows needs Rust with the MSVC toolchain (the Visual Studio Build
 Tools' C++ workload) and Node.js 22. In PowerShell, from the repository (build in `server`,

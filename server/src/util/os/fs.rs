@@ -47,10 +47,30 @@ pub fn rename_unsupported(e: &io::Error) -> bool {
 /// means by `native`, and its default.
 pub const NATIVE_CRLF: bool = cfg!(windows);
 
+/// Whether the folders a user works in are often owned by another account, which git's
+/// `safe.directory` check refuses (Windows: folders an administrator created, drives
+/// without owners such as FAT and exFAT).
+pub const FOREIGN_OWNERS: bool = cfg!(windows);
+
 /// `e`, from opening `path` as a file, says `path` is a folder: `IsADirectory`, and on
 /// Windows the "access denied" it gives a folder opened as a file.
 pub fn is_a_directory(e: &io::Error, path: &Path) -> bool {
     e.kind() == io::ErrorKind::IsADirectory || (cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied && path.is_dir())
+}
+
+/// A text file the user wrote (a token file, a `.env`), as `read_to_string` reads it. On
+/// Windows also UTF-16LE with its byte order mark and UTF-8 with one (dropped): what Windows
+/// PowerShell 5.1 writes (`>` and `Out-File` UTF-16LE, `-Encoding UTF8` with a BOM).
+pub fn read_text(path: &Path) -> io::Result<String> {
+    #[cfg(unix)]
+    {
+        std::fs::read_to_string(path)
+    }
+    #[cfg(windows)]
+    {
+        super::shell::decode_output(std::fs::read(path)?)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8 or UTF-16LE with a byte order mark"))
+    }
 }
 
 /// Create `link` pointing at `target`. Windows: a directory or a file link by what
@@ -664,6 +684,30 @@ mod tests {
             }
             Err(e) => panic!("symlink {}: {e}", link.display()),
         }
+    }
+
+    /// Token files as Windows PowerShell 5.1 writes them read as their text on Windows; on
+    /// Unix a file is UTF-8, as it always was.
+    #[test]
+    fn text_files_in_powershells_encodings() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, bytes: &[u8]| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, bytes).unwrap();
+            p
+        };
+        let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain("glpat-x\r\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let (utf16, bom, plain) = (file("utf16", &utf16), file("bom", b"\xEF\xBB\xBFglpat-x\r\n"), file("plain", b"glpat-x\n"));
+        assert_eq!(read_text(&plain).unwrap(), "glpat-x\n");
+        if cfg!(windows) {
+            assert_eq!(read_text(&utf16).unwrap(), "glpat-x\r\n");
+            assert_eq!(read_text(&bom).unwrap(), "glpat-x\r\n");
+            assert_eq!(read_text(&file("odd", &[0xFF, 0xFE, 0x41])).unwrap_err().kind(), ErrorKind::InvalidData);
+        } else {
+            assert_eq!(read_text(&utf16).unwrap_err().kind(), ErrorKind::InvalidData);
+            assert_eq!(read_text(&bom).unwrap(), "\u{feff}glpat-x\r\n");
+        }
+        assert_eq!(read_text(&dir.path().join("missing")).unwrap_err().kind(), ErrorKind::NotFound);
     }
 
     #[test]

@@ -179,13 +179,14 @@ jobs:
           $bin = Join-Path $prefix 'workbench.exe'
           & $bin --version
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          # The DLLs it loads: not the Visual C++ runtime (server/.cargo/config.toml).
+          # The DLLs it loads: not the Visual C++ runtime (server/.cargo/config.toml). The
+          # Universal C runtime (api-ms-win-crt-*, ucrtbase) is part of Windows 10 and 11.
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
           $dumpbin = Get-ChildItem -Path "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
           $imports = & $dumpbin.FullName /nologo /dependents $bin
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $imports
-          if ($imports -match 'vcruntime') {
+          if ($imports -match 'vcruntime|msvcp') {
             Write-Output '::error::workbench.exe needs the Visual C++ runtime (is crt-static missing?)'
             exit 1
           }
