@@ -6,8 +6,9 @@
 //! is SIGHUP (and SIGCONT) to every process group of the session, SIGKILL comes after a
 //! grace period.
 //!
-//! Windows: the leader joins a Job Object right after the spawn (what it starts joins too),
-//! registered under the leader's pid, so the same `i32` session ids work. The hang-up
+//! Windows: the leader joins a Job Object right after the spawn (what it starts joins too,
+//! unless it asks to leave with `CREATE_BREAKAWAY_FROM_JOB`, as a daemon leaves a Unix
+//! session), registered under the leader's pid, so the same `i32` session ids work. The hang-up
 //! closes the pseudoconsole (ConPTY sends CTRL_CLOSE_EVENT to every process attached to
 //! it); `TerminateJobObject` ends what is left after the grace period. ConPTY gives the
 //! reader no EOF when its processes exit: `leader_exited` closes the pseudoconsole once the
@@ -313,7 +314,7 @@ mod imp {
 
     pub fn register(pid: i32, hang_up: Box<dyn FnOnce() + Send>) {
         let Some(p) = u32::try_from(pid).ok().filter(|p| *p > 1) else { return };
-        let s = Session { group: ProcGroup::attach_pid(p), hang_up: Mutex::new(Some(hang_up)) };
+        let s = Session { group: ProcGroup::attach_terminal(p), hang_up: Mutex::new(Some(hang_up)) };
         SESSIONS.lock().insert(pid, Arc::new(s));
     }
 

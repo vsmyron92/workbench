@@ -10,14 +10,13 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use notify_debouncer_full::notify::{EventKind, RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
+use notify_debouncer_full::DebounceEventResult;
+use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use parking_lot::Mutex;
 
 use super::store;
 use crate::app::AppState;
-
-type Deb = Debouncer<RecommendedWatcher, RecommendedCache>;
+use crate::util::os::watch::{Debouncer as Deb, debouncer};
 
 /// Cards named per batch before it degrades to one scope-wide event.
 const MAX_CARDS_PER_BATCH: usize = 50;
@@ -71,7 +70,7 @@ fn setup(state: &AppState) {
     crate::util::fs::set_mode(&root, 0o700);
     store::migrate_legacy_dirs(state);
     let st = state.clone();
-    let deb = new_debouncer(Duration::from_millis(300), None, move |res: DebounceEventResult| {
+    let deb = debouncer(Duration::from_millis(300), move |res: DebounceEventResult| {
         let Ok(events) = res else { return };
         let paths: Vec<PathBuf> = events.into_iter().filter(|e| is_change(&e.event.kind)).flat_map(|e| e.event.paths).collect();
         if !paths.is_empty() {

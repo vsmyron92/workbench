@@ -126,7 +126,7 @@ shell = ["/bin/zsh", "-l"]         # new shells (default: $SHELL -l; PowerShell 
 Language servers and debug adapters run project code, so they start only after you
 enable code intelligence for a project (its first source file offers it) or press Debug.
 
-On Windows (not released yet) run commands go to PowerShell, and detected ones are
+On Windows (experimental) run commands go to PowerShell, and detected ones are
 written for it: `python` or `py -3` and the virtualenv's `Scripts\python.exe`,
 `.\gradlew.bat`, CMake's Debug folder (`.\build\Debug\app.exe`; with Ninja, set
 `CMAKE_GENERATOR` or configure once and detection follows), `curl.exe`, `$env:PORT`, no

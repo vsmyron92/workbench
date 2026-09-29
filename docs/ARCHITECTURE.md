@@ -191,7 +191,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 - `spawn_redacted(state, spec, secrets)` masks the given secret values (`${secret:…}` in a run's env) in the output at the source: the screen, saved screens, the WebSocket, `screen_text` and MCP never see them. On Windows a value is also masked when ConPTY's repainting puts escape sequences between its characters.
 - `POST /api/terminals/{id}/restart` re-runs a run/command terminal only when that is safe without its owner: log follows (`meta.action = "logs"`), Remote Control servers, or `meta.restartable = true`. Run configurations restart through apps; deploys and env commands only from their environment, so gates and confirmation run again. Others get `409 not_restartable`.
 - `TerminalInfo.lingering` counts processes the exited process left running in its session; kill, close and restart end them.
-- A terminal's processes are a session of `util::os::session`, keyed by the leader's pid: a Unix session (hang-up: SIGHUP and SIGCONT to its process groups, SIGKILL after the grace period), on Windows a Job Object the leader joins right after the spawn, in a pseudoconsole (ConPTY). There the hang-up closes the pseudoconsole (CTRL_CLOSE_EVENT to every attached process) and `TerminateJobObject` ends the rest; the pseudoconsole also closes once the leader has exited and the job is empty, since ConPTY gives no EOF of its own; `lingering` counts the job's live processes. `Pty::spawn` always hands portable-pty an absolute program (`util::os::exe::launch`: a relative path from the terminal's cwd, a bare name from its own `PATH` first): npm shims run as node and their script, a batch file only with a path and arguments cmd.exe reads as they are and with `NoDefaultCurrentDirectoryInExePath=1`, and an agent's initial prompt is pasted instead of passed to a batch file when it holds `% ! ^ & | < > "` or a line break.
+- A terminal's processes are a session of `util::os::session`, keyed by the leader's pid: a Unix session (hang-up: SIGHUP and SIGCONT to its process groups, SIGKILL after the grace period), on Windows a Job Object the leader joins right after the spawn (a process that asks to leave it may: `JOB_OBJECT_LIMIT_BREAKAWAY_OK`), in a pseudoconsole (ConPTY). There the hang-up closes the pseudoconsole (CTRL_CLOSE_EVENT to every attached process) and `TerminateJobObject` ends the rest; the pseudoconsole also closes once the leader has exited and the job is empty, since ConPTY gives no EOF of its own; `lingering` counts the job's live processes. `Pty::spawn` always hands portable-pty an absolute program (`util::os::exe::launch`: a relative path from the terminal's cwd, a bare name from its own `PATH` first): npm shims run as node and their script, a batch file only with a path and arguments cmd.exe reads as they are and with `NoDefaultCurrentDirectoryInExePath=1`, and an agent's initial prompt is pasted instead of passed to a batch file when it holds `% ! ^ & | < > "` or a line break.
 
 **Handlers:**
 - Return `ApiResult<Json<T>>`. JSON is camelCase (`#[serde(rename_all = "camelCase")]`).
@@ -218,6 +218,11 @@ The plan and its status are in [windows-port.md](windows-port.md).
 | `path` | `is_absolute_str`, `check_component` / `check_relative`, `stays_inside`, `to_slash`, `canonicalize`, `strip_prefix`, file-URI helpers, `data_home`, `private_dirs`, `pgpass_file` | Drive letters and `\`; device names, `:` streams, 8.3 names and trailing dots refused; UNC roots unsupported; dunce and an uppercase drive letter; case-insensitive comparisons (see "Paths" in the security model). Data in `%LOCALAPPDATA%`, config in `%APPDATA%`. |
 | `net` | `interfaces`, `bind` (the server's socket), `kill_port_holders` | `GetAdaptersAddresses`; `[::]` made dual-stack; port owners from `GetExtendedTcpTable`, only the same user's processes. |
 | `desktop` | `open_url`, `notify_send` | A Chromium browser from App Paths with `--app=`, else `ShellExecuteW`, for http(s) URLs only; no desktop notifications yet. |
+| `session` | a terminal's processes: `register`, `leader_exited`, `members`, `kill(sid, grace)`, `holders` (who holds a file open), `held_outside`, `runs_outside`, and the PTY's `Output` (the redaction hold-back) | A Job Object per terminal (`ProcGroup::attach_terminal`: what it starts may leave on request, `JOB_OBJECT_LIMIT_BREAKAWAY_OK`) in a pseudoconsole; hang-up is `ClosePseudoConsole`, then `TerminateJobObject`; the reader gets EOF once the job is empty; `RmGetList` for open files; sysinfo for cwd and command lines. |
+| `watch` | `debouncer` (the files, config and Workspace watchers), `RECURSIVE`, `FOLDERS_MODIFY`, `RESCAN_IS_OVERFLOW` | Our own `ReadDirectoryChangesW` watcher, one recursive watch per root, overflow as `Flag::Rescan`, no file-id cache. |
+| `helper` | `askpass_env` (the environment that makes git ask Workbench for credentials: `GIT_ASKPASS`, a `#!/bin/sh` wrapper on Unix), `askpass_prompt` (main.rs, before clap) | No script: `GIT_ASKPASS` and ssh's `SSH_ASKPASS` name `workbench.exe`, with `WORKBENCH_HELPER=askpass`, `SSH_ASKPASS_REQUIRE=force` and `GCM_INTERACTIVE=never`. |
+| `support` | `Feature`, `unsupported`, `require`, `require_root`: what this OS leaves out (`/api/health`, `unsupported_platform`) | Dev containers, desktop notifications, gdb attach, rust-gdb's printers and network or WSL roots are unsupported; Services is experimental. Everything is supported on Linux. |
+| `autostart` (Windows only) | the `Run` value, `StartupApproved`, Start Menu shortcuts, `start_detached` / `start_apart`, `elevated`, `message_box` | `workbench service` on Windows (`platform/service_windows.rs`, "Service install"). |
 | `dll` | `restrict_search()`, called at the start of `serve` | `SetDefaultDllDirectories`: a DLL loaded by name (portable-pty's `conpty.dll`) comes only from the executable's folder or System32, never the current directory or `PATH`. A no-op on Unix. |
 
 Windows builds use the MSVC target with a static C runtime (`server/.cargo/config.toml`). The
@@ -549,7 +554,7 @@ npm test           # vitest (src/**/*.test.ts)
   checks that the binary imports no Visual C++ runtime, starts it on scratch directories and
   a free port until the UI is served, installs again over the running server (whose exe must
   end up renamed aside), and builds `workbench-X.Y.Z-x86_64-pc-windows-msvc.zip`
-  (`workbench.exe`, `workbenchw.exe` once the crate builds it, `install.ps1`, `conpty.dll`,
+  (`workbench.exe`, `workbenchw.exe`, `install.ps1`, `conpty.dll`,
   `OpenConsole.exe`, LICENSE, README, CHANGELOG, the notices and `CONPTY_NOTICE.md`) with a
   `.sha256`. Started by hand, the job always runs; on a tag it runs only while the repository
   variable `RELEASE_WINDOWS` is `true`, and `publish` then needs both jobs. Until then a tag
@@ -2243,8 +2248,8 @@ panel is narrow.
   replaced) it hands the restart over: stopping the old server ends its terminals, and a
   command run in one with them, so it starts a new supervisor outside its own job
   (`service run --replace <old data dir>`, which stops the old service before it claims its
-  event) and only waits; when its job keeps what it starts (Workbench's terminals until they
-  allow breakaway), it restarts nothing and says how. From a process elevated through UAC
+  event) and only waits; when its job keeps what it starts (a job without breakaway; Workbench's
+  terminals allow it), it restarts nothing and says how. From a process elevated through UAC
   (`os::autostart::elevated`: the elevated half of a split token; the built-in Administrator
   and UAC off have no unelevated alternative and do not count) nothing is started or
   stopped, since the service and its agents would run as administrator; `service open`

@@ -136,7 +136,9 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   when ConPTY's repainting puts escape sequences between its characters
   (`session::REPAINTS`). A GUI program started from a terminal joins its job, keeps a lingering
   count and ends with it (Linux: it stays in the session likewise; `xdg-open`-style launchers
-  detach, `start` on Windows does not).
+  detach, `start` on Windows does not). A process that asks to leave the job
+  (`CREATE_BREAKAWAY_FROM_JOB`) may (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`), as a daemon leaves a
+  Unix session: the service `workbench service install --enable` starts from a terminal.
 
 **G. `/proc` introspection**
 
@@ -374,8 +376,9 @@ project.
   reads `StartupApproved\Run` to report an entry disabled in Task Manager.
 - `install --enable` over a running service starts the new supervisor outside its own job
   (`CREATE_BREAKAWAY_FROM_JOB`), since stopping the old server closes the terminal it may run
-  in. Workbench terminals' jobs do not allow that yet (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, for
-  the terminals slice), so from one it restarts nothing and says so.
+  in. Workbench terminals' jobs allow that (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`,
+  `ProcGroup::attach_terminal`); from a terminal whose job does not, it restarts nothing and
+  says so.
 - Rejected: a logon scheduled task (`schtasks /SC ONLOGON` is refused for standard users in
   common setups, shows a console window, and its restart policy ignores the exit code); S4U
   tasks and Windows services (they lose Credential Manager and the desktop, and a service
@@ -446,8 +449,8 @@ workflow (conpty.dll looks for `OpenConsole.exe` beside itself first); a pwsh sm
 (`install.ps1` under Windows PowerShell 5.1 into a scratch prefix, start with scratch
 directories on a free port, `Invoke-WebRequest` until the page has `<div id="root">`,
 install again over the running server, stop); package
-`workbench-<v>-x86_64-pc-windows-msvc.zip` with `workbench.exe`, `workbenchw.exe` (once
-built), `install.ps1`, `conpty.dll`, `OpenConsole.exe`, LICENSE, README, CHANGELOG, the
+`workbench-<v>-x86_64-pc-windows-msvc.zip` with `workbench.exe`, `workbenchw.exe`,
+`install.ps1`, `conpty.dll`, `OpenConsole.exe`, LICENSE, README, CHANGELOG, the
 notices and Windows Terminal's `NOTICE.md` of that package's release (`CONPTY_NOTICE.md`),
 plus a `.sha256`; `publish` needs both jobs. While the port is unvalidated, a tag runs the
 Windows job only when the repository variable `RELEASE_WINDOWS` is `true`, and `publish`

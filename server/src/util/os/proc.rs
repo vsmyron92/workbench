@@ -48,6 +48,16 @@ impl ProcGroup {
         ProcGroup(imp::Group::attach(pid))
     }
 
+    /// `attach_pid` for a terminal's process (`os::session`): what it starts may leave the
+    /// job when it asks to (`CREATE_BREAKAWAY_FROM_JOB`, allowed by
+    /// `JOB_OBJECT_LIMIT_BREAKAWAY_OK`), as a Unix daemon leaves its terminal's session. The
+    /// service `workbench service install --enable` starts from a Workbench terminal then
+    /// outlives that terminal.
+    #[cfg(windows)]
+    pub fn attach_terminal(pid: u32) -> ProcGroup {
+        ProcGroup(imp::Group::attach_job(pid, true))
+    }
+
     /// `attach_pid` for a child spawned without `prepare`, which stays in Workbench's group:
     /// on Unix the group is that process alone (`terminate` and `kill` signal its pid).
     /// Windows: as `attach_pid`, so what it starts from then on ends with it.
@@ -440,8 +450,9 @@ mod imp {
     use windows_sys::Win32::System::Diagnostics::Debug::CheckRemoteDebuggerPresent;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+        SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
         CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateEventW, DETACHED_PROCESS, EVENT_MODIFY_STATE, OpenEventW, OpenProcess, PROCESS_QUERY_INFORMATION,
@@ -486,12 +497,13 @@ mod imp {
         job: Option<Handle>,
     }
 
-    /// A new job whose processes are killed when its last handle closes.
-    fn kill_on_close_job() -> Option<Handle> {
+    /// A new job whose processes are killed when its last handle closes; with
+    /// `breakaway_ok`, a process it holds may start one outside it.
+    fn kill_on_close_job(breakaway_ok: bool) -> Option<Handle> {
         // SAFETY: no attributes and no name: an unnamed job with default security.
         let job = Handle::new(unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) })?;
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | if breakaway_ok { JOB_OBJECT_LIMIT_BREAKAWAY_OK } else { 0 };
         // SAFETY: `info` is the structure of this information class, with its own size.
         let ok = unsafe {
             SetInformationJobObject(
@@ -506,9 +518,13 @@ mod imp {
 
     impl Group {
         pub fn attach(pid: u32) -> Group {
+            Group::attach_job(pid, false)
+        }
+
+        pub fn attach_job(pid: u32, breakaway_ok: bool) -> Group {
             let access = PROCESS_TERMINATE | PROCESS_SET_QUOTA | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
             let Some(leader) = open_process(access, pid) else { return Group(None) };
-            let job = kill_on_close_job().filter(|job| {
+            let job = kill_on_close_job(breakaway_ok).filter(|job| {
                 // SAFETY: both handles are valid; the process handle has PROCESS_SET_QUOTA
                 // and PROCESS_TERMINATE.
                 unsafe { AssignProcessToJobObject(job.0, leader.0) != 0 }
@@ -575,6 +591,24 @@ mod imp {
                 room = assigned.max(room) + 16;
             }
             ids
+        }
+
+        /// The job's limit flags (`JOB_OBJECT_LIMIT_*`); `None` without a job.
+        #[cfg(test)]
+        pub fn limit_flags(&self) -> Option<u32> {
+            let job = self.0.as_ref()?.job.as_ref()?;
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            // SAFETY: `info` is the structure of this information class, with its own size.
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_mut(&mut info).cast(),
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                )
+            } != 0;
+            ok.then_some(info.BasicLimitInformation.LimitFlags)
         }
     }
 
@@ -959,6 +993,19 @@ mod tests {
         assert!(!own_pid_alive(pid as u32));
         assert!(!pid_alive(0) && !pid_alive(-1));
         kill_pid(0); // ignored, not Workbench's own group
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_a_terminals_job_lets_processes_leave() {
+        use windows_sys::Win32::System::JobObjects::{JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
+        let (mut a, mut b) = (sleeper().spawn().unwrap(), sleeper().spawn().unwrap());
+        let (plain, terminal) = (ProcGroup::attach_pid(a.id()), ProcGroup::attach_terminal(b.id()));
+        assert_eq!(plain.0.limit_flags(), Some(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE));
+        assert_eq!(terminal.0.limit_flags(), Some(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK));
+        plain.kill();
+        terminal.kill();
+        assert!(!a.wait().unwrap().success() && !b.wait().unwrap().success());
     }
 
     #[tokio::test]

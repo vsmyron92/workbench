@@ -364,8 +364,8 @@ pub fn start_detached(program: &Path, args: &[&str], cwd: Option<&Path>) -> io::
 }
 
 /// As `start_detached`, but only outside the caller's job: `Ok(false)`, with nothing
-/// started, when the job does not let it leave (a Workbench terminal's job, until terminals
-/// allow that), so it would end with the job.
+/// started, when the job does not let it leave (no `JOB_OBJECT_LIMIT_BREAKAWAY_OK`; a
+/// Workbench terminal's job allows it), so it would end with the job.
 pub fn start_apart(program: &Path, args: &[&str], cwd: Option<&Path>) -> io::Result<bool> {
     match create_detached(program, args, cwd, true) {
         Ok(()) => Ok(true),

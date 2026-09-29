@@ -509,7 +509,7 @@ pub fn install(env: &Env, name: &str, enable: bool, dry_run: bool, out: &mut dyn
             }
         };
         if !started {
-            writeln!(out, "\nnot restarted: this terminal keeps what it starts in its job (Workbench's own terminals do), so a service")?;
+            writeln!(out, "\nnot restarted: this terminal keeps what it starts in its job, so a service")?;
             writeln!(out, "started from here would end with it. Workbench runs with the previous settings. To load these:")?;
             writeln!(out, "  workbench service stop, then open {entry} from the Start Menu")?;
         }

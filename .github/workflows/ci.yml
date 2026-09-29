@@ -77,7 +77,7 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           $stage = (New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'wb-stage')).FullName
-          Copy-Item -LiteralPath ../packaging/windows/install.ps1, target/debug/workbench.exe -Destination $stage
+          Copy-Item -LiteralPath ../packaging/windows/install.ps1, target/debug/workbench.exe, target/debug/workbenchw.exe -Destination $stage
           $prefix = Join-Path $env:RUNNER_TEMP 'wb-install'
           powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stage 'install.ps1') -Prefix $prefix
           if ($LASTEXITCODE -ne 0) { exit 1 }

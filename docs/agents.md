@@ -99,4 +99,5 @@ terminals behave there.
   when another of its arguments or its own path holds one. Its cmd.exe never runs a program
   from the project folder by a bare name (`NoDefaultCurrentDirectoryInExePath`).
 - Killing or closing a terminal ends every process started in it, programs with windows
-  included.
+  included. Only a program that asks to leave the terminal's job keeps running, as the
+  service that `workbench service install --enable` starts does.

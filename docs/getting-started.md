@@ -70,8 +70,9 @@ powershell -ExecutionPolicy Bypass -File .\workbench-<version>-x86_64-pc-windows
   unpacked files do not carry it. Windows PowerShell runs no scripts under its default
   policy, and under RemoteSigned none downloaded unsigned: `-ExecutionPolicy Bypass` allows
   `install.ps1` for this one run.
-- `install.ps1` copies `workbench.exe`, `conpty.dll` and `OpenConsole.exe` (the console host
-  its terminals use), `workbenchw.exe` when the archive has it, and the documents to
+- `install.ps1` copies `workbench.exe`, `workbenchw.exe` (it starts Workbench from the Start
+  Menu and at sign-in: [Run it as a service](#run-it-as-a-service)), `conpty.dll` and
+  `OpenConsole.exe` (the console host its terminals use) and the documents to
   `%LOCALAPPDATA%\Programs\Workbench` without administrator rights, and adds that folder to
   your user PATH. `-Prefix <folder>` installs elsewhere. A folder it creates admits only you,
   SYSTEM and Administrators; it warns when an existing one lets other accounts change it,
@@ -110,10 +111,25 @@ Good to know:
   `workbench.exe`, a program that starts terminals and other programs.
 - Binding an address other than loopback (remote access) makes Windows Firewall ask whether
   to allow it.
-- Not in the first version: dev containers, desktop notifications (push notifications to
-  your phone are not affected), projects on WSL or network (`\\server\share`) paths, and
-  gdb's attach hints and rust-gdb pretty printers (attach with debugpy, CodeLLDB or
-  lldb-dap). The Services window (Docker) is untested there.
+- The folders that contain an open project cannot be renamed or moved while Workbench runs
+  (as with any IDE that watches them); folders inside the project can. Names that differ
+  only in case are one file: creating `A.txt` next to `a.txt` reports that it exists, and
+  renaming `a.txt` to `A.txt` changes only the case.
+- Creating a symbolic link (copying a folder that holds one) needs Developer Mode or an
+  administrator; without it the copy fails with a message saying so.
+
+The first version leaves a few things out; where one of them is asked for, Workbench says
+"Not available on Windows" and why:
+
+- **Dev containers.** Their chip, status item and commands are not shown. The **Services**
+  window (Docker containers, compose projects, images) works with Docker Desktop but is
+  marked *experimental*: it has not been tested there yet.
+- **Desktop notifications** from the server. Turn on browser notifications
+  (Settings › General), which then also notify on the computer Workbench runs on, or push.
+- **gdb attaching to a running process**, and rust-gdb's pretty printers. Attach to
+  Process… uses lldb-dap or CodeLLDB for native programs and debugpy for Python.
+- **Projects on a network share or inside WSL** (`\\server\share`, `\\wsl$\…`). Clone the
+  repository to a local drive, or run the Linux Workbench inside WSL for those projects.
 
 Building from source on Windows needs Rust with the MSVC toolchain (the Visual Studio Build
 Tools' C++ workload) and Node.js 22. In PowerShell, from the repository (build in `server`,
@@ -124,11 +140,11 @@ cd web; npm ci; npm run build; cd ..\server
 cargo build --release
 ```
 
-Copy `server\target\release\workbench.exe` to a folder only you can change, and put
-`conpty.dll` (`runtimes\win-x64\native`) and `OpenConsole.exe`
+Copy `workbench.exe` and `workbenchw.exe` from `server\target\release` to a folder only you
+can change, and put `conpty.dll` (`runtimes\win-x64\native`) and `OpenConsole.exe`
 (`build\native\runtimes\x64`) from the
 [Microsoft.Windows.Console.ConPTY](https://www.nuget.org/packages/Microsoft.Windows.Console.ConPTY)
-package (a `.nupkg` is a zip) next to it; the release archives use version 1.24.260710001.
+package (a `.nupkg` is a zip) next to them; the release archives use version 1.24.260710001.
 Workbench loads `conpty.dll` only from its own folder or System32, never from the folder you
 start it in. Without the two files, terminals use the console host built into Windows, which
 renders less well on Windows 10.
@@ -215,24 +231,10 @@ administrator rights:
   server 5 seconds after it fails and gives up after 5 failures within a minute.
 - To restart (after an update, or a setting that needs it): `workbench service stop`, then
   open Workbench from the Start Menu. `install --enable` over a running service restarts it
-  with the new settings when run from a terminal outside Workbench.
+  with the new settings (run from a Workbench terminal, that terminal closes as the old
+  Workbench stops).
 - In a terminal started with *Run as administrator*, `install --enable` starts nothing:
   Workbench and its agents would run as administrator too.
-
-## On Windows
-
-The Windows version (in progress: the [Windows plan](windows-port.md)) leaves out a few
-things; where one of them is asked for, Workbench says "Not available on Windows" and why:
-
-- **Dev containers.** Their chip, status item and commands are not shown. The **Services**
-  window (Docker containers, compose projects, images) works with Docker Desktop but is
-  marked *experimental*: it has not been tested there yet.
-- **Desktop notifications** from the server. Turn on browser notifications
-  (Settings › General), which then also notify on the computer Workbench runs on, or push.
-- **gdb attaching to a running process**, and rust-gdb's pretty printers. Attach to
-  Process… uses lldb-dap or CodeLLDB for native programs and debugpy for Python.
-- **Projects on a network share or inside WSL** (`\\server\share`, `\\wsl$\…`). Clone the
-  repository to a local drive, or run the Linux Workbench inside WSL for those projects.
 
 ## Next steps
 

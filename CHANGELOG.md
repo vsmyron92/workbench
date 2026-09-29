@@ -10,10 +10,25 @@
   through `PATHEXT` (npm's `.cmd` shims start through `node.exe`), run commands go through
   PowerShell, a DLL loaded by name comes only from Workbench's own folder or System32, the
   configuration is in `%APPDATA%\workbench` and the state in `%LOCALAPPDATA%\workbench`.
+  Terminals run in a pseudoconsole (ConPTY), PowerShell by default; `workbench service`
+  installs a sign-in entry and a Start Menu shortcut that start `workbenchw.exe`, which
+  supervises the server without a console window; git and ssh ask Workbench itself for
+  credentials; each project has one recursive file watch, so its folders stay renamable;
+  language servers, debuggers and detected run commands take their Windows forms.
+  `GET /api/health` reports the OS and what it leaves out (dev containers, desktop
+  notifications, gdb attach and rust-gdb's pretty printers, projects on network or WSL
+  paths), and those features answer `unsupported_platform` with the reason.
+- **Terminals:** `[terminals] shell` in `config.toml` sets the program and arguments of new
+  shells (default: `$SHELL -l`).
+- **Git:** a working tree git checks out with CRLF over an LF index (`core.autocrlf`,
+  `eol=crlf` attributes) shows in diffs and conflicts as git reads it, with LF; a conflict
+  resolved with edited text is written back with CRLF. A repository git refuses for its
+  owner (`safe.directory`) reports git's own message (`unsafe_repository`) instead of "not a
+  repository".
 - **Releases:** the release workflow can also build
   `workbench-X.Y.Z-x86_64-pc-windows-msvc.zip` with `workbench.exe` (no Visual C++ runtime
-  needed), `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY package (MIT, see the
-  third-party notices) and `install.ps1`, which installs per user into
+  needed), `workbenchw.exe`, `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY
+  package (MIT, see the third-party notices) and `install.ps1`, which installs per user into
   `%LOCALAPPDATA%\Programs\Workbench`, adds it to PATH and can install over a running
   Workbench. The job installs the archive and starts the server before publishing it. A tag
   publishes it only once the repository variable `RELEASE_WINDOWS` is `true`; until then

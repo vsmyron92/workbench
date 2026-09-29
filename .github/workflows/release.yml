@@ -151,13 +151,12 @@ jobs:
         run: |
           $name = "workbench-${{ steps.version.outputs.version }}-x86_64-pc-windows-msvc"
           $dir = (New-Item -ItemType Directory -Force -Path "dist/$name").FullName
+          # workbenchw.exe: the service's launcher (docs/windows-port.md, "Service").
           $files = @(
-            'server/target/release/workbench.exe', 'packaging/windows/install.ps1',
+            'server/target/release/workbench.exe', 'server/target/release/workbenchw.exe', 'packaging/windows/install.ps1',
             (Join-Path $env:RUNNER_TEMP 'conpty/conpty.dll'), (Join-Path $env:RUNNER_TEMP 'conpty/OpenConsole.exe'),
             'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_NOTICES.md', 'packaging/windows/CONPTY_NOTICE.md'
           )
-          # The service's supervisor (docs/windows-port.md, "Service"), once the crate builds it.
-          if (Test-Path -LiteralPath server/target/release/workbenchw.exe) { $files += 'server/target/release/workbenchw.exe' }
           Copy-Item -LiteralPath $files -Destination $dir
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "name=$name"
       # Installs the package as a user would, starts the installed server on scratch
@@ -173,6 +172,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Output '::error::install.ps1 failed'; exit 1 }
           $userPath = [string](Get-ItemProperty -LiteralPath HKCU:\Environment).Path
           if ($userPath.Split(';') -notcontains $prefix) { Write-Output '::error::install.ps1 did not add its folder to the user PATH'; exit 1 }
+          if (-not (Test-Path -LiteralPath (Join-Path $prefix 'workbenchw.exe') -PathType Leaf)) {
+            Write-Output '::error::install.ps1 did not install workbenchw.exe'
+            exit 1
+          }
           $bin = Join-Path $prefix 'workbench.exe'
           & $bin --version
           if ($LASTEXITCODE -ne 0) { exit 1 }

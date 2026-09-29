@@ -1,5 +1,6 @@
 //! `watch`: change notifications for the files watcher, debounced by notify-debouncer-full
-//! (docs/windows-port.md §2, "File watching").
+//! (docs/windows-port.md §2, "File watching"). The config folder's and the Workspace cards'
+//! watchers use the same [`debouncer`].
 //!
 //! Unix: notify's inotify watcher, and the caller adds one non-recursive watch per directory
 //! it shows: a recursive inotify watch would put one on every directory, `target/` and

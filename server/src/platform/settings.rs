@@ -458,12 +458,12 @@ pub async fn validate(Json(body): Json<ValidateBody>) -> Json<Diagnostic> {
 /// The config directory is watched, not the file: atomic saves replace the inode.
 /// The debouncer lives in the task, so it stops with the runtime.
 pub fn watch_config(state: &AppState) {
+    use notify_debouncer_full::DebounceEventResult;
     use notify_debouncer_full::notify::RecursiveMode;
-    use notify_debouncer_full::{DebounceEventResult, new_debouncer};
     let dir = state.paths.config_dir.clone();
     let name = state.paths.config_file().file_name().map(|n| n.to_os_string()).unwrap_or_default();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    let deb = new_debouncer(Duration::from_millis(400), None, move |res: DebounceEventResult| {
+    let deb = crate::util::os::watch::debouncer(Duration::from_millis(400), move |res: DebounceEventResult| {
         let Ok(events) = res else { return };
         if events.iter().any(|e| e.event.paths.iter().any(|p| p.file_name() == Some(name.as_os_str()))) {
             let _ = tx.send(());
