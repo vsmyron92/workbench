@@ -89,7 +89,8 @@ fn scan(root: &Path) -> Vec<(Stack, String, Option<String>)> {
             .filter_map(|e| Some((e.file_name().to_str()?.to_string(), e.file_type().ok()?.is_dir())))
             .collect();
         names.sort();
-        let rel = dir.strip_prefix(root).map(|r| r.display().to_string()).unwrap_or_default();
+        // With `/` on every OS: it goes into `cd` commands run in the container.
+        let rel = dir.strip_prefix(root).map(crate::util::os::path::to_slash).unwrap_or_default();
         let has = |n: &str| names.iter().any(|(x, d)| x == n && !d);
         let cd = |cmd: &str| if rel.is_empty() { cmd.to_string() } else { format!("cd {} && {cmd}", super::sh_quote(&rel)) };
         // Crates below another Cargo.toml are its workspace members.
@@ -282,7 +283,7 @@ pub fn write(root: &Path, rel: &str, content: &str) -> Result<String, ApiError> 
     if let Some(dir) = abs.parent() {
         std::fs::create_dir_all(dir)?;
         // The directory must still be inside the project (no symlink out).
-        crate::util::paths::resolve_in_root(root, &dir.strip_prefix(root).map(|d| d.display().to_string()).unwrap_or_default())?;
+        crate::util::paths::resolve_in_root(root, &dir.strip_prefix(root).map(crate::util::os::path::to_slash).unwrap_or_default())?;
     }
     use std::io::Write;
     let mut f = match std::fs::OpenOptions::new().write(true).create_new(true).open(&abs) {

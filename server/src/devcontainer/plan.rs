@@ -199,11 +199,12 @@ fn bind_risk(root: &Path, source: &str, target: &str, item: &str, risks: &mut Ve
         });
     } else if source.contains("${localEnv") {
         risks.push(Risk { level: Level::Danger, item: item.into(), message: format!("mounts a host path from your environment into {target}") });
-    } else if !source.starts_with('/') {
-        // A named volume.
+    } else if !crate::util::os::path::is_absolute_str(source) {
+        // A named volume (a host path is absolute: `/x`, and `C:\x` on Windows).
     } else if !inside(root, source) {
         let real = resolved(source);
-        let what = if real == Path::new("/") {
+        // `/` (Windows: a drive's root).
+        let what = if real.parent().is_none() {
             "the whole host filesystem".to_string()
         } else if real.display().to_string() != source {
             format!("{} (outside the project; {source} leads there)", real.display())
