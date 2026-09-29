@@ -344,7 +344,7 @@ pub fn resolve_launch(provider: &Provider, cfg: &AgentsConfig, project: &Project
             if d.is_empty() {
                 continue;
             }
-            let p = if d.starts_with('/') || d.starts_with('~') { crate::config::expand_tilde(d) } else { project.root.join(d) };
+            let p = if util::os::path::is_absolute_str(d) || d.starts_with('~') { crate::config::expand_tilde(d) } else { project.root.join(d) };
             if !p.is_dir() {
                 return Err(ApiError::bad_request(format!("additional directory {} does not exist", p.display())));
             }
@@ -2310,7 +2310,7 @@ impl Terminals {
 /// container session's transcript is a path in the container, not here.
 fn note_transcript(rec: &mut store::Record, path: Option<String>) -> bool {
     let inside = super::in_container(&rec.info);
-    let Some(tp) = path.filter(|p| !inside && p.starts_with('/') && p.ends_with(".jsonl") && !p.contains("/../")) else {
+    let Some(tp) = path.filter(|p| !inside && util::os::path::is_absolute_str(p) && p.ends_with(".jsonl") && !util::os::path::segments(p).any(|s| s == "..")) else {
         return false;
     };
     if rec.transcript_path.as_deref() == Some(tp.as_str()) {

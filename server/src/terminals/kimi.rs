@@ -199,8 +199,8 @@ fn ts(v: Option<&Value>) -> Option<i64> {
 pub fn summarize(home: &Path, e: &IndexEntry) -> Summary {
     let mut s = Summary { id: e.session_id.clone(), ..Default::default() };
     let sessions = home.join("sessions");
-    let Ok(dir) = std::fs::canonicalize(&e.session_dir) else { return s };
-    let inside = std::fs::canonicalize(&sessions).is_ok_and(|root| dir.starts_with(root));
+    let Ok(dir) = crate::util::os::path::canonicalize(&e.session_dir) else { return s };
+    let inside = crate::util::os::path::canonicalize(&sessions).is_ok_and(|root| crate::util::os::path::starts_with(&dir, &root));
     if !inside {
         return s;
     }

@@ -433,7 +433,7 @@ pub struct Written {
 pub fn write_file(path: &Path, mut data: Vec<u8>, expected: Option<&str>, force: bool) -> ApiResult<Written> {
     // Saving through a symlink updates its target; the link stays a link.
     let target = match std::fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path)?,
+        Ok(m) if m.file_type().is_symlink() => crate::util::os::path::canonicalize(path)?,
         _ => path.to_path_buf(),
     };
     let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

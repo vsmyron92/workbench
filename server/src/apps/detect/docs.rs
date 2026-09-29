@@ -177,7 +177,7 @@ fn change_dir(cwd: &Option<String>, target: &str, oldpwd: &mut Option<String>) -
     let target = target.trim_matches(['"', '\'']);
     let next = if target == "-" {
         oldpwd.clone()
-    } else if target.starts_with('/') || target.starts_with('~') || target.contains('$') {
+    } else if crate::util::os::path::is_absolute_str(target) || target.starts_with('~') || target.contains('$') {
         Some(target.to_string())
     } else {
         match cwd {

@@ -74,7 +74,7 @@ fn project(cx: &mut Ctx, dir: &Path, lists: &[PathBuf]) {
     let runtime_dir = RUNTIME_DIR.captures(&top_src).map(|c| c[1].trim_matches('/').to_string());
     let mut exes: Vec<(String, String, PathBuf)> = vec![]; // (target, dir relative to project, CMakeLists)
     for (l, t) in &sources {
-        let rel_dir = l.parent().and_then(|p| p.strip_prefix(dir).ok()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let rel_dir = l.parent().and_then(|p| p.strip_prefix(dir).ok()).map(crate::util::os::path::to_slash).unwrap_or_default();
         for c in ADD_EXECUTABLE.captures_iter(t) {
             let name = c[1].to_string();
             let args = c[2].to_ascii_uppercase();
@@ -266,7 +266,7 @@ fn binary_dir(name: &str, pr: &serde_json::Value, all: &BTreeMap<String, serde_j
     })?;
     let d = dir.replace("${presetName}", name);
     let d = d.strip_prefix("${sourceDir}/").or_else(|| d.strip_prefix("${sourceDir}")).unwrap_or(&d).trim_start_matches('/').to_string();
-    (!d.is_empty() && !d.contains("${") && !d.starts_with('/') && !d.contains("..")).then_some(d)
+    (!d.is_empty() && !d.contains("${") && !crate::util::os::path::is_absolute_str(&d) && !d.contains("..")).then_some(d)
 }
 
 fn with_presets(cx: &mut Ctx, dir: &Path, cwd: &str, p: &Presets, tests: bool, exes: &[(String, String, PathBuf)], runtime_dir: Option<&str>) {

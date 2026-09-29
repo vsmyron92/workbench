@@ -298,7 +298,7 @@ fn project_of_dir(state: &AppState, dir: &str) -> Option<String> {
         return None;
     }
     let p = PathBuf::from(dir);
-    let p = p.canonicalize().unwrap_or(p);
+    let p = crate::util::os::path::canonicalize(&p).unwrap_or(p);
     state.projects.find_by_path(&p).map(|p| p.id.clone())
 }
 

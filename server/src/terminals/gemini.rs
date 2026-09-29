@@ -43,7 +43,7 @@ fn chat_dirs(gemini: &Path, project_dir: &Path) -> Vec<PathBuf> {
         .ok()
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .and_then(|v| v.pointer("/projects").and_then(|p| p.get(&key)).and_then(Value::as_str).map(str::to_string))
-        .filter(|s| !s.is_empty() && !s.contains('/') && s != "." && s != "..");
+        .filter(|s| !s.is_empty() && !crate::util::os::path::has_separator(s) && s != "." && s != ".." && crate::util::os::path::check_component(s).is_ok());
     if let Some(s) = slug {
         out.push(gemini.join("tmp").join(s).join("chats"));
     }

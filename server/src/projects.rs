@@ -203,9 +203,10 @@ impl ProjectRegistry {
         self.get(id).ok_or_else(|| ApiError::not_found(format!("no project {id:?}")))
     }
 
-    /// The project whose root contains `abs` (deepest root wins).
+    /// The project whose root contains `abs` (deepest root wins; on Windows without
+    /// regard to case).
     pub fn find_by_path(&self, abs: &Path) -> Option<Arc<Project>> {
-        self.list_with_scratches().into_iter().filter(|p| abs.starts_with(&p.root)).max_by_key(|p| p.root.as_os_str().len())
+        self.list_with_scratches().into_iter().filter(|p| util::os::path::starts_with(abs, &p.root)).max_by_key(|p| p.root.as_os_str().len())
     }
 
     /// Rescan roots and reload every project's config layers.
@@ -215,7 +216,7 @@ impl ProjectRegistry {
             let cfg = state.config.read();
             (cfg.projects.roots.clone(), cfg.projects.include.clone(), cfg.projects.exclude.clone())
         };
-        let canonical = |p: PathBuf| p.canonicalize().unwrap_or(p);
+        let canonical = |p: PathBuf| util::os::path::canonicalize(&p).unwrap_or(p);
         let exclude: HashSet<PathBuf> =
             exclude.iter().flat_map(|e| [expand_tilde(e), canonical(expand_tilde(e))]).collect();
         let mut dirs: Vec<PathBuf> = vec![];
@@ -268,7 +269,7 @@ fn scratch_project(state: &AppState) -> anyhow::Result<Project> {
     let dir = state.paths.data_dir.join("scratches");
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    let root = dir.canonicalize()?;
+    let root = util::os::path::canonicalize(&dir)?;
     let mut config = ProjectFile::default();
     config.project.id = SCRATCH_ID.into();
     config.project.name = "Scratches".into();
@@ -288,7 +289,8 @@ async fn load_project(state: &AppState, id: &str, root: &Path) -> Project {
     let global_site = state.config.read().atlassian.as_ref().map(|a| a.site.clone());
     let detected = crate::apps::detect(root);
     let layered = project::load_layers(detected, root, &state.paths.project_overlay(id), global_site.as_deref());
-    let (mut config, warnings, repo_secret_names) = (layered.config, layered.warnings, layered.repo_secret_names);
+    let (mut config, mut warnings, repo_secret_names) = (layered.config, layered.warnings, layered.repo_secret_names);
+    warnings.extend(util::os::path::unsupported_root(root).map(str::to_string));
     let name = if config.project.name.is_empty() {
         root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| id.to_string())
     } else {
@@ -463,7 +465,7 @@ async fn add(State(state): State<AppState>, Json(body): Json<AddBody>) -> ApiRes
     })
     .await?;
     state.projects.reload(&state).await;
-    let id = state.projects.find_by_path(&p.canonicalize().unwrap_or(p)).map(|p| p.id.clone());
+    let id = state.projects.find_by_path(&util::os::path::canonicalize(&p).unwrap_or(p)).map(|p| p.id.clone());
     Ok(Json(json!({ "ok": true, "id": id })))
 }
 
@@ -678,7 +680,7 @@ mod tests {
         )
         .unwrap();
         let root_of = |id: &str| state.projects.get(id).map(|p| p.root.clone());
-        let own = own.canonicalize().unwrap();
+        let own = crate::util::os::path::canonicalize(&own).unwrap();
         state.projects.reload(state).await;
         assert_eq!(root_of("pyapi"), Some(own.clone()));
 
@@ -686,7 +688,7 @@ mod tests {
         state.config.write().projects.roots = vec![dir.path().join("root1").display().to_string()];
         state.projects.reload(state).await;
         assert_eq!(root_of("pyapi"), Some(own.clone()));
-        assert_eq!(root_of("pyapi-2"), Some(dir.path().join("root1/pyapi").canonicalize().unwrap()));
+        assert_eq!(root_of("pyapi-2"), Some(crate::util::os::path::canonicalize(dir.path().join("root1/pyapi")).unwrap()));
 
         // Another clone is added, then the owner's project is removed.
         state.config.write().projects.include.push(alt.display().to_string());

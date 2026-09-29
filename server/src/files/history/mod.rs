@@ -578,7 +578,7 @@ fn host_file(file: &str, cwd: &Path, container: Option<Option<&(PathBuf, String)
 /// `root` (a session started in a symlinked checkout).
 fn rel_in_project(root: &Path, abs: &Path) -> Option<String> {
     let rel = util::paths::relative_to(root, abs).or_else(|| {
-        let canon = abs.parent()?.canonicalize().ok()?.join(abs.file_name()?);
+        let canon = util::os::path::canonicalize(abs.parent()?).ok()?.join(abs.file_name()?);
         util::paths::relative_to(root, &canon)
     })?;
     let checked = util::paths::resolve_in_root(root, &rel).ok()?;

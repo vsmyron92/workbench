@@ -54,7 +54,7 @@ impl Repo {
             let p = PathBuf::from(common);
             if p.is_absolute() { p } else { root.join(p) }
         };
-        let common_dir = common_dir.canonicalize().unwrap_or(common_dir);
+        let common_dir = crate::util::os::path::canonicalize(&common_dir).unwrap_or(common_dir);
         Ok(Self { project_id: project_id.to_string(), top, git_dir, common_dir, prefix })
     }
 
@@ -80,7 +80,11 @@ impl Repo {
         let mut parts: Vec<String> = vec![];
         for c in p.components() {
             match c {
-                Component::Normal(s) => parts.push(s.to_string_lossy().into_owned()),
+                Component::Normal(s) => {
+                    // Windows: `a.rs:stream`, `NUL`, `GIT~1` (the short name of `.git`).
+                    crate::util::os::path::check_component(&s.to_string_lossy()).map_err(ApiError::bad_request)?;
+                    parts.push(s.to_string_lossy().into_owned())
+                }
                 Component::CurDir => {}
                 Component::ParentDir => {
                     if parts.pop().is_none() {
@@ -96,7 +100,7 @@ impl Repo {
         // Any `.git` component: this repository's git dir, but also a submodule's
         // gitfile or a nested repository's git dir (the files slice refuses the
         // same paths). Nothing git tracks lives there.
-        if parts.iter().any(|p| p == ".git") {
+        if parts.iter().any(|p| crate::util::os::path::same_name(p, ".git")) {
             return Err(ApiError::forbidden("paths inside .git are not allowed"));
         }
         Ok(parts.join("/"))
@@ -170,6 +174,11 @@ mod tests {
         assert!(r.to_repo("sub/x/../.git").is_err());
         assert_eq!(r.to_repo("a.git/x").unwrap(), "a.git/x");
         assert_eq!(r.to_project("src/a.rs"), "src/a.rs");
+        // Windows spellings of `.git` and of other files.
+        #[cfg(windows)]
+        for bad in [".GIT/config", "GIT~1/config", r"sub\.git\config", "C:x", "a.rs:stream", "NUL"] {
+            assert!(r.to_repo(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

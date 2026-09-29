@@ -89,7 +89,7 @@ impl Locations {
             }
             None => (home.join(".claude"), home.join(".claude.json")),
         };
-        Self { claude_json, claude_dir, managed_dir: PathBuf::from("/etc/claude-code") }
+        Self { claude_json, claude_dir, managed_dir: crate::util::os::path::claude_managed_dir() }
     }
 }
 
@@ -267,7 +267,8 @@ fn plugin_servers(install: &Path, files: &mut Vec<FileNote>) -> Vec<(String, Val
         Some(Value::String(rel)) => {
             let p = install.join(rel.trim_start_matches("./"));
             // Stay inside the plugin directory.
-            let inside = p.canonicalize().ok().zip(install.canonicalize().ok()).is_some_and(|(p, root)| p.starts_with(root));
+            use crate::util::os::path::{canonicalize, starts_with};
+            let inside = canonicalize(&p).ok().zip(canonicalize(install).ok()).is_some_and(|(p, root)| starts_with(&p, &root));
             if !inside {
                 return vec![];
             }
@@ -295,10 +296,11 @@ pub fn scan(loc: &Locations, root: Option<&Path>) -> Overview {
     ov.account_connectors_used = claude_json.get("claudeAiMcpEverConnected").and_then(Value::as_bool).unwrap_or(false);
     let project_entry = root.and_then(|r| {
         let projects = claude_json.get("projects")?.as_object()?;
-        let key = r.to_string_lossy();
-        let canon = r.canonicalize().ok().map(|c| c.to_string_lossy().into_owned());
+        // Claude Code writes Windows keys with `/` (`C:/Users/me/proj`).
+        let key = crate::util::os::path::to_slash(r);
+        let canon = crate::util::os::path::canonicalize(r).ok().map(|c| crate::util::os::path::to_slash(&c));
         projects
-            .get(key.as_ref())
+            .get(key.as_str())
             .or_else(|| canon.as_deref().and_then(|c| projects.get(c)))
             .or_else(|| projects.get(format!("{}/", key.trim_end_matches('/')).as_str()))
             .cloned()
@@ -350,7 +352,7 @@ pub fn scan(loc: &Locations, root: Option<&Path>) -> Overview {
 
     // Plugins.
     let installed = read_json(&loc.claude_dir.join("plugins").join("installed_plugins.json"), files).unwrap_or(Value::Null);
-    let plugins_root = loc.claude_dir.join("plugins").canonicalize().ok();
+    let plugins_root = crate::util::os::path::canonicalize(loc.claude_dir.join("plugins")).ok();
     if let Some(plugins) = installed.get("plugins").and_then(Value::as_object) {
         for (id, entries) in plugins {
             let Some(entries) = entries.as_array() else { continue };
@@ -363,7 +365,7 @@ pub fn scan(loc: &Locations, root: Option<&Path>) -> Overview {
             let Some(install) = entry.and_then(|e| e.get("installPath")).and_then(Value::as_str) else { continue };
             let install = PathBuf::from(install);
             // Only read plugins installed under Claude's own plugin directory.
-            let inside = install.canonicalize().ok().zip(plugins_root.clone()).is_some_and(|(p, r)| p.starts_with(r));
+            let inside = crate::util::os::path::canonicalize(&install).ok().zip(plugins_root.clone()).is_some_and(|(p, r)| crate::util::os::path::starts_with(&p, &r));
             if !inside {
                 continue;
             }

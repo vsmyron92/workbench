@@ -834,7 +834,7 @@ pub fn check_rel(rel: &str) -> ApiResult<String> {
     if rel.contains('\0') || rel.contains('\\') {
         return Err(ApiError::bad_request("unusable characters in the path"));
     }
-    if rel.starts_with('/') || rel.starts_with('~') {
+    if util::os::path::is_absolute_str(rel) || rel.starts_with('~') {
         return Err(ApiError::bad_request("expected a path relative to the card folder"));
     }
     let mut parts = vec![];
@@ -843,7 +843,10 @@ pub fn check_rel(rel: &str) -> ApiResult<String> {
             "" | "." => {}
             ".." => return Err(ApiError::forbidden("the path leaves the card folder")),
             s if is_private_name(s) => return Err(ApiError::forbidden(format!("{s:?} is private: dotfiles and credential files are not served"))),
-            s => parts.push(s),
+            s => {
+                util::os::path::check_component(s).map_err(ApiError::bad_request)?;
+                parts.push(s)
+            }
         }
     }
     Ok(parts.join("/"))
@@ -871,20 +874,20 @@ pub fn classify_step_path(card_dir: &Path, input: &str, import_roots: &[PathBuf]
     if input.is_empty() {
         return Err(ApiError::bad_request("a step needs a path"));
     }
-    if !(input.starts_with('/') || input.starts_with("~/")) {
+    if !(util::os::path::is_absolute_str(input) || util::os::path::home_relative(input).is_some()) {
         return Ok(StepSource::Inside(check_rel(input)?));
     }
     let abs = crate::config::expand_tilde(input);
-    let canon = abs.canonicalize().map_err(|_| ApiError::not_found(format!("{input} does not exist")))?;
-    if let Ok(dir) = card_dir.canonicalize() {
-        if let Ok(rest) = canon.strip_prefix(&dir) {
-            return Ok(StepSource::Inside(check_rel(&rest.to_string_lossy())?));
+    let canon = util::os::path::canonicalize(&abs).map_err(|_| ApiError::not_found(format!("{input} does not exist")))?;
+    if let Ok(dir) = util::os::path::canonicalize(card_dir) {
+        if let Some(rest) = util::os::path::strip_prefix(&canon, &dir) {
+            return Ok(StepSource::Inside(check_rel(&util::os::path::to_slash(rest))?));
         }
     }
     for root in import_roots {
-        let Ok(root) = root.canonicalize() else { continue };
-        if let Ok(rest) = canon.strip_prefix(&root) {
-            check_rel(&rest.to_string_lossy())?;
+        let Ok(root) = util::os::path::canonicalize(root) else { continue };
+        if let Some(rest) = util::os::path::strip_prefix(&canon, &root) {
+            check_rel(&util::os::path::to_slash(rest))?;
             if rest.as_os_str().is_empty() {
                 return Err(ApiError::bad_request("cannot add a whole project as a step"));
             }
@@ -933,7 +936,7 @@ fn copy_new_file(src: &Path, dest: &Path) -> std::io::Result<u64> {
 /// A file name a client may give an upload: one component, not private.
 pub fn check_file_name(name: &str) -> ApiResult<String> {
     let name = name.trim();
-    if name.is_empty() || name.len() > 200 || name.contains(['/', '\\', '\0']) || name == "." || name == ".." {
+    if name.is_empty() || name.len() > 200 || name.contains(['/', '\\', '\0']) || name == "." || name == ".." || util::os::path::check_component(name).is_err() {
         return Err(ApiError::bad_request("unusable file name"));
     }
     if is_private_name(name) {
@@ -1669,7 +1672,7 @@ mod tests {
         let abs_inside = card.join("sub/x.md").display().to_string();
         assert_eq!(classify_step_path(&card, &abs_inside, &roots).unwrap(), StepSource::Inside("sub/x.md".into()));
         let from_project = project.join("docs/r.md");
-        assert_eq!(classify_step_path(&card, &from_project.display().to_string(), &roots).unwrap(), StepSource::Import(from_project.canonicalize().unwrap()));
+        assert_eq!(classify_step_path(&card, &from_project.display().to_string(), &roots).unwrap(), StepSource::Import(crate::util::os::path::canonicalize(&from_project).unwrap()));
         assert!(classify_step_path(&card, &project.join(".env").display().to_string(), &roots).is_err());
         assert!(classify_step_path(&card, "/etc/hostname", &roots).is_err());
         assert!(classify_step_path(&card, &project.display().to_string(), &roots).is_err());

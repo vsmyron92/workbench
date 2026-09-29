@@ -657,7 +657,7 @@ fn web_apps(cx: &mut Ctx, py: &Py, own: &[PathBuf], django: bool) {
         }
         if !streamlit && py.mentions("streamlit") && STREAMLIT_IMPORT.is_match(&src) {
             streamlit = true;
-            let rel = f.strip_prefix(&py.dir).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+            let rel = f.strip_prefix(&py.dir).map(crate::util::os::path::to_slash).unwrap_or_default();
             cx.tag("streamlit");
             cx.add_run(RunConfig {
                 name: scoped("streamlit", &py.cwd),

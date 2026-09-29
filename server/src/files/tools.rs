@@ -54,9 +54,7 @@ pub fn resolve_target(state: &AppState, ctx: &McpCtx, path: &str) -> ApiResult<(
     }
     let expanded = crate::config::expand_tilde(path);
     if expanded.is_absolute() {
-        let abs = expanded
-            .canonicalize()
-            .map_err(|_| ApiError::not_found(format!("{} does not exist", expanded.display())))?;
+        let abs = util::os::path::canonicalize(&expanded).map_err(|_| ApiError::not_found(format!("{} does not exist", expanded.display())))?;
         if let Some(p) = state.projects.find_by_path(&abs) {
             let rel = util::paths::relative_to(&p.root, &abs).unwrap_or_default();
             util::paths::resolve_in_root(&p.root, &rel)?;
