@@ -881,6 +881,8 @@ pub struct LaunchSpec {
 /// A running PTY child.
 pub struct Pty {
     pub pid: i32,
+    /// Its session (`pid` names it while this lives).
+    session: session::Handle,
     /// The PTY's master side. Windows: its session also holds it, to close the
     /// pseudoconsole once the session is over (`util::os::session`); `None` from then on.
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
@@ -944,14 +946,14 @@ impl Pty {
         let mut redactor = Redactor::new(spec.redact.iter().cloned());
         let mut output = session::Output::new(reader, &*pair.master, redactor.is_some(), &pid.to_string())?;
         let master = Arc::new(Mutex::new(Some(pair.master)));
-        {
+        let session = {
             let master = master.clone();
             session::register(pid, move || {
                 // Taken first, so resizes do not wait while the pseudoconsole closes.
                 let m = master.lock().take();
                 drop(m);
-            });
-        }
+            })
+        };
 
         // Reader: blocking reads → mirror + broadcast under one lock.
         {
@@ -1015,7 +1017,7 @@ impl Pty {
                 session::leader_exited(pid);
             })?;
         }
-        Ok((Arc::new(Pty { pid, master, in_tx, exited }), PtyEvents { exit: exit_rx, reader_done: done_rx }))
+        Ok((Arc::new(Pty { pid, session, master, in_tx, exited }), PtyEvents { exit: exit_rx, reader_done: done_rx }))
     }
 
     /// Queue bytes for the child. Fails when the input queue is full (the child stopped
@@ -1043,6 +1045,11 @@ impl Pty {
 
     pub fn has_exited(&self) -> bool {
         self.exited.load(Ordering::Acquire)
+    }
+
+    /// Its process session, for following what the process left running after it exited.
+    pub fn session(&self) -> session::Handle {
+        self.session.clone()
     }
 
     /// Terminate everything in the PTY's session: SIGHUP (and SIGCONT, so stopped jobs
