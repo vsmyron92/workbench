@@ -82,6 +82,13 @@ under `~/workspace` becomes a project, and token files such as `~/.gitlab_token`
 picked up as secret references. See [getting started](docs/getting-started.md) for the
 whole setup.
 
+## Help
+
+The user documentation is also in the app: press **F1**, use the status bar's **Help**,
+or open **More → Help** on a phone. It covers getting started, projects, agents, version
+control and CI, remote access and the phone app (including Tailscale), running Workbench
+as a service, and `config.toml`. The pages are Markdown in `web/src/features/help/pages/`.
+
 ## What is inside
 
 | Area | Key | What it does |

@@ -1,8 +1,9 @@
 // Phone "More" tab: theme, push notifications, devices (pair / revoke), recent activity, sign out.
 
-import { useState } from 'react'
-import { LogOut, Moon, QrCode, Sun } from 'lucide-react'
+import { lazy, Suspense, useState } from 'react'
+import { ArrowLeft, CircleHelp, LogOut, Moon, QrCode, Sun } from 'lucide-react'
 import { api } from '@/api/client'
+import { useMobileHelp } from '@/features/help/mobile'
 import { toastError } from '@/shell/actions'
 import { useUi } from '@/state/store'
 import { Button, ErrorBox, Loading } from '@/ui'
@@ -15,12 +16,15 @@ import { PushMobile } from './sections/Push'
 import { DevicesList } from './sections/Remote'
 import './platform.css'
 
+const HelpView = lazy(() => import('@/features/help/HelpPanel').then((m) => ({ default: m.HelpView })))
+
 export function MobileMore({ projectId }: { projectId: string | null }) {
   const theme = useUi((s) => s.prefs.theme)
   const setPrefs = useUi((s) => s.setPrefs)
   const remote = useRemote()
   const settings = useSettings()
   const [signingOut, setSigningOut] = useState(false)
+  const help = useMobileHelp()
 
   const signOut = async () => {
     setSigningOut(true)
@@ -35,8 +39,27 @@ export function MobileMore({ projectId }: { projectId: string | null }) {
     }
   }
 
+  if (help.open) {
+    return (
+      <div className="wb-more">
+        <Button icon={ArrowLeft} onClick={help.close} style={{ alignSelf: 'flex-start' }}>
+          More
+        </Button>
+        <Suspense fallback={<Loading />}>
+          <HelpView slug={help.slug} onPage={help.setSlug} compact />
+        </Suspense>
+      </div>
+    )
+  }
+
   return (
     <div className="wb-more">
+      <section>
+        <Button icon={CircleHelp} onClick={() => help.show()} style={{ width: '100%' }}>
+          Help
+        </Button>
+      </section>
+
       <section>
         <h3 className="wb-more-title">Appearance</h3>
         <div className="wb-set-box">

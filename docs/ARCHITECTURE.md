@@ -230,6 +230,7 @@ CLion's keymap where CLion has the action. *Palette* shortcuts are commands (`sh
 | Ctrl+Alt+Z ³ | Revert Selected Lines (Local History diff) | files, editor |
 | Ctrl+Shift+A | Ask Agent About Selection (editor) / New agent session (palette) | files editor, agents palette |
 | Ctrl+, | Settings | platform, palette |
+| F1 | Help (the user documentation) | help, palette |
 | Alt+0 / Alt+9 | Commit… / Show Git Log | git, palette |
 | Ctrl+T / Ctrl+Shift+K | Update Project… / Push… | git, palette |
 | F7 / Shift+F7, Alt+↓ / Alt+↑ | Next / Previous Difference (diff viewer; declared with `data-wb-keys`, so it wins over Step Into) | git, diff panel |
@@ -282,6 +283,7 @@ Panel ids must be stable so reopening focuses the existing panel. Params must be
 | `jira.board` | `{boardId}` | atlassian | `jira.board:<boardId>` |
 | `app` | `{projectId, env?, run?, url}` | apps | `app:<projectId>:<env\|run>` |
 | `settings` | `{section?}` | platform | `settings` |
+| `help` | `{page?}` (a page slug: `getting-started`, `projects`, `agents`, `version-control`, `remote-access`, `service`, `configuration`) | help | `help` |
 | `pr` | `{projectId, number}` | github | `pr:<projectId>:<number>` |
 | `gh.run` | `{projectId, runId}` | github | `gh.run:<projectId>:<runId>` |
 | `gh.job` | `{projectId, jobId}` | github | `gh.job:<projectId>:<jobId>` |
@@ -308,7 +310,7 @@ The IDs below are the defaults. The left stripe also carries the bottom-side ico
 - **Compare (files):** panel `compare` `{projectId, path, left: {path} | {textKey, label}}` — a project file (right, its buffer, editable) against another file of the project (left, its buffer, editable) or the clipboard (read-only; the text stays in the browser tab, so a reloaded layout says it is gone). Compare With… (tree, editor, palette; the other file comes from Go to File in pick mode, `useQuickOpen.choose`), Compare with Clipboard (editor context menu, palette); Ctrl+S saves the side it is pressed in; Swap sides. Alt+Shift+Insert toggles Column Selection Mode.
 - **Bookmarks (files):** `bookmarks.ts` (a zustand store persisted per browser, every project). F11 toggles one on the caret line, Ctrl+F11 with a mnemonic (0–9, A–Z; unique, taking one moves it), Shift+F11 lists them (typing a mnemonic into the empty list jumps; Delete removes). The editor shows them in the glyph margin's right lane (beside breakpoints) with a decoration collection per editor that follows edits and writes the new lines back.
 - The palette generates a "Show <title>" command per tool window the current project shows (its `when`) unless a feature command already has that title ("Show Git Log", Alt+9).
-- **Phone tabs:** `agents` (permission requests answerable in rows and the full-screen terminal), `git` (with the bisect banner), `workspace` (25), `files`, `ci` (GitLab, when `project.gitlab`), `github` (42, when `project.github`), `docs` (when Confluence is set up), `apps`, `more` (with Notifications: push on/off, topics, test). Code intelligence, the debugger and Local History are desktop-only.
+- **Phone tabs:** `agents` (permission requests answerable in rows and the full-screen terminal), `git` (with the bisect banner), `workspace` (25), `files`, `ci` (GitLab, when `project.gitlab`), `github` (42, when `project.github`), `docs` (when Confluence is set up), `apps`, `more` (a Help button first, then Notifications: push on/off, topics, test). Help on a phone lives in the More tab: the page list with search, a page with an "All pages" button (`features/help/mobile.ts` holds its state; the More tab's `openPanel` takes the `help` panel). Code intelligence, the debugger and Local History are desktop-only.
 
 ### Events
 
@@ -2510,3 +2512,12 @@ outside Workbench; line staging of one of two changed lines in the diff viewer a
 the rest (with its automatic label); a fake Claude session's pending permission on the agents
 home answered with Allow from the page (desktop and phone); Settings › Notifications and the
 phone's More tab; both themes; the bars at 1280 px.
+
+### Help (help)
+
+The user documentation, bundled with the app so it works offline and on a phone. `web/src/features/help/pages/*.md` are the pages: the file name orders them (`01-getting-started.md`), the part after the number is the slug (`getting-started`) and the first `# ` heading is the title. `pages.ts` loads them with `import.meta.glob(…?raw)`, so they ship in the web build and the binary; nothing is fetched. Pages link to each other by slug, `[text](agents)` or `[text](agents#heading-id)`: a relative link, which the Markdown renderer hands to `onLinkClick` (a `help:` scheme would be stripped by react-markdown's URL transform).
+
+- **Panel `help`** (`HelpPanel.tsx`, id `help`, params `{page?}`): the page list with search on the left, the page rendered by `@/ui` Markdown on the right. Search (`searchPages`) needs every word in the page, ranks title hits first and shows a matching line. `HelpView` is shared with the phone (`compact`: the list and a page take turns).
+- **Entry points:** F1 and the palette (*Help*, *Help: remote access and phone*, *Help: configuration*), a status bar item, and the phone's More tab. `openHelp(page?)` (`actions.ts`) opens or focuses the panel.
+- **Guards:** `pages.test.ts` (unique slugs, a title each, every link resolves to a page, search finds the setup terms) and `render.test.ts` (every page renders through the real Markdown pipeline).
+- **Adding a page:** add `NN-slug.md` starting with `# Title`; nothing else to register. Keep it true to the code: a setting named in a page must exist in `config/global.rs` or the Settings UI, and a shortcut in the table above.

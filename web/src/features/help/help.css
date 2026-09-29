@@ -1,0 +1,122 @@
+/* Help slice: the 'help' panel and the phone's Help section. */
+.wb-help {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+}
+.wb-help-nav {
+  width: 240px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 6px;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.wb-help-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 8px;
+  color: var(--fg-muted);
+}
+.wb-help-search .wb-input {
+  flex: 1;
+  min-width: 0;
+}
+.wb-help-item,
+.wb-help-hit {
+  display: flex;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.wb-help-item {
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 10px;
+}
+.wb-help-item svg {
+  color: var(--fg-muted);
+  flex: none;
+}
+.wb-help-hit {
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+}
+.wb-help-item:hover,
+.wb-help-hit:hover {
+  background: var(--bg-hover);
+}
+.wb-help-item.active {
+  background: var(--bg-active);
+}
+.wb-help-hit-title {
+  font-weight: 600;
+}
+.wb-help-hit-snippet {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-help-empty {
+  padding: 8px 10px;
+  color: var(--fg-muted);
+}
+.wb-help-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+.wb-help-page {
+  max-width: 860px;
+  padding: 14px 28px 48px;
+}
+.wb-help-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 12px 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+/* A phone: one column, the list and the page take turns. */
+.wb-help.compact {
+  flex-direction: column;
+  height: auto;
+  min-height: 0;
+  background: transparent;
+}
+.wb-help.compact .wb-help-nav {
+  width: auto;
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+.wb-help.compact .wb-help-item {
+  min-height: 44px;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+}
+.wb-help.compact .wb-help-page {
+  padding: 4px 4px 24px;
+}
+.wb-help.compact .wb-help-main {
+  overflow: visible;
+}

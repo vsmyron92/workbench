@@ -4,6 +4,7 @@
 import { lazy } from 'react'
 import { Activity, Bell, Cable, Ellipsis, FileCode, KeyRound, MonitorSmartphone, QrCode, Settings } from 'lucide-react'
 import type { FeatureModule } from '@/shell/types'
+import { useMobileHelp } from '@/features/help/mobile'
 import { ActivityToolWindow } from './Activity'
 import { MobileMore } from './MobileMore'
 import { openPairDialog } from './PairDialog'
@@ -44,7 +45,20 @@ const feature: FeatureModule = {
     { id: 'platform.rawConfig', title: 'Edit config.toml', group: 'Workbench', icon: FileCode, keywords: ['raw', 'toml'], run: () => openSettings('raw') },
   ],
   statusbar: [RemoteIndicator, SettingsButton],
-  mobileTabs: [{ id: 'more', title: 'More', icon: Ellipsis, order: 90, component: MobileMore }],
+  mobileTabs: [
+    {
+      id: 'more',
+      title: 'More',
+      icon: Ellipsis,
+      order: 90,
+      component: MobileMore,
+      openPanel: (p) => {
+        if (p.kind !== 'help') return false
+        useMobileHelp.getState().show(typeof p.params.page === 'string' ? p.params.page : undefined)
+        return true
+      },
+    },
+  ],
   providers: [PlatformProvider],
 }
 
