@@ -29,6 +29,11 @@ pub const RECURSIVE: bool = cfg!(windows);
 /// entries themselves); inotify reports only the entries.
 pub const FOLDERS_MODIFY: bool = cfg!(windows);
 
+/// Whether an event flagged `Flag::Rescan` (the watcher lost events) is reported as an
+/// overflow: Windows, whose one watch covers the tree. On Linux inotify's queue overflow
+/// stays unreported, as it always was.
+pub const RESCAN_IS_OVERFLOW: bool = cfg!(windows);
+
 #[cfg(unix)]
 type Watcher = notify::RecommendedWatcher;
 #[cfg(unix)]
@@ -78,7 +83,7 @@ mod win {
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::io;
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::os::windows::ffi::OsStringExt;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -96,6 +101,7 @@ mod win {
     use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject};
 
     use super::{BUFFER, records};
+    use crate::util::os::path::is_short_name;
     use crate::util::os::win32::{Handle, wide_path};
 
     /// Names created, deleted or renamed, and files written (size or last write time).
@@ -134,16 +140,25 @@ mod win {
             }
             let _ = self.unwatch(path);
             let mut reader = Reader::open(path, recursive_mode == RecursiveMode::Recursive, self.buffer).map_err(fail)?;
-            // The first request is made here, so a folder that cannot be watched (a file system
-            // without change notifications) fails the call.
-            reader.arm().map_err(fail)?;
             let stop = Arc::new(event().map_err(fail)?);
             let (handler, thread_stop) = (self.handler.clone(), stop.clone());
-            // A failed spawn drops the reader, which cancels its request.
+            // Every request is made by the watch's thread: without a completion port, Windows
+            // cancels a thread's pending I/O when it exits, and the caller may be a pooled
+            // thread that exits when idle. The first one is waited for, so a folder that
+            // cannot be watched (a file system without change notifications) fails the call.
+            let (armed_tx, armed) = std::sync::mpsc::sync_channel(1);
             std::thread::Builder::new()
                 .name("workbench-watch".into())
-                .spawn(move || reader.run(&thread_stop, &handler))
+                .spawn(move || {
+                    let first = reader.arm();
+                    let ok = first.is_ok();
+                    let _ = armed_tx.send(first);
+                    if ok {
+                        reader.run(&thread_stop, &handler);
+                    }
+                })
                 .map_err(fail)?;
+            armed.recv().unwrap_or_else(|_| Err(io::Error::other("the watch's thread ended"))).map_err(fail)?;
             self.watches.insert(path.to_path_buf(), stop);
             Ok(())
         }
@@ -288,8 +303,8 @@ mod win {
             Some(Outcome::Changes(records(&bytes)))
         }
 
-        /// The watch's thread: hand every change to `handler` until `stop` is set or the
-        /// directory goes away. The first request was made by `watch`.
+        /// The watch's thread, after its first request: hand every change to `handler` until
+        /// `stop` is set or the directory goes away. An error that ends it goes to `handler`.
         fn run(mut self, stop: &Handle, handler: &Shared) {
             let send = |ev: notify::Result<Event>| handler.lock().handle_event(ev);
             let end = |why: io::Error, path: &Path| {
@@ -362,17 +377,14 @@ mod win {
         })
     }
 
-    fn has_tilde(s: &std::ffi::OsStr) -> bool {
-        s.encode_wide().any(|c| c == u16::from(b'~'))
-    }
-
     /// `dir` joined with `name` from a notification, which may spell a folder or the file
     /// with its 8.3 short name (`LONGFO~1`; Windows does not say which name it reports).
     /// A short name is made long again while the file exists; `false` when one may be left
-    /// (the file is gone), so the caller asks for a rescan.
+    /// (the file is gone), so the caller asks for a rescan. Only names of that form count:
+    /// `file.txt~` (vim's backup) and `~$doc.docx` (Office's lock) come and go on every save.
     fn long_path(dir: &Path, name: OsString) -> (PathBuf, bool) {
         let joined = dir.join(&name);
-        if !has_tilde(&name) {
+        if !Path::new(&name).components().any(|c| is_short_name(c.as_os_str())) {
             return (joined, true);
         }
         if let Some(long) = long_below(dir, &joined) {
@@ -380,7 +392,7 @@ mod win {
         }
         // Gone: its folder may still be there.
         match (joined.parent().and_then(|p| long_below(dir, p)), joined.file_name()) {
-            (Some(parent), Some(file)) => (parent.join(file), !has_tilde(file)),
+            (Some(parent), Some(file)) => (parent.join(file), !is_short_name(file)),
             _ => (joined, false),
         }
     }
@@ -510,13 +522,58 @@ mod win {
             rename(&outer, &dir.path().join("renamed"));
         }
 
+        /// The thread that asked for the watch may exit (a pooled thread going idle): the
+        /// watch lives on, since its thread makes every request.
+        #[test]
+        fn a_watch_outlives_the_thread_that_made_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = crate::util::os::path::canonicalize(dir.path()).unwrap();
+            let (w, rx) = watcher(BUFFER);
+            let w = Arc::new(Mutex::new(w));
+            let (w2, root2) = (w.clone(), root.clone());
+            std::thread::spawn(move || w2.lock().watch(&root2, RecursiveMode::Recursive).unwrap()).join().unwrap();
+            // Let the system run down the exited thread's I/O first.
+            std::thread::sleep(Duration::from_millis(200));
+            let file = root.join("after.txt");
+            std::fs::write(&file, "x").unwrap();
+            until(&rx, |got| saw(got, &file));
+        }
+
+        /// Names with a tilde that are not 8.3 names (vim's backups, Office's locks) created
+        /// and deleted at once are plain changes, not a rescan.
+        #[test]
+        fn backups_and_locks_are_no_rescan() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = crate::util::os::path::canonicalize(dir.path()).unwrap();
+            let (mut w, rx) = watcher(BUFFER);
+            w.watch(&root, RecursiveMode::Recursive).unwrap();
+            for name in ["x.txt~", "~$d.docx"] {
+                std::fs::write(root.join(name), "x").unwrap();
+                std::fs::remove_file(root.join(name)).unwrap();
+            }
+            let end = root.join("end.txt");
+            std::fs::write(&end, "x").unwrap();
+            let mut got = until(&rx, |got| saw(got, &end));
+            // A rescan would follow the batch that carried the names.
+            while let Ok(Ok(ev)) = rx.recv_timeout(Duration::from_millis(300)) {
+                got.push(ev);
+            }
+            assert!(!got.iter().any(|e| e.need_rescan()), "{got:?}");
+            assert!(saw(&got, &root.join("x.txt~")) && saw(&got, &root.join("~$d.docx")), "{got:?}");
+        }
+
         #[test]
         fn short_names_are_made_long() {
             let dir = tempfile::tempdir().unwrap();
             let root = crate::util::os::path::canonicalize(dir.path()).unwrap();
             assert_eq!(long_path(&root, "plain.txt".into()), (root.join("plain.txt"), true));
-            // A name with a tilde that is gone cannot be checked.
+            // A short name that is gone cannot be checked…
             assert!(!long_path(&root, "GONE~1.TXT".into()).1);
+            assert!(!long_path(&root, r"GONE~1\x.txt".into()).1);
+            // …but a tilde alone does not make one: editors' backups and locks come and go.
+            for gone in ["file.txt~", "~$doc.docx", "~WRL0001.tmp", r"sub\x.txt~"] {
+                assert_eq!(long_path(&root, gone.into()), (root.join(gone), true), "{gone}");
+            }
             let long = root.join("a folder with a long name");
             std::fs::create_dir(&long).unwrap();
             std::fs::write(long.join("x.txt"), "x").unwrap();
@@ -525,7 +582,7 @@ mod win {
             // SAFETY: `w` is NUL-terminated and `short` has room for its length.
             let n = unsafe { windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(w.as_ptr(), short.as_mut_ptr(), short.len() as u32) } as usize;
             let short = PathBuf::from(OsString::from_wide(&short[..n]));
-            let Some(short_name) = short.file_name().filter(|n| has_tilde(n)) else {
+            let Some(short_name) = short.file_name().filter(|n| is_short_name(n)) else {
                 eprintln!("skipped: no 8.3 names on this volume");
                 return;
             };

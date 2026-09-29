@@ -280,6 +280,7 @@ async fn first_change_of_a_committed_file_keeps_head() {
     let root = crate::util::os::path::canonicalize(proj.path()).unwrap().join("repo");
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+    std::fs::write(root.join("src/unix.rs"), "pub fn u() {}\n").unwrap();
     // CRLF on disk, LF in the repository: what `core.autocrlf` (Git for Windows' default) leaves.
     std::fs::write(root.join("src/crlf.rs"), "pub fn x() {}\r\npub fn y() {}\r\n").unwrap();
     std::fs::write(root.join("src/same.rs"), "pub fn s() {}\r\n").unwrap();
@@ -296,7 +297,10 @@ async fn first_change_of_a_committed_file_keeps_head() {
         assert!(ok, "git {args:?}");
     };
     git(&["init", "-q", "-b", "main"]);
-    git(&["-c", "core.autocrlf=true", "add", "-A"]);
+    // Checkouts keep LF, whatever the machine's settings (Git for Windows' say CRLF).
+    git(&["config", "core.autocrlf", "false"]);
+    git(&["config", "core.eol", "lf"]);
+    git(&["-c", "core.autocrlf=true", "-c", "core.safecrlf=false", "add", "-A"]);
     git(&["commit", "-qm", "init"]);
     let mut config = GlobalConfig::default();
     config.projects.roots = vec![];
@@ -323,7 +327,15 @@ async fn first_change_of_a_committed_file_keeps_head() {
     let h = env.wait_for("src/lib.rs", 3).await;
     assert_eq!(kinds(&h), ["disk", "agent", "base"]);
 
+    // With LF checkouts, a file rewritten with CRLF keeps HEAD as committed.
+    std::fs::write(root.join("src/unix.rs"), "pub fn u() {}\r\n").unwrap();
+    let h = env.wait_for("src/unix.rs", 2).await;
+    assert_eq!(kinds(&h), ["disk", "base"]);
+    let base = env.api(Method::GET, &format!("/files/history/revision?id={}", h[1]["id"]), None).await.unwrap();
+    assert_eq!(base["content"], "pub fn u() {}\n");
+
     // A CRLF checkout keeps HEAD with its line ends: the diff shows the line added…
+    git(&["config", "core.autocrlf", "true"]);
     std::fs::write(root.join("src/crlf.rs"), "pub fn x() {}\r\npub fn y() {}\r\npub fn z() {}\r\n").unwrap();
     let hook = json!({ "hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": { "file_path": root.join("src").join("crlf.rs").display().to_string() } });
     super::agent_edit(&env.state, &session("t-agent", Some(&env.pid), &root), &hook);
@@ -341,16 +353,57 @@ async fn first_change_of_a_committed_file_keeps_head() {
     assert_eq!(kinds(&env.history("src/same.rs").await), ["disk"]);
 }
 
+/// Git's rules for the line ends of a checkout (`convert.c`), from its settings and the
+/// file's attributes.
 #[test]
 fn head_takes_the_line_ends_of_the_checkout() {
-    use super::as_checked_out;
-    assert_eq!(&*as_checked_out(b"a\nb\n", b"a\r\nb\r\nc\r\n"), b"a\r\nb\r\n");
-    assert_eq!(&*as_checked_out(b"a\nb", b"a\r\nb"), b"a\r\nb");
-    // LF on disk, mixed line ends, none at all, or a CR already in HEAD: as committed.
-    for now in [&b"a\nb\n"[..], b"a\r\nb\n", b"one line"] {
-        assert_eq!(&*as_checked_out(b"a\nb\n", now), b"a\nb\n");
-    }
-    assert_eq!(&*as_checked_out(b"a\r\nb\n", b"a\r\nb\r\n"), b"a\r\nb\n");
+    use super::{Eol, EolAttrs, EolConfig, to_worktree};
+    let config = |out: &str| EolConfig::parse(out, false);
+    let attrs = |text: &str, eol: &str| EolAttrs { text: text.into(), eol: eol.into(), crlf: "unspecified".into() };
+    let none = attrs("unspecified", "unspecified");
+
+    // Settings: the last value wins; a key alone is true.
+    assert_eq!(config(""), EolConfig { autocrlf: None, eol_crlf: false });
+    assert_eq!(EolConfig::parse("", true), EolConfig { autocrlf: None, eol_crlf: true });
+    assert_eq!(config("core.autocrlf\nTrue\0"), EolConfig { autocrlf: Some(true), eol_crlf: false });
+    assert_eq!(config("core.autocrlf\0").autocrlf, Some(true));
+    assert_eq!(config("core.autocrlf\ntrue\0core.autocrlf\ninput\0").autocrlf, Some(false));
+    assert_eq!(config("core.autocrlf\nfalse\0core.eol\ncrlf\0"), EolConfig { autocrlf: None, eol_crlf: true });
+    assert!(!EolConfig::parse("core.eol\nlf\0", true).eol_crlf);
+
+    // A stock Linux repository: as committed, whatever the attributes short of eol=crlf.
+    let stock = config("");
+    assert_eq!(stock.eol(&none), Eol::AsCommitted);
+    assert_eq!(stock.eol(&attrs("set", "unspecified")), Eol::AsCommitted);
+    assert_eq!(stock.eol(&attrs("auto", "unspecified")), Eol::AsCommitted);
+    assert_eq!(stock.eol(&attrs("unspecified", "crlf")), Eol::Crlf);
+    assert_eq!(stock.eol(&attrs("auto", "crlf")), Eol::AutoCrlf);
+    assert_eq!(stock.eol(&attrs("unset", "crlf")), Eol::AsCommitted);
+    // core.autocrlf=true (Git for Windows): CRLF unless the attributes say otherwise.
+    let autocrlf = config("core.autocrlf\ntrue\0");
+    assert_eq!(autocrlf.eol(&none), Eol::AutoCrlf);
+    assert_eq!(autocrlf.eol(&attrs("set", "unspecified")), Eol::Crlf);
+    assert_eq!(autocrlf.eol(&attrs("unset", "unspecified")), Eol::AsCommitted);
+    assert_eq!(autocrlf.eol(&attrs("unspecified", "lf")), Eol::AsCommitted);
+    assert_eq!(config("core.autocrlf\ninput\0").eol(&none), Eol::AsCommitted);
+    // No autocrlf where the native line end is CRLF: text files get it.
+    let native = EolConfig::parse("", true);
+    assert_eq!(native.eol(&none), Eol::AsCommitted);
+    assert_eq!(native.eol(&attrs("auto", "unspecified")), Eol::AutoCrlf);
+    // The older `crlf` attribute counts when `text` is not given.
+    let legacy = EolAttrs { text: "unspecified".into(), eol: "unspecified".into(), crlf: "unset".into() };
+    assert_eq!(autocrlf.eol(&legacy), Eol::AsCommitted);
+
+    let parsed = EolAttrs::parse(b"a b.rs\0text\0auto\0a b.rs\0eol\0crlf\0a b.rs\0crlf\0unspecified\0");
+    assert_eq!((parsed.text.as_str(), parsed.eol.as_str(), parsed.crlf.as_str()), ("auto", "crlf", "unspecified"));
+
+    // Lone LFs become CRLF; auto leaves a file that has a CR, or a NUL, alone.
+    assert_eq!(&*to_worktree(b"a\nb\n", Eol::Crlf), b"a\r\nb\r\n");
+    assert_eq!(&*to_worktree(b"a\r\nb\n", Eol::Crlf), b"a\r\nb\r\n");
+    assert_eq!(&*to_worktree(b"a\nb", Eol::AutoCrlf), b"a\r\nb");
+    assert_eq!(&*to_worktree(b"a\r\nb\n", Eol::AutoCrlf), b"a\r\nb\n");
+    assert_eq!(&*to_worktree(b"a\0\nb\n", Eol::AutoCrlf), b"a\0\nb\n");
+    assert_eq!(&*to_worktree(b"a\nb\n", Eol::AsCommitted), b"a\nb\n");
 }
 
 /// Git operations that rewrite the working tree get a label first.

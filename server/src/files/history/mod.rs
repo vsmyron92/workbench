@@ -333,13 +333,14 @@ pub(crate) fn changed(state: &AppState, pid: &str, paths: Vec<String>, new_dirs:
     spawn_ordered(state, project, read, move |project, store, files| {
         // A big batch is a checkout, a generator or a formatter run: no git per file.
         let seed = files.len() <= MAX_SEEDED_BATCH;
+        let mut checkout = Checkout::new(&project.root);
         let mut out = vec![];
         for (disk, rel) in files {
             let now = util::now_ms();
             match disk {
                 Disk::Text(bytes) => {
                     if seed {
-                        seed_from_head(store, &project.root, &rel, &bytes, now)?;
+                        seed_from_head(store, &mut checkout, &rel, &bytes, now)?;
                     }
                     if store.record(NewRevision::content(&rel, Kind::Disk, now, &bytes))?.is_some() {
                         out.push(rel);
@@ -421,14 +422,13 @@ fn files_in_new_dirs(project: &Project, dirs: &[String], paths: &mut Vec<String>
 /// Before the first recorded change of a file with no history, keep its version in
 /// the last commit (when git tracks it and it differs), so that change can be
 /// compared with something. Labelled as what it is: it may predate edits made while
-/// Workbench was not running. It is kept with the line ends of the file on disk
-/// ([`as_checked_out`]).
-fn seed_from_head(store: &mut Store, root: &Path, rel: &str, now: &[u8], ts: i64) -> std::io::Result<()> {
+/// Workbench was not running. It is kept as a checkout writes it ([`Checkout`]).
+fn seed_from_head(store: &mut Store, checkout: &mut Checkout, rel: &str, now: &[u8], ts: i64) -> std::io::Result<()> {
     if store.latest(rel).is_some() {
         return Ok(());
     }
-    let Some(head) = head_blob(root, rel) else { return Ok(()) };
-    let head = as_checked_out(&head, now);
+    let Some(head) = head_blob(checkout.root, rel) else { return Ok(()) };
+    let head = checkout.as_checked_out(rel, &head);
     if *head == *now || decode_text(&head) == Decoded::Binary {
         return Ok(());
     }
@@ -437,19 +437,181 @@ fn seed_from_head(store: &mut Store, root: &Path, rel: &str, now: &[u8], ts: i64
     store.record(r).map(|_| ())
 }
 
-/// `head`, a committed version, as a checkout writes it: with CRLF line ends when the
-/// file on disk (`now`) ends every line so and `head` has none (`core.autocrlf`, the
-/// default of Git for Windows, or `eol=crlf`: the repository keeps LF). Compared as
-/// committed, every line of such a file would differ.
-fn as_checked_out<'a>(head: &'a [u8], now: &[u8]) -> Cow<'a, [u8]> {
-    let lf = |t: &[u8]| t.iter().filter(|&&b| b == b'\n').count();
-    let crlf = now.windows(2).filter(|w| w[0] == b'\r' && w[1] == b'\n').count();
-    if head.contains(&b'\r') || crlf == 0 || crlf != lf(now) {
+/// Committed files as a checkout of `root` writes them: with CRLF line ends where git's
+/// rules say so (`core.autocrlf`, the default of Git for Windows, or the `text`/`eol`
+/// attributes), else as committed. Compared as committed, every line of such a file would
+/// differ. The settings are read from git once (bounded, like `head_blob`), the
+/// attributes per file, and only for a file with a line end to convert.
+struct Checkout<'a> {
+    root: &'a Path,
+    config: Option<EolConfig>,
+}
+
+impl<'a> Checkout<'a> {
+    fn new(root: &'a Path) -> Self {
+        Checkout { root, config: None }
+    }
+
+    fn as_checked_out<'b>(&mut self, rel: &str, head: &'b [u8]) -> Cow<'b, [u8]> {
+        if !has_lone_lf(head) {
+            return Cow::Borrowed(head);
+        }
+        let root = self.root;
+        let config = *self.config.get_or_insert_with(|| EolConfig::read(root));
+        let attrs = git_output(root, &["check-attr", "-z", "text", "eol", "crlf", "--", rel], 64 * 1024).unwrap_or_default();
+        let eol = config.eol(&EolAttrs::parse(&attrs));
+        to_worktree(head, eol)
+    }
+}
+
+/// What a checkout does to the line ends of one file (git's `convert.c`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Eol {
+    AsCommitted,
+    /// Lone LFs become CRLF.
+    Crlf,
+    /// The same, unless the file has a CR already or looks binary (`text=auto`, or
+    /// `core.autocrlf` for a file without attributes).
+    AutoCrlf,
+}
+
+/// `core.autocrlf` and `core.eol`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EolConfig {
+    /// `Some(true)`: `true`; `Some(false)`: `input`; `None`: `false` or not set.
+    autocrlf: Option<bool>,
+    /// `core.eol` is `crlf`, or `native` (or not set) where git's native line end is CRLF.
+    eol_crlf: bool,
+}
+
+impl EolConfig {
+    /// From `git config` (every scope). Blocking.
+    fn read(root: &Path) -> Self {
+        let out = git_output(root, &["config", "-z", "--get-regexp", r"^core\.(autocrlf|eol)$"], 64 * 1024).unwrap_or_default();
+        Self::parse(&String::from_utf8_lossy(&out), crate::util::os::fs::NATIVE_CRLF)
+    }
+
+    /// `git config -z --get-regexp` output: `key\nvalue\0` entries (a key alone is `true`);
+    /// the last value of a key wins.
+    fn parse(out: &str, native_crlf: bool) -> Self {
+        let (mut autocrlf, mut eol) = (None, None);
+        for entry in out.split('\0').filter(|e| !e.is_empty()) {
+            let (key, value) = entry.split_once('\n').map_or((entry, None), |(k, v)| (k, Some(v.to_ascii_lowercase())));
+            match key {
+                "core.autocrlf" => {
+                    autocrlf = match value.as_deref() {
+                        None | Some("true" | "yes" | "on") => Some(true),
+                        Some("input") => Some(false),
+                        Some(v) => v.parse::<i64>().is_ok_and(|n| n != 0).then_some(true),
+                    }
+                }
+                "core.eol" => eol = value,
+                _ => {}
+            }
+        }
+        let eol_crlf = match eol.as_deref() {
+            Some("lf") => false,
+            Some("crlf") => true,
+            _ => native_crlf,
+        };
+        EolConfig { autocrlf, eol_crlf }
+    }
+
+    /// Whether `text` files get CRLF (`text_eol_is_crlf`).
+    fn text_crlf(&self) -> bool {
+        self.autocrlf.unwrap_or(self.eol_crlf)
+    }
+
+    /// Git's decision for a file with these attributes (`convert_attrs`, `output_eol`).
+    fn eol(&self, attrs: &EolAttrs) -> Eol {
+        #[derive(PartialEq)]
+        enum Action {
+            Undefined,
+            Binary,
+            Text,
+            TextInput,
+            TextCrlf,
+            Auto,
+            AutoInput,
+            AutoCrlf,
+        }
+        let parse = |v: &str| match v {
+            "set" => Action::Text,
+            "unset" => Action::Binary,
+            "input" => Action::TextInput,
+            "auto" => Action::Auto,
+            _ => Action::Undefined,
+        };
+        let mut action = parse(&attrs.text);
+        if action == Action::Undefined {
+            action = parse(&attrs.crlf);
+        }
+        if action != Action::Binary {
+            action = match (action, attrs.eol.as_str()) {
+                (Action::Auto, "lf") => Action::AutoInput,
+                (Action::Auto, "crlf") => Action::AutoCrlf,
+                (_, "lf") => Action::TextInput,
+                (_, "crlf") => Action::TextCrlf,
+                (a, _) => a,
+            };
+        }
+        let text_crlf = self.text_crlf();
+        match action {
+            Action::Text if text_crlf => Eol::Crlf,
+            Action::Auto if text_crlf => Eol::AutoCrlf,
+            Action::Undefined if self.autocrlf == Some(true) => Eol::AutoCrlf,
+            Action::TextCrlf => Eol::Crlf,
+            Action::AutoCrlf => Eol::AutoCrlf,
+            _ => Eol::AsCommitted,
+        }
+    }
+}
+
+/// The `text`, `eol` and (older) `crlf` attributes of a file: `set`, `unset`,
+/// `unspecified` or a value, as `git check-attr` prints them.
+#[derive(Debug, Default)]
+struct EolAttrs {
+    text: String,
+    eol: String,
+    crlf: String,
+}
+
+impl EolAttrs {
+    /// `git check-attr -z` output: `path\0attribute\0value\0` for each.
+    fn parse(out: &[u8]) -> Self {
+        let mut attrs = EolAttrs::default();
+        let fields: Vec<String> = out.split(|&b| b == 0).map(|f| String::from_utf8_lossy(f).into_owned()).collect();
+        for triple in fields.chunks_exact(3) {
+            let value = triple[2].clone();
+            match triple[1].as_str() {
+                "text" => attrs.text = value,
+                "eol" => attrs.eol = value,
+                "crlf" => attrs.crlf = value,
+                _ => {}
+            }
+        }
+        attrs
+    }
+}
+
+/// A LF with no CR before it.
+fn has_lone_lf(text: &[u8]) -> bool {
+    text.iter().enumerate().any(|(i, &b)| b == b'\n' && (i == 0 || text[i - 1] != b'\r'))
+}
+
+/// `head` checked out with `eol` (`crlf_to_worktree`).
+fn to_worktree(head: &[u8], eol: Eol) -> Cow<'_, [u8]> {
+    let convert = match eol {
+        Eol::AsCommitted => false,
+        Eol::Crlf => true,
+        Eol::AutoCrlf => !head.contains(&b'\r') && !head.contains(&0),
+    };
+    if !convert || !has_lone_lf(head) {
         return Cow::Borrowed(head);
     }
-    let mut out = Vec::with_capacity(head.len() + lf(head));
-    for &b in head {
-        if b == b'\n' {
+    let mut out = Vec::with_capacity(head.len() + head.len() / 16);
+    for (i, &b) in head.iter().enumerate() {
+        if b == b'\n' && (i == 0 || head[i - 1] != b'\r') {
             out.push(b'\r');
         }
         out.push(b);
@@ -568,7 +730,7 @@ fn agent_edit(state: &AppState, info: &crate::terminals::TerminalInfo, payload: 
                     let done = store.attribute(&rel, &hash, now - ATTRIBUTE_WINDOW_MS, &terminal, who.as_deref())?;
                     return Ok(done.map(|_| vec![rel]).unwrap_or_default());
                 }
-                seed_from_head(store, &project.root, &rel, &bytes, now)?;
+                seed_from_head(store, &mut Checkout::new(&project.root), &rel, &bytes, now)?;
                 let r = NewRevision { path: &rel, kind: Kind::Agent, ts: now, content: Some(&bytes), label: None, by: Some(terminal), who };
                 Ok(store.record(r)?.map(|_| vec![rel]).unwrap_or_default())
             }

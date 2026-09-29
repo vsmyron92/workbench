@@ -280,9 +280,15 @@ overflow maps to `overflow: true`. Done in `util::os::watch`: notify 8's Windows
 drops overflows silently (the rescan event is in notify 9, a release candidate) and
 notify-debouncer-full's Windows file-id cache walks the whole tree, following links, on
 every watch and created folder, so Windows gets its own watcher (a thread per watched
-directory, 64 KB buffer, 8.3 names in notifications made long again, `Flag::Rescan` on
-overflow) under the same debouncer with no cache. Git dirs outside the root (a
-subdirectory project, a linked worktree) keep their own watches.
+directory that makes every request, since Windows cancels a thread's pending I/O when it
+exits; 64 KB buffer; 8.3 names in notifications made long again; `Flag::Rescan` on
+overflow) under the same debouncer with no cache. The folders whose changes are kept come
+from the Linux walk itself (`dirs`, gitignore-aware, ignore files above the root
+included), so both report the same paths. A watch that stops on an error is made again
+(after 1 s, doubling), with `overflow: true`. Git dirs outside the root (a subdirectory
+project, a linked worktree) keep their own watches. Linux is unchanged: inotify's queue
+overflow is still not reported (reporting it would be a Linux change for the owner to
+decide).
 
 What Windows users notice: the folders that contain an open project cannot be renamed or
 moved while Workbench runs (as with any IDE); a linked worktree's project also holds its

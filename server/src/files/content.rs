@@ -403,9 +403,7 @@ fn read_existing(path: &Path) -> ApiResult<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(b) => Ok(Some(b)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => Err(ApiError::bad_request("path is a directory")),
-        // Windows refuses to open a directory as a file with "access denied".
-        Err(_) if path.is_dir() => Err(ApiError::bad_request("path is a directory")),
+        Err(e) if crate::util::os::fs::is_a_directory(&e, path) => Err(ApiError::bad_request("path is a directory")),
         Err(e) => Err(e.into()),
     }
 }

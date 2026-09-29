@@ -9,22 +9,24 @@
 //!
 //! Windows (`os::watch::RECURSIVE`): one recursive watch on the root instead, since an
 //! open directory handle keeps the folders above it from being renamed. It sees ignored
-//! folders too; their changes are dropped here (`Shown`), so the events are the same.
+//! folders too: the same walk keeps the folders a watch each would cover (`dirs`), and
+//! changes elsewhere are dropped, so the events are the same. A watch that stops on an
+//! error is made again.
 //!
 //! Events are debounced (200 ms), deduplicated and capped (500 paths, then
 //! `overflow: true`, as when the watcher itself lost events), and emitted as
 //! `fs.changed {paths}` (project-relative). Changes to `.git/HEAD`, the index or refs
 //! emit `git.changed`. Changed files are handed to Local History (`history::changed`).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path as UrlPath, State};
-use notify_debouncer_full::notify::RecursiveMode;
+use notify_debouncer_full::notify::{self, RecursiveMode};
 use notify_debouncer_full::notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind};
 use notify_debouncer_full::{DebounceEventResult, DebouncedEvent};
 use parking_lot::Mutex;
@@ -56,16 +58,22 @@ struct Pending {
     new_dirs: Vec<PathBuf>,
     /// A directory went away or moved: prune our bookkeeping.
     prune: bool,
+    /// A watch stopped on an error (`os::watch::RECURSIVE`): make the watches again.
+    rewatch: bool,
 }
 
 struct Inner {
     root: PathBuf,
+    git: Option<GitDirs>,
     deb: Mutex<Option<Deb>>,
+    /// The folders watched, one watch each; with one recursive watch, those it reports.
     dirs: Mutex<HashSet<PathBuf>>,
     pending: Mutex<Pending>,
     wake: tokio::sync::Notify,
     capped: AtomicBool,
     errors: AtomicUsize,
+    /// Times the watches were made again after an error (`Pending::rewatch`).
+    rewatches: AtomicU32,
 }
 
 pub struct ProjectWatch {
@@ -193,44 +201,6 @@ fn walk_dirs(start: &Path) -> impl Iterator<Item = PathBuf> {
         .map(|e| e.into_path())
 }
 
-/// The folders a watch per directory covers (those `walk_dirs` enters: every folder from
-/// the root down neither hard-ignored nor gitignored), for a recursive watch that sees
-/// them all. Decisions and matchers are kept for one batch.
-#[derive(Default)]
-struct Shown {
-    dirs: HashMap<PathBuf, bool>,
-    checkers: HashMap<PathBuf, IgnoreChecker>,
-}
-
-impl Shown {
-    /// Whether a change of `path`, below `root`, is seen: its folder is covered.
-    fn folder_of(&mut self, root: &Path, path: &Path) -> bool {
-        let Some(rel) = os::path::strip_prefix(path, root) else { return false };
-        let mut parts = rel.components().peekable();
-        let mut dir = root.to_path_buf();
-        while let Some(part) = parts.next() {
-            if parts.peek().is_none() {
-                break;
-            }
-            let child = dir.join(part);
-            let shown = match self.dirs.get(&child) {
-                Some(&shown) => shown,
-                None => {
-                    let checker = self.checkers.entry(dir.clone()).or_insert_with(|| IgnoreChecker::for_dir(root, &dir));
-                    let shown = !hard_ignored(&part.as_os_str().to_string_lossy()) && !checker.is_ignored(&child, true);
-                    self.dirs.insert(child.clone(), shown);
-                    shown
-                }
-            };
-            if !shown {
-                return false;
-            }
-            dir = child;
-        }
-        true
-    }
-}
-
 /// What changed, for `run`.
 #[derive(Debug, Default)]
 struct Batch {
@@ -242,40 +212,44 @@ struct Batch {
 }
 
 impl Inner {
-    fn new(root: PathBuf) -> Arc<Inner> {
+    fn new(root: PathBuf, git: Option<GitDirs>) -> Arc<Inner> {
         Arc::new(Inner {
             root,
+            git,
             deb: Mutex::new(None),
             dirs: Mutex::new(HashSet::new()),
             pending: Mutex::new(Pending::default()),
             wake: tokio::sync::Notify::new(),
             capped: AtomicBool::new(false),
             errors: AtomicUsize::new(0),
+            rewatches: AtomicU32::new(0),
         })
     }
 
     /// Create the debouncer (`debounce`: how long events settle); the watches come with
     /// `watch_all`.
-    fn start(self: &Arc<Self>, git: Option<GitDirs>, debounce: Duration) -> anyhow::Result<()> {
+    fn start(self: &Arc<Self>, debounce: Duration) -> anyhow::Result<()> {
         let inner = self.clone();
-        let deb = os::watch::debouncer(debounce, move |res: DebounceEventResult| {
-            if let Ok(events) = res {
-                inner.on_events(git.as_ref(), events);
-            }
+        let deb = os::watch::debouncer(debounce, move |res: DebounceEventResult| match res {
+            Ok(events) => inner.on_events(events),
+            Err(errors) if os::watch::RECURSIVE => inner.on_errors(errors),
+            Err(_) => {}
         })?;
         *self.deb.lock() = Some(deb);
         Ok(())
     }
 
     /// A debounced batch: sort it into `pending` and wake `run`.
-    fn on_events(&self, git: Option<&GitDirs>, events: Vec<DebouncedEvent>) {
-        let mut shown = Shown::default();
+    fn on_events(&self, events: Vec<DebouncedEvent>) {
+        let git = self.git.as_ref();
         let mut p = self.pending.lock();
         let mut any = false;
         for ev in events {
-            if ev.need_rescan() {
-                // The watcher lost events (a queue or buffer overflowed): refresh everything.
+            if os::watch::RESCAN_IS_OVERFLOW && ev.need_rescan() {
+                // The watcher lost events (its buffer overflowed): refresh everything, git
+                // included (a `.git` inside the root has no watch of its own).
                 p.overflow = true;
+                p.git |= git.is_some();
                 any = true;
                 continue;
             }
@@ -298,7 +272,7 @@ impl Inner {
                     Class::Noise => {}
                     // One recursive watch also sees ignored folders: keep what a watch per
                     // directory would have seen.
-                    Class::File(_) if os::watch::RECURSIVE && !shown.folder_of(&self.root, path) => {}
+                    Class::File(_) if os::watch::RECURSIVE && !self.covers(path) => {}
                     // A folder "modified" by its entries: they are reported themselves.
                     Class::File(_) if os::watch::FOLDERS_MODIFY && ev.kind == EventKind::Modify(ModifyKind::Any) && path.is_dir() => {}
                     Class::File(rel) => {
@@ -321,40 +295,72 @@ impl Inner {
         }
     }
 
+    /// Whether a change of `path` is one a watch per directory reports: its folder is
+    /// among `dirs`.
+    fn covers(&self, path: &Path) -> bool {
+        path.parent().is_some_and(|d| self.dirs.lock().contains(d))
+    }
+
+    /// Watches that stopped on an error (`os::watch::RECURSIVE`: a watch's thread ended):
+    /// counted, and made again by `next_batch`, everything refreshed since events were lost
+    /// meanwhile. Nothing is watched again once the root is gone.
+    fn on_errors(&self, errors: Vec<notify::Error>) {
+        for e in &errors {
+            if self.errors.fetch_add(1, Ordering::Relaxed) < 5 {
+                tracing::warn!("{}: a watch stopped: {e}", self.root.display());
+            }
+        }
+        if errors.is_empty() || !self.root.is_dir() {
+            return;
+        }
+        let mut p = self.pending.lock();
+        p.rewatch = true;
+        p.overflow = true;
+        p.git |= self.git.is_some();
+        drop(p);
+        self.wake.notify_one();
+    }
+
     /// The first watches: the root's tree (one recursive watch, or one per directory) and
     /// the git dirs. Blocking.
-    fn watch_all(&self, git: Option<&GitDirs>) {
+    fn watch_all(&self) {
         if os::watch::RECURSIVE {
             self.watch_root();
-        } else {
-            self.add_tree(&self.root, false);
         }
-        if let Some(g) = git {
+        self.add_tree(&self.root, false);
+        if let Some(g) = &self.git {
             self.add_git_watches(g);
         }
     }
 
     /// One recursive watch on the root (`os::watch::RECURSIVE`). Blocking.
     fn watch_root(&self) {
-        let mut dirs = self.dirs.lock();
         let mut deb = self.deb.lock();
         let Some(deb) = deb.as_mut() else { return };
-        match deb.watch(&self.root, RecursiveMode::Recursive) {
-            Ok(()) => {
-                dirs.insert(self.root.clone());
-            }
-            Err(e) => {
-                self.errors.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!("cannot watch {}: {e}", self.root.display());
-            }
+        if let Err(e) = deb.watch(&self.root, RecursiveMode::Recursive) {
+            self.errors.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!("cannot watch {}: {e}", self.root.display());
         }
     }
 
-    /// Wait for the next batch. With watches per directory, new folders get theirs first,
-    /// and those of folders that went away are forgotten.
+    /// Wait for the next batch. New folders are added to `dirs` first (with watches per
+    /// directory, they get theirs), and folders that went away are forgotten.
     async fn next_batch(self: &Arc<Self>) -> Batch {
         self.wake.notified().await;
         let batch = std::mem::take(&mut *self.pending.lock());
+        if os::watch::RECURSIVE && batch.rewatch {
+            // After a pause that doubles each time (1 s, up to 64 s), should it keep stopping.
+            let n = self.rewatches.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_secs(1 << n.min(6))).await;
+            let w = self.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                w.watch_root();
+                if let Some(g) = &w.git {
+                    w.add_git_watches(g);
+                }
+            })
+            .await;
+        }
         // Files may have landed in a new folder before its watch existed: Local
         // History looks inside (the tree only needs the folder).
         let created: Vec<String> = batch
@@ -364,7 +370,7 @@ impl Inner {
             .map(|r| r.to_string_lossy().replace('\\', "/"))
             .filter(|r| !r.is_empty())
             .collect();
-        if !os::watch::RECURSIVE && (!batch.new_dirs.is_empty() || batch.prune) {
+        if !batch.new_dirs.is_empty() || batch.prune {
             let w = self.clone();
             let new_dirs = batch.new_dirs;
             let prune = batch.prune;
@@ -414,6 +420,11 @@ impl Inner {
                 }
                 return;
             }
+            if os::watch::RECURSIVE {
+                // The root's watch sees it already.
+                dirs.insert(d);
+                continue;
+            }
             // Re-adding an existing watch is cheap and refreshes notify's path for a
             // renamed directory.
             let mut deb = self.deb.lock();
@@ -456,11 +467,10 @@ impl Inner {
 /// Start watching `project`. The initial walk runs on the blocking pool.
 async fn start_watch(state: &AppState, project: &Project) -> anyhow::Result<ProjectWatch> {
     let root = project.root.clone();
-    let git = git_dirs(&root);
-    let inner = Inner::new(root.clone());
-    inner.start(git.clone(), Duration::from_millis(200))?;
+    let inner = Inner::new(root.clone(), git_dirs(&root));
+    inner.start(Duration::from_millis(200))?;
     let setup = inner.clone();
-    tokio::task::spawn_blocking(move || setup.watch_all(git.as_ref())).await?;
+    tokio::task::spawn_blocking(move || setup.watch_all()).await?;
     tracing::debug!("watching {} ({} dirs)", root.display(), inner.dirs.lock().len());
 
     let task = tokio::spawn(run(state.clone(), project.id.clone(), inner.clone()));
@@ -513,7 +523,7 @@ pub async fn sync_all(state: &AppState) {
 #[serde(rename_all = "camelCase")]
 pub struct WatchStatus {
     pub watching: bool,
-    /// Directories watched (Windows: the root, whose one watch covers the tree).
+    /// Directories watched (Windows: covered by the root's one watch).
     pub dirs: usize,
     /// Hit the per-project cap: some directories are not watched.
     pub capped: bool,
@@ -677,11 +687,10 @@ mod tests {
     }
 
     async fn watching(root: &Path) -> Watching {
-        let inner = Inner::new(root.to_path_buf());
-        let git = git_dirs(root);
-        inner.start(git.clone(), Duration::from_millis(100)).unwrap();
+        let inner = Inner::new(root.to_path_buf(), git_dirs(root));
+        inner.start(Duration::from_millis(100)).unwrap();
         let setup = inner.clone();
-        tokio::task::spawn_blocking(move || setup.watch_all(git.as_ref())).await.unwrap();
+        tokio::task::spawn_blocking(move || setup.watch_all()).await.unwrap();
         Watching(inner)
     }
 
@@ -764,37 +773,71 @@ mod tests {
         assert!(paths.contains("lib/moved/er/a.rs"), "{paths:?}");
     }
 
-    /// A watcher that lost events (inotify's queue, Windows' buffer) says so: `overflow`.
+    /// Windows' watcher lost events: `overflow`, and git is looked at again. inotify's queue
+    /// overflow stays unreported on Linux, as it always was.
     #[tokio::test]
     async fn lost_events_are_an_overflow() {
         use notify_debouncer_full::notify::Event;
         use notify_debouncer_full::notify::event::Flag;
-        let inner = Inner::new(PathBuf::from("/p"));
+        let g = GitDirs { gitdir: "/p/.git".into(), commondir: "/p/.git".into() };
+        let inner = Inner::new(PathBuf::from("/p"), Some(g));
         let rescan = Event::new(EventKind::Other).set_flag(Flag::Rescan);
-        inner.on_events(None, vec![DebouncedEvent::new(rescan, std::time::Instant::now())]);
-        let b = tokio::time::timeout(Duration::from_secs(1), inner.next_batch()).await.unwrap();
-        assert!(b.overflow && b.paths.is_empty());
+        inner.on_events(vec![DebouncedEvent::new(rescan, std::time::Instant::now())]);
+        let b = tokio::time::timeout(Duration::from_millis(500), inner.next_batch()).await;
+        if os::watch::RESCAN_IS_OVERFLOW {
+            let b = b.unwrap();
+            assert!(b.overflow && b.git && b.paths.is_empty(), "{b:?}");
+        } else {
+            assert!(b.is_err(), "nothing to report");
+        }
     }
 
-    /// What one recursive watch reports: changes in the folders a watch per directory
-    /// covers, the folders it skips included, nothing inside them.
-    #[test]
-    fn a_recursive_watch_keeps_what_per_directory_watches_see() {
+    /// A watch that stopped on an error (Windows) is made again, and everything refreshed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stopped_watch_is_made_again() {
+        if !os::watch::RECURSIVE {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        for d in ["src/gen/x", "build/out", "node_modules/p", "docs/keep/deep", "a/b/c"] {
+        let root = crate::util::os::path::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let inner = watching(&root).await;
+        let stopped = notify::Error::io(std::io::ErrorKind::Other.into()).add_path(root.clone());
+        inner.on_errors(vec![stopped]);
+        let b = tokio::time::timeout(Duration::from_secs(5), inner.next_batch()).await.unwrap();
+        assert!(b.overflow, "{b:?}");
+        assert_eq!(inner.errors.load(Ordering::Relaxed), 1);
+        std::fs::write(root.join("src/after.rs"), "x").unwrap();
+        let (paths, _, _) = collect(&inner).await;
+        assert!(paths.contains("src/after.rs"), "{paths:?}");
+    }
+
+    /// The folders whose changes are reported: those the walk enters, as a watch each
+    /// (Linux) or kept from one recursive watch (Windows). Ignore files above the root
+    /// count, as they do for the walk.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_walk_decides_which_folders_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = crate::util::os::path::canonicalize(dir.path()).unwrap();
+        let root = repo.join("app").join("web");
+        for d in ["src/gen/x", "build/out", "node_modules/p", "docs/keep/deep", "a/b/c", "dist/assets"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
+        std::fs::write(repo.join(".gitignore"), "dist/\n").unwrap();
         std::fs::write(root.join(".gitignore"), "build/\n*.log\n").unwrap();
         std::fs::write(root.join("src/.gitignore"), "gen/\n").unwrap();
-        let mut shown = Shown::default();
-        let mut seen = |rel: &str| shown.folder_of(root, &root.join(rel));
-        for rel in ["src/a.rs", "build", "node_modules", "src/gen", "x.log", "a/b/c/d.rs", "docs/keep/deep/f.md", ".gitignore"] {
-            assert!(seen(rel), "{rel}");
+        let inner = watching(&root).await;
+        for rel in ["src/a.rs", "build", "node_modules", "src/gen", "x.log", "a/b/c/d.rs", "docs/keep/deep/f.md", ".gitignore", "dist"] {
+            assert!(inner.covers(&root.join(rel)), "{rel}");
         }
-        for rel in ["build/out", "build/out/x.o", "node_modules/p/i.js", "src/gen/x", "src/gen/x/y.rs"] {
-            assert!(!seen(rel), "{rel}");
+        for rel in ["build/out", "build/out/x.o", "node_modules/p/i.js", "src/gen/x", "src/gen/x/y.rs", "dist/app.js", "dist/assets/a.css"] {
+            assert!(!inner.covers(&root.join(rel)), "{rel}");
         }
-        assert!(!shown.folder_of(root, Path::new("/elsewhere/x")));
+        assert!(!inner.covers(Path::new("/elsewhere/x")));
+        // End to end: only the covered folder's change is reported.
+        std::fs::write(root.join("dist/app.js"), "x").unwrap();
+        std::fs::write(root.join("src/a.rs"), "x").unwrap();
+        let (paths, _, _) = collect(&inner).await;
+        assert!(paths.contains("src/a.rs") && !paths.contains("dist/app.js"), "{paths:?}");
     }
 }
