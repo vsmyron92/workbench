@@ -129,7 +129,10 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   (`sh -c`); `devcontainer/ops.rs:193`. POSIX quoting: `apps/expand.rs:185 shell_quote` (47
   callers building `bash -lc` commands), `terminals/input.rs:69-75 quote_path`,
   `agent.rs:262-268, 821` (the statusline command). `/bin/sh` inside containers stays.
-- API: `interactive()`, `run_argv(cmd)`, `quote(s)`, `helper_command(exe, args)`.
+- API: `interactive()`, `run_argv(cmd)`, `quote(s)`, `posix_quote(s)`, `helper_command(exe, args)`.
+  `quote` is for the local run shell only; anything bound for a POSIX shell elsewhere (an ssh
+  host through `apps::remote::quote`, a detected ssh deploy, the dev container scripts) takes
+  `posix_quote`, the same on every OS.
 
 **I. Finding programs → `os::exe`**
 
@@ -233,6 +236,14 @@ shells Workbench starts.
 run's argv; `quote()` follows the choice. Add `WT_SESSION` and `WT_PROFILE_ID` to
 `PARENT_TERMINAL_VARS`.
 
+**Detected commands.** Detection writes POSIX forms (`.venv/bin/python`, `python3`, `cmake
+--build … && ./bin`, `cd dir && ./x.sh`), and the `health.via_host` probe is `curl -o
+/dev/null` (in Windows PowerShell 5.1 `curl` is `Invoke-WebRequest`). Local runs need
+Windows forms: the venv's `Scripts\python.exe`, `os::exe::python()`, `.\bin.exe`, no `&&`
+under 5.1 (or pwsh 7 required); a local via_host probe runs `curl.exe -o NUL`;
+`debug::derive::is_python` accepts `python.exe` and `py`. Deploys and probes for an ssh
+host keep the POSIX forms.
+
 **Process trees.** Job Objects replace process groups and the `/proc` session scan;
 `TerminalInfo.lingering` is the job's process count minus one. `KILL_ON_JOB_CLOSE` matches
 Linux, where closing the PTY hangs up its processes.
@@ -252,9 +263,10 @@ folder; the inbox ConPTY renders poorly on Windows 10.
 **Git.** `GIT_ASKPASS` is the absolute `workbench.exe` with `WORKBENCH_HELPER=askpass` in
 git's environment, dispatched in `main.rs` before clap, so no script or batch file is
 involved. `GIT_EDITOR` and `GIT_SEQUENCE_EDITOR` keep `sh_quote` (Git for Windows runs them
-through its sh) with forward-slash paths. Remote operations run with `CREATE_NO_WINDOW`,
-`GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS=<exe>`, `SSH_ASKPASS_REQUIRE=force`, so an ssh prompt
-fails fast instead of hanging on an invisible console (the Windows `setsid`). Surface
+through its sh) with forward-slash paths. Remote operations start with no console at all
+(`DETACHED_PROCESS` in `ProcGroup::prepare_session`, the Windows `setsid`: git then
+starts ssh without one too, and ssh fails instead of prompting on a hidden console), plus
+`GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS=<exe>` and `SSH_ASKPASS_REQUIRE=force`. Surface
 "dubious ownership" (`safe.directory`) errors verbatim.
 
 **Agent hooks.** Claude's hooks are HTTP hooks (`agent.rs:175-205`); only the `SessionStart`
@@ -323,7 +335,7 @@ Each step compiles and passes on Linux. S = under a day, M = 1–3 days, L = 3�
 6. **L** Windows `proc` and `session`: Job Objects, sysinfo, Restart Manager, shutdown
    events. From here `cargo build` passes on Windows and the CI job becomes required.
 7. **L** ConPTY: EOF on close, the hold-back channel, default shells, npm-shim unwrapping,
-   `.cmd` argument rules.
+   `.cmd` argument rules; detected commands in Windows forms (§2).
 8. **M** Networking and desktop: GetAdaptersAddresses, GetExtendedTcpTable, browser launch,
    Recycle Bin.
 9. **M** Git: askpass through the environment, editor paths, CRLF-aware diff and line

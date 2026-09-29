@@ -1133,7 +1133,7 @@ impl Terminals {
             (PathBuf::from(&r.info.cwd), r.info.argv.clone())
         };
         let cwd = if cwd.is_dir() { cwd } else { dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")) };
-        let argv = if argv.is_empty() { vec![login_shell(), "-l".into()] } else { argv };
+        let argv = if argv.is_empty() { util::os::shell::interactive() } else { argv };
         pty::LaunchSpec { argv, cwd, env: base_env(state, &entry.id), cols: 0, rows: 0, redact: vec![] }
     }
 
@@ -1172,7 +1172,7 @@ impl Terminals {
         let (argv, meta) = match &target {
             // The container user's login shell.
             Some(t) => (vec![t.shell.clone(), "-l".into()], json!({ "inContainer": true, "container": t.describe() })),
-            None => (vec![login_shell(), "-l".into()], json!({})),
+            None => (util::os::shell::interactive(), json!({})),
         };
         self.spawn(state, SpawnSpec { kind: TerminalKind::Shell, title, project_id, cwd, argv, env: vec![], cols, rows, meta }).await
     }
@@ -1230,14 +1230,6 @@ impl Terminals {
         })
         .await;
     }
-}
-
-/// The user's login shell.
-fn login_shell() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty() && Path::new(s).is_file())
-        .unwrap_or_else(|| "/bin/bash".into())
 }
 
 /// Resolve a client-supplied working directory: project-relative, or absolute.

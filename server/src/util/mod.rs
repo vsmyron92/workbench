@@ -13,7 +13,8 @@ pub fn open_in_browser(url: &str) {
     os::desktop::open_url(url)
 }
 
-/// Whether `cmd` resolves on `PATH`.
+/// Whether `cmd` resolves on `PATH` (`os::exe::which`, which code in `util::os` calls
+/// itself).
 pub fn which(cmd: &str) -> bool {
     which_path(cmd).is_some()
 }

@@ -218,6 +218,26 @@ pub fn command(r: &Resolved) -> tokio::process::Command {
     c
 }
 
+/// A process running `argv`, a command line from config.toml (a secret's `command`). Unix:
+/// `argv[0]` as it is, looked up on `PATH` by the OS. Windows: resolved as `launch_argv`
+/// does, so an npm shim or a batch file (`bw.cmd`) starts too, with `child_env`.
+pub fn configured(argv: &[String]) -> std::io::Result<std::process::Command> {
+    #[cfg(unix)]
+    {
+        let (first, rest) = argv.split_first().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty command"))?;
+        let mut c = std::process::Command::new(first);
+        c.args(rest);
+        Ok(c)
+    }
+    #[cfg(windows)]
+    {
+        let argv = launch_argv(argv.to_vec()).map_err(std::io::Error::other)?;
+        let mut c = std::process::Command::new(&argv[0]);
+        c.args(&argv[1..]).envs(child_env().iter().copied());
+        Ok(c)
+    }
+}
+
 /// Whether cmd.exe passes `args` to a `.bat`/`.cmd` file as they are: none contains
 /// `% ! ^ & | < > "` or a line break. cmd.exe parses a batch file's command line again,
 /// so such an argument could expand variables or start commands of its own (BatBadBut).
@@ -229,7 +249,7 @@ pub fn batch_args_safe<S: AsRef<str>>(args: &[S]) -> bool {
 /// A terminal's argv, ready for the PTY. Unix: unchanged. Windows: the program becomes an
 /// absolute path, an npm shim is unwrapped, and a batch file is refused when cmd.exe would
 /// misread an argument (the caller can paste the prompt instead).
-#[allow(dead_code)] // the terminals slice's PTY spawn (docs/windows-port.md, step 7)
+#[cfg_attr(unix, allow(dead_code))] // Unix: for the terminals slice's PTY spawn (docs/windows-port.md, step 7)
 pub fn launch_argv(argv: Vec<String>) -> Result<Vec<String>, String> {
     #[cfg(unix)]
     {

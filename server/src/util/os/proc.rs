@@ -30,7 +30,9 @@ impl ProcGroup {
     }
 
     /// Before spawning: the child leads a new session (Unix), so it has no controlling
-    /// terminal to prompt on. Windows: as `prepare`.
+    /// terminal to prompt on. Windows: as `prepare`, but with no console at all
+    /// (`DETACHED_PROCESS`): Git for Windows then starts ssh without one too, and ssh fails
+    /// instead of prompting on a hidden console nobody sees.
     pub fn prepare_session(cmd: &mut Command) {
         imp::prepare_session(cmd);
     }
@@ -84,7 +86,6 @@ impl ProcGroup {
 // ---------------------------------------------------------------- single processes
 
 /// Whether a pid is alive, including processes of other users.
-#[allow(dead_code)] // for the terminals' port (docs/windows-port.md §1.F)
 pub fn pid_alive(pid: i32) -> bool {
     imp::pid_alive(pid)
 }
@@ -431,7 +432,7 @@ mod imp {
         JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateEventW, EVENT_MODIFY_STATE, OpenEventW, OpenProcess, PROCESS_QUERY_INFORMATION,
+        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateEventW, DETACHED_PROCESS, EVENT_MODIFY_STATE, OpenEventW, OpenProcess, PROCESS_QUERY_INFORMATION,
         PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, SetEvent, TerminateProcess, WaitForSingleObject,
     };
 
@@ -457,7 +458,9 @@ mod imp {
     }
 
     pub fn prepare_session(cmd: &mut Command) {
-        prepare(cmd);
+        // Not CREATE_NO_WINDOW: a hidden console is still one to prompt on. git passes
+        // DETACHED_PROCESS on to its console children when it has no console itself.
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
     }
 
     #[derive(Clone, Default)]

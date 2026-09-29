@@ -514,12 +514,12 @@ async fn background_jobs_left_behind_are_reported_and_killed() {
     wait_exit(&state, &info.id).await;
     wait_for("the pid file", || pidfile.is_file()).await;
     let job: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
-    assert!(super::pty::pid_alive(job));
+    assert!(crate::util::os::proc::pid_alive(job));
     wait_for("the lingering count", || t.info(&info.id).is_some_and(|i| i.lingering == 1)).await;
     assert_eq!(t.info(&info.id).unwrap().status, TerminalStatus::Exited);
     // Kill reaches the job although the terminal's own process is gone.
     t.kill(&info.id).await.unwrap();
-    wait_for("the job to die", || !super::pty::pid_alive(job)).await;
+    wait_for("the job to die", || !crate::util::os::proc::pid_alive(job)).await;
     wait_for("the count to clear", || t.info(&info.id).is_some_and(|i| i.lingering == 0)).await;
 
     // Close (and forget) reach them too.
@@ -531,7 +531,7 @@ async fn background_jobs_left_behind_are_reported_and_killed() {
     let job2: i32 = std::fs::read_to_string(&pidfile2).unwrap().trim().parse().unwrap();
     wait_for("the second lingering count", || t.info(&info.id).is_some_and(|i| i.lingering == 1)).await;
     t.close(&state, &info.id, true).await.unwrap();
-    wait_for("the second job to die", || !super::pty::pid_alive(job2)).await;
+    wait_for("the second job to die", || !crate::util::os::proc::pid_alive(job2)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

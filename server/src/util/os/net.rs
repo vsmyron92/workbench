@@ -98,7 +98,7 @@ mod sys {
     }
 
     pub async fn kill_port_holders(port: u16) -> Result<String, String> {
-        if !crate::util::which("fuser") {
+        if super::super::exe::which("fuser").is_none() {
             return Err("fuser is not installed (package psmisc); free the port yourself".into());
         }
         let out = crate::util::proc::run("fuser", &["-k", &format!("{port}/tcp")], std::path::Path::new("/"), Duration::from_secs(10))

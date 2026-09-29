@@ -104,6 +104,15 @@ pub fn argv(target: &Target, cmd: &str, tty: bool) -> Vec<String> {
     }
 }
 
+/// `s` as one word of the shell `argv` gives a command on `target`: the local run shell's
+/// (`util::os::shell::quote`), or POSIX on an ssh host whatever OS Workbench runs on.
+pub fn quote(target: &Target, s: &str) -> String {
+    match target {
+        Target::Local => crate::util::os::shell::quote(s),
+        Target::Ssh(_) => crate::util::os::shell::posix_quote(s),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

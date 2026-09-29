@@ -133,7 +133,7 @@ pub fn resolve(r: &SecretRef, warnings: &mut Vec<String>) -> anyhow::Result<Secr
         }
         SecretRef::Command(argv) => {
             anyhow::ensure!(!argv.is_empty(), "empty command");
-            let out = std::process::Command::new(&argv[0]).args(&argv[1..]).output()?;
+            let out = crate::util::os::exe::configured(argv)?.output()?;
             anyhow::ensure!(out.status.success(), "secret command exited with {}", out.status);
             String::from_utf8(out.stdout)?.trim().to_string()
         }

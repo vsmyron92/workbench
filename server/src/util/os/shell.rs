@@ -12,7 +12,6 @@ use std::path::Path;
 
 /// argv of the user's interactive shell for a terminal: `$SHELL -l` when it names a file,
 /// else `/bin/bash -l` (Unix); `pwsh.exe -NoLogo`, else `powershell.exe -NoLogo` (Windows).
-#[allow(dead_code)] // the terminals slice starts shells with it (docs/windows-port.md, step 7)
 pub fn interactive() -> Vec<String> {
     #[cfg(unix)]
     {
@@ -129,20 +128,28 @@ fn decode_output(bytes: Vec<u8>) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-/// `s` as one word of the run shell (`run_argv`): unchanged when it is plain, else
-/// single-quoted (POSIX on Unix; PowerShell on Windows, where a quote is doubled).
+/// `s` as one word of the local run shell (`run_argv`): unchanged when it is plain, else
+/// single-quoted (`posix_quote` on Unix; PowerShell on Windows, where a quote is doubled).
+/// A command for an ssh host or a container takes `posix_quote` on every OS.
 pub fn quote(s: &str) -> String {
     #[cfg(unix)]
     {
-        if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c)) {
-            return s.to_string();
-        }
-        format!("'{}'", s.replace('\'', r"'\''"))
+        posix_quote(s)
     }
     #[cfg(windows)]
     {
         ps_quote(s)
     }
+}
+
+/// `s` as one word of a POSIX shell, on every OS: unchanged when it is plain, else
+/// single-quoted. For commands that run in `sh` or `bash` wherever Workbench runs: over ssh
+/// (`apps::remote`), in a container, in a generated bash script.
+pub fn posix_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c)) {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// A path for insertion at a shell or agent prompt (a pasted image), quoted like `quote`.
@@ -275,6 +282,15 @@ mod tests {
         assert_eq!(ps_quote("$(rm x); `n"), "'$(rm x); `n'");
         assert_eq!(ps_quote("--%"), "'--%'");
         assert_eq!(ps_quote("@args"), "'@args'");
+    }
+
+    #[test]
+    fn posix_quoting_on_every_os() {
+        assert_eq!(posix_quote("http://127.0.0.1:8081/api/health"), "http://127.0.0.1:8081/api/health");
+        assert_eq!(posix_quote(""), "''");
+        assert_eq!(posix_quote("a b"), "'a b'");
+        assert_eq!(posix_quote("it's"), r"'it'\''s'");
+        assert_eq!(posix_quote(r"C:\x"), r"'C:\x'");
     }
 
     #[test]

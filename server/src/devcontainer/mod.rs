@@ -63,13 +63,9 @@ use plan::Engines;
 
 // ---------------------------------------------------------------- shared helpers
 
-/// A shell word: bare when safe, else single-quoted.
+/// A shell word: bare when safe, else single-quoted (`util::os::shell::posix_quote`).
 pub fn sh_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c)) {
-        s.to_string()
-    } else {
-        sh_quote_always(s)
-    }
+    crate::util::os::shell::posix_quote(s)
 }
 
 pub fn sh_quote_always(s: &str) -> String {

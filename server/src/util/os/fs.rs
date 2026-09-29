@@ -132,7 +132,7 @@ mod unix {
     }
 
     pub async fn trash(path: &Path) -> ApiResult<&'static str> {
-        if crate::util::which("gio") {
+        if super::super::exe::which("gio").is_some() {
             let p = path.to_string_lossy().into_owned();
             let parent = path.parent().unwrap_or(Path::new("/")).to_path_buf();
             match crate::util::proc::run("gio", &["trash", "--", &p], &parent, Duration::from_secs(30)).await {
@@ -155,7 +155,7 @@ mod unix {
     }
 
     pub async fn desktop_trash(path: &Path) -> ApiResult<bool> {
-        if crate::util::which("gio") {
+        if super::super::exe::which("gio").is_some() {
             let out = crate::util::proc::run("gio", &["trash", "--", &path.to_string_lossy()], Path::new("/"), Duration::from_secs(30)).await?;
             if out.ok() {
                 return Ok(true);

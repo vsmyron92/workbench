@@ -696,9 +696,10 @@ pub(crate) fn npm_graph(scripts: &serde_json::Map<String, serde_json::Value>) ->
 }
 
 /// `s` as one shell word: unchanged when it is plain (`build`, `db:migrate`,
-/// `./cmd/api`), single-quoted otherwise. Detected commands run with `bash -lc`, and
-/// names from repository files (Make targets, Taskfile keys, script names, directory
-/// names) must never add a command of their own.
+/// `./cmd/api`), single-quoted otherwise. Detected commands run in the local run shell
+/// (`bash -lc` on Unix; a deploy for an ssh host quotes with `posix_quote`), and names
+/// from repository files (Make targets, Taskfile keys, script names, directory names)
+/// must never add a command of their own.
 pub(crate) fn sh(s: &str) -> String {
     crate::apps::expand::shell_quote(s)
 }

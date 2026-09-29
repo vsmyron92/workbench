@@ -2275,7 +2275,7 @@ impl Terminals {
         };
         let dir = transcript::claude_dir(None);
         let mut list = tokio::task::spawn_blocking(move || transcript::read_live_sessions(&dir)).await.unwrap_or_default();
-        list.retain(|s| pty::pid_alive(s.pid) && !pids.contains(&s.pid) && !sessions.contains(&s.session_id));
+        list.retain(|s| crate::util::os::proc::pid_alive(s.pid) && !pids.contains(&s.pid) && !sessions.contains(&s.session_id));
         for s in &mut list {
             s.project_id = state.projects.find_by_path(Path::new(&s.cwd)).map(|p| p.id.clone());
         }

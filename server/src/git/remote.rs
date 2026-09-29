@@ -319,8 +319,8 @@ async fn run(state: &AppState, repo: &Repo, spec: &RemoteOpSpec, op_id: &str, ca
         .env("GIT_HTTP_LOW_SPEED_TIME", "60");
     let mut cmd = g.command();
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    // A new session has no controlling terminal, so ssh cannot open /dev/tty and
-    // block on a passphrase prompt nobody can answer.
+    // A new session has no controlling terminal (Windows: no console), so ssh cannot
+    // open /dev/tty and block on a passphrase prompt nobody can answer.
     crate::util::os::proc::ProcGroup::prepare_session(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(c) => c,

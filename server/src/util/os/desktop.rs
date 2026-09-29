@@ -20,11 +20,11 @@ pub fn notify_send() -> Option<PathBuf> {
 mod sys {
     use std::path::PathBuf;
 
-    use crate::util::which;
+    use super::super::exe::which;
 
     pub fn open_url(url: &str) {
         for browser in ["google-chrome", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"] {
-            if which(browser) {
+            if which(browser).is_some() {
                 let ok = std::process::Command::new(browser)
                     .arg(format!("--app={url}"))
                     .stdin(std::process::Stdio::null())
@@ -45,7 +45,7 @@ mod sys {
     }
 
     pub fn notify_send() -> Option<PathBuf> {
-        crate::util::which_path("notify-send")
+        which("notify-send")
     }
 }
 

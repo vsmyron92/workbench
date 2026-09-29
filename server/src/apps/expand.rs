@@ -181,8 +181,8 @@ pub fn run_env(
     Ok((out, used))
 }
 
-/// `s` as one word of the shell that runs run commands (`util::os::shell::quote`:
-/// POSIX single quotes on Unix).
+/// `s` as one word of the local shell that runs run commands (`util::os::shell::quote`:
+/// POSIX single quotes on Unix). A command for an ssh host quotes with `remote::quote`.
 pub fn shell_quote(s: &str) -> String {
     crate::util::os::shell::quote(s)
 }

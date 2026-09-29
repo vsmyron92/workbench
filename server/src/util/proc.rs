@@ -73,9 +73,11 @@ pub async fn run(program: &str, args: &[&str], cwd: &Path, timeout: Duration) ->
     run_cmd(cmd, timeout).await
 }
 
-/// Run a prepared command (stdin closed), capture output, kill on timeout.
+/// Run a prepared command (stdin closed, `os::exe::child_env` added), capture output, kill
+/// on timeout.
 pub async fn run_cmd(mut cmd: Command, timeout: Duration) -> Result<Output, ApiError> {
     clean_env(&mut cmd);
+    cmd.envs(crate::util::os::exe::child_env().iter().copied());
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let child = cmd.spawn().map_err(|e| ApiError::internal(format!("spawn failed: {e}")))?;
     match tokio::time::timeout(timeout, child.wait_with_output()).await {

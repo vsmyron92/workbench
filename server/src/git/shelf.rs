@@ -142,7 +142,7 @@ pub fn delete(root: &Path, id: &str) -> Result<(), ApiError> {
 fn read_patches(root: &Path, meta: &ShelfMeta, files: &[&ShelfFile]) -> Result<Vec<u8>, ApiError> {
     let mut out = vec![];
     for f in files {
-        if f.patch.contains('/') || f.patch.starts_with('.') {
+        if f.patch.contains('/') || f.patch.starts_with('.') || crate::util::os::path::check_component(&f.patch).is_err() {
             return Err(ApiError::internal("corrupt shelf metadata"));
         }
         let p = root.join(&meta.id).join("files").join(&f.patch);

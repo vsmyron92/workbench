@@ -390,8 +390,8 @@ pub fn describe(err: &reqwest::Error, timeout: Duration) -> String {
 /// The probe run on the host for `health.via_host`: prints `<http_code> <seconds>`.
 /// Auth is never passed: a host-local port is not behind the site's basic auth, and a
 /// password must not appear in a remote argv.
-pub fn via_host_command(url: &str, secs: u64) -> String {
-    format!("curl -sS -o /dev/null -w '%{{http_code}} %{{time_total}}' --max-time {secs} {}", super::expand::shell_quote(url))
+pub fn via_host_command(target: &remote::Target, url: &str, secs: u64) -> String {
+    format!("curl -sS -o /dev/null -w '%{{http_code}} %{{time_total}}' --max-time {secs} {}", remote::quote(target, url))
 }
 
 /// Parse `via_host_command` output: `(status, latency_ms)`; status 0 means no response.
@@ -408,7 +408,7 @@ async fn check_via_host(project: &Project, e: &Environment, h: &crate::config::p
         Err(err) => return CheckOutcome { status: HealthStatus::Unknown, http_status: None, latency_ms: None, error: Some(err.message) },
     };
     let secs = (u64::from(h.timeout_ms) / 1000).clamp(1, 60);
-    let argv = remote::argv(&target, &via_host_command(&h.url, secs), false);
+    let argv = remote::argv(&target, &via_host_command(&target, &h.url, secs), false);
     let mut c = crate::util::os::shell::command(&argv);
     c.current_dir(&project.root);
     match crate::util::proc::run_cmd(c, Duration::from_secs(secs + 20)).await {
@@ -660,9 +660,12 @@ mod tests {
 
     #[test]
     fn via_host_probe_command_and_output() {
-        let c = via_host_command("http://127.0.0.1:8081/api/health", 5);
+        let ssh = remote::Target::Ssh(crate::config::project::SshHost { host: "203.0.113.10".into(), ..Default::default() });
+        let c = via_host_command(&ssh, "http://127.0.0.1:8081/api/health", 5);
         assert_eq!(c, "curl -sS -o /dev/null -w '%{http_code} %{time_total}' --max-time 5 http://127.0.0.1:8081/api/health");
-        assert!(via_host_command("http://x/a b", 5).ends_with("'http://x/a b'"));
+        // POSIX quoting on the ssh host, on every OS.
+        assert!(via_host_command(&ssh, "http://x/it's", 5).ends_with(r"'http://x/it'\''s'"));
+        assert!(via_host_command(&remote::Target::Local, "http://x/a b", 5).ends_with("'http://x/a b'"));
         assert_eq!(parse_via_host("200 0.0123"), (Some(200), Some(12)));
         assert_eq!(parse_via_host("000 5.001"), (None, Some(5001)));
         assert_eq!(parse_via_host(""), (None, None));

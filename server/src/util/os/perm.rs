@@ -20,6 +20,7 @@ pub enum Privacy {
 }
 
 impl Privacy {
+    /// Whether others can read it.
     pub fn is_exposed(&self) -> bool {
         matches!(self, Privacy::Exposed(_))
     }
@@ -54,7 +55,8 @@ pub fn create_dir_private(path: &Path) -> io::Result<()> {
 }
 
 /// Create the file `path` for writing, failing if anything exists there, even a dangling
-/// symlink; `mode` applies from the start. `nofollow` adds `O_NOFOLLOW` on Unix.
+/// symlink; `mode` applies from the start. `nofollow` adds `O_NOFOLLOW` on Unix, as the
+/// callers always did; creating never follows a symlink at `path` anyway.
 pub fn open_new(path: &Path, mode: u32, nofollow: bool) -> io::Result<File> {
     imp::open_new(path, mode, nofollow)
 }
