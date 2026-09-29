@@ -30,13 +30,19 @@ pub(super) fn init_repo() -> tempfile::TempDir {
         ("commit.gpgsign", "false"),
         ("tag.gpgsign", "false"),
         ("core.autocrlf", "false"),
-        ("core.hooksPath", "/dev/null"),
         ("merge.conflictstyle", "merge"),
         ("pull.rebase", "false"),
     ] {
         git(p, &["config", k, v]);
     }
+    no_hooks(p);
     d
+}
+
+/// Run no hooks in `repo` (global ones included): `core.hooksPath` names a folder that does
+/// not exist. Not `/dev/null`, which Git for Windows reads as a folder of its installation.
+pub(super) fn no_hooks(repo: &Path) {
+    git(repo, &["config", "core.hooksPath", &crate::util::os::path::to_slash(&repo.join(".git").join("no-hooks"))]);
 }
 
 pub(super) fn write(dir: &Path, rel: &str, text: &str) {
@@ -560,29 +566,32 @@ async fn stash_include_untracked_and_keep_index_really_do_it() {
 
 #[tokio::test]
 async fn paths_with_glob_characters_are_literal() {
+    // A file called `*.txt` (Windows allows no `*` in names: `[a].txt`, a glob matching
+    // a.txt too).
+    let star = if cfg!(windows) { "[a].txt" } else { "*.txt" };
     let d = init_repo();
     let p = d.path();
     write(p, "a.txt", "a\n");
-    write(p, "*.txt", "star\n");
+    write(p, star, "star\n");
     write(p, "app/[id]/page.tsx", "x\n");
     write(p, "app/i/page.tsx", "i\n");
     commit_all(p, "init");
     let r = repo(p).await;
     write(p, "a.txt", "a2\n");
-    write(p, "*.txt", "star2\n");
+    write(p, star, "star2\n");
     write(p, "app/[id]/page.tsx", "x2\n");
     write(p, "app/i/page.tsx", "i2\n");
-    ops::stage(&r, &ops::PathsRequest { paths: vec!["*.txt".into(), "app/[id]/page.tsx".into()], all: false }).await.unwrap();
+    ops::stage(&r, &ops::PathsRequest { paths: vec![star.into(), "app/[id]/page.tsx".into()], all: false }).await.unwrap();
     let staged = git(p, &["diff", "--cached", "--name-only"]);
-    assert_eq!(staged, "*.txt\napp/[id]/page.tsx\n");
-    let (df, _) = file_diff(&r, &DiffQuery { path: "*.txt".into(), mode: Some(DiffMode::Staged), ..Default::default() }).await.unwrap();
+    assert_eq!(staged, format!("{star}\napp/[id]/page.tsx\n"));
+    let (df, _) = file_diff(&r, &DiffQuery { path: star.into(), mode: Some(DiffMode::Staged), ..Default::default() }).await.unwrap();
     assert_eq!(df.hunks.len(), 1);
     // Stash only the file called `*.txt` (not a.txt).
-    ops::stash_push(&r, &ops::StashPushRequest { message: None, include_untracked: false, keep_index: false, paths: Some(vec!["*.txt".into()]), staged: false })
+    ops::stash_push(&r, &ops::StashPushRequest { message: None, include_untracked: false, keep_index: false, paths: Some(vec![star.into()]), staged: false })
         .await
         .unwrap();
     assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "a2\n");
-    assert_eq!(std::fs::read_to_string(p.join("*.txt")).unwrap(), "star\n");
+    assert_eq!(std::fs::read_to_string(p.join(star)).unwrap(), "star\n");
     let hist = log::log(&r, &log::LogQuery { path: Some("app/[id]/page.tsx".into()), ..Default::default() }).await.unwrap();
     assert_eq!(hist.commits.len(), 1);
 }
@@ -683,9 +692,10 @@ async fn pull_with_autostash_conflict_is_not_reported_as_success() {
     let tmp = tempfile::tempdir().unwrap();
     let down = tmp.path().join("down");
     git(tmp.path(), &["clone", "-q", up.path().to_str().unwrap(), down.to_str().unwrap()]);
-    for (k, v) in [("user.name", "T"), ("user.email", "t@example.com"), ("core.hooksPath", "/dev/null")] {
+    for (k, v) in [("user.name", "T"), ("user.email", "t@example.com"), ("core.autocrlf", "false")] {
         git(&down, &["config", k, v]);
     }
+    no_hooks(&down);
     write(up.path(), "m.txt", "1\n2\nremote\n4\n5\n");
     commit_all(up.path(), "remote change");
     write(&down, "m.txt", "1\n2\nlocal\n4\n5\n");
@@ -839,4 +849,32 @@ async fn submodule_changes_are_reported_not_faked() {
     assert!(ops::stage(&r, &ops::PathsRequest { paths: vec!["sub".into()], all: false }).await.unwrap().is_empty());
     let (sd, _) = file_diff(&r, &DiffQuery { path: "sub".into(), mode: Some(DiffMode::Staged), ..Default::default() }).await.unwrap();
     assert!(sd.submodule && sd.submodule_summary.as_deref().unwrap_or_default().contains("lib change"), "{sd:?}");
+}
+
+#[tokio::test]
+async fn a_repository_git_refuses_for_its_owner_is_reported_in_gits_words() {
+    let d = init_repo();
+    let p = d.path();
+    // Git's own switch for testing its ownership check, and an empty global config, so no
+    // `safe.directory` of this computer lets the folder pass.
+    let cfg = tempfile::tempdir().unwrap();
+    let empty = cfg.path().join("gitconfig");
+    std::fs::write(&empty, "").unwrap();
+    let out = super::cmd::Git::read(p)
+        .args(super::repo::DISCOVER_ARGS)
+        .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+        .env("GIT_CONFIG_GLOBAL", empty.to_string_lossy().to_string())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .run()
+        .await
+        .unwrap();
+    assert!(!out.ok());
+    let e = super::repo::discover_error(&out, p);
+    assert_eq!((e.status.as_u16(), e.code), (403, "unsafe_repository"), "{}", e.message);
+    assert_eq!(e.message, out.stderr.trim(), "verbatim");
+    assert!(e.message.contains("--add safe.directory"), "{}", e.message);
+    assert_eq!(super::cmd::git_error(&out).code, "unsafe_repository");
+    // A folder that is no repository still says so.
+    let plain = tempfile::tempdir().unwrap();
+    assert_eq!(Repo::discover("plain", plain.path()).await.unwrap_err().code, "not_a_repo");
 }

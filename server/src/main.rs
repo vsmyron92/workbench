@@ -73,6 +73,11 @@ enum Command {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Windows: git and ssh start this executable itself as their askpass program, with the
+    // prompt as the only argument (`util::os::helper`).
+    if let Some(prompt) = util::os::helper::askpass_prompt(is_command) {
+        return git::cli_askpass(&prompt);
+    }
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Serve { bind: None, open: false }) {
         Command::Serve { bind, open } => serve(bind, open),
@@ -90,6 +95,13 @@ fn main() -> anyhow::Result<()> {
         Command::Statusline => terminals::cli_statusline(),
         Command::Service(args) => platform::service::cli(args),
     }
+}
+
+/// Whether `word`, a single argument, is a command line of Workbench's own (a subcommand,
+/// `help`, an option) rather than a prompt.
+fn is_command(word: &str) -> bool {
+    use clap::CommandFactory;
+    word.starts_with('-') || word == "help" || Cli::command().find_subcommand(word).is_some()
 }
 
 fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {

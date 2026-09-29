@@ -107,6 +107,126 @@ async fn line_staging_round_trips_crlf_files() {
     assert_eq!(read(p, "w.txt"), "a\r\nb\r\nZ\r\n");
 }
 
+async fn working_diff(p: &Path, path: &str) -> super::diff::GitFileDiff {
+    file_diff(&repo(p).await, &DiffQuery { path: path.into(), mode: Some(DiffMode::Working), ..Default::default() }).await.unwrap().0
+}
+
+#[tokio::test]
+async fn crlf_working_trees_over_lf_indexes_diff_and_stage_as_git_reads_them() {
+    // core.autocrlf=true (Git for Windows' default): LF in the index, CRLF on disk.
+    let d = init_repo();
+    let p = d.path();
+    git(p, &["config", "core.autocrlf", "true"]);
+    write(p, "w.txt", "a\r\nb\r\nc\r\n");
+    commit_all(p, "init");
+    write(p, "w.txt", "a\r\nNEW\r\nb\r\nc\r\nZ\r\n");
+    // Both sides of the diff read like the hunks: LF.
+    let diff = working_diff(p, "w.txt").await;
+    assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\nb\nc\n", "a\nNEW\nb\nc\nZ\n"));
+    assert_eq!(diff.lines.iter().map(|l| (l.kind, l.line)).collect::<Vec<_>>(), vec![(LineKind::Add, 2), (LineKind::Add, 5)]);
+    let r = repo(p).await;
+    let q = DiffQuery { path: "w.txt".into(), mode: Some(DiffMode::Compare), base: Some("HEAD".into()), ..Default::default() };
+    assert_eq!(file_diff(&r, &q).await.unwrap().0.modified, "a\nNEW\nb\nc\nZ\n");
+    // Staging a line puts LF into the index; rolling one back keeps the file CRLF.
+    lines_op(p, LineOp::Stage, "w.txt", &[add(5)]).await.unwrap();
+    assert_eq!(index_of(p, "w.txt"), "a\nb\nc\nZ\n");
+    lines_op(p, LineOp::Discard, "w.txt", &[add(2)]).await.unwrap();
+    assert_eq!(read(p, "w.txt"), "a\r\nb\r\nc\r\nZ\r\n");
+    // Nothing unstaged is left, and both sides say so (the UI's "No changes").
+    let diff = working_diff(p, "w.txt").await;
+    assert!(diff.hunks.is_empty() && diff.original == diff.modified, "{diff:?}");
+    // Hunks, the same way.
+    write(p, "w.txt", "a\r\nb\r\nH\r\nc\r\nZ\r\n");
+    let diff = working_diff(p, "w.txt").await;
+    let req = |fingerprint: String| super::diff::HunkRequest { path: "w.txt".into(), hunk_indexes: vec![0], fingerprint };
+    super::diff::apply_hunks(&r, super::diff::HunkOp::Stage, &req(diff.fingerprint)).await.unwrap();
+    assert_eq!(index_of(p, "w.txt"), "a\nb\nH\nc\nZ\n");
+    // HEAD → index is one hunk (H and Z): unstaging it leaves HEAD's version.
+    let staged = file_diff(&r, &DiffQuery { path: "w.txt".into(), mode: Some(DiffMode::Staged), ..Default::default() }).await.unwrap().0;
+    super::diff::apply_hunks(&r, super::diff::HunkOp::Unstage, &req(staged.fingerprint)).await.unwrap();
+    assert_eq!(index_of(p, "w.txt"), "a\nb\nc\n");
+    let diff = working_diff(p, "w.txt").await;
+    assert_eq!(diff.modified, "a\nb\nH\nc\nZ\n");
+    super::diff::apply_hunks(&r, super::diff::HunkOp::Discard, &req(diff.fingerprint)).await.unwrap();
+    assert_eq!(read(p, "w.txt"), "a\r\nb\r\nc\r\n");
+
+    // Part of an untracked CRLF file goes into the index with LF, as `git add` would.
+    write(p, "u.txt", "x\r\ny\r\nz\r\n");
+    let diff = working_diff(p, "u.txt").await;
+    assert!(diff.untracked && diff.modified == "x\ny\nz\n", "{diff:?}");
+    lines_op(p, LineOp::Stage, "u.txt", &[add(1), add(3)]).await.unwrap();
+    assert_eq!(index_of(p, "u.txt"), "x\nz\n");
+    assert_eq!(working_diff(p, "u.txt").await.modified, "x\ny\nz\n");
+}
+
+#[tokio::test]
+async fn crlf_by_attribute_and_unconverted_crlf() {
+    // `text eol=crlf` in .gitattributes, core.autocrlf off.
+    let d = init_repo();
+    let p = d.path();
+    write(p, ".gitattributes", "*.txt text eol=crlf\n");
+    write(p, "w.txt", "a\r\nb\r\n");
+    commit_all(p, "init");
+    assert_eq!(index_of(p, "w.txt"), "a\nb\n");
+    write(p, "w.txt", "a\r\nNEW\r\nb\r\nZ\r\n");
+    assert_eq!(working_diff(p, "w.txt").await.modified, "a\nNEW\nb\nZ\n");
+    lines_op(p, LineOp::Stage, "w.txt", &[add(4)]).await.unwrap();
+    assert_eq!(index_of(p, "w.txt"), "a\nb\nZ\n");
+    lines_op(p, LineOp::Discard, "w.txt", &[add(2)]).await.unwrap();
+    assert_eq!(read(p, "w.txt"), "a\r\nb\r\nZ\r\n");
+    // `-text`: bytes as they are.
+    write(p, ".gitattributes", "*.txt text eol=crlf\nraw.txt -text\n");
+    write(p, "raw.txt", "r\n");
+    commit_all(p, "raw");
+    write(p, "raw.txt", "r\r\n");
+    assert_eq!(working_diff(p, "raw.txt").await.modified, "r\r\n");
+
+    // No conversion: a file whose line endings the user changed shows its CRs (every line
+    // is a change for git too).
+    let d = init_repo();
+    let p = d.path();
+    write(p, "w.txt", "a\nb\n");
+    commit_all(p, "init");
+    write(p, "w.txt", "a\r\nb\r\n");
+    let diff = working_diff(p, "w.txt").await;
+    assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\nb\n", "a\r\nb\r\n"));
+    assert_eq!(diff.lines.len(), 4);
+    // `text` converts a file committed with CRLF all the same (git shows every line changed
+    // until it is renormalized): the working-tree side reads with LF.
+    write(p, "c.txt", "a\r\nb\r\n");
+    commit_all(p, "crlf");
+    write(p, ".gitattributes", "c.txt text\n");
+    let diff = working_diff(p, "c.txt").await;
+    assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\r\nb\r\n", "a\nb\n"));
+}
+
+#[tokio::test]
+async fn conflicts_in_crlf_working_trees_are_shown_with_lf_and_resolved_with_crlf() {
+    let d = init_repo();
+    let p = d.path();
+    git(p, &["config", "core.autocrlf", "true"]);
+    write(p, "a.txt", "one\r\ntwo\r\n");
+    commit_all(p, "init");
+    git(p, &["checkout", "-q", "-b", "feature"]);
+    write(p, "a.txt", "one\r\nfeature\r\n");
+    commit_all(p, "feature");
+    git(p, &["checkout", "-q", "main"]);
+    write(p, "a.txt", "one\r\nmain\r\n");
+    commit_all(p, "main");
+    let r = repo(p).await;
+    let out = ops::merge(&r, &ops::MergeRequest { rev: "feature".into(), no_ff: false, ff_only: false, squash: false, message: None }).await.unwrap();
+    assert!(out.conflicts, "{out:?}");
+    assert!(read(p, "a.txt").contains("<<<<<<< HEAD\r\n"), "git writes the conflict with CRLF");
+    let v = super::conflicts::versions(&r, "a.txt").await.unwrap();
+    assert_eq!(v.ours.as_deref(), Some("one\nmain\n"));
+    assert!(v.merged.starts_with("one\n<<<<<<< HEAD\nmain\n=======\n") && !v.merged.contains('\r'), "{}", v.merged);
+    let req = super::conflicts::ResolveRequest { path: "a.txt".into(), content: Some("one\nmain and feature\n".into()), side: None };
+    super::conflicts::resolve(&r, &req).await.unwrap();
+    assert_eq!(read(p, "a.txt"), "one\r\nmain and feature\r\n");
+    assert_eq!(index_of(p, "a.txt"), "one\nmain and feature\n");
+    assert!(status::status(&r, false).await.unwrap().files.iter().all(|f| f.path != "a.txt" || f.worktree == ' '));
+}
+
 #[tokio::test]
 async fn line_staging_of_new_deleted_and_renamed_files() {
     let d = init_repo();
@@ -298,7 +418,7 @@ fn shim() -> String {
     let exe = std::env::current_exe().unwrap();
     format!(
         "WB_GIT_EDITOR_SHIM=1 {} --exact --quiet --test-threads=1 git::tests_flows::git_editor_shim --",
-        rebase_i::sh_quote(&exe.to_string_lossy())
+        rebase_i::sh_path(&exe)
     )
 }
 

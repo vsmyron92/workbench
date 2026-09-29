@@ -308,8 +308,10 @@ async fn run(state: &AppState, repo: &Repo, spec: &RemoteOpSpec, op_id: &str, ca
     for (k, v) in &spec.env {
         g = g.env(k, v.clone());
     }
-    if let Some(askpass) = state.git.askpass.get() {
-        g = g.env("GIT_ASKPASS", askpass.to_string_lossy().to_string());
+    // GIT_ASKPASS (Windows: also ssh's SSH_ASKPASS); GIT_TERMINAL_PROMPT=0 comes with
+    // every git command (`Git::command`).
+    for (k, v) in state.git.askpass.get().into_iter().flatten() {
+        g = g.env(k, v.clone());
     }
     g = g
         .env("WORKBENCH_PROJECT_ID", repo.project_id.clone())

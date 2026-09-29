@@ -458,15 +458,21 @@ pub fn write_staging(dir: &Path, git_dir: &Path, plan: &[PlanCommit], p: &Prepar
 }
 
 /// Shell-quote one word for the `GIT_*EDITOR` command lines (git runs them with sh).
-pub fn sh_quote(s: &str) -> String {
+fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// A path as one word of the `GIT_*EDITOR` command lines: `sh_quote`d, with `/`
+/// separators on Windows, where Git for Windows runs them with its own sh.
+pub fn sh_path(p: &Path) -> String {
+    sh_quote(&crate::util::os::path::to_slash(p))
 }
 
 /// `GIT_SEQUENCE_EDITOR` / `GIT_EDITOR` for a run, given the helper program prefix.
 pub fn editor_env(program: &str, staging: &Path, git_dir: &Path) -> Vec<(String, String)> {
     vec![
-        ("GIT_SEQUENCE_EDITOR".into(), format!("{program} todo {}", sh_quote(&staging.to_string_lossy()))),
-        ("GIT_EDITOR".into(), format!("{program} message {}", sh_quote(&git_dir.to_string_lossy()))),
+        ("GIT_SEQUENCE_EDITOR".into(), format!("{program} todo {}", sh_path(staging))),
+        ("GIT_EDITOR".into(), format!("{program} message {}", sh_path(git_dir))),
     ]
 }
 
@@ -478,7 +484,7 @@ pub fn continue_env(git_dir: &Path, program: Option<&str>) -> (Vec<String>, Vec<
     let ch = std::fs::read_to_string(dir.join("comment-char")).ok().and_then(|s| s.trim().chars().next()).unwrap_or('#');
     (
         vec!["-c".into(), format!("core.commentChar={ch}")],
-        vec![("GIT_EDITOR".into(), format!("{program} message {}", sh_quote(&git_dir.to_string_lossy())))],
+        vec![("GIT_EDITOR".into(), format!("{program} message {}", sh_path(git_dir)))],
     )
 }
 
@@ -699,6 +705,15 @@ mod tests {
     }
     fn e(c: &PlanCommit, action: Action, message: Option<&str>) -> Entry {
         Entry { sha: c.sha.clone(), action, message: message.map(str::to_string) }
+    }
+
+    #[test]
+    fn editor_paths_are_one_sh_word() {
+        assert_eq!(sh_path(Path::new("/home/u/it's here/wb")), r"'/home/u/it'\''s here/wb'");
+        // Git for Windows' sh reads `/` separators (a `\` is kept inside quotes, but other
+        // programs on the way may not).
+        #[cfg(windows)]
+        assert_eq!(sh_path(Path::new(r"C:\Users\A B\workbench.exe")), "'C:/Users/A B/workbench.exe'");
     }
 
     #[test]

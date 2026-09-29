@@ -225,6 +225,12 @@ case-insensitive drive letter (servers often lowercase it); `lsp-src://pid/C:/�
 `eol=crlf`). In the git slice read `git ls-files --eol <path>`: when the index has LF and the
 working tree CRLF, strip `\r` from the working-tree side for the diff and for the patch given
 to `git apply --cached`, and put CRLF back when rolling lines back into the working tree.
+Done (`git/eol.rs`, on every OS): git's own diffs already read such a file with LF, so the
+staging patches were right and `git apply` writes CRLF back by itself; what was missing is
+the diff's `modified` side and a conflict's `merged` text (now LF, like the hunks) and a
+conflict resolved with edited text (written back with CRLF). "Converted" follows git:
+`ls-files --eol` (`i/lf`, `w/crlf`, the `attr/` column) and `core.autocrlf` when no attribute
+decides; anything else keeps its bytes.
 
 **Program lookup, `.cmd` shims and BatBadBut.** portable-pty resolves PATHEXT and launches
 `claude.cmd` with MSVCRT quoting (`cmdbuilder.rs:581-606, 702`): command injection through
@@ -277,6 +283,22 @@ through its sh) with forward-slash paths. Remote operations start with no consol
 starts ssh without one too, and ssh fails instead of prompting on a hidden console), plus
 `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS=<exe>` and `SSH_ASKPASS_REQUIRE=force`. Surface
 "dubious ownership" (`safe.directory`) errors verbatim.
+
+Done (`util::os::helper`, git slice). Unix keeps its `#!/bin/sh` wrapper: the variable route
+is not the same there (every hook, ssh and credential helper git starts would inherit
+`WORKBENCH_HELPER`, and the argv changes). The dispatch takes a call only with the variable
+set and a single argument that is not a subcommand or an option, because the rebase's
+`workbench git-editor …` and hooks run under the same environment. What Windows users should
+know: git asks its credential helpers first (Git for Windows installs Credential Manager),
+then Workbench's askpass, which answers only the configured GitLab host over https. Remote
+ops run with `GCM_INTERACTIVE=never`: Credential Manager returns what it has stored but
+never opens its sign-in window, so an https host it knows nothing about (the GitLab host
+included) gets Workbench's token or fails at once. Git hands credentials that worked to its
+helpers, so Credential Manager may keep that token afterwards. An ssh key with a passphrase must be loaded in an agent the ssh git uses
+can reach, and a new host must be accepted once in a terminal (`known_hosts`): remote
+operations cannot prompt and fail instead. A repository an administrator created, or one
+on a drive without owners (FAT, exFAT, some network shares), stops with git's
+`safe.directory` message, which names the command that trusts it.
 
 **Agent hooks.** Claude's hooks are HTTP hooks (`agent.rs:175-205`); only the `SessionStart`
 and `statusLine` helpers are commands. On Windows emit `"C:/…/workbench.exe" statusline`

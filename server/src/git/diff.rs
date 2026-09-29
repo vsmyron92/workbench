@@ -10,12 +10,15 @@
 //! client saw (409 when the file moved on — another agent may be editing it), then
 //! build a patch containing only the chosen hunks and feed it to `git apply`.
 //! Patches are built from the raw diff bytes, so files in any encoding round-trip.
+//! The working-tree side is shown as git reads it (`eol`: a CRLF file git normalizes
+//! shows with LF, like its hunks).
 
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::cmd::{check_rev, literal, split_z};
+use super::eol;
 use super::lines::{ChangedLine, changed_lines};
 use super::repo::Repo;
 use super::status::{StatusFile, entries_for, narrow_entries};
@@ -386,8 +389,18 @@ pub async fn blob_side(repo: &Repo, spec: &str) -> Result<Side, ApiError> {
     Ok(side_from_bytes(out.stdout))
 }
 
-/// The working-tree file (symlinks read as their target text, like git stores them).
+/// The working-tree file as git reads it: a symlink as its target text (git stores it so),
+/// a file whose CRLFs git turns into LFs with LFs, like the hunks (`eol`).
 pub async fn worktree_side(repo: &Repo, repo_rel: &str) -> Result<Side, ApiError> {
+    let mut side = worktree_bytes(repo, repo_rel).await?;
+    if side.text.contains("\r\n") {
+        side.text = eol::of(repo, repo_rel).await.read(side.text);
+    }
+    Ok(side)
+}
+
+/// The working-tree file byte for byte (a symlink as its target text).
+pub async fn worktree_bytes(repo: &Repo, repo_rel: &str) -> Result<Side, ApiError> {
     let abs = repo.abs(repo_rel);
     // The parent must stay inside the working tree (no symlinked-directory escapes).
     if let Some(parent) = std::path::Path::new(repo_rel).parent() {

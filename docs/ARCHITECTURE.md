@@ -44,6 +44,7 @@ Python would have been fine for I/O, but Rust is lower overhead and fits better.
 ```
 server/            Rust crate `workbench`
   src/main.rs        CLI: serve | open | url | askpass | git-editor | statusline | service
+                     (and git/ssh's askpass call on Windows: WORKBENCH_HELPER=askpass <prompt>)
   src/app.rs         AppState + router assembly (core)
   src/auth.rs        token → device cookie, pairing, Host/Origin guard, agent tokens (core)
   src/config/        global config.toml + project model (layered TOML) (core)
@@ -173,7 +174,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 | `devcontainer::{summary, running_target, exec_target, uses_container, run_inside, port_route, agent_command, container_has_curl, write_into, kill_inside, workspace_mount, docker::exec}`, `ExecTarget::{wrap, map_path, describe}` | devcontainer | projects (`ProjectSummary.devcontainer`), terminals (`meta.inContainer`), apps (runs inside, readiness, previews), lsp and debug (servers and adapters inside, path mapping), files (`workspace_mount`: agent paths back to the host) |
 | `<slice>::mcp_tools() -> Vec<McpTool>` | each slice | platform (`/mcp` server via `mcp::all_tools`) |
 | `<slice>::{router, start}`, `terminals::shutdown`, `apps::shutdown`, `lsp::shutdown`, `debug::shutdown` | each slice | app.rs |
-| `git::{cli_askpass, cli_git_editor}`, `terminals::cli_statusline`, `platform::service::cli` | git, terminals, platform | main.rs (`askpass`, `git-editor`, `statusline`, `service`) |
+| `git::{cli_askpass, cli_git_editor}`, `terminals::cli_statusline`, `platform::service::cli` | git, terminals, platform | main.rs (`askpass`, `git-editor`, `statusline`, `service`; `cli_askpass` also for `util::os::helper::askpass_prompt`) |
 | `mcp::call_api(state, method, path, body, ctx)` | core | any MCP tool that reuses a REST route |
 | `McpCtx::{project_for, may_see_project}` | core | every MCP tool that takes a project or reads another terminal |
 | `AppState::secret`, `events.emit/ui_open/ui_open_id/notify`, `projects.require/find_by_path` | core | everyone |
@@ -407,7 +408,8 @@ interface GitStatus {
 // git — GET /api/projects/{pid}/git/diff?path=&mode=working|staged|commit|compare&sha=&base=&head=
 interface GitFileDiff {
   path: string; oldPath?: string
-  original: string; modified: string          // full texts ('' when absent)
+  original: string; modified: string          // full texts ('' when absent); the working tree as git reads it
+                                               // (LF where git turns its CRLFs into LFs, like the hunks)
   binary: boolean; tooLarge: boolean
   hunks: { header: string; oldStart: number; oldLines: number; newStart: number; newLines: number }[]
   fingerprint: string                          // pass back when staging hunks or lines
@@ -1603,7 +1605,12 @@ shifted by the emitted hunks' delta on the other; `-N,0` hunks follow git's conv
 A line without a final newline stays last on its side: when turning a change into
 context would put lines after it, the change is kept and a copy with a newline is
 emitted (the smallest valid patch). Lines are raw bytes (CRLF and any encoding
-round-trip; `autocrlf` works because `git apply` converts). Part of an untracked file
+round-trip). A working tree git checks out with CRLF over an LF index (`core.autocrlf`,
+`text`/`eol=crlf` attributes; `eol.rs` reads `git ls-files --eol` and `core.autocrlf`): git's
+diffs already show it with LF, so the staging patches are LF, `git apply` writes CRLF back
+when rolling back, and Workbench shows the working-tree side (`modified`, a conflict's
+`merged`) with LF too and writes a conflict resolved with edited text back with CRLF;
+files git does not convert keep their bytes. Part of an untracked file
 becomes a `new file` patch; an intent-to-add entry gets a modification patch; renames
 patch the new path; every line of a new/deleted file becomes the file-level operation;
 partial roll back of a deleted file and partial unstage of a staged deletion are
@@ -1709,6 +1716,21 @@ tree diff (`-U0`; a line in a replaced block maps to the old block, a line in an
 block to the old lines around it; 400 when every selected line is uncommitted), and a
 file renamed since is logged under its old name. The editor action sends it (panel param
 `worktreeLines`).
+
+**Helpers and git's refusals.** `GIT_ASKPASS` for remote ops comes from
+`util::os::helper::askpass_env` (`GitState.askpass` holds the environment): on Unix the
+`data_dir/git-askpass` wrapper script as before; on Windows the absolute `workbench.exe`
+itself with `WORKBENCH_HELPER=askpass`, also as ssh's `SSH_ASKPASS` with
+`SSH_ASKPASS_REQUIRE=force`, so a passphrase or unknown host key fails the op at once
+(remote ops start without a console), and `GCM_INTERACTIVE=never`, so Git Credential
+Manager, which git asks first, never opens a sign-in window. `main.rs` answers such a call before clap parses
+anything: the variable set and a single argument that is not a subcommand or an option
+(`askpass_prompt`), so hooks and the rebase editor, which inherit the variable, still run
+their commands. `GIT_EDITOR`/`GIT_SEQUENCE_EDITOR` quote their paths for sh with `/`
+separators (`rebase_i::sh_path`; Git for Windows runs them with its sh). A repository git
+refuses for its owner (`safe.directory`, "detected dubious ownership") answers
+`403 unsafe_repository` with git's message verbatim (it names the owners and the command
+that trusts the folder) instead of `not_a_repo`.
 
 **UI.** Commit tool window: tabs **Changes / Stash / Shelf**; Changes groups by the
 staging area (as before) or by **changelists** (toolbar ▸ Group by), with a checkbox per

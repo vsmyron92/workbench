@@ -3,11 +3,13 @@
 //! token), and refuse everything else (other hosts, ssh passphrases) with a
 //! non-zero exit so git fails fast instead of hanging.
 //!
-//! Git runs GIT_ASKPASS without a shell and with the prompt as the only argument,
-//! so the server points it at a tiny wrapper script that calls
-//! `workbench askpass "<prompt>"` (the CLI subcommand handled by `cli_askpass`).
+//! Git runs GIT_ASKPASS without a shell and with the prompt as the only argument.
+//! `util::os::helper::askpass_env` points it at `workbench askpass "<prompt>"` (the CLI
+//! subcommand handled by `cli_askpass`): through a tiny wrapper script on Unix; on
+//! Windows at the executable itself, with `WORKBENCH_HELPER=askpass` (ssh's
+//! `SSH_ASKPASS` too, so a passphrase or host-key prompt fails instead of waiting).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::config::{GlobalConfig, Paths, ProjectFile, SecretRef};
 
@@ -110,18 +112,6 @@ pub fn cli_askpass(prompt: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Write `<data_dir>/git-askpass` (0700) that runs this binary's askpass helper.
-pub fn write_wrapper(data_dir: &Path) -> anyhow::Result<PathBuf> {
-    let exe = crate::util::os::proc::current_exe()?;
-    let exe = exe.to_string_lossy();
-    let quoted = format!("'{}'", exe.replace('\'', "'\\''"));
-    let script = format!("#!/bin/sh\n# Written by Workbench: answers git credential prompts for the configured GitLab host.\nexec {quoted} askpass \"$1\"\n");
-    let path = data_dir.join("git-askpass");
-    crate::util::fs::write_atomic(&path, script.as_bytes(), 0o700)?;
-    crate::util::fs::set_mode(&path, 0o700);
-    Ok(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +126,11 @@ mod tests {
         assert_eq!(match_prompt("Username for 'http://gitlab.com': ", "gitlab.com"), None);
         assert_eq!(match_prompt("Enter passphrase for key '/home/u/.ssh/id_ed25519': ", "gitlab.com"), None);
         assert_eq!(match_prompt("Username for 'https://gitlab.com': ", ""), None);
+        // What ssh asks through SSH_ASKPASS (Windows) is refused too.
+        let host_key = "The authenticity of host 'gitlab.com (1.2.3.4)' can't be established.\nAre you sure you want to continue connecting (yes/no/[fingerprint])?";
+        assert_eq!(match_prompt(host_key, "gitlab.com"), None);
+        assert_eq!(match_prompt("(git@gitlab.com) Password: ", "gitlab.com"), None);
+        assert_eq!(match_prompt("Enter passphrase for key 'C:\\Users\\u/.ssh/id_ed25519': ", "gitlab.com"), None);
     }
 
     #[test]
@@ -144,15 +139,5 @@ mod tests {
         assert_eq!(match_prompt("Username for 'https://git.corp:8443': ", "git.corp"), None);
         assert_eq!(match_prompt("Username for 'https://git.corp:443': ", "git.corp"), Some(Answer::Username));
         assert_eq!(match_prompt("Username for 'https://git.corp': ", "git.corp:9000"), None);
-    }
-
-    #[test]
-    fn wrapper_script_quotes_the_binary_path() {
-        let d = tempfile::tempdir().unwrap();
-        let p = write_wrapper(d.path()).unwrap();
-        let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.starts_with("#!/bin/sh\n"));
-        assert!(text.contains(" askpass \"$1\""));
-        crate::util::os::perm::assert_mode(&p, 0o700);
     }
 }

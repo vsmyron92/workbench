@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
-use super::cmd::Git;
+use super::cmd::{Git, GitOutput};
 use crate::error::ApiError;
 
 #[derive(Debug, Clone)]
@@ -26,19 +26,22 @@ pub struct Repo {
     pub prefix: String,
 }
 
+pub(super) const DISCOVER_ARGS: [&str; 5] = ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir", "--show-prefix"];
+
+/// Why `root` is no repository Workbench can use: git's own words when it refuses a
+/// folder another user owns, else "not a git repository".
+pub(super) fn discover_error(out: &GitOutput, root: &Path) -> ApiError {
+    super::cmd::unsafe_repository(out).unwrap_or_else(|| {
+        ApiError::new(StatusCode::NOT_FOUND, "not_a_repo", format!("{} is not a git repository", crate::config::contract_tilde(root)))
+    })
+}
+
 impl Repo {
     /// Resolve the repository containing `root`.
     pub async fn discover(project_id: &str, root: &Path) -> Result<Self, ApiError> {
-        let out = Git::read(root)
-            .args(["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir", "--show-prefix"])
-            .run()
-            .await?;
+        let out = Git::read(root).args(DISCOVER_ARGS).run().await?;
         if !out.ok() {
-            return Err(ApiError::new(
-                StatusCode::NOT_FOUND,
-                "not_a_repo",
-                format!("{} is not a git repository", crate::config::contract_tilde(root)),
-            ));
+            return Err(discover_error(&out, root));
         }
         let text = out.text();
         let mut lines = text.lines();
