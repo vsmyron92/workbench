@@ -1860,7 +1860,7 @@ mod tests {
         assert_eq!(v["sourceReference"], 7);
         // A symlinked view of the project still maps into it.
         let link = d.path().join("link");
-        std::os::unix::fs::symlink(&root, &link).unwrap();
+        crate::util::os::fs::symlink(&root, &link).unwrap();
         let host = PathMap::new(&root, None);
         assert_eq!(host.project_rel(&link.join("src")), Some("src".into()));
     }

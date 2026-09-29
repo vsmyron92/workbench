@@ -523,7 +523,8 @@ a project id or `home` (not tied to a project). No project gets the id `home` or
   order and entries we cannot use survive: the new file is staged and synced first, then swapped in with
   `renameat2(RENAME_EXCHANGE)` only while the registry still holds what was read (checked again after the
   swap, which is undone on a mismatch); otherwise the change is redone on the newer file (409 after 8
-  tries). A registry that does not parse is never overwritten. Our registries use UTC timestamps; `updated` is bumped on any change.
+  tries). Windows has no atomic exchange (`util::os::fs::rename_exchange` is unsupported there): the check
+  right before a plain rename is the last one. A registry that does not parse is never overwritten. Our registries use UTC timestamps; `updated` is bumped on any change.
 - **Lists** sort pinned first, then by freshness (`updated ?? created`, newest first); a card is
   `archived` when its status says so or it was not touched for 7 days (unless pinned or a sample).
 - **Mr. Mak compatibility.** A project whose root has `workspace/workspace.json` also shows those cards,

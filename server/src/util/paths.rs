@@ -114,7 +114,7 @@ mod tests {
     fn rejects_symlinks_that_leave_the_root() {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        crate::util::os::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
         assert!(resolve_in_root(dir.path(), "link/secret").is_err());
     }
 
@@ -124,8 +124,8 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("a")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.join("a/link")).unwrap();
+        crate::util::os::fs::symlink(outside.path(), root.join("link")).unwrap();
+        crate::util::os::fs::symlink(outside.path(), root.join("a/link")).unwrap();
         // The link itself is an entry of the project…
         assert!(resolve_in_root(root, "link").is_err());
         assert_eq!(resolve_entry_in_root(root, "link").unwrap(), root.join("link"));

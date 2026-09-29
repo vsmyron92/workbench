@@ -298,7 +298,7 @@ mod tests {
         std::fs::create_dir_all(prefix.join("node_modules/typescript-language-server/lib")).unwrap();
         std::fs::write(prefix.join("node_modules/typescript-language-server/lib/cli.mjs"), "").unwrap();
         std::fs::create_dir_all(prefix.join("node_modules/.bin")).unwrap();
-        std::os::unix::fs::symlink("../typescript-language-server/lib/cli.mjs", prefix.join("node_modules/.bin/typescript-language-server")).unwrap();
+        crate::util::os::fs::symlink("../typescript-language-server/lib/cli.mjs", prefix.join("node_modules/.bin/typescript-language-server")).unwrap();
         let (specs, _) = super::super::config::LspConfig::default().specs();
         let mut ts = specs.iter().find(|s| s.id == "typescript").unwrap().clone();
         preset_defaults(&mut ts, &Placement::Host(prefix.join("node_modules/.bin/typescript-language-server")));

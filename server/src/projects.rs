@@ -776,7 +776,7 @@ mod tests {
             let e = call_api(&t.state, Method::GET, &format!("{base}/read?path={bad}"), None, &ctx).await.unwrap_err();
             assert!(e.status.is_client_error(), "{bad}: {e:?}");
         }
-        std::os::unix::fs::symlink(t.state.paths.data_dir.join("token"), p.root.join("link")).unwrap();
+        crate::util::os::fs::symlink(t.state.paths.data_dir.join("token"), p.root.join("link")).unwrap();
         assert!(call_api(&t.state, Method::GET, &format!("{base}/read?path=link"), None, &ctx).await.is_err());
         // The list the UI shows never has it.
         let v = call_api(&t.state, Method::GET, "/api/projects", None, &ctx).await.unwrap();

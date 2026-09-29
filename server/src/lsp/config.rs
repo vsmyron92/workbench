@@ -647,7 +647,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(bin.join(f), std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        std::os::unix::fs::symlink(bin.join("rustup"), bin.join("fake-analyzer")).unwrap();
+        crate::util::os::fs::symlink(bin.join("rustup"), bin.join("fake-analyzer")).unwrap();
         let proxy = bin.join("fake-analyzer").display().to_string();
         let err = locate(&proxy, Some("rust-analyzer")).await.unwrap_err();
         assert!(err.contains("rustup component add rust-analyzer"), "{err}");

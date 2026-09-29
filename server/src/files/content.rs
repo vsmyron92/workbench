@@ -568,7 +568,7 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"\xEF\xBB\xBFecho bye\n");
 
         let link = dir.path().join("link.sh");
-        std::os::unix::fs::symlink(&p, &link).unwrap();
+        crate::util::os::fs::symlink(&p, &link).unwrap();
         let etag = sha256_hex(&std::fs::read(&p).unwrap());
         write_checked(&link, b"echo link\n".to_vec(), Some(&etag), false).unwrap();
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());

@@ -13,7 +13,8 @@
 //!   synced) first, and only swapped in while the registry still holds what was read
 //!   (`renameat2(RENAME_EXCHANGE)`, checked after the swap and undone on a mismatch),
 //!   else the update starts over on the newer file. An agent that replaces the file
-//!   meanwhile never loses its change.
+//!   meanwhile never loses its change. (Windows has no exchange: there the check
+//!   right before a plain rename is the last one.)
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -295,7 +296,7 @@ fn stage_registry(path: &Path, bytes: &[u8]) -> ApiResult<PathBuf> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "workspace.json".into());
     let tmp = dir.join(format!(".{name}.wb-tmp-{}", util::random_token(6)));
     let written = (|| -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(mode).open(&tmp)?;
+        let mut f = util::os::fs::open_nofollow(std::fs::OpenOptions::new().write(true).create_new(true).mode(mode), &tmp)?;
         f.set_permissions(std::fs::Permissions::from_mode(mode))?;
         f.write_all(bytes)?;
         f.sync_all()
@@ -326,10 +327,10 @@ fn commit_registry(tmp: &Path, path: &Path, source: &[u8], ours: &[u8]) -> ApiRe
         }
         if source.is_empty() {
             // Create only if it still does not exist.
-            return match renameat2(tmp, path, libc::RENAME_NOREPLACE) {
+            return match util::os::fs::rename_noreplace_atomic(tmp, path) {
                 Ok(()) => Ok(true),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-                Err(e) if unsupported(&e) => std::fs::rename(tmp, path).map(|_| true),
+                Err(e) if util::os::fs::rename_unsupported(&e) => std::fs::rename(tmp, path).map(|_| true),
                 Err(e) => Err(e),
             };
         }
@@ -357,12 +358,12 @@ fn commit_registry(tmp: &Path, path: &Path, source: &[u8], ours: &[u8]) -> ApiRe
 /// that what came out is `source`. If a write landed after the last check, swap it
 /// back (keeping whatever is newest) and report `false`.
 fn swap_if_unchanged(tmp: &Path, path: &Path, source: &[u8], ours: &[u8]) -> std::io::Result<bool> {
-    match renameat2(tmp, path, libc::RENAME_EXCHANGE) {
+    match util::os::fs::rename_exchange(tmp, path) {
         Ok(()) => {}
         // Deleted meanwhile: let the caller reread (and report it missing).
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        // A filesystem without RENAME_EXCHANGE: the check above was the last one.
-        Err(e) if unsupported(&e) => return std::fs::rename(tmp, path).map(|_| true),
+        // A filesystem (or Windows) without RENAME_EXCHANGE: the check above was the last one.
+        Err(e) if util::os::fs::rename_unsupported(&e) => return std::fs::rename(tmp, path).map(|_| true),
         Err(e) => return Err(e),
     }
     // `tmp` now names the file we replaced.
@@ -371,26 +372,13 @@ fn swap_if_unchanged(tmp: &Path, path: &Path, source: &[u8], ours: &[u8]) -> std
         return Ok(true);
     }
     // Not what we read (or unreadable): put it back.
-    renameat2(tmp, path, libc::RENAME_EXCHANGE)?;
+    util::os::fs::rename_exchange(tmp, path)?;
     replaced?;
     if read_or_empty(tmp)? != ours {
         // Yet another write replaced ours in that instant: it is the newest, keep it.
-        renameat2(tmp, path, libc::RENAME_EXCHANGE)?;
+        util::os::fs::rename_exchange(tmp, path)?;
     }
     Ok(false)
-}
-
-fn unsupported(e: &std::io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP))
-}
-
-pub(super) fn renameat2(from: &Path, to: &Path, flags: libc::c_uint) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let f = std::ffi::CString::new(from.as_os_str().as_bytes())?;
-    let t = std::ffi::CString::new(to.as_os_str().as_bytes())?;
-    // SAFETY: both pointers are valid NUL-terminated strings for the call's duration.
-    let rc = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), flags) };
-    if rc == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
 /// Test-only injection point: run code between staging and committing a registry.
@@ -922,7 +910,7 @@ fn copy_new_file(src: &Path, dest: &Path) -> std::io::Result<u64> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut from = std::fs::File::open(src)?;
     let mode = from.metadata()?.permissions().mode() & 0o777;
-    let mut to = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(0o600).open(dest)?;
+    let mut to = util::os::fs::open_nofollow(std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600), dest)?;
     let copied = std::io::copy(&mut from, &mut to).and_then(|n| to.set_permissions(std::fs::Permissions::from_mode(mode)).map(|_| n));
     if copied.is_err() {
         let _ = std::fs::remove_file(dest);
@@ -1536,7 +1524,9 @@ mod tests {
         assert_eq!(names, ["workspace.json"], "no temp files left");
     }
 
-    /// The swap itself: a write that slipped in after the last check is put back.
+    /// The swap itself: a write that slipped in after the last check is put back
+    /// (`RENAME_EXCHANGE`; Windows has none, its last check is the one before).
+    #[cfg(unix)]
     #[test]
     fn swap_puts_back_a_registry_it_displaced() {
         let dir = tempfile::tempdir().unwrap();
@@ -1551,7 +1541,11 @@ mod tests {
         // Based on what is there: swapped in, and the old file is what `tmp` names.
         assert!(swap_if_unchanged(&tmp, &reg, b"theirs", b"ours").unwrap());
         assert_eq!(std::fs::read_to_string(&reg).unwrap(), "ours");
-        // A registry that appeared meanwhile is never replaced by a create.
+    }
+
+    #[test]
+    fn a_create_never_replaces_a_registry_that_appeared() {
+        let dir = tempfile::tempdir().unwrap();
         let fresh = dir.path().join("new.json");
         std::fs::write(&fresh, "someone's").unwrap();
         let staged = stage_registry(&fresh, b"mine").unwrap();
@@ -1682,7 +1676,7 @@ mod tests {
         assert!(!card.join("shots/.env").exists());
 
         // Symlinks out of the card are neither listed nor resolved.
-        std::os::unix::fs::symlink(&project, card.join("escape")).unwrap();
+        util::os::fs::symlink(&project, card.join("escape")).unwrap();
         assert!(resolve_in_card(&card, "escape/docs/r.md").is_err());
         let (list, _) = list_files(&card, "").unwrap();
         let names: Vec<_> = list.iter().map(|f| f.name.as_str()).collect();

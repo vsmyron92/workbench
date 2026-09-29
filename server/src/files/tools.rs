@@ -225,7 +225,7 @@ mod tests {
     async fn outside_symlinks_are_moved_as_links() {
         let (state, dirs, pid) = app().await;
         let (proj, outside) = (dirs[2].path(), dirs[3].path());
-        std::os::unix::fs::symlink(outside, proj.join("out-link")).unwrap();
+        crate::util::os::fs::symlink(outside, proj.join("out-link")).unwrap();
         let ctx = McpCtx::default();
         let op_url = format!("/api/projects/{pid}/files/op");
         let op = |body: serde_json::Value| call_api(&state, Method::POST, &op_url, Some(body), &ctx);

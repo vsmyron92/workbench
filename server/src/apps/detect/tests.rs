@@ -669,7 +669,7 @@ fn hostile_and_empty_trees_are_fine() {
     write(r, "Caddyfile", "{{{{ }}");
     write(r, "CLAUDE.md", "```bash\n\\\n\\\n");
     // A symlink loop must not be followed, and a FIFO must not block.
-    std::os::unix::fs::symlink(r, r.join("loop")).unwrap();
+    crate::util::os::fs::symlink(r, r.join("loop")).unwrap();
     nix::unistd::mkfifo(&r.join("CLAUDE.md.fifo"), nix::sys::stat::Mode::S_IRWXU).unwrap();
     std::fs::remove_file(r.join("CLAUDE.md")).unwrap();
     std::fs::rename(r.join("CLAUDE.md.fifo"), r.join("CLAUDE.md")).unwrap();
