@@ -73,4 +73,4 @@ See [Projects and files](projects) for `~/.config/workbench/projects/<id>.toml` 
 | `workbench serve` | run the server (the default) |
 | `workbench open` | open the UI of the running server, signed in with a one-time code |
 | `workbench url` | print a login URL that carries the master token: keep it private |
-| `workbench service …` | install, check or remove the systemd user service |
+| `workbench service …` | install, check or remove the [service](service): a systemd user service on Linux; on Windows a sign-in entry and a Start Menu shortcut, and `stop` |

@@ -5,24 +5,31 @@
 - **Windows (experimental):** the server is being ported to Windows 10 (1809 or newer) and
   11 on x86_64 ([plan and status](docs/windows-port.md)). Nothing of it has been tested on
   a real Windows machine yet. Operating-system code now goes through one layer
-  (`util::os`), and Linux behaviour is unchanged (apart from the Unity item below). On
+  (`util::os`); on Linux only the items marked "every OS" below change anything. On
   Windows, private files get an access list for you and SYSTEM only, child processes run in
   Job Objects, programs are found through `PATHEXT` (npm's `.cmd` shims start through
   `node.exe`), run commands go through PowerShell, a DLL loaded by name comes only from
   Workbench's own folder or System32, the configuration is in `%APPDATA%\workbench` and the
   state in `%LOCALAPPDATA%\workbench`. Terminals run in a pseudoconsole (ConPTY),
-  PowerShell by default; `workbench service` installs a sign-in entry and a Start Menu
-  shortcut that start `workbenchw.exe`, which supervises the server without a console
-  window; git and ssh ask Workbench itself for credentials; each project has one recursive
-  file watch, so its folders stay renamable; language servers, debuggers and detected run
-  commands take their Windows forms; secret files written by Windows PowerShell 5.1
+  PowerShell by default, and closing a terminal ends what it started, a browser or editor it
+  opened that was not running yet included; `workbench service` installs a sign-in entry
+  and a Start Menu shortcut that start `workbenchw.exe`, which supervises the server without
+  a console window; git and ssh ask Workbench itself for credentials, and git's credential
+  helpers (Credential Manager) are neither asked for nor handed the token of the GitLab host
+  Workbench answers for; each project has one recursive file watch, so its folders stay
+  renamable; language servers, debuggers and detected run commands take their Windows
+  forms; secret files written by Windows PowerShell 5.1
   (UTF-16, or UTF-8 with a byte order mark) read as text. A program installed while
   Workbench runs is found once it restarts, as the "not found" messages say.
   `GET /api/health` reports the OS and what it leaves out (dev containers, desktop
   notifications, gdb attach and rust-gdb's pretty printers, projects on network or WSL
   paths), and those features answer `unsupported_platform` with the reason.
-- **Terminals:** `[terminals] shell` in `config.toml` sets the program and arguments of new
-  shells (default: `$SHELL -l`).
+- **Terminals (every OS):** `[terminals] shell` in `config.toml` sets the program and
+  arguments of new shells (default: `$SHELL -l`; PowerShell on Windows). A process's exit is
+  recorded and saved before it is announced, and Kill, Restart and Close wait for that, so
+  the terminal never reads as still running after Kill or Close. A terminal removed from
+  history stays removed: a save still under way cannot write its files back, so it no longer
+  returns at the next start.
 - **Git on Windows:** a working tree git checks out with CRLF over an LF index
   (`core.autocrlf`, Git for Windows' default, or `eol=crlf` attributes) shows in diffs and
   conflicts as git reads it, with LF; a conflict resolved with edited text is written back

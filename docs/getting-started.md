@@ -47,7 +47,9 @@ install -m 0755 target/release/workbench ~/.local/bin/
 ```
 
 The web UI is embedded in the binary, so `~/.local/bin/workbench` is all you need to run.
-To update later, install the new release (or pull, rebuild both parts and install the
+The build also makes `target/release/workbenchw`, the Windows launcher of `workbench
+service`: on Linux it is a stub that only prints a message, and nothing uses it. To update
+later, install the new release (or pull, rebuild both parts and install the
 binary again); then restart the service (below) or the running `workbench serve`.
 
 ## Install on Windows (experimental)
@@ -124,6 +126,12 @@ Good to know:
   renaming `a.txt` to `A.txt` changes only the case.
 - Creating a symbolic link (copying a folder that holds one) needs Developer Mode or an
   administrator; without it the copy fails with a message saying so.
+- The programs a terminal starts end when that terminal is closed, restarted or killed, or
+  when Workbench stops, and that includes a browser or an editor that a program in the
+  terminal opens when it was not running yet (the sign-in page of an agent CLI, `code .`):
+  all of its windows close with the terminal. Start your browser and editor outside
+  Workbench first; one that already runs only receives the page or folder. On Linux such
+  programs usually outlive the terminal.
 
 The first version leaves a few things out; where one of them is asked for, Workbench says
 "Not available on Windows" and why:

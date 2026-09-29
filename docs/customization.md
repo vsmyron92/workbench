@@ -136,11 +136,13 @@ POSIX shell, `validate.sh` scripts, and scripts or tasks whose names hold `% ! ^
 PowerShell's syntax. Runs get Workbench's own `PATH`: start Workbench after installing a
 tool, or add the tool's folder to your `PATH`. Language servers installed with `npm install -g` are found in
 `%APPDATA%\npm` and run with Node directly. GDB reads only MinGW builds: to debug Rust
-built with the default MSVC toolchain, install lldb-dap or CodeLLDB and set
+built with the default MSVC toolchain, install lldb-dap or CodeLLDB and name the one you
+installed as Rust's adapter (CodeLLDB's `codelldb` has to be on `PATH`, or set
+`[debug.adapters.codelldb] command`):
 
 ```toml
 [debug.default_adapter]
-rust = "codelldb"
+rust = "lldb-dap"                  # or "codelldb"
 ```
 
 ## Change with an agent

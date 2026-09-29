@@ -146,11 +146,25 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   terminal follow or kill another terminal's session. The pump thread always drains the
   pipe, also after the reader stopped, so `ClosePseudoConsole` never waits for good. A secret
   is also masked when ConPTY's repainting puts escape sequences between its characters
-  (`session::REPAINTS`). A GUI program started from a terminal joins its job, keeps a lingering
-  count and ends with it (Linux: it stays in the session likewise; `xdg-open`-style launchers
-  detach, `start` on Windows does not). A process that asks to leave the job
-  (`CREATE_BREAKAWAY_FROM_JOB`) may (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`), as a daemon leaves a
-  Unix session: the service `workbench service install --enable` starts from a terminal.
+  (`session::REPAINTS`). A GUI program started from a terminal joins its job like any other
+  process, counts as lingering once the terminal's own process has exited, and ends with the
+  terminal: Kill, Close and Restart close the pseudoconsole (which a GUI program does not
+  notice), then `TerminateJobObject` ends it; Workbench stopping ends its terminals' sessions
+  the same way (and the job is `KILL_ON_JOB_CLOSE` besides). A process that asks to leave the
+  job (`CREATE_BREAKAWAY_FROM_JOB`) may (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`), as a daemon leaves
+  a Unix session: the service `workbench service install --enable` starts from a terminal.
+- **A known Windows difference:** a browser or an editor that a terminal's program starts
+  when it was not running yet (the sign-in page an agent CLI opens, `start <url>`, `code .`)
+  is in that job too unless it leaves it, and closing, restarting or killing the terminal
+  then ends it, every window of it. One that already runs only receives the page or folder
+  and is not affected. On Linux such a program is in the terminal's session and ends
+  likewise, unless its launcher starts it in a session of its own (`setsid`; Node's
+  `detached: true`, which VS Code's `code` and the `open` package use there), so there it
+  usually outlives the terminal; on Windows `detached` only means no console, and the
+  program stays in the job. Not changed: a job cannot let a process go, and sparing GUI
+  programs at Kill would leave running a GUI app under development that a run
+  configuration started. The user documentation says to start the browser or editor
+  outside Workbench first (getting-started, Help).
 
 **G. `/proc` introspection**
 
@@ -448,7 +462,8 @@ Each step compiles and passes on Linux. S = under a day, M = 1–3 days, L = 3�
 5. **M–L** Windows `perm`, `fs` and `path`: DACLs, `MoveFileExW`, `resolve_in_root`
    hardening, dunce, the data-dir split, the v6-only bind.
 6. **L** Windows `proc` and `session`: Job Objects, sysinfo, Restart Manager, shutdown
-   events. From here `cargo build` passes on Windows and the CI job becomes required.
+   events. From here `cargo build` passes on Windows (the CI job became required with
+   step 13).
 7. **L** ConPTY: EOF on close, the hold-back channel, default shells, npm-shim unwrapping,
    `.cmd` argument rules; detected commands in Windows forms (§2).
 8. **M** Networking and desktop: GetAdaptersAddresses, GetExtendedTcpTable, browser launch,
@@ -464,8 +479,10 @@ Each step compiles and passes on Linux. S = under a day, M = 1–3 days, L = 3�
 
 **CI.** A `server-windows` job on `windows-latest`: `git config --global core.autocrlf
 false`, checkout, setup-python, `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache`
-(workspaces: server), `cargo build --locked`, `install.ps1` under Windows PowerShell 5.1,
-`cargo test --locked --no-fail-fast`. Informational (`continue-on-error`) until step 13.
+(workspaces: server; kept when tests fail), `cargo build --locked`, `cargo test --locked
+--no-fail-fast`, then `install.ps1` under Windows PowerShell 5.1 whenever the build
+succeeded. Informational (`continue-on-error`) until step 13; required since (done: see the
+status at the top).
 
 **Release.** A `windows` job next to the Linux one: `server/.cargo/config.toml` sets
 `[target.x86_64-pc-windows-msvc] rustflags = ["-C", "target-feature=+crt-static"]` (no VC++
