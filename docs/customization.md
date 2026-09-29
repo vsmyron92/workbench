@@ -32,6 +32,10 @@ staging   = { command = ["pass", "show", "shop/staging"] }
 Values are read by the server when needed. They never reach the browser, a command line
 or a log, and terminal output that contains one is masked.
 
+On Windows (experimental), `~` is your user folder (`%USERPROFILE%`), `config.toml` and the
+overlays are in `%APPDATA%\workbench`, and a `keyring` reference reads Windows Credential
+Manager: `workbench/atlassian` is the generic credential named `atlassian.workbench`.
+
 ## Configure a project
 
 Workbench detects a project's run configurations and environments from its files. You

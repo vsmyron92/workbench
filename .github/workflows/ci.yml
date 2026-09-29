@@ -69,4 +69,14 @@ jobs:
         with:
           workspaces: server
       - run: cargo build --locked
+      # The release archive's installer under Windows PowerShell 5.1, as users run it (the
+      # release job also installs over a running server).
+      - name: install.ps1
+        run: |
+          $stage = (New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'wb-stage')).FullName
+          Copy-Item -LiteralPath ../packaging/windows/install.ps1, target/debug/workbench.exe -Destination $stage
+          $prefix = Join-Path $env:RUNNER_TEMP 'wb-install'
+          powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stage 'install.ps1') -Prefix $prefix
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & (Join-Path $prefix 'workbench.exe') --version
       - run: cargo test --locked --no-fail-fast

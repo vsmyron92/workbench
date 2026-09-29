@@ -1,0 +1,4 @@
+# Windows builds link the C runtime statically, so workbench.exe runs without the Visual
+# C++ Redistributable. Other targets are unaffected (docs/windows-port.md, "Release").
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

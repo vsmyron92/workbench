@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **Windows (experimental):** the server is being ported to Windows 10 (1809 or newer) and
+  11 on x86_64 ([plan and status](docs/windows-port.md)). Nothing of it has been tested on
+  a real Windows machine yet. Operating-system code now goes through one layer
+  (`util::os`), and Linux behaviour is unchanged. On Windows, private files get an access
+  list for you and SYSTEM only, child processes run in Job Objects, programs are found
+  through `PATHEXT` (npm's `.cmd` shims start through `node.exe`), run commands go through
+  PowerShell, the configuration is in `%APPDATA%\workbench` and the state in
+  `%LOCALAPPDATA%\workbench`.
+- **Releases:** the release workflow also builds
+  `workbench-X.Y.Z-x86_64-pc-windows-msvc.zip` with `workbench.exe` (no Visual C++ runtime
+  needed), `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY package (MIT, see the
+  third-party notices) and `install.ps1`, which installs per user into
+  `%LOCALAPPDATA%\Programs\Workbench`, adds it to PATH and can install over a running
+  Workbench. The job installs the archive and starts the server before publishing it.
+
 ## 0.2.0 - 2026-09-29
 
 - **Help:** the user documentation in the app, bundled so it works offline and on a phone:

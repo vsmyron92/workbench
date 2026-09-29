@@ -1,11 +1,25 @@
 # Porting the server to Windows
 
-**Status: in progress.** The `util::os` areas `perm`, `fs`, `proc`, `shell`, `exe`, `path`,
-`net` and `desktop` are in (their shared Win32 helpers live in `util/os/win32.rs`); the
-server compiles for Windows except the terminals slice (`os::session`, §1.F), and nothing
-has run on Windows yet. This is the plan for a native `x86_64-pc-windows-msvc` build that
-works on Windows 10 and 11, with Linux behaviour unchanged. File and line references are
-from 0.1.0 (commit `493a66e`) and will drift.
+**Status: in progress, experimental.** Nothing has run on a real Windows machine yet: the
+informational `windows-latest` CI job is the first place the Windows build, `install.ps1`
+and the tests run.
+
+- **Phase A (merged):** `.gitattributes`, the CI job, and the `util::os` areas `perm`, `fs`,
+  `proc`, `shell`, `exe`, `path`, `net` and `desktop` with their Windows bodies (their shared
+  Win32 helpers live in `util/os/win32.rs`). Call sites outside `util::os` are free of
+  `cfg(unix)` / `cfg(windows)`; ARCHITECTURE.md has the contract ("Operating-system layer").
+  The server then compiled for Windows except the terminals slice.
+- **Phase B:** terminals on ConPTY and Job Objects (`os::session`, §1.F); the service
+  (`workbenchw.exe` and the `Run` value, §2); git (askpass through the environment,
+  CRLF-aware diffs and line staging); file watching (one recursive watch, §2); LSP, the
+  debugger and detected commands in Windows forms; reporting unsupported features (§5); the
+  Windows release job with `install.ps1`, and the user documentation (§4, step 14).
+- **Next:** the CI job passing on `windows-latest` and becoming required (steps 6 and 13),
+  then real Windows 10 and 11 machines (§5) before a release ships the Windows archive.
+
+This is the plan for a native `x86_64-pc-windows-msvc` build that works on Windows 10 and
+11, with Linux behaviour unchanged. File and line references are from 0.1.0 (commit
+`493a66e`) and will drift.
 
 Estimated size: 6–8 engineer-weeks, in 14 steps that each compile and pass on Linux.
 
@@ -349,15 +363,21 @@ Each step compiles and passes on Linux. S = under a day, M = 1–3 days, L = 3�
 
 **CI.** A `server-windows` job on `windows-latest`: `git config --global core.autocrlf
 false`, checkout, setup-python, `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache`
-(workspaces: server), `cargo build --locked`, `cargo test --locked`.
+(workspaces: server), `cargo build --locked`, `install.ps1` under Windows PowerShell 5.1,
+`cargo test --locked --no-fail-fast`. Informational (`continue-on-error`) until step 13.
 
 **Release.** A `windows` job next to the Linux one: `server/.cargo/config.toml` sets
 `[target.x86_64-pc-windows-msvc] rustflags = ["-C", "target-feature=+crt-static"]` (no VC++
-runtime needed); a pwsh smoke test (start with scratch directories, `Invoke-WebRequest` until
-the page has `<div id="root">`, stop); package
-`workbench-<v>-x86_64-pc-windows-msvc.zip` with `workbench.exe`, `workbenchw.exe`,
-`install.ps1`, `conpty.dll`, `OpenConsole.exe`, LICENSE, README, CHANGELOG and the notices,
-plus a `.sha256`; `publish` needs both jobs.
+runtime needed; `dumpbin /dependents` checks it); `conpty.dll`
+(`runtimes/win-x64/native/`) and `OpenConsole.exe` (`build/native/runtimes/x64/`) from the
+`Microsoft.Windows.Console.ConPTY` package on nuget.org, version and SHA-256s pinned in the
+workflow (conpty.dll looks for `OpenConsole.exe` beside itself first); a pwsh smoke test
+(`install.ps1` under Windows PowerShell 5.1 into a scratch prefix, start with scratch
+directories on a free port, `Invoke-WebRequest` until the page has `<div id="root">`,
+install again over the running server, stop); package
+`workbench-<v>-x86_64-pc-windows-msvc.zip` with `workbench.exe`, `workbenchw.exe` (once
+built), `install.ps1`, `conpty.dll`, `OpenConsole.exe`, LICENSE, README, CHANGELOG and the
+notices, plus a `.sha256`; `publish` needs both jobs.
 
 **A zip with `install.ps1`, not an MSI.** It mirrors the Linux archive and `install.sh`,
 installs per user into `%LOCALAPPDATA%\Programs\Workbench` without elevation, updates the
@@ -372,8 +392,10 @@ manifest can come later; revisit MSI once the binaries are code-signed. Users ru
 block on Windows 10 if output is not drained). A child can start grandchildren in the gap
 before it joins its Job (portable-pty has no suspended start; fork it if that matters).
 `.cmd` injection wherever the resolver is bypassed. CRLF handling in line staging.
-`aws-lc-sys` on MSVC (CMake is on the runners; check the first run and add a setup-nasm step
-if needed). Sharing violations on rename and delete. A Windows Firewall prompt when binding
+`aws-lc-sys` on MSVC: 0.45 builds with its `cc` builder (no CMake) and, without NASM, links
+the prebuilt NASM objects that rustls's `aws_lc_rs` feature enables (`prebuilt-nasm`), so
+no setup-nasm step should be needed; check the first run. Sharing violations on rename and
+delete. A Windows Firewall prompt when binding
 `0.0.0.0`. SmartScreen and antivirus reactions to an unsigned exe that spawns PTYs. The
 Credential Manager target names keyring uses need documenting. Tests run 2–3× slower.
 
