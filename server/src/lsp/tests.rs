@@ -171,7 +171,7 @@ async fn wait_for(mut f: impl FnMut() -> bool) {
 }
 
 fn alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    crate::util::os::proc::pid_alive(pid as i32)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

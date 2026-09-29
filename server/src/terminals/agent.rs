@@ -239,24 +239,10 @@ pub fn user_defines_statusline(claude_dir: &Path, dirs: &[&Path]) -> bool {
     })
 }
 
-/// The Workbench executable for the `statusline` helper. After the binary was replaced
-/// on disk (an upgrade, a rebuild), Linux reports `… (deleted)`: use the new file at the
-/// same path, or else the running image through `/proc/<pid>/exe`.
+/// The Workbench executable for the `statusline` helper, also after the binary was
+/// replaced on disk (an upgrade, a rebuild).
 fn helper_exe() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    if exe.is_file() {
-        return Some(exe);
-    }
-    helper_fallback(&exe, std::process::id())
-}
-
-fn helper_fallback(exe: &Path, pid: u32) -> Option<PathBuf> {
-    let s = exe.to_string_lossy();
-    if let Some(p) = s.strip_suffix(" (deleted)").map(PathBuf::from).filter(|p| p.is_file()) {
-        return Some(p);
-    }
-    let proc_exe = PathBuf::from(format!("/proc/{pid}/exe"));
-    proc_exe.exists().then_some(proc_exe)
+    crate::util::os::proc::runnable_exe()
 }
 
 fn shell_quote(s: &str) -> String {
@@ -2826,18 +2812,6 @@ mod tests {
     fn quoting_for_the_status_line_command() {
         assert_eq!(shell_quote("/home/u/.cache/wb/debug/workbench"), "/home/u/.cache/wb/debug/workbench");
         assert_eq!(shell_quote("/opt/my apps/wb"), "'/opt/my apps/wb'");
-    }
-
-    #[test]
-    fn helper_survives_a_replaced_binary() {
-        let dir = tempfile::tempdir().unwrap();
-        let new_bin = dir.path().join("workbench");
-        std::fs::write(&new_bin, b"").unwrap();
-        let deleted = PathBuf::from(format!("{} (deleted)", new_bin.display()));
-        assert_eq!(helper_fallback(&deleted, std::process::id()), Some(new_bin.clone()));
-        std::fs::remove_file(&new_bin).unwrap();
-        let me = std::process::id();
-        assert_eq!(helper_fallback(&deleted, me), Some(PathBuf::from(format!("/proc/{me}/exe"))));
     }
 
     #[test]

@@ -279,7 +279,7 @@ fn systemctl(env: &Env, args: &[&str]) -> anyhow::Result<(bool, String)> {
 fn running_pid(env: &Env) -> Option<u32> {
     let rt: serde_json::Value = util::fs::read_json(&env.data_dir.as_ref()?.join("runtime.json")).ok()??;
     let pid = rt["pid"].as_u64()? as u32;
-    Path::new(&format!("/proc/{pid}")).exists().then_some(pid)
+    util::os::proc::own_pid_alive(pid).then_some(pid)
 }
 
 fn write_file(path: &Path, text: &str, mode: u32) -> anyhow::Result<()> {

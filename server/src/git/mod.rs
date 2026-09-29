@@ -107,12 +107,10 @@ pub async fn start(state: &AppState) {
         }
         Err(e) => tracing::warn!("git: cannot write the askpass helper ({e:#}); remote operations rely on credential helpers"),
     }
-    match std::env::current_exe() {
+    match crate::util::os::proc::current_exe() {
         Ok(exe) => {
             let exe = exe.to_string_lossy();
-            // A rebuilt binary leaves /proc/self/exe pointing at "… (deleted)".
-            let exe = exe.strip_suffix(" (deleted)").unwrap_or(&exe);
-            let _ = state.git.editor.set(format!("{} git-editor", rebase_i::sh_quote(exe)));
+            let _ = state.git.editor.set(format!("{} git-editor", rebase_i::sh_quote(&exe)));
         }
         Err(e) => tracing::warn!("git: cannot locate the workbench binary ({e}); interactive rebase is unavailable"),
     }

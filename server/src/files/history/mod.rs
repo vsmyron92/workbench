@@ -456,13 +456,16 @@ fn git_output(root: &Path, args: &[&str], max: u64) -> Option<Vec<u8>> {
         cmd.env_remove(k);
     }
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
-    let pid = child.id() as libc::pid_t;
+    // Unix: git alone. Windows: also what it starts (Git for Windows' `git.exe` on PATH is
+    // a launcher whose child holds the pipe); the group lives until git is waited for.
+    let group = util::os::proc::ProcGroup::attach_single(child.id());
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-    let watchdog = std::thread::spawn(move || {
-        if done_rx.recv_timeout(Duration::from_secs(5)).is_err() {
-            // SAFETY: plain syscall; the child is not reaped before `done` is sent.
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
+    let watchdog = std::thread::spawn({
+        let group = group.clone();
+        move || {
+            if done_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                // The child is not reaped before `done` is sent: the pid is still its own.
+                group.kill();
             }
         }
     });

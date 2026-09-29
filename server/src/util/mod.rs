@@ -7,22 +7,6 @@ pub mod os;
 pub mod paths;
 pub mod proc;
 
-/// Resolves on SIGINT or SIGTERM.
-pub async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    let term = async {
-        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            s.recv().await;
-        }
-    };
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = term => {},
-    }
-}
-
 /// Open `url` in an app-style browser window when a Chromium browser is
 /// installed (no tabs or address bar), otherwise in the default browser.
 pub fn open_in_browser(url: &str) {

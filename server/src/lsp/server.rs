@@ -139,7 +139,7 @@ pub struct Server {
     /// Last document change or request (idle shutdown).
     pub last_activity: AtomicI64,
     exited: watch::Receiver<Option<String>>,
-    pgid: Option<i32>,
+    group: crate::util::os::proc::ProcGroup,
     container: Option<(String, String, String)>,
     project: Weak<ProjectLsp>,
 }
@@ -153,8 +153,8 @@ impl Server {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .process_group(0);
+            .kill_on_drop(true);
+        crate::util::os::proc::ProcGroup::prepare(&mut cmd);
         crate::util::proc::clean_env(&mut cmd);
         for (k, v) in &launch.env {
             match v {
@@ -163,6 +163,7 @@ impl Server {
             };
         }
         let mut child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", launch.display))?;
+        let group = crate::util::os::proc::ProcGroup::attach(&child);
         let (Some(stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
             return Err("the process has no stdio".into());
         };
@@ -190,7 +191,7 @@ impl Server {
             watchers: Mutex::new(vec![]),
             last_activity: AtomicI64::new(crate::util::now_ms()),
             exited: exit_rx,
-            pgid: os_pid.map(|p| p as i32),
+            group,
             container: launch.container,
             project: Arc::downgrade(project),
         });
@@ -204,7 +205,7 @@ impl Server {
         tokio::spawn(async move {
             let status = child.wait().await;
             let desc = match status {
-                Ok(s) => match (s.code(), std::os::unix::process::ExitStatusExt::signal(&s)) {
+                Ok(s) => match (s.code(), crate::util::os::proc::exit_signal(&s)) {
                     (Some(c), _) => format!("exited with code {c}"),
                     (None, Some(sig)) => format!("killed by signal {sig}"),
                     _ => "exited".into(),
@@ -447,34 +448,34 @@ impl Server {
             let _ = tokio::time::timeout(Duration::from_secs(3), self.request("shutdown", Value::Null, Duration::from_secs(3))).await;
             self.notify("exit", Value::Null);
             if tokio::time::timeout(Duration::from_secs(2), self.wait_exit()).await.is_err() {
-                self.kill(libc::SIGTERM);
+                self.terminate();
                 if tokio::time::timeout(Duration::from_secs(2), self.wait_exit()).await.is_err() {
-                    self.kill(libc::SIGKILL);
+                    self.kill();
                     let _ = tokio::time::timeout(Duration::from_secs(2), self.wait_exit()).await;
                 }
             }
         }
         // Children of the server in its group outlive a clean exit sometimes.
-        self.kill_group(libc::SIGKILL);
+        self.group.kill();
         if let Some((docker, container, term)) = &self.container {
             crate::devcontainer::kill_inside(docker, container, term).await;
         }
     }
 
-    fn kill(&self, sig: i32) {
-        if let Some(pg) = self.pgid {
-            if !self.exited() {
-                unsafe { libc::kill(pg, sig) };
-            }
+    /// SIGTERM to the process (until it is reaped: its pid could be reused then) and to its group.
+    fn terminate(&self) {
+        if !self.exited() {
+            self.group.terminate_leader();
         }
-        self.kill_group(sig);
+        self.group.terminate();
     }
 
-    fn kill_group(&self, sig: i32) {
-        if let Some(pg) = self.pgid.filter(|p| *p > 1) {
-            // SAFETY: plain syscall; the group is the one the process was started in.
-            unsafe { libc::killpg(pg, sig) };
+    /// `terminate` with SIGKILL.
+    fn kill(&self) {
+        if !self.exited() {
+            self.group.kill_leader();
         }
+        self.group.kill();
     }
 }
 
@@ -535,7 +536,7 @@ async fn read_loop(state: AppState, server: Weak<Server>, stdout: tokio::process
             Err(e) => {
                 if let Some(s) = server.upgrade() {
                     s.log.lock().push("workbench", &format!("protocol error, stopping: {e}"));
-                    s.kill(libc::SIGTERM);
+                    s.terminate();
                 }
                 break;
             }

@@ -157,7 +157,7 @@ fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {
         {
             let (state, stop) = (state.clone(), stop.clone());
             tokio::spawn(async move {
-                util::shutdown_signal().await;
+                util::os::proc::shutdown_signal(&state.paths.data_dir).await;
                 tracing::info!("shutting down");
                 app::shutdown(&state).await;
                 stop.cancel();
