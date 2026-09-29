@@ -25,7 +25,7 @@ Config files hold *references*, never values:
 gitlab    = { file = "~/.gitlab_token" }
 github    = { env = "GITHUB_TOKEN" }
 atlassian = { keyring = "workbench/atlassian" }
-db_url    = { dotenv = "app/.env", key = "DATABASE_URL" }
+db_url    = { dotenv = { path = "app/.env", key = "DATABASE_URL" } }
 staging   = { command = ["pass", "show", "shop/staging"] }
 ```
 

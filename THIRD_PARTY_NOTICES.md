@@ -43,11 +43,16 @@ SOFTWARE.
 The Windows release archive ships `conpty.dll` and `OpenConsole.exe` unmodified, the
 x64 files of Microsoft's
 [Microsoft.Windows.Console.ConPTY](https://www.nuget.org/packages/Microsoft.Windows.Console.ConPTY)
-package (the version is pinned in `.github/workflows/release.yml`), built from
-[Windows Terminal](https://github.com/microsoft/terminal). Workbench's terminals use them
-in place of the console host built into Windows. Microsoft lists the third-party components
-of that repository in its
-[NOTICE.md](https://github.com/microsoft/terminal/blob/main/NOTICE.md).
+package 1.24.260710001 (pinned in `.github/workflows/release.yml`), built from
+[Windows Terminal](https://github.com/microsoft/terminal) and released with
+[v1.24.11911.0](https://github.com/microsoft/terminal/releases/tag/v1.24.11911.0).
+Workbench's terminals use them in place of the console host built into Windows.
+
+Windows Terminal's notices for the third-party code in its repository, which includes the
+code built into these two files, are its
+[NOTICE.md](https://github.com/microsoft/terminal/blob/v1.24.11911.0/NOTICE.md) at that
+release: `CONPTY_NOTICE.md` in the archive (`packaging/windows/CONPTY_NOTICE.md` in this
+repository), unmodified.
 
 The package is distributed under the MIT License:
 

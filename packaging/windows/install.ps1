@@ -14,6 +14,9 @@
     Mark of the Web). -ExecutionPolicy Bypass applies to this run only. Unblocking the archive
     before unpacking it removes the mark (Unblock-File .\workbench-<version>-...-msvc.zip).
 
+    A folder it creates admits only you, SYSTEM and Administrators, so nobody else can replace
+    the programs your PATH starts. It warns when an existing folder lets others change it.
+
     A running Workbench keeps running: Windows cannot replace a running program, so its files
     are renamed aside (*.old, removed by the next install) and the new ones take their names.
     Restart Workbench to use the new version.
@@ -47,7 +50,101 @@ trap { Fail (Get-Reason $_) }
 
 # What a release archive holds besides this script; only workbench.exe is required.
 $Payload = @('workbench.exe', 'workbenchw.exe', 'conpty.dll', 'OpenConsole.exe',
-    'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_NOTICES.md')
+    'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_NOTICES.md', 'CONPTY_NOTICE.md')
+
+# The accounts an install folder may let change it: you, SYSTEM, Administrators, and the
+# CREATOR OWNER and TrustedInstaller entries Windows puts on its own folders.
+$Me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$Trusted = @($Me.Value, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-0',
+    'S-1-5-80-956008885-3425870976-1789322516-4210395290-2271478464')
+# Rights that let an account change a folder's files: create files or folders (append),
+# delete, change permissions, take ownership, and the generic write and all.
+$WriteRights = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+
+# A folder's access list. Windows PowerShell's .NET reads and writes it itself, so a
+# Get-Acl that fails to load (a Windows PowerShell started from PowerShell 7 can find the
+# latter's modules first) does not matter; PowerShell 7's .NET has no such methods.
+function Get-FolderAcl([string]$Dir) {
+    if ($PSVersionTable.PSEdition -eq 'Desktop') { return [System.IO.Directory]::GetAccessControl($Dir) }
+    Get-Acl -LiteralPath $Dir
+}
+
+function Set-FolderAcl([string]$Dir, $Acl) {
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        [System.IO.Directory]::SetAccessControl($Dir, $Acl)
+    } else {
+        Set-Acl -LiteralPath $Dir -AclObject $Acl
+    }
+}
+
+# Gives the folder install.ps1 just created an access list of its own: full control for you,
+# SYSTEM and Administrators (what folders in your profile inherit), passed on to what it holds.
+function Protect-Folder([string]$Dir) {
+    $acl = Get-FolderAcl $Dir
+    $acl.SetAccessRuleProtection($true, $false)
+    $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    foreach ($sid in @($Me.Value, 'S-1-5-18', 'S-1-5-32-544')) {
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            [System.Security.Principal.SecurityIdentifier]::new($sid),
+            [System.Security.AccessControl.FileSystemRights]::FullControl, $inherit,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow))
+    }
+    Set-FolderAcl $Dir $acl
+    # Something another account put there before the access list applied would stay theirs.
+    if (@(Get-ChildItem -LiteralPath $Dir -Force).Length) {
+        Fail "$Dir changed while it was being created: remove it and run install.ps1 again"
+    }
+}
+
+# The other accounts that can change what is in $Dir: its owner, or an allow entry with one of
+# $WriteRights.
+function Get-OtherWriters([string]$Dir) {
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $acl = Get-FolderAcl $Dir
+    $sids = @()
+    $owner = $acl.GetOwner($sidType)
+    if ($owner -and $Trusted -notcontains $owner.Value) { $sids += $owner }
+    foreach ($rule in $acl.GetAccessRules($true, $true, $sidType)) {
+        if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+        if ($Trusted -contains $rule.IdentityReference.Value) { continue }
+        if ([int]$rule.FileSystemRights -band $WriteRights) { $sids += $rule.IdentityReference }
+    }
+    $names = @()
+    foreach ($sid in $sids) {
+        try { $name = $sid.Translate([System.Security.Principal.NTAccount]).Value } catch { $name = $sid.Value }
+        if ($names -notcontains $name) { $names += $name }
+    }
+    $names
+}
+
+# Renames $From to $To. Another program can hold either file for a moment without letting it
+# be renamed (an antivirus scanning the new file, Explorer's preview), so a sharing violation
+# is retried for about a second.
+function Move-File([string]$From, [string]$To) {
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            [System.IO.File]::Move($From, $To)
+            return
+        } catch {
+            $e = $_.Exception
+            if ($e.InnerException) { $e = $e.InnerException }
+            $busy = ($e -is [System.UnauthorizedAccessException]) -or (($e -is [System.IO.IOException]) -and
+                ($e -isnot [System.IO.FileNotFoundException]) -and ($e -isnot [System.IO.DirectoryNotFoundException]))
+            if ($attempt -ge 10 -or -not $busy) { throw }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
+# Removes the copies staged next to their destinations (<name>.new).
+function Remove-Staged {
+    foreach ($name in $Payload) {
+        try { [System.IO.File]::Delete((Join-Path $Prefix "$name.new")) } catch { }
+    }
+}
 
 # Adds $Dir to the user's PATH (HKCU\Environment) unless it is there; $true when added.
 function Add-UserPath([string]$Dir) {
@@ -107,12 +204,33 @@ if ($Prefix.Length -gt 3) { $Prefix = $Prefix.TrimEnd('\') }
 if ($Prefix -ieq $here.TrimEnd('\')) {
     Fail "run install.ps1 from the unpacked archive, not from $Prefix"
 }
-[void][System.IO.Directory]::CreateDirectory($Prefix)
+# PATH separates folders with ; and expands %NAME%.
+if ($Prefix.Contains(';') -or $Prefix.Contains('%')) {
+    Fail "the install folder goes on PATH, so its name cannot contain ; or %: $Prefix"
+}
+if (Test-Path -LiteralPath $Prefix -PathType Leaf) {
+    Fail "$Prefix is a file, not a folder"
+} elseif (Test-Path -LiteralPath $Prefix) {
+    try {
+        $others = @(Get-OtherWriters $Prefix)
+    } catch {
+        $others = @()
+        Write-Warning "could not read who can change ${Prefix}: $(Get-Reason $_)"
+    }
+    if ($others.Length) {
+        Write-Warning ("$Prefix lets $($others -join ', ') change its files, and so the programs " +
+            'you start from it. Install into a folder only you can change, or remove their access.')
+    }
+} else {
+    [void][System.IO.Directory]::CreateDirectory($Prefix)
+    Protect-Folder $Prefix
+}
 
-# Files an earlier install renamed aside while Workbench was running.
+# What an earlier install left: files it renamed aside while Workbench was running, and copies
+# of an install that stopped half-way.
 foreach ($file in @(Get-ChildItem -LiteralPath $Prefix -File -Force)) {
     foreach ($name in $Payload) {
-        if ($file.Name -like "$name.*.old") {
+        if ($file.Name -like "$name.*.old" -or $file.Name -eq "$name.new") {
             try { [System.IO.File]::Delete($file.FullName) } catch { }
             break
         }
@@ -127,7 +245,13 @@ if ($names -notcontains 'conpty.dll' -or $names -notcontains 'OpenConsole.exe') 
 # Copy everything first, next to its destination, so a failed copy changes nothing.
 foreach ($name in $names) {
     $new = Join-Path $Prefix "$name.new"
-    [System.IO.File]::Copy((Join-Path $here $name), $new, $true)
+    try {
+        [System.IO.File]::Copy((Join-Path $here $name), $new, $true)
+    } catch {
+        $reason = Get-Reason $_
+        Remove-Staged
+        Fail "cannot copy $name to ${Prefix}: $reason"
+    }
     # A copy keeps the download's Mark of the Web, with which Windows stops the installed
     # programs with a SmartScreen warning when they start from Explorer or the Start menu.
     try { Unblock-File -LiteralPath $new } catch { }
@@ -136,26 +260,38 @@ foreach ($name in $names) {
 # Then swap each file in. A running exe or a loaded DLL cannot be overwritten or deleted,
 # but it can be renamed: the old file moves aside and is deleted unless something uses it.
 $inUse = @()
+$done = @()
 foreach ($name in $names) {
     $dest = Join-Path $Prefix $name
     $aside = $null
+    $failure = $null
     if (Test-Path -LiteralPath $dest) {
         $aside = '{0}.{1}.old' -f $dest, [guid]::NewGuid().ToString('N').Substring(0, 8)
         try {
-            [System.IO.File]::Move($dest, $aside)
+            Move-File $dest $aside
         } catch {
-            Fail "cannot replace ${dest}: $(Get-Reason $_)"
+            $failure = "cannot replace ${dest}: $(Get-Reason $_)"
+            $aside = $null
         }
     }
-    try {
-        [System.IO.File]::Move("$dest.new", $dest)
-    } catch {
-        $reason = Get-Reason $_
-        if ($aside) {
-            try { [System.IO.File]::Move($aside, $dest) } catch { }
+    if (-not $failure) {
+        try {
+            Move-File "$dest.new" $dest
+        } catch {
+            $failure = "cannot install ${dest}: $(Get-Reason $_)"
+            if ($aside) {
+                try { Move-File $aside $dest } catch { }
+            }
         }
-        Fail "cannot install ${dest}: $reason"
     }
+    if ($failure) {
+        Remove-Staged
+        if ($done.Length) {
+            $failure += " (already updated: $($done -join ', ')). Run install.ps1 again to finish the update."
+        }
+        Fail $failure
+    }
+    $done += $name
     if ($aside) {
         try { [System.IO.File]::Delete($aside) } catch { $inUse += $name }
     }

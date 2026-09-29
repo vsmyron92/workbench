@@ -76,6 +76,10 @@ jobs:
 
   windows:
     name: Windows x86_64
+    # Experimental (docs/windows-port.md): run by hand it always builds the archive, but a tag
+    # builds and publishes it only when the repository variable RELEASE_WINDOWS is 'true'.
+    # Until then a tag releases Linux alone.
+    if: github.ref_type != 'tag' || vars.RELEASE_WINDOWS == 'true'
     runs-on: windows-latest
     defaults:
       run:
@@ -83,7 +87,9 @@ jobs:
     env:
       # The console host shipped next to workbench.exe (docs/windows-port.md, "Terminals
       # (ConPTY)"): the Microsoft.Windows.Console.ConPTY package from nuget.org, and the
-      # SHA-256 of the two x64 files taken from it. Update the three together.
+      # SHA-256 of the two x64 files taken from it. Update the three together, with
+      # packaging/windows/CONPTY_NOTICE.md (NOTICE.md of the Windows Terminal release that
+      # published that package version) and THIRD_PARTY_NOTICES.md.
       CONPTY_VERSION: 1.24.260710001
       CONPTY_DLL_SHA256: 39fba2713e2495117b1591ae8c32a3b904bea7aa66069cf7815e2844c76d75d8
       OPENCONSOLE_SHA256: b7fd936c2668b87b9ecf7b3366dc6568afc1c6f981874cba3e955a1c35cf8160
@@ -148,7 +154,7 @@ jobs:
           $files = @(
             'server/target/release/workbench.exe', 'packaging/windows/install.ps1',
             (Join-Path $env:RUNNER_TEMP 'conpty/conpty.dll'), (Join-Path $env:RUNNER_TEMP 'conpty/OpenConsole.exe'),
-            'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_NOTICES.md'
+            'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_NOTICES.md', 'packaging/windows/CONPTY_NOTICE.md'
           )
           # The service's supervisor (docs/windows-port.md, "Service"), once the crate builds it.
           if (Test-Path -LiteralPath server/target/release/workbenchw.exe) { $files += 'server/target/release/workbenchw.exe' }
@@ -156,7 +162,7 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "name=$name"
       # Installs the package as a user would, starts the installed server on scratch
       # directories and checks that the embedded UI is served, then installs again over the
-      # running server (its files are renamed aside).
+      # running server: its workbench.exe is renamed aside and, still running, stays as *.old.
       - name: Smoke test
         run: |
           $stage = (Resolve-Path "dist/${{ steps.package.outputs.name }}").Path
@@ -194,17 +200,20 @@ jobs:
           }
           powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Prefix $prefix
           $reinstalled = $LASTEXITCODE
-          if (-not $server.HasExited) { Stop-Process -Id $server.Id -Force }
-          if (-not $page.Contains('<div id="root">')) {
+          $running = -not $server.HasExited
+          if ($running) { Stop-Process -Id $server.Id -Force }
+          if (-not $page.Contains('<div id="root">') -or -not $running) {
             Get-Content -LiteralPath (Join-Path $scratch 'out.log'), (Join-Path $scratch 'err.log')
-            Write-Output '::error::the embedded UI is missing'
+            if ($running) { Write-Output '::error::the embedded UI is missing' } else { Write-Output '::error::the server stopped' }
             exit 1
           }
           if ($reinstalled -ne 0) { Write-Output '::error::install.ps1 failed over a running Workbench'; exit 1 }
-          if ((Get-FileHash -LiteralPath $bin).Hash -ne (Get-FileHash -LiteralPath (Join-Path $stage 'workbench.exe')).Hash) {
-            Write-Output '::error::install.ps1 left the old workbench.exe in place'
+          if (-not @(Get-ChildItem -LiteralPath $prefix -Filter 'workbench.exe.*.old').Length) {
+            Write-Output '::error::install.ps1 did not rename the running workbench.exe aside'
             exit 1
           }
+          & $bin --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           exit 0
       - name: Archive
         run: |
@@ -227,7 +236,8 @@ jobs:
   publish:
     name: Publish
     needs: [linux, windows]
-    if: github.ref_type == 'tag'
+    # Both archives, or Linux alone while the Windows job is skipped (above).
+    if: ${{ !cancelled() && github.ref_type == 'tag' && needs.linux.result == 'success' && (needs.windows.result == 'success' || needs.windows.result == 'skipped') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write

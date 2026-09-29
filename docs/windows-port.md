@@ -13,9 +13,12 @@ and the tests run.
   (`workbenchw.exe` and the `Run` value, §2); git (askpass through the environment,
   CRLF-aware diffs and line staging); file watching (one recursive watch, §2); LSP, the
   debugger and detected commands in Windows forms; reporting unsupported features (§5); the
-  Windows release job with `install.ps1`, and the user documentation (§4, step 14).
+  Windows release job with `install.ps1`, and the user documentation (§4, step 14). The
+  server loads DLLs by name only from its own folder and System32 (`os::dll`).
 - **Next:** the CI job passing on `windows-latest` and becoming required (steps 6 and 13),
-  then real Windows 10 and 11 machines (§5) before a release ships the Windows archive.
+  then real Windows 10 and 11 machines (§5). Until then a tag publishes the Linux archive
+  alone: the release workflow builds the Windows archive on a tag only once the repository
+  variable `RELEASE_WINDOWS` is `true` (by hand it always does).
 
 This is the plan for a native `x86_64-pc-windows-msvc` build that works on Windows 10 and
 11, with Linux behaviour unchanged. File and line references are from 0.1.0 (commit
@@ -272,7 +275,9 @@ thread while the reader keeps draining. portable-pty creates the console with
 `INHERIT_CURSOR`, so ConPTY sends `ESC[6n` and waits; the existing headless DSR answer
 covers it (add a test). Ship a side-loaded `conpty.dll` and `OpenConsole.exe` (the
 Microsoft.Windows.Console.ConPTY package, MIT), which portable-pty loads from the exe's
-folder; the inbox ConPTY renders poorly on Windows 10.
+folder; the inbox ConPTY renders poorly on Windows 10. portable-pty loads it by bare name,
+which would also search the current directory and `PATH`, so `serve` first limits the DLL
+search to the exe's folder and System32 (`os::dll`, `SetDefaultDllDirectories`).
 
 **Git.** `GIT_ASKPASS` is the absolute `workbench.exe` with `WORKBENCH_HELPER=askpass` in
 git's environment, dispatched in `main.rs` before clap, so no script or batch file is
@@ -376,8 +381,11 @@ workflow (conpty.dll looks for `OpenConsole.exe` beside itself first); a pwsh sm
 directories on a free port, `Invoke-WebRequest` until the page has `<div id="root">`,
 install again over the running server, stop); package
 `workbench-<v>-x86_64-pc-windows-msvc.zip` with `workbench.exe`, `workbenchw.exe` (once
-built), `install.ps1`, `conpty.dll`, `OpenConsole.exe`, LICENSE, README, CHANGELOG and the
-notices, plus a `.sha256`; `publish` needs both jobs.
+built), `install.ps1`, `conpty.dll`, `OpenConsole.exe`, LICENSE, README, CHANGELOG, the
+notices and Windows Terminal's `NOTICE.md` of that package's release (`CONPTY_NOTICE.md`),
+plus a `.sha256`; `publish` needs both jobs. While the port is unvalidated, a tag runs the
+Windows job only when the repository variable `RELEASE_WINDOWS` is `true`, and `publish`
+otherwise ships Linux alone.
 
 **A zip with `install.ps1`, not an MSI.** It mirrors the Linux archive and `install.sh`,
 installs per user into `%LOCALAPPDATA%\Programs\Workbench` without elevation, updates the
@@ -396,8 +404,9 @@ before it joins its Job (portable-pty has no suspended start; fork it if that ma
 the prebuilt NASM objects that rustls's `aws_lc_rs` feature enables (`prebuilt-nasm`), so
 no setup-nasm step should be needed; check the first run. Sharing violations on rename and
 delete. A Windows Firewall prompt when binding
-`0.0.0.0`. SmartScreen and antivirus reactions to an unsigned exe that spawns PTYs. The
-Credential Manager target names keyring uses need documenting. Tests run 2–3× slower.
+`0.0.0.0`. SmartScreen and antivirus reactions to an unsigned exe that spawns PTYs. Tests
+run 2–3× slower. (A `keyring` reference `service/account` is the generic credential
+`account.service`, documented in getting-started.)
 
 **Left out of the first version:**
 

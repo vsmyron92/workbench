@@ -73,7 +73,9 @@ powershell -ExecutionPolicy Bypass -File .\workbench-<version>-x86_64-pc-windows
 - `install.ps1` copies `workbench.exe`, `conpty.dll` and `OpenConsole.exe` (the console host
   its terminals use), `workbenchw.exe` when the archive has it, and the documents to
   `%LOCALAPPDATA%\Programs\Workbench` without administrator rights, and adds that folder to
-  your user PATH. `-Prefix <folder>` installs elsewhere.
+  your user PATH. `-Prefix <folder>` installs elsewhere. A folder it creates admits only you,
+  SYSTEM and Administrators; it warns when an existing one lets other accounts change it,
+  since they could then replace the programs you start from it.
 - Installing over a running Workbench works: Windows cannot replace a running program, so
   its files are renamed aside (`*.old`, removed by the next install). Restart Workbench to
   use the new version.
@@ -114,9 +116,21 @@ Good to know:
   lldb-dap). The Services window (Docker) is untested there.
 
 Building from source on Windows needs Rust with the MSVC toolchain (the Visual Studio Build
-Tools' C++ workload) and Node.js 22; build as above and copy
-`server\target\release\workbench.exe` wherever you like. Without `conpty.dll` and
-`OpenConsole.exe` next to it, terminals use the console host built into Windows, which
+Tools' C++ workload) and Node.js 22. In PowerShell, from the repository (build in `server`,
+where `.cargo\config.toml` links the C runtime statically):
+
+```powershell
+cd web; npm ci; npm run build; cd ..\server
+cargo build --release
+```
+
+Copy `server\target\release\workbench.exe` to a folder only you can change, and put
+`conpty.dll` (`runtimes\win-x64\native`) and `OpenConsole.exe`
+(`build\native\runtimes\x64`) from the
+[Microsoft.Windows.Console.ConPTY](https://www.nuget.org/packages/Microsoft.Windows.Console.ConPTY)
+package (a `.nupkg` is a zip) next to it; the release archives use version 1.24.260710001.
+Workbench loads `conpty.dll` only from its own folder or System32, never from the folder you
+start it in. Without the two files, terminals use the console host built into Windows, which
 renders less well on Windows 10.
 
 ## First start

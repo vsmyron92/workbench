@@ -4,6 +4,7 @@
 //! functions instead of using Unix or Windows APIs itself (tests excepted).
 
 pub mod desktop;
+pub mod dll;
 pub mod exe;
 pub mod fs;
 pub mod net;

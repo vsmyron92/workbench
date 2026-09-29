@@ -22,7 +22,7 @@ file = "~/.gitlab_token"
 
 **Settings → Secrets** shows the status of each one and can fix a file's permissions. Tokens never reach the browser, logs or command lines.
 
-Besides `file`, a secret can come from `env`, a `.env` file (`dotenv` and `key`), a `command`, or the system keyring: `keyring = "service/account"`, which on Windows is the Credential Manager's generic credential `account.service`.
+Besides `file`, a secret can come from `env`, a `.env` file (`dotenv = { path = ".env", key = "NAME" }`), a `command`, or the system keyring: `keyring = "service/account"`, which on Windows is the Credential Manager's generic credential `account.service`.
 
 ## Reference
 

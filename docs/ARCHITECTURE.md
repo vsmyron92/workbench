@@ -79,8 +79,8 @@ web/               React 19 + TS + Vite 8
   src/features/<slice>/   one folder per slice; index.ts exports a FeatureModule
 docs/              this file
 packaging/linux/   install.sh shipped in the Linux release archive
-packaging/windows/ install.ps1 shipped in the Windows release archive
-.github/workflows/ ci.yml (web and server build + tests, Linux and Windows), release.yml (tag → Linux and Windows archives + GitHub release)
+packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows release archive
+.github/workflows/ ci.yml (web and server build + tests, Linux and Windows), release.yml (tag → Linux archive, Windows zip when `RELEASE_WINDOWS` is set, + GitHub release)
 ```
 
 **Ownership rule.** A slice owns `server/src/<slice>/**` and `web/src/features/<slice>/**`. Core files change only when the contract changes. `Cargo.toml` and `package.json` already list everything a slice is expected to need; adding a dependency is allowed but should be rare.
@@ -214,10 +214,12 @@ The plan and its status are in [windows-port.md](windows-port.md).
 | `path` | `is_absolute_str`, `check_component` / `check_relative`, `stays_inside`, `to_slash`, `canonicalize`, `strip_prefix`, file-URI helpers, `data_home`, `private_dirs`, `pgpass_file` | Drive letters and `\`; device names, `:` streams, 8.3 names and trailing dots refused; UNC roots unsupported; dunce and an uppercase drive letter; case-insensitive comparisons (see "Paths" in the security model). Data in `%LOCALAPPDATA%`, config in `%APPDATA%`. |
 | `net` | `interfaces`, `bind` (the server's socket), `kill_port_holders` | `GetAdaptersAddresses`; `[::]` made dual-stack; port owners from `GetExtendedTcpTable`, only the same user's processes. |
 | `desktop` | `open_url`, `notify_send` | A Chromium browser from App Paths with `--app=`, else `ShellExecuteW`, for http(s) URLs only; no desktop notifications yet. |
+| `dll` | `restrict_search()`, called at the start of `serve` | `SetDefaultDllDirectories`: a DLL loaded by name (portable-pty's `conpty.dll`) comes only from the executable's folder or System32, never the current directory or `PATH`. A no-op on Unix. |
 
 Windows builds use the MSVC target with a static C runtime (`server/.cargo/config.toml`). The
 release archive adds `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY package next to
-`workbench.exe`, where portable-pty loads them instead of the console host built into Windows.
+`workbench.exe`, where portable-pty loads them instead of the console host built into Windows
+(`os::dll` keeps it from finding a `conpty.dll` anywhere else).
 
 ### TypeScript
 
@@ -518,9 +520,10 @@ npm test           # vitest (src/**/*.test.ts)
 - **CI** (`.github/workflows/ci.yml`, GitHub Actions): every push to `main` and every pull
   request runs the web job (`npm ci`, build, lint, test; Node 22) and the server job
   (`cargo build --locked`, `cargo test --locked`; stable Rust) on Ubuntu 24.04. A
-  `windows-latest` job builds the server, runs `install.ps1` under Windows PowerShell 5.1
-  and runs `cargo test --no-fail-fast` (with Python for the test fakes and
-  `core.autocrlf false`); it is informational (`continue-on-error`) until the port is done.
+  `windows-latest` job builds the server, runs `cargo test --no-fail-fast` (with Python for
+  the test fakes and `core.autocrlf false`) and then, whether the tests passed or not,
+  `install.ps1` under Windows PowerShell 5.1; it is informational (`continue-on-error`) until
+  the port is done.
 - **Releases** (`release.yml`): bump `version` in `server/Cargo.toml` (and `web/package.json`),
   give CHANGELOG.md a `## X.Y.Z - date` section, commit, then push a `vX.Y.Z` tag. The
   workflow refuses a tag that does not match the crate version, builds the UI and the
@@ -529,19 +532,24 @@ npm test           # vitest (src/**/*.test.ts)
   `workbench-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz` (binary, `install.sh`, LICENSE, README,
   CHANGELOG, notices) with a `.sha256`, the CHANGELOG section as the notes. Started by hand,
   it builds the archives as artifacts without publishing.
-- **The Windows release** is a job of its own on `windows-latest`, and `publish` needs both.
-  It builds the UI and `workbench.exe` (MSVC, static C runtime), takes `conpty.dll` and
-  `OpenConsole.exe` (x64) from the pinned `Microsoft.Windows.Console.ConPTY` NuGet package
-  (checked against pinned SHA-256s), installs the staged package with `install.ps1` under
-  Windows PowerShell 5.1, checks that the binary imports no Visual C++ runtime, starts it on
-  scratch directories and a free port until the UI is served, installs again over the
-  running server, and publishes `workbench-X.Y.Z-x86_64-pc-windows-msvc.zip`
+- **The Windows release** is a job of its own on `windows-latest`. It builds the UI and
+  `workbench.exe` (MSVC, static C runtime), takes `conpty.dll` and `OpenConsole.exe` (x64)
+  from the pinned `Microsoft.Windows.Console.ConPTY` NuGet package (checked against pinned
+  SHA-256s), installs the staged package with `install.ps1` under Windows PowerShell 5.1,
+  checks that the binary imports no Visual C++ runtime, starts it on scratch directories and
+  a free port until the UI is served, installs again over the running server (whose exe must
+  end up renamed aside), and builds `workbench-X.Y.Z-x86_64-pc-windows-msvc.zip`
   (`workbench.exe`, `workbenchw.exe` once the crate builds it, `install.ps1`, `conpty.dll`,
-  `OpenConsole.exe`, LICENSE, README, CHANGELOG, notices) with a `.sha256`. `install.ps1`
-  installs per user into `%LOCALAPPDATA%\Programs\Workbench` (or `-Prefix`) without
-  elevation, adds it to the user PATH (`HKCU\Environment`, then `WM_SETTINGCHANGE`), renames
-  files in use aside (`*.old`, removed by the next install), removes the Mark of the Web from
-  what it installs and exits non-zero on failure.
+  `OpenConsole.exe`, LICENSE, README, CHANGELOG, the notices and `CONPTY_NOTICE.md`) with a
+  `.sha256`. Started by hand, the job always runs; on a tag it runs only while the repository
+  variable `RELEASE_WINDOWS` is `true`, and `publish` then needs both jobs. Until then a tag
+  publishes the Linux archive alone, as before the port. `install.ps1` installs per user into
+  `%LOCALAPPDATA%\Programs\Workbench` (or `-Prefix`) without elevation, gives a folder it
+  creates an access list for the user, SYSTEM and Administrators only (and warns when an
+  existing one lets others write), adds it to the user PATH (`HKCU\Environment`, then
+  `WM_SETTINGCHANGE`), renames files in use aside (`*.old`, removed by the next install,
+  renames retried on sharing violations), removes the Mark of the Web from what it installs
+  and exits non-zero on failure.
 
 ## Second phase (2026-09-26): Workspace, agent providers, GitHub, broader detection
 
@@ -807,7 +815,7 @@ The Database tool window (right; CLion's Database view) and SQL consoles, for Po
 
 **Data sources** are `[[database]]` entries of the project config: `name`, `host`, `port`,
 `database`, `user`, `password` (a secret *name*), `url` (a secret name whose value is a whole
-`postgres://…` or `key=value` URL, e.g. `{ dotenv = ".env", key = "DATABASE_URL" }`; the other
+`postgres://…` or `key=value` URL, e.g. `{ dotenv = { path = ".env", key = "DATABASE_URL" } }`; the other
 fields override its parts), `sslmode` and `read_only`. Unset: host `localhost`, port 5432, user
 the OS user, database the user. Without a password `~/.pgpass` is read with libpq's rules (and
 only when it is not readable by others; on Windows, like libpq, without that check). `sslmode`: `disable`, `prefer` (default) and `require`
