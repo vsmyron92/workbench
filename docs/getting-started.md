@@ -12,12 +12,30 @@ CLI can be added in `config.toml`.
 
 ## What you need
 
-- Linux on x86_64. Workbench is developed and tested there.
-- [Rust](https://rustup.rs) 1.97 or newer, [Node.js](https://nodejs.org) 22 and git.
+- Linux on x86_64 (glibc 2.35 or newer for the release binaries, e.g. Ubuntu 22.04,
+  Debian 12, Fedora 36). Workbench is developed and tested there; Windows is not
+  supported yet.
+- git. To build from source: [Rust](https://rustup.rs) 1.97 or newer and
+  [Node.js](https://nodejs.org) 22.
 - Optional, for the features that use them: Docker (dev containers and Services),
   language servers (code intelligence), GDB / lldb-dap / debugpy / delve (debugging).
 
-## Build and install
+## Install a release
+
+Download `workbench-<version>-x86_64-unknown-linux-gnu.tar.gz` from the repository's
+releases, check it against its `.sha256` file if you like, and run its installer:
+
+```bash
+sha256sum -c workbench-*-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar xzf workbench-*-x86_64-unknown-linux-gnu.tar.gz
+./workbench-*-x86_64-unknown-linux-gnu/install.sh
+```
+
+`install.sh` copies the binary to `~/.local/bin/workbench` (`PREFIX=/usr/local` for
+`/usr/local/bin`, with the rights to write there) and tells you when that folder is not on
+your PATH or when a running service needs a restart.
+
+## Build and install from source
 
 ```bash
 git clone <your copy of this repository> ~/src/workbench
@@ -28,8 +46,8 @@ install -m 0755 target/release/workbench ~/.local/bin/
 ```
 
 The web UI is embedded in the binary, so `~/.local/bin/workbench` is all you need to run.
-To update later, pull, rebuild both parts and install the binary again; then restart the
-service (below) or the running `workbench serve`.
+To update later, install the new release (or pull, rebuild both parts and install the
+binary again); then restart the service (below) or the running `workbench serve`.
 
 ## First start
 

@@ -1,0 +1,103 @@
+name: Release
+
+# A `vX.Y.Z` tag (matching server/Cargo.toml) builds the release binaries and publishes
+# them with that version's CHANGELOG section. Run by hand, it only builds the archives.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux x86_64
+    # The oldest supported image: the binary needs this glibc (2.35) or newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' server/Cargo.toml | head -n1)
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match server/Cargo.toml version ${version}"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Web UI
+        working-directory: web
+        run: npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      # The release binary embeds web/dist.
+      - name: Binary
+        working-directory: server
+        run: |
+          cargo build --release --locked
+          strip target/release/workbench
+      - name: Smoke test
+        run: |
+          bin=server/target/release/workbench
+          "$bin" --version
+          scratch=$(mktemp -d)
+          WORKBENCH_CONFIG_DIR="$scratch/config" WORKBENCH_DATA_DIR="$scratch/data" \
+            "$bin" serve --bind 127.0.0.1:7799 > "$scratch/log" 2>&1 &
+          pid=$!
+          for _ in $(seq 1 50); do curl -fsS -o /dev/null http://127.0.0.1:7799/ && break; sleep 0.2; done
+          page=$(curl -fsS http://127.0.0.1:7799/)
+          kill "$pid"
+          echo "$page" | grep -q '<div id="root">' || { cat "$scratch/log"; echo "::error::the embedded UI is missing"; exit 1; }
+      - name: Archive
+        id: archive
+        run: |
+          name="workbench-${{ steps.version.outputs.version }}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/$name"
+          cp server/target/release/workbench packaging/linux/install.sh LICENSE README.md CHANGELOG.md THIRD_PARTY_NOTICES.md "dist/$name/"
+          chmod 0755 "dist/$name/workbench" "dist/$name/install.sh"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: [linux]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" 'index($0, "## " v " ") == 1 || $0 == "## " v {f = 1; next} /^## / {f = 0} f' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --title "Workbench ${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag
+          fi

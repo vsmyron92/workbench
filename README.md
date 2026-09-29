@@ -55,8 +55,13 @@ agent CLI) and paste:
 
 ## Run on Linux
 
-1. Install Rust (1.97 or newer), Node.js 22 and git.
-2. Build and install:
+1. Install a release: download `workbench-<version>-x86_64-unknown-linux-gnu.tar.gz` from
+   the [releases](../../releases) (x86_64, glibc 2.35 or newer), then
+   ```bash
+   tar xzf workbench-*-x86_64-unknown-linux-gnu.tar.gz
+   ./workbench-*-x86_64-unknown-linux-gnu/install.sh   # into ~/.local/bin
+   ```
+2. Or build it yourself, with Rust (1.97 or newer), Node.js 22 and git:
    ```bash
    cd web && npm ci && npm run build && cd ..
    cd server && cargo build --release        # one binary, the UI embedded

@@ -76,6 +76,8 @@ web/               React 19 + TS + Vite 8
   src/lib/           monacoSetup, languages.ts (file → Monaco language), vhdl.ts (grammar) (core)
   src/features/<slice>/   one folder per slice; index.ts exports a FeatureModule
 docs/              this file
+packaging/linux/   install.sh shipped in the release archive
+.github/workflows/ ci.yml (web and server build + tests), release.yml (tag → Linux archive + GitHub release)
 ```
 
 **Ownership rule.** A slice owns `server/src/<slice>/**` and `web/src/features/<slice>/**`. Core files change only when the contract changes. `Cargo.toml` and `package.json` already list everything a slice is expected to need; adding a dependency is allowed but should be rare.
@@ -483,6 +485,18 @@ npm test           # vitest (src/**/*.test.ts)
 - **Isolated instance for development or tests.** Set `WORKBENCH_CONFIG_DIR` and `WORKBENCH_DATA_DIR` to scratch directories and choose a free `--bind` port.
 - **Signing in.** Use `$(cat $WORKBENCH_DATA_DIR/token)` as the Bearer token for curl. Open `/auth?token=…` in a browser.
 - **Stopping a server.** Use `fuser -k <port>/tcp`, never `pkill -f`.
+- **CI** (`.github/workflows/ci.yml`, GitHub Actions): every push to `main` and every pull
+  request runs the web job (`npm ci`, build, lint, test; Node 22) and the server job
+  (`cargo build --locked`, `cargo test --locked`; stable Rust) on Ubuntu 24.04.
+- **Releases** (`release.yml`): bump `version` in `server/Cargo.toml` (and `web/package.json`),
+  give CHANGELOG.md a `## X.Y.Z - date` section, commit, then push a `vX.Y.Z` tag. The
+  workflow refuses a tag that does not match the crate version, builds the UI and the
+  release binary on Ubuntu 22.04 (glibc 2.35 is the floor), strips it, starts it on a
+  scratch config to check that the embedded UI is served, and publishes
+  `workbench-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz` (binary, `install.sh`, LICENSE, README,
+  CHANGELOG, notices) with a `.sha256`, the CHANGELOG section as the notes. Started by hand,
+  it builds the archive as an artifact without publishing. Windows is not built: the server
+  uses Unix APIs (PTYs, process groups, file modes, systemd, `/proc`) throughout.
 
 ## Second phase (2026-09-26): Workspace, agent providers, GitHub, broader detection
 
