@@ -5,8 +5,8 @@
 - **Windows (experimental):** the server is being ported to Windows 10 (1809 or newer) and
   11 on x86_64 ([plan and status](docs/windows-port.md)). Nothing of it has been tested on
   a real Windows machine yet. Operating-system code now goes through one layer
-  (`util::os`), and Linux behaviour is unchanged (apart from the Unity item below). On
-  Windows, private files get an access list for you and SYSTEM only, child processes run in
+  (`util::os`), and Linux behaviour is unchanged (apart from the Unity and git credentials
+  items below). On Windows, private files get an access list for you and SYSTEM only, child processes run in
   Job Objects, programs are found through `PATHEXT` (npm's `.cmd` shims start through
   `node.exe`), run commands go through PowerShell, a DLL loaded by name comes only from
   Workbench's own folder or System32, the configuration is in `%APPDATA%\workbench` and the
@@ -23,6 +23,17 @@
   paths), and those features answer `unsupported_platform` with the reason.
 - **Terminals:** `[terminals] shell` in `config.toml` sets the program and arguments of new
   shells (default: `$SHELL -l`).
+- **Git credentials (every OS):** Workbench's fetch, update and push no longer ask git's
+  credential helpers for the GitLab host Workbench has a token for (the project's own
+  `[repo.gitlab]` token, else `[gitlab]`), nor hand them that token to store: it no longer
+  ends up in Git Credential Manager, `~/.git-credentials`, a credential cache or a keychain,
+  and a stored credential no longer answers in its place, so a project's own token, a
+  rotated token or a removed one takes effect at once. Other hosts keep your helpers. On
+  Linux this changes behaviour if a credential helper of yours knew that host: Workbench's
+  remote operations now use Workbench's token there. Workbench also no longer answers a
+  credential prompt whose user name contains `/` (git before its January 2025 security
+  releases prints it unescaped), which a crafted remote or submodule URL could use to get
+  the GitLab token sent to another host.
 - **Git on Windows:** a working tree git checks out with CRLF over an LF index
   (`core.autocrlf`, Git for Windows' default, or `eol=crlf` attributes) shows in diffs and
   conflicts as git reads it, with LF; a conflict resolved with edited text is written back

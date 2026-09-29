@@ -147,6 +147,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 - **Logs:** request spans carry the method and path only, never the query string (`/auth?token=…`, `?wbk=`).
 - **Agent tokens:** `auth.issue_agent_token(terminal_id)` is put into a hosted session's environment (`WORKBENCH_AGENT_TOKEN`). It is valid only on `/api/hooks/**` and `/mcp`, whose handlers check it with `auth.agent_from_headers`.
   - A hosted session is confined to its own project over MCP. Tools resolve the project with `McpCtx::project_for`, which refuses a `projectId` naming another project; terminal tools show only what `McpCtx::may_see_project` allows. Only a caller that is not a session (the master token without `X-Workbench-Terminal`) may name any project.
+- **Git credentials** (`git::askpass`): remote ops (fetch, pull, push, rebase) let git ask `workbench askpass`, which answers only for the GitLab host Workbench has a token for (the project's `[repo.gitlab]` with its own token, else `[gitlab]`), only over https, and only when the prompt names that host unambiguously: git before its CVE-2024-50349 fix prints user names decoded, so `Password for 'https://gitlab.com/@evil.example': ` (user `gitlab.com/`) is refused. For that host the ops also empty git's credential helper list (`-c credential.https://<host>.helper=`, `askpass::reset_helpers_key`), so no helper (Git Credential Manager, `store`, `cache`, a keychain) is asked for it or handed the token to store; other hosts keep the user's helpers.
 - **Paths:** every client path goes through `util::paths::resolve_in_root`, or through `resolve_absolute_in` for extra roots. These reject `..` escapes and symlinks leaving the root.
   - Whether a string is an absolute path, and the Windows rules, live in `util::os::path`. On Windows client paths use `/` only (a `\` could slip past checks that split on `/`), and names that alias another file or a device are refused (`:`, device names like `NUL` or `com1.txt`, a trailing dot or space, 8.3 short names like `GIT~1`); roots compare without regard to ASCII case; UNC roots (`\\server\share`, `\\wsl$`, also spelled `\\?\UNC\…` or `\??\UNC\…`) are refused: adding one as a project answers `unsupported_platform` (`networkRoots`), so does a path that resolves to one (a mapped network drive), and config.toml entries naming one are skipped at reload before anything opens them. Canonical paths drop `\\?\` wherever a plain path names the same file and have an uppercase drive letter; comparisons take `\\?\C:\` for `C:\`. Linux keeps its rules.
 - **PTY input is code execution.** Every authenticated device is fully trusted, so remote exposure requires pairing and should use TLS (a proxy such as `tailscale serve` or Caddy, or `[server.tls]`).
@@ -1821,7 +1822,10 @@ file renamed since is logged under its old name. The editor action sends it (pan
 itself with `WORKBENCH_HELPER=askpass`, also as ssh's `SSH_ASKPASS` with
 `SSH_ASKPASS_REQUIRE=force`, so a passphrase or unknown host key fails the op at once
 (remote ops start without a console), and `GCM_INTERACTIVE=never`, so Git Credential
-Manager, which git asks first, never opens a sign-in window. `main.rs` answers such a call before clap parses
+Manager, which git asks first, never opens a sign-in window. For the GitLab host askpass
+answers for, remote ops empty git's credential helper list on every OS, so Credential Manager
+is neither asked for it nor handed Workbench's token (Security model, "Git credentials").
+`main.rs` answers such a call before clap parses
 anything: the variable set and a single argument that is not a subcommand or an option
 (`askpass_prompt`), so hooks and the rebase editor, which inherit the variable, still run
 their commands. `GIT_EDITOR`/`GIT_SEQUENCE_EDITOR` quote their paths for sh with `/`

@@ -93,6 +93,8 @@ pub struct Git {
     timeout: Duration,
     max_stdout: usize,
     env: Vec<(String, String)>,
+    /// `-c key=value` before the subcommand, after Workbench's own.
+    config: Vec<(String, String)>,
 }
 
 impl Git {
@@ -106,6 +108,7 @@ impl Git {
             timeout: READ_TIMEOUT,
             max_stdout: DEFAULT_MAX_STDOUT,
             env: vec![],
+            config: vec![],
         }
     }
 
@@ -143,10 +146,21 @@ impl Git {
         self
     }
 
+    /// Set config `key` for this command only (`-c key=value`, which git reads after every
+    /// config file and passes on to the git commands it starts). An empty value resets a
+    /// list such as `credential.<url>.helper`.
+    pub fn config(mut self, key: &str, value: impl Into<String>) -> Self {
+        self.config.push((key.to_string(), value.into()));
+        self
+    }
+
     /// The prepared `tokio::process::Command` (also used for streamed remote ops).
     pub fn command(&self) -> Command {
         let mut cmd = Command::new("git");
         cmd.args(["-c", "core.quotepath=false", "-c", "color.ui=false", "-c", "core.pager=cat"]);
+        for (k, v) in &self.config {
+            cmd.arg("-c").arg(format!("{k}={v}"));
+        }
         cmd.args(&self.args);
         cmd.current_dir(&self.cwd)
             .env("LC_ALL", "C")
@@ -443,6 +457,14 @@ mod tests {
         for k in ["GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"] {
             assert!(envs.iter().any(|(n, v)| *n == k && v.is_none()), "{k} must be removed");
         }
+    }
+
+    #[test]
+    fn config_goes_before_the_subcommand() {
+        let cmd = Git::write(Path::new("/")).args(["fetch", "origin"]).config("credential.https://gitlab.com.helper", "").command();
+        let args: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let i = args.iter().position(|a| a == "fetch").unwrap();
+        assert_eq!(args[i - 2..], ["-c", "credential.https://gitlab.com.helper=", "fetch", "origin"]);
     }
 
     #[test]

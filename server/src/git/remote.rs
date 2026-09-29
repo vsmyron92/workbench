@@ -310,12 +310,21 @@ async fn run(state: &AppState, repo: &Repo, spec: &RemoteOpSpec, op_id: &str, ca
     }
     // GIT_ASKPASS (Windows: also ssh's SSH_ASKPASS); GIT_TERMINAL_PROMPT=0 comes with
     // every git command (`Git::command`).
-    for (k, v) in state.git.askpass.get().into_iter().flatten() {
-        g = g.env(k, v.clone());
+    let root = project_root(state, repo);
+    if let Some(askpass) = state.git.askpass.get() {
+        for (k, v) in askpass {
+            g = g.env(k, v.clone());
+        }
+        // Git's credential helpers are neither asked for the host askpass answers for nor
+        // handed its token to store (Git Credential Manager, `~/.git-credentials`…).
+        let cfg = state.config.read().clone();
+        if let Some(key) = super::askpass::reset_helpers_key(&state.paths, &cfg, Some((&root, &repo.project_id))) {
+            g = g.config(&key, "");
+        }
     }
     g = g
         .env("WORKBENCH_PROJECT_ID", repo.project_id.clone())
-        .env("WORKBENCH_PROJECT_ROOT", project_root(state, repo).to_string_lossy().to_string())
+        .env("WORKBENCH_PROJECT_ROOT", root.to_string_lossy().to_string())
         // Abort transfers that stall for a minute.
         .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
         .env("GIT_HTTP_LOW_SPEED_TIME", "60");
