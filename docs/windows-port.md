@@ -300,6 +300,10 @@ clearly. Reading and containment are unaffected.
   the user's PATH).
 - A Start Menu `Workbench.lnk` runs `workbenchw.exe open`. `workbench service status` also
   reads `StartupApproved\Run` to report an entry disabled in Task Manager.
+- `install --enable` over a running service starts the new supervisor outside its own job
+  (`CREATE_BREAKAWAY_FROM_JOB`), since stopping the old server closes the terminal it may run
+  in. Workbench terminals' jobs do not allow that yet (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, for
+  the terminals slice), so from one it restarts nothing and says so.
 - Rejected: a logon scheduled task (`schtasks /SC ONLOGON` is refused for standard users in
   common setups, shows a console window, and its restart policy ignores the exit code); S4U
   tasks and Windows services (they lose Credential Manager and the desktop, and a service

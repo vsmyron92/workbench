@@ -8,15 +8,18 @@
 //! * The Start Menu shortcut `Workbench.lnk` runs `workbenchw.exe open`: it starts the
 //!   service when it is not running, then opens a signed-in window like `workbench open`.
 //! * `--enable` sets the value `Workbench` of `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-//!   to `"<folder>\workbenchw.exe"` and starts the service now. `--dry-run` prints everything
-//!   and changes nothing.
+//!   to `"<folder>\workbenchw.exe"` and starts the service now. Over a running service it
+//!   starts a new supervisor (`service run --replace <old data dir>`) that stops the old one:
+//!   stopping the old server ends its terminals, and this command with them when it runs in
+//!   one. `--dry-run` prints everything and changes nothing.
 //! * `workbenchw.exe` is a GUI program (no console at sign-in) that starts the supervisor,
 //!   `workbench service run`: it runs `workbench serve` without a console window, appends its
 //!   output to `service.log` next to `service.json`, restarts it 5 s after a failure
 //!   (systemd's `RestartSec=5`) and gives up after 5 failures within 60 s. It starts nothing
 //!   while a server already serves the data dir.
 //! * `stop` sets the stop events of the server and of the supervisor
-//!   (`os::proc::request_stop`) and waits until the server's port is free.
+//!   (`os::proc::request_stop`) and waits until the server's port is free. `uninstall` stops
+//!   the service last, after removing its files.
 //!
 //! Files carry a marker (the shortcut in its description); `uninstall` removes only what
 //! has it, and the `Run` value only when it runs a `workbenchw.exe`.
@@ -36,7 +39,7 @@ use crate::util;
 use crate::util::os::autostart;
 use crate::util::os::proc::{self, Event};
 
-pub const ABOUT: &str = "Start Workbench at sign-in (workbenchw.exe), with a Start Menu shortcut.";
+pub const ABOUT: &str = "Start Workbench at sign-in (workbenchw.exe), with a Start Menu shortcut";
 
 const MARKER: &str = "Written by `workbench service install`";
 /// Environment carried into the service when set.
@@ -49,8 +52,12 @@ const RESTART_DELAY: Duration = Duration::from_secs(5);
 /// The supervisor gives up after this many failures within `FAILURE_WINDOW`.
 const MAX_FAILURES: usize = 5;
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
-/// How long a stop may take (systemd's `TimeoutStopSec=30`).
+/// How long a stop may take before the supervisor ends the server (systemd's
+/// `TimeoutStopSec=30`).
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// How much longer `stop` waits for a supervised server: time for the supervisor to end it
+/// (systemd's stop, too, waits through the timeout and the kill).
+const KILL_GRACE: Duration = Duration::from_secs(10);
 /// How long `install --enable` and the Start Menu shortcut wait for a server to come up.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// A larger `service.log` is moved to `service.log.old` when the supervisor starts.
@@ -99,6 +106,9 @@ pub enum ServiceAction {
     Run {
         #[arg(long, default_value = DEFAULT_NAME)]
         name: String,
+        /// Stop the service running on this data dir first (`install --enable` restarting it).
+        #[arg(long)]
+        replace: Option<PathBuf>,
     },
     /// `workbenchw.exe open`: start the service when it does not run, then open a signed-in window.
     #[command(hide = true)]
@@ -125,11 +135,15 @@ pub struct Env {
     pub approved_key: String,
     /// `CARRIED_VARS` that are set.
     pub vars: Vec<(String, String)>,
-    /// This process runs as administrator: it starts no service, which would run so too,
+    /// This process runs elevated through UAC while the user's session does not
+    /// (`autostart::elevated`): it starts no service, which would run as administrator too,
     /// its agents included.
     pub elevated: bool,
     pub start_timeout: Duration,
+    /// The supervisor's stop timeout, after which it ends the server; `stop` waits
+    /// `kill_grace` longer.
     pub stop_timeout: Duration,
+    pub kill_grace: Duration,
 }
 
 impl Env {
@@ -150,6 +164,7 @@ impl Env {
             elevated: autostart::elevated(),
             start_timeout: START_TIMEOUT,
             stop_timeout: STOP_TIMEOUT,
+            kill_grace: KILL_GRACE,
         })
     }
 
@@ -177,10 +192,12 @@ fn carried_vars() -> Vec<(String, String)> {
         .iter()
         .filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| (k.to_string(), v)))
         .map(|(k, v)| {
-            // Directories go in absolute, whatever the current folder of this shell was.
+            // Directories go in absolute, whatever the current folder of this shell was, and
+            // normalised (GetFullPathNameW: `\` separators, no `.` or `..`), as the data dir
+            // names the service's events.
             if k != "WORKBENCH_LOG" {
                 let p = crate::config::expand_tilde(&v);
-                let p = if p.is_absolute() { p } else { std::env::current_dir().map(|d| d.join(&p)).unwrap_or(p) };
+                let p = std::path::absolute(&p).unwrap_or(p);
                 (k, p.to_string_lossy().into_owned())
             } else {
                 (k, v)
@@ -338,6 +355,36 @@ fn start(env: &Env, name: &str, data_dir: &Path, out: &mut dyn Write) -> anyhow:
     if !apart {
         writeln!(out, "note: this terminal keeps what it starts in a job that may end with it; if Workbench stops when it closes, start it from the Start Menu")?;
     }
+    wait_started(env, name, data_dir, out)
+}
+
+/// Replaces the service running on `old` (a data dir) with a new supervisor, which stops the
+/// old one itself (`service run --replace`), then waits for the new server. Stopping the
+/// old server ends its terminals, and with them this command when it runs in one: the
+/// replacement must not depend on it. `Ok(false)`, and nothing changed, when this process's
+/// job keeps what it starts: the replacement would end with that terminal too.
+fn restart(env: &Env, name: &str, old: &Path, data_dir: &Path, out: &mut dyn Write) -> anyhow::Result<bool> {
+    let old_pid = Runtime::of(old).live_pid();
+    let old_arg = old.to_string_lossy();
+    let args = [run_args(name), vec!["--replace", &old_arg]].concat();
+    if !autostart::start_apart(&env.exe, &args, dirs::home_dir().as_deref()).with_context(|| format!("cannot start {}", env.exe.display()))? {
+        return Ok(false);
+    }
+    writeln!(out, "restarting Workbench to load the new settings (open Workbench tabs reconnect)")?;
+    out.flush()?;
+    // The old server by its pid: on the same data dir, the new one takes over its events.
+    if let Some(pid) = old_pid
+        && !wait_until(env.stop_timeout + env.kill_grace, || !proc::own_pid_alive(pid))
+    {
+        writeln!(out, "the previous Workbench (pid {pid}) is still stopping; see {}", env.log_file(name).display())?;
+        return Ok(true);
+    }
+    wait_started(env, name, data_dir, out)?;
+    Ok(true)
+}
+
+/// Waits for the server of `data_dir` to come up, and says so.
+fn wait_started(env: &Env, name: &str, data_dir: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     if wait_until(env.start_timeout, || proc::server_running(data_dir)) {
         let url = Runtime::of(data_dir).url.map(|u| format!(" at {u}")).unwrap_or_default();
         writeln!(out, "started Workbench{url}")?;
@@ -371,8 +418,10 @@ fn stop_instance(env: &Env, data_dir: &Path) -> anyhow::Result<bool> {
             && (!server || before.pid.is_none_or(|p| !proc::own_pid_alive(p)))
             && (!server || before.port.is_none_or(|p| !port_open(p)))
     };
-    if !wait_until(env.stop_timeout, down) {
-        bail!("Workbench is still running after {} s{}", env.stop_timeout.as_secs(), before.pid_text());
+    // A supervisor ends a server that has not stopped after `stop_timeout`: wait for that too.
+    let timeout = if supervisor { env.stop_timeout + env.kill_grace } else { env.stop_timeout };
+    if !wait_until(timeout, down) {
+        bail!("Workbench is still running after {} s{}", timeout.as_secs(), before.pid_text());
     }
     Ok(true)
 }
@@ -451,19 +500,27 @@ pub fn install(env: &Env, name: &str, enable: bool, dry_run: bool, out: &mut dyn
             writeln!(out, "note: {entry} is turned off in Task Manager › Startup apps, so it does not start at sign-in; turn it on there")?;
         }
     } else if enable {
-        if let Some(dir) = &supervised {
-            // A running supervisor keeps its old environment: restart it with the new one.
-            writeln!(out, "restarting Workbench to load the new settings (open Workbench tabs reconnect)")?;
-            out.flush()?;
-            stop_instance(env, dir)?;
+        // A running supervisor keeps its old environment: a new one replaces it.
+        let started = match &supervised {
+            Some(old) => restart(env, name, old, &data_dir, out)?,
+            None => {
+                start(env, name, &data_dir, out)?;
+                true
+            }
+        };
+        if !started {
+            writeln!(out, "\nnot restarted: this terminal keeps what it starts in its job (Workbench's own terminals do), so a service")?;
+            writeln!(out, "started from here would end with it. Workbench runs with the previous settings. To load these:")?;
+            writeln!(out, "  workbench service stop, then open {entry} from the Start Menu")?;
         }
-        start(env, name, &data_dir, out)?;
         if turned_off {
             writeln!(out, "note: {entry} is turned off in Task Manager › Startup apps, so it does not start at sign-in; turn it on there")?;
         } else {
             writeln!(out, "Workbench now starts at sign-in")?;
         }
-        writeln!(out, "open it with the Start Menu's {entry} or `workbench open`; log: {}", env.log_file(name).display())?;
+        if started {
+            writeln!(out, "open it with the Start Menu's {entry} or `workbench open`; log: {}", env.log_file(name).display())?;
+        }
     } else if supervised.is_some() {
         writeln!(out, "\nWorkbench runs with the previous settings. To load these:")?;
         writeln!(out, "  workbench service stop, then open {entry} from the Start Menu")?;
@@ -497,9 +554,6 @@ pub fn uninstall(env: &Env, name: &str, dry_run: bool, out: &mut dyn Write) -> a
     let data_dir = data_dir_of(&service_vars(env, name).unwrap_or_else(|_| env.vars.clone()))?;
     let supervised = Event::exists(&service_event(&data_dir));
     if dry_run {
-        if supervised {
-            writeln!(out, "would stop Workbench (the service runs it)")?;
-        }
         match &run {
             Some(v) if run_ours => writeln!(out, "would remove {run_path} ({v})")?,
             Some(v) => writeln!(out, "would keep {run_path} ({v}, not written by Workbench)")?,
@@ -512,13 +566,10 @@ pub fn uninstall(env: &Env, name: &str, dry_run: bool, out: &mut dyn Write) -> a
                 writeln!(out, "would keep {} (not written by Workbench)", f.0.display())?;
             }
         }
-        return Ok(());
-    }
-    if supervised {
-        match stop_instance(env, &data_dir) {
-            Ok(_) => writeln!(out, "stopped Workbench")?,
-            Err(e) => writeln!(out, "could not stop Workbench: {e:#}")?,
+        if supervised {
+            writeln!(out, "would stop Workbench (the service runs it)")?;
         }
+        return Ok(());
     }
     let mut removed = 0;
     match &run {
@@ -548,6 +599,16 @@ pub fn uninstall(env: &Env, name: &str, dry_run: bool, out: &mut dyn Write) -> a
     }
     if removed == 0 {
         writeln!(out, "nothing to remove")?;
+    }
+    // Last: stopping the server ends its terminals, and this command with them when it runs
+    // in one.
+    if supervised {
+        writeln!(out, "stopping Workbench")?;
+        out.flush()?;
+        match stop_instance(env, &data_dir) {
+            Ok(_) => writeln!(out, "stopped Workbench")?,
+            Err(e) => writeln!(out, "could not stop Workbench: {e:#}")?,
+        }
     }
     Ok(())
 }
@@ -782,17 +843,30 @@ fn open_log(path: &Path) -> anyhow::Result<File> {
     util::os::perm::open_append(path, 0o600).with_context(|| format!("open {}", path.display()))
 }
 
-/// `workbench service run`: the supervisor `workbenchw.exe` starts.
-pub fn run(env: &Env, name: &str) -> anyhow::Result<()> {
+/// `workbench service run`: the supervisor `workbenchw.exe` starts. With `replace` (a data
+/// dir), it first stops the service running there: `install --enable` hands a restart over.
+pub fn run(env: &Env, name: &str, replace: Option<&Path>) -> anyhow::Result<()> {
     check_name(name)?;
     let vars = service_vars(env, name)?;
     let data_dir = data_dir_of(&vars)?;
-    let log_path = env.log_file(name);
-    let mut log = open_log(&log_path)?;
+    // Created here as the server creates it: an existing data dir has one canonical path,
+    // which names the events of this process, of the server and of the other commands alike.
+    std::fs::create_dir_all(&data_dir).with_context(|| format!("create {}", data_dir.display()))?;
+    util::fs::set_mode(&data_dir, 0o700);
+    // Before claiming the event, which the old supervisor holds on the same data dir.
+    let replaced = replace.map(|old| stop_instance(env, old));
     let Some(me) = Event::create(&service_event(&data_dir)).context("cannot create the service's stop event")? else {
-        log_line(&mut log, &format!("the service already runs for {}; not starting another", data_dir.display()));
+        // Another supervisor runs for the data dir (the shortcut clicked twice): its log, too,
+        // is left alone.
         return Ok(());
     };
+    let log_path = env.log_file(name);
+    let mut log = open_log(&log_path)?;
+    match replaced {
+        Some(Ok(true)) => log_line(&mut log, "stopped the previous service, to start with new settings"),
+        Some(Err(e)) => log_line(&mut log, &format!("cannot stop the previous service: {e:#}")),
+        _ => {}
+    }
     let exe = env.exe.clone();
     let child_log = log.try_clone()?;
     let command = move || -> std::io::Result<Command> {
@@ -810,7 +884,7 @@ pub fn run(env: &Env, name: &str) -> anyhow::Result<()> {
         command: Box::new(command),
         delay: RESTART_DELAY,
         failures: Failures::new(MAX_FAILURES, FAILURE_WINDOW),
-        stop_timeout: STOP_TIMEOUT,
+        stop_timeout: env.stop_timeout,
     };
     if supervise(&mut sup, &me, &mut log) == Outcome::GaveUp {
         // Let a new start (the Start Menu, `install --enable`) run while the box is up.
@@ -834,7 +908,7 @@ pub fn cli(args: ServiceArgs) -> anyhow::Result<()> {
         ServiceAction::Uninstall { dry_run, name } => uninstall(&env, &name, dry_run, &mut out),
         ServiceAction::Status { name } => status(&env, &name, &mut out),
         ServiceAction::Stop { name } => stop(&env, &name, &mut out),
-        ServiceAction::Run { name } => run(&env, &name),
+        ServiceAction::Run { name, replace } => run(&env, &name, replace.as_deref()),
         ServiceAction::Open { name } => open(&env, &name),
     }
 }
@@ -886,6 +960,7 @@ mod tests {
             elevated: false,
             start_timeout: Duration::ZERO,
             stop_timeout: Duration::from_secs(5),
+            kill_grace: Duration::from_secs(1),
         };
         std::fs::create_dir_all(dir.path().join("data")).unwrap();
         Fixture { dir, env, key }
@@ -962,14 +1037,8 @@ mod tests {
         assert!(out.find("running outside the service").unwrap() < out.find("--enable").unwrap(), "{out}");
     }
 
-    /// A stand-in for a running supervisor of `data_dir`: holds its event until it is set.
-    fn fake_supervisor(data_dir: &Path) -> std::thread::JoinHandle<bool> {
-        let me = Event::create(&service_event(data_dir)).unwrap().unwrap();
-        std::thread::spawn(move || me.wait(Duration::from_secs(20)).unwrap())
-    }
-
     #[test]
-    fn reinstalling_restarts_the_service_and_keeps_the_entry() {
+    fn reinstalling_hands_the_restart_over_and_keeps_the_entry() {
         let f = fixture();
         install(&f.env, "workbench", true, false, &mut vec![]).unwrap();
         // Without --enable, an entry that is there stays and is kept up to date.
@@ -977,15 +1046,38 @@ mod tests {
         install(&f.env, "workbench", false, false, &mut out).unwrap();
         assert!(text(out).contains("starts at the next sign-in"));
         assert!(run_value(&f).is_some());
-        // The service runs on the data dir of the settings being replaced: it is restarted.
+        // The service runs on the data dir of the settings being replaced (a stand-in holds
+        // its event). A replacement supervisor stops it (whoami.exe stands in for that one), or
+        // nothing happens when this test's job keeps what it starts; never this command itself,
+        // which a terminal of the old server would not survive.
         let old = f.dir.path().join("data");
         let mut env = f.env.clone();
         env.vars[1].1 = f.dir.path().join("data2").display().to_string();
-        let supervisor = fake_supervisor(&old);
+        let supervisor = Event::create(&service_event(&old)).unwrap().unwrap();
         let mut out = vec![];
         install(&env, "workbench", true, false, &mut out).unwrap();
-        assert!(text(out).contains("restarting Workbench"));
-        assert!(supervisor.join().unwrap(), "the old supervisor was asked to stop");
+        let out = text(out);
+        assert!(out.contains("restarting Workbench") || out.contains("not restarted"), "{out}");
+        assert!(!supervisor.wait(Duration::ZERO).unwrap(), "not stopped by `install`");
+        assert!(run_value(&f).is_some());
+    }
+
+    #[test]
+    fn stop_waits_for_the_supervisor_to_end_a_hung_server() {
+        let f = fixture();
+        let data = f.dir.path().join("data");
+        // A supervisor stand-in that ends its server just after its stop timeout.
+        let mut env = f.env.clone();
+        env.stop_timeout = Duration::from_millis(300);
+        let server = Event::create(&proc::stop_event_name(&data)).unwrap().unwrap();
+        let service = Event::create(&service_event(&data)).unwrap().unwrap();
+        let waiter = std::thread::spawn(move || {
+            assert!(service.wait(Duration::from_secs(10)).unwrap());
+            std::thread::sleep(Duration::from_millis(500));
+            drop(server);
+        });
+        stop(&env, "workbench", &mut vec![]).unwrap();
+        waiter.join().unwrap();
     }
 
     #[test]

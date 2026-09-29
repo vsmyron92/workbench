@@ -10,7 +10,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, WIN32_ERROR};
+use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, WIN32_ERROR};
 use windows_sys::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
@@ -325,16 +325,25 @@ pub fn shortcut_mentions(lnk: &Path, text: &str) -> bool {
 
 // ---------------------------------------------------------------- processes
 
-/// `program` and `args` as a command line: each word double-quoted when it has a space or a
-/// tab. A word with a double quote or a NUL is refused.
+/// `program` and `args` as a command line that CommandLineToArgvW and the C runtime split
+/// back into these words: each argument double-quoted when it is empty or has a space or a
+/// tab, with the backslashes that end a quoted one doubled (one before the closing quote
+/// would escape it). The program is always quoted (its name is read up to the closing quote,
+/// backslashes and all). A word with a double quote or a NUL is refused.
 pub fn command_line(program: &Path, args: &[&str]) -> io::Result<String> {
     let program = program.to_string_lossy();
-    let mut words = vec![format!("\"{program}\"")];
-    for a in args {
-        words.push(if a.is_empty() || a.contains([' ', '\t']) { format!("\"{a}\"") } else { a.to_string() });
-    }
     if std::iter::once(program.as_ref()).chain(args.iter().copied()).any(|w| w.contains(['"', '\0'])) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "a double quote in a command-line word"));
+    }
+    let mut words = vec![format!("\"{program}\"")];
+    for a in args {
+        words.push(if a.is_empty() || a.contains([' ', '\t']) {
+            let trailing = a.len() - a.trim_end_matches('\\').len();
+            format!("\"{a}{}\"", "\\".repeat(trailing))
+        } else {
+            // Backslashes not followed by a quote are taken as they are.
+            a.to_string()
+        });
     }
     Ok(words.join(" "))
 }
@@ -346,49 +355,67 @@ pub fn command_line(program: &Path, args: &[&str]) -> io::Result<String> {
 /// job when the job allows that: a terminal that ends its job when it closes would end it
 /// too. `Ok(false)`: it had to stay in the caller's job.
 pub fn start_detached(program: &Path, args: &[&str], cwd: Option<&Path>) -> io::Result<bool> {
-    let line = command_line(program, args)?;
-    let app = wide_os(program)?;
-    let cwd = cwd.map(wide_os).transpose()?;
-    let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
-    let mut last = None;
-    for (extra, apart) in [(CREATE_BREAKAWAY_FROM_JOB, true), (0, false)] {
-        // CreateProcessW may write to the command line: a fresh copy per attempt.
-        let mut wline = wide(&line);
-        let si = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };
-        let mut pi = PROCESS_INFORMATION::default();
-        // SAFETY: NUL-terminated program, command line and folder that outlive the call;
-        // default attributes; no inherited handles; the parent's environment; `si` and `pi`
-        // are valid for the call, and the handles it returns are closed by `Handle`.
-        let ok = unsafe {
-            CreateProcessW(
-                app.as_ptr(),
-                wline.as_mut_ptr(),
-                ptr::null(),
-                ptr::null(),
-                0,
-                flags | extra,
-                ptr::null(),
-                cwd.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
-                &si,
-                &mut pi,
-            )
-        } != 0;
-        if ok {
-            let _process = Handle::new(pi.hProcess);
-            let _thread = Handle::new(pi.hThread);
-            return Ok(apart);
-        }
+    match create_detached(program, args, cwd, true) {
+        Ok(()) => Ok(true),
         // A job without JOB_OBJECT_LIMIT_BREAKAWAY_OK refuses the breakaway (access denied):
         // start inside it instead.
-        last = Some(io::Error::last_os_error());
+        Err(_) => create_detached(program, args, cwd, false).map(|()| false),
     }
-    Err(last.unwrap_or_else(|| io::Error::other("cannot start the process")))
 }
 
-/// Whether this process runs elevated (as administrator through UAC): what it starts runs
-/// elevated too.
+/// As `start_detached`, but only outside the caller's job: `Ok(false)`, with nothing
+/// started, when the job does not let it leave (a Workbench terminal's job, until terminals
+/// allow that), so it would end with the job.
+pub fn start_apart(program: &Path, args: &[&str], cwd: Option<&Path>) -> io::Result<bool> {
+    match create_detached(program, args, cwd, true) {
+        Ok(()) => Ok(true),
+        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// `start_detached`'s CreateProcessW; `breakaway` leaves the caller's job, and then fails
+/// when the job does not allow it (outside a job the flag does nothing).
+fn create_detached(program: &Path, args: &[&str], cwd: Option<&Path>, breakaway: bool) -> io::Result<()> {
+    // CreateProcessW may write to the command line: a buffer of its own.
+    let mut line = wide(&command_line(program, args)?);
+    let app = wide_os(program)?;
+    let cwd = cwd.map(wide_os).transpose()?;
+    let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | if breakaway { CREATE_BREAKAWAY_FROM_JOB } else { 0 };
+    let si = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };
+    let mut pi = PROCESS_INFORMATION::default();
+    // SAFETY: NUL-terminated program, command line and folder that outlive the call;
+    // default attributes; no inherited handles; the parent's environment; `si` and `pi`
+    // are valid for the call, and the handles it returns are closed by `Handle`.
+    let ok = unsafe {
+        CreateProcessW(
+            app.as_ptr(),
+            line.as_mut_ptr(),
+            ptr::null(),
+            ptr::null(),
+            0,
+            flags,
+            ptr::null(),
+            cwd.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+            &si,
+            &mut pi,
+        )
+    } != 0;
+    if !ok {
+        return Err(io::Error::last_os_error());
+    }
+    let _process = Handle::new(pi.hProcess);
+    let _thread = Handle::new(pi.hThread);
+    Ok(())
+}
+
+/// Whether this process runs elevated through UAC while the user's session does not: its
+/// token is the elevated half of a split token, so what it starts runs as administrator,
+/// unlike what Explorer, the Start Menu and the sign-in entry start. The built-in
+/// Administrator, and administrators where UAC is off, have no split token: everything runs
+/// with the full token there, and this is false.
 pub fn elevated() -> bool {
-    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION_TYPE, TOKEN_QUERY, TokenElevationType};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     let mut token = ptr::null_mut();
     // SAFETY: the current process's pseudo handle; `token` receives a handle `Handle` closes.
@@ -396,11 +423,20 @@ pub fn elevated() -> bool {
         return false;
     }
     let Some(token) = Handle::new(token) else { return false };
-    let mut e = TOKEN_ELEVATION::default();
+    let mut t: TOKEN_ELEVATION_TYPE = 0;
     let mut len = 0u32;
-    // SAFETY: a token with TOKEN_QUERY; `e` is the structure of this class, with its size.
-    let ok = unsafe { GetTokenInformation(token.0, TokenElevation, ptr::from_mut(&mut e).cast(), size_of::<TOKEN_ELEVATION>() as u32, &mut len) };
-    ok != 0 && e.TokenIsElevated != 0
+    // SAFETY: a token with TOKEN_QUERY; `t` is this class's value (a TOKEN_ELEVATION_TYPE),
+    // with its size.
+    let ok = unsafe {
+        GetTokenInformation(token.0, TokenElevationType, ptr::from_mut(&mut t).cast(), size_of::<TOKEN_ELEVATION_TYPE>() as u32, &mut len)
+    };
+    ok != 0 && split_elevated(t)
+}
+
+/// `TokenElevationTypeFull`: the elevated half of a split token. `Default` is a token without
+/// a split (a standard user, the built-in Administrator, UAC off); `Limited` the other half.
+fn split_elevated(t: windows_sys::Win32::Security::TOKEN_ELEVATION_TYPE) -> bool {
+    t == windows_sys::Win32::Security::TokenElevationTypeFull
 }
 
 /// Starts `cmd`'s program without a console window: a console program gets a hidden
@@ -484,7 +520,22 @@ mod tests {
         let exe = Path::new(r"C:\Program Files\Workbench\workbench.exe");
         assert_eq!(command_line(exe, &[]).unwrap(), r#""C:\Program Files\Workbench\workbench.exe""#);
         assert_eq!(command_line(exe, &["service", "run", "a b"]).unwrap(), r#""C:\Program Files\Workbench\workbench.exe" service run "a b""#);
+        // A quoted word's final backslashes are doubled; elsewhere they stay single.
+        assert_eq!(
+            command_line(exe, &[r"C:\My Data\", r"C:\data\", ""]).unwrap(),
+            r#""C:\Program Files\Workbench\workbench.exe" "C:\My Data\\" C:\data\ """#
+        );
         assert!(command_line(exe, &["x\"y"]).is_err());
+    }
+
+    #[test]
+    fn only_the_elevated_half_of_a_split_token_counts() {
+        use windows_sys::Win32::Security::{TokenElevationTypeDefault, TokenElevationTypeFull, TokenElevationTypeLimited};
+        assert!(split_elevated(TokenElevationTypeFull));
+        assert!(!split_elevated(TokenElevationTypeDefault), "no split: the built-in Administrator, UAC off, a standard user");
+        assert!(!split_elevated(TokenElevationTypeLimited));
+        // Whatever this runner's token is, it is read.
+        let _ = elevated();
     }
 
     #[test]

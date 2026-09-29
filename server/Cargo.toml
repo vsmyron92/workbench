@@ -4,6 +4,8 @@ version = "0.2.0"
 edition = "2024"
 description = "AI-centric developer workspace: Claude Code sessions, editor, git, GitLab, Atlassian and deployed apps in one window"
 license = "MIT"
+# `cargo run` runs the server; `--bin workbenchw` the Windows launcher.
+default-run = "workbench"
 
 [[bin]]
 name = "workbench"

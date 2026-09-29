@@ -50,6 +50,6 @@ workbench service uninstall
 - The Start Menu's **Workbench** opens a signed-in window like `workbench open`, and starts Workbench first when it is not running. Without `--enable` you get Workbench on demand, from the Start Menu.
 - The server's output goes to `%LOCALAPPDATA%\workbench\service.log`.
 - Task Manager › Startup apps lists the entry; turning it off there keeps Windows from starting Workbench at sign-in, and `workbench service status` shows it as turned off.
-- `workbench service stop` asks Workbench to stop and waits until its port is free. `install --enable` over a running service restarts it with the new settings.
-- In a terminal running as administrator, `install --enable` writes everything but starts nothing: Workbench and its agents would run as administrator too. The sign-in entry and the Start Menu start it as you.
+- `workbench service stop` asks Workbench to stop and waits until its port is free. `install --enable` over a running service restarts it with the new settings. Run it from a terminal outside Workbench: in a Workbench terminal it cannot start the new Workbench apart from the old one, which closes that terminal as it stops, so it restarts nothing and tells you what to do instead.
+- In a terminal started with *Run as administrator*, `install --enable` writes everything but starts nothing: Workbench and its agents would run as administrator too. The sign-in entry and the Start Menu start it as you.
 - To update, stop the service, replace `workbench.exe` and `workbenchw.exe`, and open Workbench from the Start Menu.

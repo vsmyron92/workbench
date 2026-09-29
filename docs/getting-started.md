@@ -129,7 +129,10 @@ administrator rights:
   without a console window, logs to `%LOCALAPPDATA%\workbench\service.log`, restarts the
   server 5 seconds after it fails and gives up after 5 failures within a minute.
 - To restart (after an update, or a setting that needs it): `workbench service stop`, then
-  open Workbench from the Start Menu.
+  open Workbench from the Start Menu. `install --enable` over a running service restarts it
+  with the new settings when run from a terminal outside Workbench.
+- In a terminal started with *Run as administrator*, `install --enable` starts nothing:
+  Workbench and its agents would run as administrator too.
 
 ## Next steps
 

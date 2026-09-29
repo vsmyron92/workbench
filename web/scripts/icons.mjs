@@ -1,9 +1,10 @@
 // Generates Workbench's app icons into public/icons/ from one geometry (the
 // favicon's, on a 512 grid): the SVG (manifest, desktop launcher), PNGs for the
 // web app manifest (192/512, maskable), the iOS home screen icon, the
-// monochrome notification badge and the Windows icon of workbench.exe and
-// workbenchw.exe (server/build.rs). No dependencies: shapes are rasterized with 8×8
-// supersampling and written as PNG with node:zlib.
+// monochrome notification badge; and the Windows icon of workbench.exe and
+// workbenchw.exe into packaging/windows/ (server/build.rs embeds it; kept out of the
+// web bundle). No dependencies: shapes are rasterized with 8×8 supersampling and
+// written as PNG with node:zlib.
 //
 //   node scripts/icons.mjs
 //
@@ -15,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { deflateSync } from 'node:zlib'
 
 const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'public', 'icons')
+const OUT_ICO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'packaging', 'windows')
 
 const BG = '#2b2d30' // --bg-panel (dark)
 const ACCENT = '#548af7' // --accent (dark)
@@ -188,5 +190,6 @@ const files = [
 for (const [name, list, size] of files) writeFileSync(join(OUT, name), png(raster(list, size), size))
 // Windows: small icons at 100–250 % scaling, the Start Menu's and Explorer's larger ones.
 const icoSizes = [16, 20, 24, 32, 40, 48, 64, 256]
-writeFileSync(join(OUT, 'workbench.ico'), ico(icoSizes.map((s) => [s, png(raster(icon, s), s)])))
-console.log(`wrote workbench.svg, ${files.length} PNGs and workbench.ico to ${OUT}`)
+mkdirSync(OUT_ICO, { recursive: true })
+writeFileSync(join(OUT_ICO, 'workbench.ico'), ico(icoSizes.map((s) => [s, png(raster(icon, s), s)])))
+console.log(`wrote workbench.svg and ${files.length} PNGs to ${OUT}, workbench.ico to ${OUT_ICO}`)

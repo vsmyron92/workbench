@@ -726,7 +726,8 @@ mod imp {
     }
 
     /// Whether a server serving `data_dir` runs: it holds the stop event, which it creates
-    /// once it listens and which goes with its process (a crash leaves nothing stale).
+    /// once it listens and keeps until its process ends, a graceful shutdown included (a crash
+    /// leaves nothing stale).
     pub fn server_running(data_dir: &Path) -> bool {
         Event::exists(&stop_event_name(data_dir))
     }
@@ -829,11 +830,14 @@ mod imp {
         let Some(event) = create_stop_event(data_dir) else {
             return std::future::pending().await;
         };
+        // Never closed: the event goes with the process, so a server still shutting down (and
+        // holding its port) counts as running (`server_running`). Setting it again is harmless.
+        let event = std::mem::ManuallyDrop::new(event);
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         // A thread of its own, not `spawn_blocking`: the runtime waits for blocking tasks
-        // when it shuts down. It ends (closing the event) once nobody listens.
+        // when it shuts down. It ends once a stop is requested or nobody listens.
         let waiter = std::thread::Builder::new().name("workbench-stop-event".into()).spawn(move || {
-            // The whole `Event` moves here (not just its handle), and closes with the thread.
+            // The whole `Event` moves here (not just its handle).
             let event = event;
             loop {
                 match event.wait(std::time::Duration::from_millis(250)) {
@@ -1022,6 +1026,7 @@ mod tests {
         let server = tokio::spawn(async move { shutdown_signal(&path).await });
         assert!(eventually(|| request_stop(dir.path()).unwrap()).await, "the server created its event");
         tokio::time::timeout(Duration::from_secs(5), server).await.expect("the server stopped").unwrap();
+        assert!(server_running(dir.path()), "held through the shutdown, until the process ends");
     }
 
     #[cfg(windows)]

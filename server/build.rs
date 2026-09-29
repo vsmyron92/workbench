@@ -15,7 +15,7 @@ fn windows_resource() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    let icon = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../web/public/icons/workbench.ico");
+    let icon = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../packaging/windows/workbench.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
     let mut res = winresource::WindowsResource::new();
     res.set_icon(&icon.to_string_lossy()).set("ProductName", "Workbench").set("FileDescription", "Workbench");
