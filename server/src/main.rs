@@ -118,7 +118,7 @@ fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {
             None => None,
         };
 
-        let listener = tokio::net::TcpListener::bind(addr)
+        let listener = util::os::net::bind(addr)
             .await
             .with_context(|| format!("cannot bind {addr} (is another Workbench running?)"))?;
         let addr = listener.local_addr()?;

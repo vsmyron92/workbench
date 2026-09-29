@@ -26,25 +26,7 @@ pub async fn shutdown_signal() {
 /// Open `url` in an app-style browser window when a Chromium browser is
 /// installed (no tabs or address bar), otherwise in the default browser.
 pub fn open_in_browser(url: &str) {
-    for browser in ["google-chrome", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"] {
-        if which(browser) {
-            let ok = std::process::Command::new(browser)
-                .arg(format!("--app={url}"))
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .is_ok();
-            if ok {
-                return;
-            }
-        }
-    }
-    let _ = std::process::Command::new("xdg-open")
-        .arg(url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    os::desktop::open_url(url)
 }
 
 /// Whether `cmd` resolves on `PATH`.

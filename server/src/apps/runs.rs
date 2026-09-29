@@ -477,14 +477,10 @@ pub async fn port_open(port: u16, timeout: Duration) -> bool {
     matches!(a, Ok(Ok(_))) || matches!(b, Ok(Ok(_)))
 }
 
-/// `fuser -k PORT/tcp`, then wait up to 5 s for the port to close.
+/// `fuser -k PORT/tcp` (`util::os::net::kill_port_holders`), then wait up to 5 s for
+/// the port to close.
 async fn free_port(port: u16) -> Result<(), String> {
-    if !crate::util::which("fuser") {
-        return Err("fuser is not installed (package psmisc); free the port yourself".into());
-    }
-    let out = crate::util::proc::run("fuser", &["-k", &format!("{port}/tcp")], std::path::Path::new("/"), Duration::from_secs(10))
-        .await
-        .map_err(|e| e.message)?;
+    let done = crate::util::os::net::kill_port_holders(port).await?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if !port_open(port, Duration::from_millis(200)).await {
@@ -492,7 +488,7 @@ async fn free_port(port: u16) -> Result<(), String> {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    Err(format!("port {port} is still in use after fuser -k ({})", out.message()))
+    Err(format!("port {port} is still in use after {done}"))
 }
 
 // ---------------------------------------------------------------- start

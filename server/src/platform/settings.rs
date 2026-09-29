@@ -357,7 +357,7 @@ pub async fn get_settings(State(state): State<AppState>) -> ApiResult<Json<Value
         "startedAt": state.started_at,
         "restartRequired": restart_required(&state.platform.boot(), &cfg.server),
         "tlsActive": state.platform.tls_active(),
-        "notifySend": util::which("notify-send"),
+        "notifySend": util::os::desktop::notify_send().is_some(),
         "mcpEndpoint": format!("{}/mcp", state.local_base_url()),
     })))
 }

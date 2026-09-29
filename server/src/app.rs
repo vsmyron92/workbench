@@ -161,11 +161,8 @@ pub fn loopback_listen_addr(bind: SocketAddr) -> Option<SocketAddr> {
     use std::net::{IpAddr, Ipv4Addr};
     let covered = match bind.ip() {
         IpAddr::V4(v4) => v4.is_unspecified() || v4 == Ipv4Addr::LOCALHOST,
-        // [::] also takes IPv4 unless the kernel is set to v6-only sockets.
-        IpAddr::V6(v6) => {
-            v6.is_unspecified()
-                && std::fs::read_to_string("/proc/sys/net/ipv6/bindv6only").map(|s| s.trim() != "1").unwrap_or(true)
-        }
+        // [::] also takes IPv4 unless the system makes it v6-only (`util::os::net::bind`).
+        IpAddr::V6(v6) => v6.is_unspecified() && util::os::net::v6_any_takes_v4(),
     };
     (!covered).then(|| SocketAddr::from((Ipv4Addr::LOCALHOST, bind.port())))
 }

@@ -195,7 +195,7 @@ impl Notifier {
 
         let desktop_status = if !desktop {
             "disabled"
-        } else if let Some(bin) = util::which_path("notify-send") {
+        } else if let Some(bin) = util::os::desktop::notify_send() {
             let mut cmd = tokio::process::Command::new(bin);
             cmd.arg("--app-name=Workbench")
                 .arg(format!("--urgency={}", note.level.urgency()))
