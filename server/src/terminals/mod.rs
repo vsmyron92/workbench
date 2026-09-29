@@ -1154,7 +1154,10 @@ impl Terminals {
         let cwd = resolve_cwd(&base, cwd.as_deref())?;
         // In the project's dev container: asked for, or the project's default.
         let target = match (&project_id, container) {
-            (Some(pid), Some(true)) => Some(crate::devcontainer::running_target(state, pid).await.map_err(ApiError::conflict)?),
+            (Some(pid), Some(true)) => {
+                crate::devcontainer::require_supported()?;
+                Some(crate::devcontainer::running_target(state, pid).await.map_err(ApiError::conflict)?)
+            }
             (Some(pid), None) => crate::devcontainer::exec_target(state, pid).await,
             (None, Some(true)) => return Err(ApiError::bad_request("a dev container shell needs a project")),
             _ => None,

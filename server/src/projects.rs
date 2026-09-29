@@ -217,26 +217,42 @@ impl ProjectRegistry {
             let cfg = state.config.read();
             (cfg.projects.roots.clone(), cfg.projects.include.clone(), cfg.projects.exclude.clone())
         };
-        let canonical = |p: PathBuf| util::os::path::canonicalize(&p).unwrap_or(p);
+        // Roots this OS does not serve (UNC and WSL paths on Windows) are skipped before
+        // anything opens them, which would connect to their server; so are directories
+        // that resolve to one (a mapped network drive, a link to a share).
+        let served = |p: &Path| match util::os::path::unsupported_root(p) {
+            Some(why) => {
+                tracing::warn!("project {} skipped: {why}", p.display());
+                false
+            }
+            None => true,
+        };
+        let canonical = |p: PathBuf| match util::os::path::unsupported_root(&p) {
+            Some(_) => p,
+            None => util::os::path::canonicalize(&p).unwrap_or(p),
+        };
         let exclude: HashSet<PathBuf> =
             exclude.iter().flat_map(|e| [expand_tilde(e), canonical(expand_tilde(e))]).collect();
         let mut dirs: Vec<PathBuf> = vec![];
         for root in &roots {
             let root = expand_tilde(root);
+            if !served(&root) {
+                continue;
+            }
             let Ok(rd) = std::fs::read_dir(&root) else { continue };
             let mut found: Vec<PathBuf> =
                 rd.flatten().map(|e| e.path()).filter(|p| p.is_dir() && p.join(".git").exists()).collect();
             found.sort();
             dirs.extend(found);
         }
-        dirs.extend(include.iter().map(|inc| expand_tilde(inc)).filter(|p| p.is_dir()));
+        dirs.extend(include.iter().map(|inc| expand_tilde(inc)).filter(|p| served(p) && p.is_dir()));
         // One project per directory, however it was reached (a root, an include, a symlink).
         let mut seen = HashSet::new();
         let dirs: Vec<PathBuf> = dirs
             .into_iter()
             .filter(|d| !exclude.contains(d))
             .map(canonical)
-            .filter(|d| !exclude.contains(d) && seen.insert(d.clone()))
+            .filter(|d| !exclude.contains(d) && served(d) && seen.insert(d.clone()))
             .collect();
 
         let ids_file = state.paths.data_dir.join(IDS_FILE);
@@ -289,8 +305,7 @@ async fn load_project(state: &AppState, id: &str, root: &Path) -> Project {
     let global_site = state.config.read().atlassian.as_ref().map(|a| a.site.clone());
     let detected = crate::apps::detect(root);
     let layered = project::load_layers(detected, root, &state.paths.project_overlay(id), global_site.as_deref());
-    let (mut config, mut warnings, repo_secret_names) = (layered.config, layered.warnings, layered.repo_secret_names);
-    warnings.extend(util::os::path::unsupported_root(root).map(str::to_string));
+    let (mut config, warnings, repo_secret_names) = (layered.config, layered.warnings, layered.repo_secret_names);
     let name = if config.project.name.is_empty() {
         root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| id.to_string())
     } else {
@@ -458,6 +473,10 @@ async fn add(State(state): State<AppState>, Json(body): Json<AddBody>) -> ApiRes
     if !p.is_dir() {
         return Err(ApiError::bad_request(format!("{} is not a directory", p.display())));
     }
+    // A mapped network drive or a link to a share resolves to a UNC path: refused
+    // before config.toml names it.
+    let canon = util::os::path::canonicalize(&p).unwrap_or_else(|_| p.clone());
+    util::os::support::require_root(&canon).map_err(|e| ApiError { message: format!("{} is {}: {}", p.display(), canon.display(), e.message), ..e })?;
     update_projects_config(&state, |projects| {
         let s = contract_tilde(&p);
         if !projects.include.contains(&s) {
@@ -467,7 +486,7 @@ async fn add(State(state): State<AppState>, Json(body): Json<AddBody>) -> ApiRes
     })
     .await?;
     state.projects.reload(&state).await;
-    let id = state.projects.find_by_path(&util::os::path::canonicalize(&p).unwrap_or(p)).map(|p| p.id.clone());
+    let id = state.projects.find_by_path(&canon).map(|p| p.id.clone());
     Ok(Json(json!({ "ok": true, "id": id })))
 }
 
@@ -611,7 +630,12 @@ mod tests {
         let app = testutil::app().await;
         let file = app.state.paths.config_file();
         let before = std::fs::read_to_string(&file).unwrap();
-        for (path, says) in [(r"\\wsl$\Ubuntu\home\u\proj", "WSL"), ("//wsl.localhost/Debian/src", "WSL"), (r"\\server.invalid\share\proj", "network")] {
+        for (path, says) in [
+            (r"\\wsl$\Ubuntu\home\u\proj", "WSL"),
+            ("//wsl.localhost/Debian/src", "WSL"),
+            (r"\\server.invalid\share\proj", "network"),
+            (r"\??\UNC\server.invalid\share\proj", "network"),
+        ] {
             let req = axum::http::Request::builder()
                 .method("POST")
                 .uri("/api/projects")
@@ -628,6 +652,24 @@ mod tests {
             assert!(v["error"]["message"].as_str().is_some_and(|m| m.contains(says)), "{v}");
         }
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    /// Windows: WSL and network roots already in config.toml are skipped, not loaded;
+    /// local ones next to them still are.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_skips_wsl_and_network_roots_in_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("local");
+        std::fs::create_dir_all(local.join(".git")).unwrap();
+        let mut cfg = GlobalConfig::default();
+        cfg.projects.roots = vec![r"\\server.invalid\share".into(), r"\\wsl$\Ubuntu\home\u".into()];
+        cfg.projects.include =
+            vec![r"\\wsl$\Ubuntu\home\u\proj".into(), r"\??\UNC\server.invalid\share\proj".into(), local.display().to_string()];
+        cfg.notify.desktop = false;
+        let app = testutil::app_with(cfg).await;
+        let roots: Vec<std::path::PathBuf> = app.state.projects.list().iter().map(|p| p.root.clone()).collect();
+        assert_eq!(roots, [crate::util::os::path::canonicalize(&local).unwrap()]);
     }
 
     #[test]

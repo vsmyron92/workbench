@@ -22,11 +22,13 @@
 //!
 //! CONTRACT (other slices): `summary` (projects), `running_target` / `exec_target` /
 //! `kill_inside` (terminals), `run_inside` / `port_route` (apps), `agent_command`
-//! (terminals, agents in containers), `router`, `start`, `shutdown`, `mcp_tools`.
+//! (terminals, agents in containers), `require_supported`, `router`, `start`,
+//! `shutdown`, `mcp_tools`.
 //!
 //! Where dev containers do not work (`util::os::support`: Windows) none of this is
-//! offered: no summary, no container is ever found, and the routes and the MCP tool
-//! answer `unsupported_platform`. The Services tool window (`services`) still works.
+//! offered: no summary, no container is ever found, and the routes, the MCP tool and
+//! whatever asks for a container explicitly (`require_supported`) answer
+//! `unsupported_platform`. The Services tool window (`services`) still works.
 
 mod bridge;
 pub(crate) mod config;
@@ -238,6 +240,12 @@ fn use_container_of(saved: &store::Saved) -> bool {
 /// Why dev containers do not work on this OS (`None` where they do).
 fn unsupported() -> Option<&'static str> {
     crate::util::os::support::unsupported(crate::util::os::support::Feature::Devcontainer)
+}
+
+/// `Err(unsupported_platform)` where dev containers do not work: what the routes answer,
+/// for callers that would put a terminal, an agent or a language server inside.
+pub fn require_supported() -> crate::error::ApiResult<()> {
+    crate::util::os::support::require(crate::util::os::support::Feature::Devcontainer)
 }
 
 /// `ProjectSummary.devcontainer`: `None` for a project without configs or containers,

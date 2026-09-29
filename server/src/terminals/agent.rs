@@ -550,6 +550,7 @@ impl Terminals {
         let launch = resolve_launch(&provider, &cfg, &project, &req)?;
         // In the dev container, the CLI must exist there; on the host, here.
         let container = if req.in_container {
+            crate::devcontainer::require_supported()?;
             let (t, _) = crate::devcontainer::agent_command(state, &project.id, &provider.command).await.map_err(ApiError::conflict)?;
             Some(t)
         } else {
@@ -694,6 +695,7 @@ impl Terminals {
         // Records from before providers are Claude sessions, whatever the default is now.
         let provider = find_provider(&cfg, Some(launch.provider.as_deref().unwrap_or("claude")))?;
         let (command, container) = if in_container {
+            crate::devcontainer::require_supported()?;
             let pid = project_id.as_deref().ok_or_else(|| ApiError::conflict("a dev container session needs its project"))?;
             let (t, path) = crate::devcontainer::agent_command(state, pid, &provider.command).await.map_err(ApiError::conflict)?;
             (PathBuf::from(path), Some(t))
