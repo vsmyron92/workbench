@@ -318,14 +318,10 @@ pub struct Candidate {
 /// Slack for clocks and file timestamps.
 const LAUNCH_SLACK_MS: i64 = 2000;
 
-fn same_dir(a: &str, b: &str) -> bool {
-    a.trim_end_matches('/') == b.trim_end_matches('/')
-}
-
 /// Whether `c` fits `p` at all (cwd, time, kind of session).
 fn fits(p: &Pending, c: &Candidate) -> bool {
     interactive(&c.meta)
-        && same_dir(&c.meta.cwd, &p.cwd)
+        && crate::util::os::path::same_dir(&c.meta.cwd, &p.cwd)
         && c.created_at >= p.launched_at - LAUNCH_SLACK_MS
         && c.meta.forked_from == p.fork_of
 }
@@ -356,7 +352,7 @@ pub fn choose<'a>(me: &Pending, pending: &[Pending], candidates: &'a [Candidate]
     // Without that evidence: the only candidate no waiting session holds, and nobody else
     // in this cwd (and of the same launch kind) is waiting for one.
     let free: Vec<&&Candidate> = fitting.iter().filter(|c| c.holders.is_empty()).collect();
-    let rivals = pending.iter().filter(|o| o.terminal_id != me.terminal_id && same_dir(&o.cwd, &me.cwd) && o.fork_of == me.fork_of).count();
+    let rivals = pending.iter().filter(|o| o.terminal_id != me.terminal_id && crate::util::os::path::same_dir(&o.cwd, &me.cwd) && o.fork_of == me.fork_of).count();
     match (free.as_slice(), rivals) {
         ([only], 0) => Choice::Unproven(only),
         _ => Choice::Unknown,
@@ -607,11 +603,8 @@ const SCAN_MAX: usize = 3000;
 impl HistoryCache {
     /// Sessions whose cwd is `root` or inside it, newest first: `(summary, mtime ms, size)`.
     pub fn list(&mut self, home: &Path, root: &Path, limit: usize) -> Vec<(Summary, i64, u64)> {
-        let root_s = root.to_string_lossy().trim_end_matches('/').to_string();
-        let inside = |cwd: &str| {
-            let c = cwd.trim_end_matches('/');
-            c == root_s || c.starts_with(&format!("{root_s}/"))
-        };
+        let root_s = root.to_string_lossy();
+        let inside = |cwd: &str| crate::util::os::path::dir_within(cwd, &root_s);
         let mut files: Vec<(PathBuf, SystemTime, u64)> = vec![];
         for day in sorted_day_dirs(home, 400) {
             let Ok(rd) = std::fs::read_dir(&day) else { continue };

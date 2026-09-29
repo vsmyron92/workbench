@@ -179,6 +179,34 @@ pub fn starts_with(p: &Path, base: &Path) -> bool {
     strip_prefix(p, base).is_some()
 }
 
+/// Whether the directories `a` and `b`, as programs record them (an agent CLI's cwd), are
+/// the same, a trailing separator aside. Unix compares the strings; Windows compares like
+/// [`strip_prefix`], so case and `/` or `\` do not matter.
+pub fn same_dir(a: &str, b: &str) -> bool {
+    #[cfg(unix)]
+    {
+        a.trim_end_matches('/') == b.trim_end_matches('/')
+    }
+    #[cfg(windows)]
+    {
+        win::strip_prefix(a, b).is_some_and(str::is_empty)
+    }
+}
+
+/// Whether the directory `dir`, as a program records it, is `root` or below it
+/// ([`same_dir`]'s comparison).
+pub fn dir_within(dir: &str, root: &str) -> bool {
+    #[cfg(unix)]
+    {
+        let (d, r) = (dir.trim_end_matches('/'), root.trim_end_matches('/'));
+        d == r || d.starts_with(&format!("{r}/"))
+    }
+    #[cfg(windows)]
+    {
+        win::strip_prefix(dir, root).is_some()
+    }
+}
+
 /// Whether the file name `a` is `b` (Windows: without regard to ASCII case).
 pub fn same_name(a: impl AsRef<OsStr>, b: &str) -> bool {
     #[cfg(unix)]
@@ -540,6 +568,8 @@ mod tests {
         assert_eq!(strip_prefix(Path::new("/a/B/c"), Path::new("/a/b")), None);
         assert_eq!(strip_prefix(Path::new("/a/b/c"), Path::new("/a/b/")), Some(Path::new("c")));
         assert!(same_name(".git", ".git") && !same_name(".GIT", ".git"));
+        assert!(same_dir("/p/x/", "/p/x") && !same_dir("/p/X", "/p/x") && !same_dir("/p//x", "/p/x"));
+        assert!(dir_within("/p/x", "/p/") && dir_within("/p", "/p") && !dir_within("/p2", "/p") && !dir_within("/P/x", "/p"));
         assert_eq!(uri_path("/x/y"), (String::new(), "/x/y".to_string()));
         assert_eq!(from_uri_path("/c:/x".into()).as_deref(), Some("/c:/x"));
         assert!(!CASE_INSENSITIVE);
@@ -678,6 +708,8 @@ mod tests {
         assert_eq!(home_relative(r"~\x"), Some("x"));
         assert_eq!(to_slash(Path::new(r"a\b")), "a/b");
         assert!(same_name(".GIT", ".git") && CASE_INSENSITIVE);
+        assert!(same_dir(r"C:\Proj\", "c:/proj") && !same_dir(r"C:\proj\x", r"C:\proj"));
+        assert!(dir_within(r"c:\proj\Sub", r"C:\Proj") && dir_within("C:/proj", r"C:\proj\") && !dir_within(r"C:\proj2", r"C:\proj"));
     }
 
     #[cfg(windows)]

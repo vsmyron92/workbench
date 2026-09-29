@@ -93,6 +93,10 @@ pub fn runs_outside(cwd: &Path, ours: &HashSet<i32>, matches: impl Fn(&[u8]) -> 
 /// one piece. Unix passes the bytes on.
 pub const REPAINTS: bool = cfg!(windows);
 
+/// Whether a new PTY asks for the cursor position before its program runs and waits for
+/// the answer: ConPTY does (portable-pty creates it with INHERIT_CURSOR). Unix does not.
+pub const ASKS_CURSOR: bool = cfg!(windows);
+
 /// A PTY's output, for the thread that reads it.
 ///
 /// Windows: a thread of its own reads the pipe until it ends and hands the chunks over, so
@@ -568,6 +572,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn a_session_is_a_job_that_holds_its_files_and_ends_together() {
+        use std::os::windows::process::CommandExt;
         use std::process::Stdio;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -588,9 +593,16 @@ mod tests {
         std::fs::write(&other, "x").unwrap();
         // The first ping gives the leader time to join its job; the second (a grandchild of
         // this test) keeps `file` open through cmd's redirection.
+        // As written (`raw_arg`): cmd.exe does not read CommandLineToArgvW's `\"` escapes.
         let script = format!("ping -n 2 127.0.0.1 >nul & ping -n 60 127.0.0.1 > \"{}\"", file.display());
-        let mut child =
-            std::process::Command::new("cmd").args(["/d", "/c", &script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let mut child = std::process::Command::new("cmd")
+            .args(["/d", "/c"])
+            .raw_arg(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
         let sid = child.id() as i32;
         let hung_up = Arc::new(AtomicBool::new(false));
         let h = hung_up.clone();

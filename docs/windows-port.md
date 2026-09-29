@@ -263,8 +263,9 @@ counterpart of `process_group(0)`). `ExitInfo.signal` is always `None`.
 **Terminals (ConPTY).** Resize is `ResizePseudoConsole`. ConPTY gives no EOF when the child
 exits: close the pseudoconsole once the leader has exited and the job is empty, on a blocking
 thread while the reader keeps draining. portable-pty creates the console with
-`INHERIT_CURSOR`, so ConPTY sends `ESC[6n` and waits; the existing headless DSR answer
-covers it (add a test). Ship a side-loaded `conpty.dll` and `OpenConsole.exe` (the
+`INHERIT_CURSOR`, so ConPTY sends `ESC[6n` and waits; the server answers that first query
+from its mirror whether or not a client is attached, and keeps it from the clients
+(`session::ASKS_CURSOR`). Ship a side-loaded `conpty.dll` and `OpenConsole.exe` (the
 Microsoft.Windows.Console.ConPTY package, MIT), which portable-pty loads from the exe's
 folder; the inbox ConPTY renders poorly on Windows 10.
 

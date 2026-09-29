@@ -218,8 +218,9 @@ pub fn command(r: &Resolved) -> tokio::process::Command {
 }
 
 /// A process running `argv`, a command line from config.toml (a secret's `command`). Unix:
-/// `argv[0]` as it is, looked up on `PATH` by the OS. Windows: resolved as `launch_argv`
-/// does, so an npm shim or a batch file (`bw.cmd`) starts too, with `child_env`.
+/// `argv[0]` as it is, looked up on `PATH` by the OS. Windows: resolved as `launch` does
+/// (in Workbench's own directory), so an npm shim or a batch file (`bw.cmd`) starts too,
+/// with `child_env`.
 pub fn configured(argv: &[String]) -> std::io::Result<std::process::Command> {
     #[cfg(unix)]
     {
@@ -230,7 +231,7 @@ pub fn configured(argv: &[String]) -> std::io::Result<std::process::Command> {
     }
     #[cfg(windows)]
     {
-        let argv = launch_argv(argv.to_vec()).map_err(std::io::Error::other)?;
+        let argv = win::launch(argv.to_vec(), None, None).map_err(std::io::Error::other)?.argv;
         let mut c = std::process::Command::new(&argv[0]);
         c.args(&argv[1..]).envs(child_env().iter().copied());
         Ok(c)
@@ -244,26 +245,33 @@ pub fn batch_args_safe<S: AsRef<str>>(args: &[S]) -> bool {
     args.iter().all(|a| !a.as_ref().contains(['%', '!', '^', '&', '|', '<', '>', '"', '\n', '\r']))
 }
 
-/// A terminal's argv, ready for the PTY. Unix: unchanged. Windows: the program becomes an
-/// absolute path, an npm shim is unwrapped, and a batch file is refused when cmd.exe would
-/// misread an argument (the caller can paste the prompt instead).
-pub fn launch_argv(argv: Vec<String>) -> Result<Vec<String>, String> {
+/// How a terminal starts its program (`launch`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Launch {
+    pub argv: Vec<String>,
+    /// Set on top of the terminal's environment: `child_env` for a batch file, so its
+    /// cmd.exe never takes a program named by a bare name (`node`) from the terminal's cwd,
+    /// a repository. Empty for anything else (a shell keeps the usual lookup) and on Unix.
+    pub env: &'static [(&'static str, &'static str)],
+}
+
+/// A terminal's argv, ready for the PTY that starts it in `cwd` with `env` on top of
+/// Workbench's environment (`None` removes a variable). Unix: unchanged, the PTY looks the
+/// program up itself. Windows: the program becomes an absolute path (a relative one taken
+/// from `cwd`, a bare name looked up in `env`'s `PATH` first), an npm shim is unwrapped,
+/// and a batch file is refused when cmd.exe would misread its path or an argument (the
+/// caller can paste a prompt instead).
+pub fn launch(argv: Vec<String>, cwd: &Path, env: &[(String, Option<String>)]) -> Result<Launch, String> {
     #[cfg(unix)]
     {
-        Ok(argv)
+        let _ = (cwd, env);
+        Ok(Launch { argv, env: &[] })
     }
     #[cfg(windows)]
     {
-        let (first, rest) = argv.split_first().ok_or("empty command")?;
-        let r = resolve(first).ok_or_else(|| format!("{first} was not found"))?;
-        if r.kind == Kind::Batch && !batch_args_safe(rest) {
-            return Err(format!(
-                "{} is a batch file, and cmd.exe would misread an argument with % ! ^ & | < > \" or a line break",
-                r.program.display()
-            ));
-        }
-        let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
-        Ok(r.argv(&rest))
+        // Variable names compare without case; the last setting wins.
+        let path = env.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case("PATH")).and_then(|(_, v)| v.as_deref());
+        win::launch(argv, Some(cwd), path)
     }
 }
 
@@ -341,7 +349,7 @@ fn ps_words(s: &str) -> Option<Vec<String>> {
 mod win {
     use std::path::{Path, PathBuf};
 
-    use super::{Kind, Resolved};
+    use super::{Kind, Launch, Resolved};
 
     /// The extensions CreateProcess starts (a `.bat`/`.cmd` through cmd.exe).
     const LAUNCHABLE: &[&str] = &[".exe", ".com", ".bat", ".cmd"];
@@ -407,6 +415,31 @@ mod win {
                 PathBuf::from(s)
             })
             .find(|p| is_file(p))
+    }
+
+    /// `launch` in `cwd` (Workbench's own directory when `None`), a bare name looked up in
+    /// `path` before Workbench's own lookup.
+    pub(super) fn launch(argv: Vec<String>, cwd: Option<&Path>, path: Option<&str>) -> Result<Launch, String> {
+        let (first, rest) = argv.split_first().ok_or("empty command")?;
+        let found = if !super::names_path(first) {
+            let dirs: Vec<PathBuf> = path.map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+            super::find_in(&dirs, first).or_else(|| super::which(first))
+        } else if let Some(cwd) = cwd.filter(|_| crate::util::os::path::home_relative(first).is_none()) {
+            // An absolute path stays as it is (`join`).
+            program_file(cwd.join(first))
+        } else {
+            super::which(first)
+        };
+        let r = classify(found.ok_or_else(|| format!("{first} was not found"))?);
+        if r.kind == Kind::Batch && !(super::batch_args_safe(rest) && super::batch_args_safe(&[r.program.to_string_lossy()])) {
+            return Err(format!(
+                "{} is a batch file, and cmd.exe would misread its path or an argument with % ! ^ & | < > \" or a line break",
+                r.program.display()
+            ));
+        }
+        let env = if r.kind == Kind::Batch { super::child_env() } else { &[] };
+        let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+        Ok(Launch { argv: r.argv(&rest), env })
     }
 
     pub(super) fn classify(path: PathBuf) -> Resolved {
@@ -608,5 +641,28 @@ exit $ret
         assert_eq!(rustup_proxy(&d.join("rust-analyzer.exe")), Some(d.join("rustup.exe")));
         assert_eq!(rustup_proxy(&d.join("tool.exe")), None);
         assert_eq!(rustup_proxy(&d.join("rustup.exe")), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_terminal_launches() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = std::path::absolute(dir.path()).unwrap();
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        std::fs::write(d.join("bin").join("tool.exe"), "").unwrap();
+        std::fs::write(d.join("bin").join("run.cmd"), "@ECHO off\r\n").unwrap();
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // A relative program is the terminal's, a bare name comes from its own PATH first.
+        let l = launch(args(&[r".\bin\tool", "x"]), &d, &[]).unwrap();
+        assert_eq!(l, Launch { argv: args(&[&d.join("bin").join("tool.exe").display().to_string(), "x"]), env: &[] });
+        let env = [("Path".to_string(), Some(d.join("bin").display().to_string()))];
+        assert_eq!(launch(args(&["tool"]), Path::new(r"C:\"), &env).unwrap().argv[0], d.join("bin").join("tool.exe").display().to_string());
+        // A batch file's cmd.exe never takes a program from the cwd, and reads its line as it is.
+        let l = launch(args(&["run", "plain"]), &d, &env).unwrap();
+        assert_eq!(l.env, child_env());
+        assert!(launch(args(&["run", "50%"]), &d, &env).unwrap_err().contains("batch file"));
+        std::fs::create_dir_all(d.join("R&D")).unwrap();
+        std::fs::write(d.join("R&D").join("run.cmd"), "@ECHO off\r\n").unwrap();
+        assert!(launch(args(&[r"R&D\run.cmd"]), &d, &[]).unwrap_err().contains("batch file"));
     }
 }

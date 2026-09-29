@@ -10,7 +10,9 @@
 //!   duplicate (`Screen::attach`).
 //! * While no client is attached, the reader answers the device queries programs send
 //!   at startup (DA1, DA2, DSR, XTVERSION) so a headless agent does not stall waiting.
-//!   With a client attached, xterm.js answers and we stay quiet.
+//!   With a client attached, xterm.js answers and we stay quiet. The pseudoconsole's own
+//!   cursor query (Windows, `session::ASKS_CURSOR`) is always answered here and never
+//!   reaches a client, which would answer it a second time.
 //!
 //! * Secret values a spawner declares (`LaunchSpec::redact`) are replaced before the
 //!   output reaches the mirror, so no consumer (clients, saved screens, `screen_text`,
@@ -613,10 +615,15 @@ impl Redactor {
         }
         let mut hold = self.held_tail(&buf);
         if self.across_escapes && buf.contains(&0x1b) {
+            // The text's positions, found again only after a secret was masked.
+            let mut pos = text_positions(&buf);
             for n in &self.needles {
-                buf = replace_across_escapes(&buf, n, MASK);
+                if let Some(masked) = replace_across_escapes(&buf, &pos.0, n, MASK) {
+                    buf = masked;
+                    pos = text_positions(&buf);
+                }
             }
-            hold = self.held_tail(&buf).max(self.held_tail_across_escapes(&buf));
+            hold = self.held_tail(&buf).max(self.held_tail_across_escapes(&buf, &pos));
         }
         self.carry = buf.split_off(buf.len() - hold);
         buf
@@ -649,8 +656,9 @@ impl Redactor {
     /// `held_tail` with escape sequences between the characters: the longest tail whose
     /// text (escape sequences left out) is a proper prefix of a secret, or else an
     /// unfinished escape sequence (what follows decides whether it splits a secret).
-    fn held_tail_across_escapes(&self, buf: &[u8]) -> usize {
-        let (text, unfinished) = text_positions(buf);
+    /// `pos` is `text_positions(buf)`.
+    fn held_tail_across_escapes(&self, buf: &[u8], pos: &(Vec<usize>, Option<usize>)) -> usize {
+        let (text, unfinished) = (&pos.0, pos.1);
         let mut from = unfinished.filter(|at| buf.len() - at <= MAX_HELD_ESCAPE).unwrap_or(buf.len());
         for n in &self.needles {
             let longest = (n.len() - 1).min(text.len());
@@ -683,9 +691,9 @@ fn replace_all(hay: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
 
 /// `replace_all` for `needle` written with escape sequences between its characters: each
 /// occurrence becomes `with`, followed by the escape sequences it contained (they still
-/// take effect: a cursor shown again, a colour).
-fn replace_across_escapes(hay: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
-    let (text, _) = text_positions(hay);
+/// take effect: a cursor shown again, a colour). `text` is `text_positions(hay).0`; `None`
+/// when `needle` does not occur.
+fn replace_across_escapes(hay: &[u8], text: &[usize], needle: &[u8], with: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(hay.len());
     let mut copied = 0;
     let mut i = 0;
@@ -709,8 +717,11 @@ fn replace_across_escapes(hay: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
         copied = end;
         i += needle.len();
     }
+    if copied == 0 {
+        return None;
+    }
     out.extend_from_slice(&hay[copied..]);
-    out
+    Some(out)
 }
 
 /// Where the bytes of `buf` that are not part of an escape sequence are, and where an
@@ -782,9 +793,15 @@ struct Feeder {
     scanner: QueryScanner,
     queries: Vec<(usize, Query)>,
     in_tx: mpsc::Sender<Bytes>,
+    /// The PTY's own cursor query is still to come (`session::ASKS_CURSOR`).
+    pty_asks_cursor: bool,
 }
 
 impl Feeder {
+    fn new(screen: Arc<Screen>, proc_gen: u64, in_tx: mpsc::Sender<Bytes>) -> Self {
+        Feeder { screen, proc_gen, scanner: QueryScanner::default(), queries: vec![], in_tx, pty_asks_cursor: session::ASKS_CURSOR }
+    }
+
     /// False once a newer process owns the screen (the reader must stop).
     fn feed(&mut self, chunk: &[u8]) -> bool {
         if chunk.is_empty() {
@@ -792,6 +809,17 @@ impl Feeder {
         }
         self.queries.clear();
         self.scanner.scan(chunk, &mut self.queries);
+        // The pseudoconsole's cursor query, its first: answered here whether or not a client
+        // is attached (it may have missed the query in a resync), and cut from what clients
+        // get, since xterm.js's answer would reach the program as typed input. One split
+        // across reads was partly sent already: only its usual answer then.
+        let mut own = None;
+        if self.pty_asks_cursor {
+            if let Some(i) = self.queries.iter().position(|&(_, q)| q == Query::CursorPosition) {
+                self.pty_asks_cursor = false;
+                own = Some(i).filter(|&i| chunk[..self.queries[i].0].ends_with(b"\x1b[6n"));
+            }
+        }
         let mut replies: Vec<Vec<u8>> = vec![];
         {
             let mut s = self.screen.mirror.lock();
@@ -803,19 +831,30 @@ impl Feeder {
             s.hydrate(self.screen.scrollback);
             let m = &mut s.parser;
             let headless = self.screen.attached.load(Ordering::Relaxed) == 0;
-            if headless && !self.queries.is_empty() {
+            if (headless || own.is_some()) && !self.queries.is_empty() {
                 // Process up to each query so a cursor report is exact.
                 let mut at = 0;
-                for &(end, q) in &self.queries {
+                for (i, &(end, q)) in self.queries.iter().enumerate() {
                     m.process(&chunk[at..end]);
                     at = end;
-                    replies.push(reply_for(q, m));
+                    if headless || own == Some(i) {
+                        replies.push(reply_for(q, m));
+                    }
                 }
                 m.process(&chunk[at..]);
             } else {
                 m.process(chunk);
             }
-            let _ = self.screen.out_tx.send(Bytes::copy_from_slice(chunk));
+            let out = match own {
+                Some(i) => {
+                    let end = self.queries[i].0;
+                    Bytes::from([&chunk[..end - 4], &chunk[end..]].concat())
+                }
+                None => Bytes::copy_from_slice(chunk),
+            };
+            if !out.is_empty() {
+                let _ = self.screen.out_tx.send(out);
+            }
         }
         self.screen.dirty.store(true, Ordering::Relaxed);
         self.screen.last_output_at.store(crate::util::now_ms(), Ordering::Relaxed);
@@ -862,9 +901,10 @@ impl Pty {
     /// from `spawn_blocking`.
     pub fn spawn(spec: &LaunchSpec, screen: Arc<Screen>, proc_gen: u64) -> anyhow::Result<(Arc<Pty>, PtyEvents)> {
         anyhow::ensure!(!spec.argv.is_empty(), "empty command");
-        // Windows: an absolute program, npm shims unwrapped, a batch file only with arguments
-        // cmd.exe reads as they are. Unix: unchanged.
-        let argv = crate::util::os::exe::launch_argv(spec.argv.clone()).map_err(|e| anyhow::anyhow!(e))?;
+        // Windows: an absolute program, npm shims unwrapped, a batch file only with a path and
+        // arguments cmd.exe reads as they are. Unix: unchanged.
+        let launch = crate::util::os::exe::launch(spec.argv.clone(), &spec.cwd, &spec.env).map_err(|e| anyhow::anyhow!(e))?;
+        let argv = launch.argv;
         let pair = native_pty_system().openpty(PtySize {
             rows: spec.rows,
             cols: spec.cols,
@@ -882,6 +922,10 @@ impl Pty {
                 Some(v) => cmd.env(k, v),
                 None => cmd.env_remove(k),
             }
+        }
+        // After `spec.env`, which cannot undo it (a batch file's, on Windows).
+        for (k, v) in launch.env {
+            cmd.env(k, v);
         }
         let mut child = pair.slave.spawn_command(cmd)?;
         // The parent must not keep the slave open, or the reader never sees EOF.
@@ -911,7 +955,7 @@ impl Pty {
 
         // Reader: blocking reads → mirror + broadcast under one lock.
         {
-            let mut feeder = Feeder { screen, proc_gen, scanner: QueryScanner::default(), queries: vec![], in_tx: in_tx.clone() };
+            let mut feeder = Feeder::new(screen, proc_gen, in_tx.clone());
             std::thread::Builder::new().name(format!("pty-read-{pid}")).spawn(move || {
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
@@ -1426,17 +1470,18 @@ mod tests {
         assert!(screen_text(&mut screen.mirror(), 10).contains("args: plain"));
     }
 
-    /// ConPTY, created with INHERIT_CURSOR, asks for the cursor position before anything
-    /// else and waits for the answer: while no client is attached, the reader gives it.
+    /// A program's cursor query is answered while no client is attached.
     #[test]
-    fn a_cursor_query_at_startup_is_answered_while_headless() {
+    fn a_cursor_query_is_answered_while_headless() {
         let screen = Arc::new(Screen::new(24, 80, 100));
         let (in_tx, mut in_rx) = mpsc::channel(8);
         let proc_gen = screen.next_proc_gen();
-        let mut f = Feeder { screen: screen.clone(), proc_gen, scanner: QueryScanner::default(), queries: vec![], in_tx };
-        // What ConPTY writes first: win32-input-mode and focus reports on, then the query.
+        let mut f = Feeder::new(screen.clone(), proc_gen, in_tx);
+        f.pty_asks_cursor = false;
+        let mut out = screen.out_tx.subscribe();
         assert!(f.feed(b"\x1b[?9001h\x1b[?1004h\x1b[6n"));
         assert_eq!(&in_rx.try_recv().unwrap()[..], b"\x1b[1;1R");
+        assert_eq!(&out.try_recv().unwrap()[..], b"\x1b[?9001h\x1b[?1004h\x1b[6n");
         // Split across reads, after some output.
         assert!(f.feed(b"hello\x1b["));
         assert!(in_rx.try_recv().is_err());
@@ -1446,6 +1491,42 @@ mod tests {
         screen.attached.fetch_add(1, Ordering::AcqRel);
         assert!(f.feed(b"\x1b[6n"));
         assert!(in_rx.try_recv().is_err());
+    }
+
+    /// ConPTY, created with INHERIT_CURSOR, asks for the cursor position before anything
+    /// else and waits for the answer. The reader gives it even with a client attached (that
+    /// client may never see the query), and the client does not get the query, or the
+    /// program would read its answer as typed input. Later queries are the client's again.
+    #[test]
+    fn the_pseudoconsoles_cursor_query_is_answered_here_only() {
+        let screen = Arc::new(Screen::new(24, 80, 100));
+        let (in_tx, mut in_rx) = mpsc::channel(8);
+        let proc_gen = screen.next_proc_gen();
+        let mut f = Feeder::new(screen.clone(), proc_gen, in_tx);
+        assert_eq!(f.pty_asks_cursor, session::ASKS_CURSOR);
+        f.pty_asks_cursor = true;
+        screen.feed(b"restarted\r\n");
+        let mut out = screen.out_tx.subscribe();
+        screen.attached.fetch_add(1, Ordering::AcqRel);
+        // What ConPTY writes first: win32-input-mode and focus reports on, then the query.
+        assert!(f.feed(b"\x1b[?9001h\x1b[?1004h\x1b[6n"));
+        assert_eq!(&in_rx.try_recv().unwrap()[..], b"\x1b[2;1R");
+        assert_eq!(&out.try_recv().unwrap()[..], b"\x1b[?9001h\x1b[?1004h");
+        assert!(f.feed(b"$ \x1b[6n"));
+        assert!(in_rx.try_recv().is_err());
+        assert_eq!(&out.try_recv().unwrap()[..], b"$ \x1b[6n");
+        // The query alone sends clients nothing.
+        f.pty_asks_cursor = true;
+        assert!(f.feed(b"\x1b[6n"));
+        assert_eq!(&in_rx.try_recv().unwrap()[..], b"\x1b[2;3R");
+        assert!(out.try_recv().is_err());
+        // Split across reads, its start already sent: the client answers it.
+        f.pty_asks_cursor = true;
+        assert!(f.feed(b"\x1b["));
+        assert!(f.feed(b"6n"));
+        assert!(in_rx.try_recv().is_err() && !f.pty_asks_cursor);
+        assert_eq!(&out.try_recv().unwrap()[..], b"\x1b[");
+        assert_eq!(&out.try_recv().unwrap()[..], b"6n");
     }
 
     #[cfg(unix)]

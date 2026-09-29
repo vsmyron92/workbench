@@ -52,10 +52,7 @@ import json
 import os
 import re
 import sys
-import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 
 
@@ -203,6 +200,11 @@ PLAN_DIALOG = (
 
 
 def claude(args):
+    # Imported here: they slow every other fake's start (and its argv log) by tens of ms.
+    import threading
+    import urllib.error
+    import urllib.request
+
     need("FAKE_CLAUDE_LOG")
     settings = sid = ""
     i = 0

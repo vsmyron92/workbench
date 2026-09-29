@@ -755,9 +755,12 @@ async fn codex_sessions_are_discovered_tracked_and_resumed() {
     // The command line: flags the installed version supports, Workbench's MCP server,
     // the Workspace folders, the prompt after `--`. The token is not in it.
     let argv = std::fs::read_to_string(&log).unwrap();
-    let first = argv.lines().next().unwrap();
+    // a and b start together, so their lines may come in either order: a's has its id.
+    let first = argv
+        .lines()
+        .find(|l| l.contains(&format!("X-Workbench-Terminal\"=\"{}\"", a.id)))
+        .unwrap_or_else(|| panic!("{argv}"));
     assert!(first.starts_with("--no-daemon --no-alt-screen -c mcp_servers.workbench.url=\"http://127.0.0.1:"), "{first}");
-    assert!(first.contains(&format!("X-Workbench-Terminal\"=\"{}\"", a.id)), "{first}");
     assert!(first.contains(&format!("--add-dir {}", state.paths.data_dir.join("workspace/home").display())), "{first}");
     assert!(first.ends_with("-- first task"), "{first}");
     assert!(!first.contains("wba_"), "a token reached argv: {first}");

@@ -441,7 +441,7 @@ fn missing_command(p: &Provider) -> ApiError {
 }
 
 /// Whether `command` runs through cmd.exe, which parses its arguments again: a batch file
-/// that is not an npm shim (Windows only; `util::os::exe::launch_argv`).
+/// that is not an npm shim (Windows only; `util::os::exe::launch`).
 fn is_batch(command: &Path) -> bool {
     util::os::exe::classify(command.to_path_buf()).kind == util::os::exe::Kind::Batch
 }
@@ -1251,7 +1251,7 @@ impl Terminals {
         let (home, foreign) = (w.home.clone(), w.foreign.clone());
         let (found, not_ours) = tokio::task::spawn_blocking(move || {
             let mut candidates = codex::recent_candidates(&home, me.launched_at);
-            candidates.retain(|c| c.meta.cwd.trim_end_matches('/') == me.cwd.trim_end_matches('/') && !foreign.contains(&c.path));
+            candidates.retain(|c| util::os::path::same_dir(&c.meta.cwd, &me.cwd) && !foreign.contains(&c.path));
             if candidates.is_empty() {
                 return (None, None);
             }
@@ -1295,7 +1295,7 @@ impl Terminals {
         let cwd = waiting.iter().find(|(p, _, _)| p.terminal_id == entry.id)?.0.cwd.clone();
         let waiting: Vec<(String, Arc<HashSet<String>>, Arc<Entry>)> = waiting
             .into_iter()
-            .filter(|(p, _, _)| p.cwd.trim_end_matches('/') == cwd.trim_end_matches('/'))
+            .filter(|(p, _, _)| util::os::path::same_dir(&p.cwd, &cwd))
             .filter_map(|(p, _, e)| {
                 let known = e.rt.lock().kimi_known.clone()?;
                 Some((p.terminal_id, known, e))
@@ -2205,14 +2205,9 @@ impl Terminals {
             ProviderKind::Kimi => {
                 let home = kimi::kimi_home(env_dir("KIMI_CODE_HOME").as_deref());
                 tokio::task::spawn_blocking(move || {
-                    let root_s = root.to_string_lossy().trim_end_matches('/').to_string();
-                    let entries: Vec<kimi::IndexEntry> = kimi::load_index(&home)
-                        .into_iter()
-                        .filter(|e| {
-                            let w = e.work_dir.trim_end_matches('/');
-                            w == root_s || w.starts_with(&format!("{root_s}/"))
-                        })
-                        .collect();
+                    let root_s = root.to_string_lossy();
+                    let entries: Vec<kimi::IndexEntry> =
+                        kimi::load_index(&home).into_iter().filter(|e| util::os::path::dir_within(&e.work_dir, &root_s)).collect();
                     // Newest entries last in the index; read at most a few hundred.
                     let mut rows: Vec<HistoryEntry> = entries
                         .iter()
