@@ -10,20 +10,20 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, WIN32_ERROR};
+use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
 use windows_sys::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
-    RegDeleteKeyValueW, RegGetValueW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_BINARY, RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW,
+    RegSetValueExW,
 };
 use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
 use windows_sys::Win32::UI::Shell::{FOLDERID_Programs, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellLink};
 use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW};
 use windows_sys::core::{GUID, HRESULT, PCWSTR, PWSTR};
 
-use super::win32::{Handle, wide};
+use super::win32::{Handle, reg_string, reg_value, wide};
 
 /// `HKCU\<RUN_KEY>`: what Windows starts when the user signs in.
 pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -47,36 +47,10 @@ fn check(rc: WIN32_ERROR) -> io::Result<()> {
     if rc == ERROR_SUCCESS { Ok(()) } else { Err(io::Error::from_raw_os_error(rc as i32)) }
 }
 
-/// The value `name` of `HKCU\<key>`, restricted to the types in `flags` (`RRF_RT_…`);
-/// `None` when the key or the value does not exist.
-fn get(key: &str, name: &str, flags: u32) -> io::Result<Option<Vec<u8>>> {
-    let (wkey, wname) = (wide(key), wide(name));
-    let mut buf = vec![0u8; 512];
-    for _ in 0..4 {
-        let mut len = buf.len() as u32;
-        // SAFETY: both names are NUL-terminated and outlive the call; `buf` is writable for
-        // `len` bytes.
-        let rc = unsafe { RegGetValueW(HKEY_CURRENT_USER, wkey.as_ptr(), wname.as_ptr(), flags, ptr::null_mut(), buf.as_mut_ptr().cast(), &mut len) };
-        match rc {
-            ERROR_SUCCESS => {
-                buf.truncate(len as usize);
-                return Ok(Some(buf));
-            }
-            // `len` is the size needed now; the value may still grow before the next try.
-            ERROR_MORE_DATA => buf = vec![0u8; len as usize + 64],
-            ERROR_FILE_NOT_FOUND => return Ok(None),
-            rc => return Err(io::Error::from_raw_os_error(rc as i32)),
-        }
-    }
-    Err(io::Error::other("the registry value kept changing size"))
-}
-
-/// A string value (`REG_SZ`, or `REG_EXPAND_SZ` expanded) of `HKCU\<key>`.
+/// A string value (`REG_SZ`, or `REG_EXPAND_SZ` expanded) of `HKCU\<key>`; `None` when the
+/// key or the value does not exist.
 pub fn get_string(key: &str, name: &str) -> io::Result<Option<String>> {
-    let Some(bytes) = get(key, name, RRF_RT_REG_SZ)? else { return Ok(None) };
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-    let end = units.iter().position(|&c| c == 0).unwrap_or(units.len());
-    Ok(Some(String::from_utf16_lossy(&units[..end])))
+    reg_string(HKEY_CURRENT_USER, key, Some(name), 0)
 }
 
 /// Sets the `REG_SZ` value `name` of `HKCU\<key>`, creating the key when it is missing.
@@ -137,7 +111,7 @@ pub fn set_binary(key: &str, name: &str, data: &[u8]) -> io::Result<()> {
 /// Settings › Apps › Startup): its value under `approved_key` (`APPROVED_KEY`, or a test's)
 /// starts with an odd byte (2 and 6 mean on, 3 and 7 off; a missing value means on).
 pub fn startup_disabled(approved_key: &str, name: &str) -> bool {
-    matches!(get(approved_key, name, RRF_RT_REG_BINARY), Ok(Some(b)) if b.first().is_some_and(|x| x & 1 == 1))
+    matches!(reg_value(HKEY_CURRENT_USER, approved_key, Some(name), RRF_RT_REG_BINARY), Ok(Some(b)) if b.first().is_some_and(|x| x & 1 == 1))
 }
 
 // ---------------------------------------------------------------- Start Menu
@@ -445,9 +419,38 @@ pub fn no_console_window(cmd: &mut std::process::Command) {
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
+/// Whether this process's windows reach a user: its window station is the interactive one,
+/// and not in session 0, where services and what an SSH sign-in starts run and which no user
+/// sees since Windows Vista.
+pub fn interactive() -> bool {
+    use windows_sys::Win32::System::StationsAndDesktops::{GetProcessWindowStation, GetUserObjectInformationW, UOI_FLAGS, USEROBJECTFLAGS};
+    use windows_sys::Win32::UI::WindowsAndMessaging::WSF_VISIBLE;
+    if super::proc::session_of(std::process::id()).is_none_or(|s| s == 0) {
+        return false;
+    }
+    let mut flags = USEROBJECTFLAGS::default();
+    let mut needed = 0u32;
+    // SAFETY: the process's own window station, a handle not to be closed (null on failure,
+    // which fails the call); `flags` is writable for its size.
+    let ok = unsafe {
+        GetUserObjectInformationW(
+            GetProcessWindowStation(),
+            UOI_FLAGS,
+            (&mut flags as *mut USEROBJECTFLAGS).cast(),
+            size_of::<USEROBJECTFLAGS>() as u32,
+            &mut needed,
+        )
+    } != 0;
+    ok && flags.dwFlags & WSF_VISIBLE as u32 != 0
+}
+
 /// Shows `text` in a message box and waits for OK: for a program without a console
-/// (`workbenchw`'s service) that has to tell the user something.
+/// (`workbenchw`'s service) that has to tell the user something. Nothing where no one could
+/// answer it (not [`interactive`]): the box would wait for good.
 pub fn message_box(title: &str, text: &str, error: bool) {
+    if !interactive() {
+        return;
+    }
     let (title, text) = (wide(title), wide(text));
     let icon = if error { MB_ICONERROR } else { MB_ICONINFORMATION };
     // SAFETY: no owner window; both strings are NUL-terminated and outlive the call.
@@ -485,6 +488,32 @@ mod tests {
         assert!(delete_value(&run, "Workbench").unwrap());
         assert!(!delete_value(&run, "Workbench").unwrap());
         assert_eq!(get_string(&run, "Workbench").unwrap(), None);
+    }
+
+    /// Session 0 (services, SSH) has no desktop anyone sees, so no message box waits there.
+    #[test]
+    fn session_zero_is_not_interactive() {
+        let session = crate::util::os::proc::session_of(std::process::id()).expect("this process's session");
+        if session == 0 {
+            assert!(!interactive());
+        }
+    }
+
+    /// The reader desktop's App Paths lookup shares: a key's default value, in a registry view.
+    #[test]
+    fn default_values_are_read_in_a_view() {
+        use windows_sys::Win32::System::Registry::RRF_SUBKEY_WOW6464KEY;
+        let key = scratch();
+        let app = format!(r"{}\App Paths\tool.exe", key.0);
+        assert_eq!(reg_string(HKEY_CURRENT_USER, &app, None, RRF_SUBKEY_WOW6464KEY).unwrap(), None, "no key yet");
+        set_string(&app, "Path", r"C:\Tools").unwrap();
+        assert_eq!(reg_string(HKEY_CURRENT_USER, &app, None, RRF_SUBKEY_WOW6464KEY).unwrap(), None, "no default value yet");
+        let long = format!(r"C:\Tools\{}\tool.exe", "d".repeat(600));
+        set_string(&app, "", &long).unwrap();
+        assert_eq!(reg_string(HKEY_CURRENT_USER, &app, None, RRF_SUBKEY_WOW6464KEY).unwrap(), Some(long));
+        // A value of another type is an error, not a string.
+        set_binary(&app, "Bin", &[1, 2, 3]).unwrap();
+        assert!(reg_string(HKEY_CURRENT_USER, &app, Some("Bin"), 0).is_err());
     }
 
     #[test]

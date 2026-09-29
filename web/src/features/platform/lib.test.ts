@@ -5,6 +5,7 @@ import {
   formatMs,
   hostEntryError,
   hostOf,
+  inConfigDir,
   makeSecretRef,
   panelIdFor,
   prependCapped,
@@ -106,6 +107,12 @@ describe('validation', () => {
     expect(projectPathError('D:\\code', 'linux')).toBe('Use an absolute path or ~/…')
     expect(projectPathError('D:code', 'windows')).not.toBeNull()
     expect(projectPathError('code\\app', 'windows')).not.toBeNull()
+  })
+  it('suggests files in the config dir the server reports, with its separator', () => {
+    expect(inConfigDir('~/.config/workbench', 'tls', 'cert.pem')).toBe('~/.config/workbench/tls/cert.pem')
+    expect(inConfigDir('~\\AppData\\Roaming\\workbench', 'tls', 'key.pem')).toBe('~\\AppData\\Roaming\\workbench\\tls\\key.pem')
+    expect(inConfigDir('/srv/wb/config/', 'tls', 'cert.pem')).toBe('/srv/wb/config/tls/cert.pem')
+    expect(inConfigDir(undefined, 'tls', 'cert.pem')).toBe('~/.config/workbench/tls/cert.pem')
   })
 })
 

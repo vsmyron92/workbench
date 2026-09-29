@@ -692,19 +692,23 @@ struct Prepared {
 }
 
 fn prepare(state: &AppState, project: &Project, c: &RunConfig, vars: &Vars) -> Result<Prepared, ApiError> {
+    // Where this project's machine overlay really is (`~/.config/workbench/projects/<id>.toml`
+    // by default on Linux, under `%APPDATA%` on Windows, or `$WORKBENCH_CONFIG_DIR`).
+    let overlay = || crate::config::contract_tilde(&state.paths.project_overlay(&project.id));
     for (name, path) in &project.config.toolchains {
         if c.command.contains(&format!("{{{name}}}")) && !crate::config::expand_tilde(path).exists() {
             return Err(ApiError::not_configured(format!(
-                "toolchain {{{name}}} not found at {path}; install it or set [toolchains] {name} = \"…\" in ~/.config/workbench/projects/{}.toml",
-                project.id
+                "toolchain {{{name}}} not found at {path}; install it or set [toolchains] {name} = \"…\" in {}",
+                overlay()
             )));
         }
     }
     let unknown: Vec<String> = expand::unknown_placeholders(&c.command, vars);
     if let Some(u) = unknown.first() {
         return Err(ApiError::not_configured(format!(
-            "{}: unknown placeholder {{{u}}}; add it under [toolchains] in ~/.config/workbench/projects/{}.toml",
-            c.name, project.id
+            "{}: unknown placeholder {{{u}}}; add it under [toolchains] in {}",
+            c.name,
+            overlay()
         )));
     }
     let cwd = resolve_cwd(project, &c.cwd)?;

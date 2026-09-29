@@ -201,7 +201,7 @@ pub fn enable_ctrl_c() {
 }
 
 #[cfg(windows)]
-pub use imp::{Event, request_stop, server_running, stop_event_name};
+pub use imp::{Event, request_stop, server_running, session_of, stop_event_name};
 
 // ---------------------------------------------------------------- Unix
 
@@ -802,6 +802,17 @@ mod imp {
         Event::exists(&stop_event_name(data_dir))
     }
 
+    /// The Windows session process `pid` runs in: 0 for services and for what an SSH
+    /// sign-in starts, 1 and up for the desktops users sign in to. `Local\` names, the stop
+    /// events among them, belong to one session: another session's server holds its events
+    /// where no process here can see them. `None` when the pid cannot be looked up.
+    pub fn session_of(pid: u32) -> Option<u32> {
+        use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+        let mut session = 0u32;
+        // SAFETY: plain call; `session` is a valid out-pointer.
+        (unsafe { ProcessIdToSessionId(pid, &mut session) } != 0).then_some(session)
+    }
+
     /// A named auto-reset event that only this user and SYSTEM may open, held while the
     /// value lives: a server's stop event, `workbench service`'s own.
     pub struct Event(Handle);
@@ -1150,6 +1161,16 @@ mod tests {
         let s = "4145729 (my (odd) prog) S 4145700 4145729 1 0 -1 4194304 100 0 0 0 1 2 0 0 20 0 1 0 987654 1000 100";
         assert_eq!(imp::parse_stat(s), Some((4145700, 987654)));
         assert_eq!(imp::parse_stat("garbage"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_child_runs_in_its_parents_session() {
+        let mine = session_of(std::process::id()).expect("this process's session");
+        let mut child = sleeper().spawn().unwrap();
+        assert_eq!(session_of(child.id()), Some(mine));
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[cfg(windows)]

@@ -89,6 +89,16 @@ export function osLabel(os: string | null | undefined): string | null {
   return ({ linux: 'Linux', windows: 'Windows', macos: 'macOS' } as Record<string, string>)[os] ?? os
 }
 
+/**
+ * Where the server's OS keeps config.toml unless WORKBENCH_CONFIG_DIR moves it (the server's
+ * `dirs::config_dir()/workbench`), for setup hints; the Linux place until the report arrives.
+ */
+export function configFileHint(os: string | null | undefined = report?.os): string {
+  if (os === 'windows') return '%APPDATA%\\workbench\\config.toml'
+  if (os === 'macos') return '~/Library/Application Support/workbench/config.toml'
+  return '~/.config/workbench/config.toml'
+}
+
 /** The server writes reasons like its error messages (lowercase first letter). */
 function sentence(s: string | undefined): string | null {
   const t = s?.trim()

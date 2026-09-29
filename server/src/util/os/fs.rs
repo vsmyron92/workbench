@@ -73,10 +73,11 @@ pub fn read_text(path: &Path) -> io::Result<String> {
     }
 }
 
-/// Create `link` pointing at `target`. Windows: a directory or a file link by what
-/// `target` is, seen from `link`'s folder (a missing target makes a file link); without
-/// Developer Mode or an administrator it fails with a clear `PermissionDenied`.
-#[cfg_attr(not(test), allow(dead_code))] // the tests' symlink; copies use `copy_symlink`
+/// Tests: create `link` pointing at `target` (Workbench itself only recreates links, with
+/// `copy_symlink`). Windows: a directory or a file link by what `target` is, seen from
+/// `link`'s folder (a missing target makes a file link); without Developer Mode or an
+/// administrator it fails with a clear `PermissionDenied`.
+#[cfg(test)]
 pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     sys::symlink(target.as_ref(), link.as_ref())
 }
@@ -178,6 +179,7 @@ mod unix {
         if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
     }
 
+    #[cfg(test)]
     pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
         std::os::unix::fs::symlink(target, link)
     }
@@ -386,11 +388,10 @@ mod unix {
 
 #[cfg(windows)]
 mod win {
-    use std::ffi::OsString;
     use std::io::{self, ErrorKind};
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::FileTypeExt;
-    use std::path::{Component, Path, PathBuf};
+    use std::path::{Component, Path};
     use std::time::Duration;
 
     use windows_sys::Win32::Foundation::{
@@ -467,7 +468,11 @@ mod win {
         String::from_utf16_lossy(&w[..w.iter().position(|&c| c == 0).unwrap_or(w.len())])
     }
 
+    #[cfg(test)]
     pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        use std::path::PathBuf;
         // A relative target resolves only with backslashes.
         let w: Vec<u16> = target.as_os_str().encode_wide().map(|c| if c == u16::from(b'/') { u16::from(b'\\') } else { c }).collect();
         let target = PathBuf::from(OsString::from_wide(&w));

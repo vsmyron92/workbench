@@ -27,6 +27,7 @@ vi.mock('@/shell/actions', () => ({
 
 const { ApiError } = await import('@/api/client')
 const { setAppsQueryClient, startRun } = await import('./api')
+const { setHealth } = await import('@/api/health')
 import type { QueryClient } from '@tanstack/react-query'
 import type { RunView } from './types'
 
@@ -65,7 +66,26 @@ describe('startRun', () => {
     confirmDialog.mockResolvedValueOnce(true)
     expect(await startRun('p', 'web')).toBe(true)
     expect(confirmDialog).toHaveBeenCalledTimes(1)
+    // How it is freed: fuser on Linux (and before the health report arrives).
+    expect(confirmDialog.mock.calls[0][0].message).toBe(
+      'port 7824 is in use by another process.\n\nWorkbench will stop it (its own run, or fuser -k <port>/tcp for another process) and then start “web”.',
+    )
     expect(post).toHaveBeenLastCalledWith('/api/projects/p/runs/web/start', { freePort: true, confirmed: false })
+  })
+
+  it('says how a Windows server frees the port: no fuser there', async () => {
+    setHealth({ ok: true, service: 'workbench', version: '0', startedAt: 1, os: 'windows' })
+    try {
+      cache([web()])
+      post.mockRejectedValueOnce(new ApiError(409, 'port_in_use', 'port 7824 is in use by another process')).mockResolvedValueOnce({})
+      confirmDialog.mockResolvedValueOnce(true)
+      expect(await startRun('p', 'web')).toBe(true)
+      const message: string = confirmDialog.mock.calls[0][0].message
+      expect(message).not.toContain('fuser')
+      expect(message).toContain('(its own run, or the process listening on the port and the ones it started, when they run as you)')
+    } finally {
+      setHealth(null)
+    }
   })
 
   it('does nothing more when the user keeps the port', async () => {

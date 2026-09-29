@@ -22,6 +22,8 @@ There are two places, and they behave differently:
 | `~/.config/workbench/projects/<id>.toml` | this machine only | hosts, secrets, deploys, agent settings |
 | `.workbench.toml` in the repository | committed with the code | run configurations and other non-sensitive settings |
 
+On Windows the machine's file is `%APPDATA%\workbench\projects\<id>.toml`.
+
 A repository's own config is **untrusted**. It can never define secrets, loosen agent permissions or make Workbench run a command by itself. That is deliberate: cloning a repository must not be able to take over your machine.
 
 ## Files and editing

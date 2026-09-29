@@ -138,8 +138,8 @@ pub struct EnvView {
 }
 
 /// The env config as the UI sees it: no secret values (only secret *names*).
-pub fn config_view(project: &Project, e: &Environment) -> Value {
-    let target = remote::env_target(project, e).map(|t| t.label()).ok();
+pub fn config_view(state: &AppState, project: &Project, e: &Environment) -> Value {
+    let target = remote::env_target(&state.paths, project, e).map(|t| t.label()).ok();
     json!({
         "host": e.host,
         "target": target,
@@ -184,7 +184,7 @@ pub fn list(state: &AppState, project: &Project) -> Vec<EnvView> {
                 name: e.name.clone(),
                 kind: e.kind,
                 url: e.url.clone(),
-                config: config_view(project, e),
+                config: config_view(state, project, e),
                 health,
                 version,
                 preview: preview_info(state, &project.id, e),
@@ -249,7 +249,7 @@ pub async fn check(state: &AppState, project: &Project, e: &Environment) -> Heal
     let _guard = lock.lock().await;
     let outcome = match &e.health {
         None => CheckOutcome { status: HealthStatus::Unknown, http_status: None, latency_ms: None, error: Some("no health probe configured".into()) },
-        Some(h) if h.via_host => check_via_host(project, e, h).await,
+        Some(h) if h.via_host => check_via_host(state, project, e, h).await,
         Some(h) => {
             let first = check_http(state, project, e, h).await;
             if first.status == HealthStatus::Down {
@@ -414,8 +414,8 @@ pub fn parse_via_host(stdout: &str) -> (Option<u16>, Option<u64>) {
     (code, ms)
 }
 
-async fn check_via_host(project: &Project, e: &Environment, h: &crate::config::project::Health) -> CheckOutcome {
-    let target = match remote::env_target(project, e) {
+async fn check_via_host(state: &AppState, project: &Project, e: &Environment, h: &crate::config::project::Health) -> CheckOutcome {
+    let target = match remote::env_target(&state.paths, project, e) {
         Ok(t) => t,
         Err(err) => return CheckOutcome { status: HealthStatus::Unknown, http_status: None, latency_ms: None, error: Some(err.message) },
     };
@@ -477,7 +477,7 @@ pub async fn probe_version(state: &AppState, project: &Project, e: &Environment)
     let info = if v.http.is_some() {
         probe_version_http(state, project, e).await?
     } else if let Some(cmd) = &v.command {
-        let target = remote::env_target(project, e)?;
+        let target = remote::env_target(&state.paths, project, e)?;
         let argv = remote::argv(&target, cmd, false);
         let mut c = crate::util::os::shell::command(&argv);
         c.current_dir(&project.root);
@@ -602,7 +602,7 @@ pub async fn open_logs(state: &AppState, project: &Project, e: &Environment, whi
         Some(n) => e.logs.iter().find(|l| l.name == n).ok_or_else(|| ApiError::not_found(format!("{} has no log {n:?}", e.name)))?,
         None => e.logs.first().ok_or_else(|| ApiError::not_configured(format!("{} has no [[env.logs]] commands", e.name)))?,
     };
-    let target = remote::env_target(project, e)?;
+    let target = remote::env_target(&state.paths, project, e)?;
     let argv = remote::argv(&target, &log.command, true);
     state
         .terminals
@@ -629,7 +629,7 @@ pub async fn run_command(state: &AppState, project: &Project, e: &Environment, n
     if c.confirm && !confirmed {
         return Err(ApiError::new(axum::http::StatusCode::PRECONDITION_REQUIRED, "confirmation_required", format!("{name} on {} needs confirmation", e.name)));
     }
-    let target = remote::env_target(project, e)?;
+    let target = remote::env_target(&state.paths, project, e)?;
     let argv = remote::argv(&target, &c.command, false);
     state
         .terminals

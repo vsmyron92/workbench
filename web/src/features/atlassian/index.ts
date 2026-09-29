@@ -5,6 +5,7 @@
 // panels 'jira' {key} and 'jira.board' {boardId}.
 
 import { BookOpen, FilePlus, FileSearch, FileText, Kanban, ListTodo, SquarePlus } from 'lucide-react'
+import { configFileHint } from '@/api/health'
 import { ConfluenceIcon, JiraIcon } from '@/ui'
 import { showToolWindow, toast } from '@/shell/actions'
 import type { FeatureModule } from '@/shell/types'
@@ -23,7 +24,7 @@ function requireConfluence(): boolean {
   if (confluenceAvailable()) return true
   const s = useAtlassianStatus.getState()
   toast('warning', 'Confluence is not available', {
-    detail: s.errorMessage ?? s.status?.error ?? 'Set [atlassian] site, email and token in ~/.config/workbench/config.toml.',
+    detail: s.errorMessage ?? s.status?.error ?? `Set [atlassian] site, email and token in ${s.status?.configFile ?? configFileHint()}.`,
     timeout: 9000,
   })
   return false

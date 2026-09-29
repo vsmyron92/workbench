@@ -736,7 +736,7 @@ pub async fn chmod_secret(
     if !perm::owned_by_me(&path).map_err(|e| ApiError::not_found(format!("{p}: {e}")))? {
         return Err(ApiError::forbidden(format!("{p} belongs to another user")));
     }
-    perm::apply(&path, 0o600).map_err(|e| ApiError::internal(format!("chmod {p}: {e}")))?;
+    perm::apply(&path, 0o600).map_err(|e| ApiError::internal(format!("{} {p}: {e}", perm::MAKING_PRIVATE)))?;
     tracing::info!("secret file {p} set to mode 600");
     Ok(Json(secret_row(&state, &name, &r, q.project_id.as_deref(), vec![]).await))
 }

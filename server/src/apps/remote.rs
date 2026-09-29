@@ -9,8 +9,8 @@
 //!   require `deploy.local = true` to run locally, so a missing host can never turn a
 //!   remote deploy into a local one.
 
-use crate::config::expand_tilde;
 use crate::config::project::{Environment, SshHost};
+use crate::config::{Paths, contract_tilde, expand_tilde};
 use crate::error::ApiError;
 use crate::projects::Project;
 
@@ -31,8 +31,9 @@ impl Target {
     }
 }
 
-/// The target of an env's logs / commands / version probe.
-pub fn env_target(project: &Project, env: &Environment) -> Result<Target, ApiError> {
+/// The target of an env's logs / commands / version probe. `paths` locates the project's
+/// machine overlay, which the message about an undefined host names.
+pub fn env_target(paths: &Paths, project: &Project, env: &Environment) -> Result<Target, ApiError> {
     match env.host.as_deref() {
         None => Ok(Target::Local),
         Some(name) => match project.config.hosts.get(name) {
@@ -42,19 +43,20 @@ pub fn env_target(project: &Project, env: &Environment) -> Result<Target, ApiErr
             }
             None if name == "local" || name == "localhost" => Ok(Target::Local),
             None => Err(ApiError::not_configured(format!(
-                "environment {:?} uses host {name:?}, which is not defined; add [hosts.{name}] to ~/.config/workbench/projects/{}.toml",
-                env.name, project.id
+                "environment {:?} uses host {name:?}, which is not defined; add [hosts.{name}] to {}",
+                env.name,
+                contract_tilde(&paths.project_overlay(&project.id))
             ))),
         },
     }
 }
 
 /// The target of a deploy: local only when `deploy.local = true`.
-pub fn deploy_target(project: &Project, env: &Environment, local: bool) -> Result<Target, ApiError> {
+pub fn deploy_target(paths: &Paths, project: &Project, env: &Environment, local: bool) -> Result<Target, ApiError> {
     if local {
         return Ok(Target::Local);
     }
-    match env_target(project, env)? {
+    match env_target(paths, project, env)? {
         Target::Local => Err(ApiError::not_configured(format!(
             "environment {:?} has no ssh host for its deploy; set `host` (a [hosts] entry) or `deploy.local = true`",
             env.name

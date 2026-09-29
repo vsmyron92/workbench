@@ -92,6 +92,17 @@ export function projectPathError(p: string, os: string | null | undefined): stri
   return /^([A-Za-z]:)?[\\/]/.test(p) ? null : 'Use an absolute path (C:\\…) or ~\\…'
 }
 
+/**
+ * `parts` under the config dir the server reports (`GET /api/settings` `paths.configDir`,
+ * `~`-contracted, with the server's separator): `~/.config/workbench/tls/cert.pem` on
+ * Linux, `~\AppData\Roaming\workbench\tls\cert.pem` on Windows.
+ */
+export function inConfigDir(configDir: string | undefined, ...parts: string[]): string {
+  const dir = configDir || '~/.config/workbench'
+  const sep = dir.includes('\\') ? '\\' : '/'
+  return [dir.replace(/[\\/]+$/, ''), ...parts].join(sep)
+}
+
 /** `null` when `u` can be the public URL, else the problem. */
 export function publicUrlError(u: string): string | null {
   const v = u.trim()

@@ -32,6 +32,13 @@ pub const MAKE_PRIVATE: &str = "run chmod 600";
 #[cfg(windows)]
 pub const MAKE_PRIVATE: &str = "use Settings → Secrets to make it private";
 
+/// What making a file private (`apply(path, 0o600)`) is called in an error message:
+/// `<this> <file>: <error>`.
+#[cfg(unix)]
+pub const MAKING_PRIVATE: &str = "chmod";
+#[cfg(windows)]
+pub const MAKING_PRIVATE: &str = "make private";
+
 /// Set `path`'s permission bits (chmod). Windows: a private mode gives it the private DACL;
 /// any other mode leaves its ACL as it is.
 pub fn apply(path: &Path, mode: u32) -> io::Result<()> {

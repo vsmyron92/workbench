@@ -54,15 +54,12 @@ mod sys {
     use std::path::PathBuf;
     use std::ptr;
 
-    use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
     use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize};
-    use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6432KEY, RRF_SUBKEY_WOW6464KEY, RegGetValueW,
-    };
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_SUBKEY_WOW6432KEY, RRF_SUBKEY_WOW6464KEY};
     use windows_sys::Win32::UI::Shell::{SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    use crate::util::os::win32::wide;
+    use crate::util::os::win32::{reg_string, wide};
 
     /// Chromium browsers by their App Paths names, in the order Linux tries them.
     const BROWSERS: &[&str] = &["chrome.exe", "msedge.exe", "brave.exe"];
@@ -105,34 +102,10 @@ mod sys {
             (HKEY_LOCAL_MACHINE, RRF_SUBKEY_WOW6432KEY),
         ]
         .into_iter()
-        .filter_map(|(root, view)| default_value(root, &key, view))
+        // The key's default value.
+        .filter_map(|(root, view)| reg_string(root, &key, None, view).ok().flatten())
         .map(|v| PathBuf::from(v.trim().trim_matches('"')))
         .find(|p| p.is_file())
-    }
-
-    /// A registry key's default string value (REG_EXPAND_SZ expanded), read in the
-    /// registry `view` (RRF_SUBKEY_WOW64…).
-    fn default_value(root: HKEY, key: &str, view: u32) -> Option<String> {
-        let key = wide(key);
-        let mut buf = vec![0u16; 512];
-        for _ in 0..3 {
-            let mut bytes = (buf.len() * 2) as u32;
-            // SAFETY: key is NUL-terminated, a null value name reads the default value,
-            // and buf is writable for `bytes` bytes.
-            let rc = unsafe {
-                RegGetValueW(root, key.as_ptr(), ptr::null(), RRF_RT_REG_SZ | view, ptr::null_mut(), buf.as_mut_ptr().cast(), &mut bytes)
-            };
-            match rc {
-                ERROR_SUCCESS => {
-                    let got = &buf[..(bytes as usize / 2).min(buf.len())];
-                    let end = got.iter().position(|&c| c == 0).unwrap_or(got.len());
-                    return Some(String::from_utf16_lossy(&got[..end]));
-                }
-                ERROR_MORE_DATA => buf = vec![0u16; (bytes as usize).div_ceil(2) + 1],
-                _ => return None,
-            }
-        }
-        None
     }
 
     /// The default browser, through the shell. On a thread of its own, because shell

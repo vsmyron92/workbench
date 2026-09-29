@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from './client'
-import { experimentalNote, FEATURES, getHealth, loadHealth, osLabel, setHealth, unsupportedReason, type Health } from './health'
+import { configFileHint, experimentalNote, FEATURES, getHealth, loadHealth, osLabel, setHealth, unsupportedReason, type Health } from './health'
 
 const base = { ok: true, service: 'workbench', version: '0.2.0', startedAt: 1 }
 const LINUX: Health = { ...base, os: 'linux', unsupported: {}, experimental: {} }
@@ -62,6 +62,14 @@ describe('the health report', () => {
     vi.stubGlobal('fetch', reply(503, { error: { code: 'internal', message: 'down' } }))
     await loadHealth()
     expect(getHealth()).toBeNull()
+  })
+
+  it("names config.toml where the server's OS keeps it", () => {
+    expect(configFileHint('linux')).toBe('~/.config/workbench/config.toml')
+    expect(configFileHint('windows')).toBe('%APPDATA%\\workbench\\config.toml')
+    expect(configFileHint()).toBe('~/.config/workbench/config.toml')
+    setHealth(WINDOWS)
+    expect(configFileHint()).toBe('%APPDATA%\\workbench\\config.toml')
   })
 })
 

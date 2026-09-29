@@ -32,6 +32,11 @@
 - **Run configurations:** Unity detection takes the editor version from
   `ProjectVersion.txt` only when it consists of version characters (letters, digits, `.`,
   `_`, `-`), since it becomes part of the detected commands (every OS).
+- **Setup help:** the messages about a missing toolchain, an unknown placeholder or an
+  undefined ssh host, and the Confluence setup hint, name the project's machine overlay and
+  `config.toml` where this Workbench reads them (`WORKBENCH_CONFIG_DIR`, `XDG_CONFIG_HOME`,
+  `%APPDATA%` on Windows) instead of always `~/.config/workbench` (every OS; the same text
+  on a default Linux install).
 - **Releases:** the release workflow can also build
   `workbench-X.Y.Z-x86_64-pc-windows-msvc.zip` with `workbench.exe` (no Visual C++ runtime
   needed), `workbenchw.exe`, `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY

@@ -4,9 +4,9 @@ import { Laptop, LogOut, QrCode, RotateCcw, Save, ShieldAlert, ShieldCheck, Smar
 import { api } from '@/api/client'
 import { confirmDialog, toast, toastError } from '@/shell/actions'
 import { Badge, Button, Checkbox, EmptyState, ErrorBox, Input, Loading, StatusDot, TimeAgo } from '@/ui'
-import { pk, reportApply, useRemote } from '../api'
+import { pk, reportApply, useRemote, useSettings } from '../api'
 import { CodeLine, Group, Note, Page, Row, StringList, useDraft } from '../common'
-import { hostEntryError, hostNameOf, publicUrlError, restartText } from '../lib'
+import { hostEntryError, hostNameOf, inConfigDir, publicUrlError, restartText } from '../lib'
 import { openPairDialog } from '../PairDialog'
 import type { ApplyResult, DeviceInfo, RemoteInfo } from '../types'
 
@@ -129,6 +129,8 @@ export function RemoteSection() {
   const saved = useMemo(() => (data ? fromRemote(data) : undefined), [data])
   const { draft: form, setDraft: setForm, dirty, reset } = useDraft(saved, normalize)
   const [busy, setBusy] = useState(false)
+  // The certificate's suggested place: the config dir this server reads.
+  const configDir = useSettings().data?.paths.configDir
 
   if (remote.error) return <ErrorBox error={remote.error} onRetry={() => void remote.refetch()} />
   if (!data || !form) return <Loading />
@@ -309,10 +311,10 @@ export function RemoteSection() {
         {form.tlsOn && (
           <>
             <Row label="Certificate" hint={data.tls.configured && data.tls.certExists === false ? 'File not found' : undefined}>
-              <Input className="mono" value={form.cert} onChange={(e) => set({ cert: e.target.value })} placeholder="~/.config/workbench/tls/cert.pem" />
+              <Input className="mono" value={form.cert} onChange={(e) => set({ cert: e.target.value })} placeholder={inConfigDir(configDir, 'tls', 'cert.pem')} />
             </Row>
             <Row label="Private key" hint={data.tls.configured && data.tls.keyExists === false ? 'File not found' : undefined}>
-              <Input className="mono" value={form.key} onChange={(e) => set({ key: e.target.value })} placeholder="~/.config/workbench/tls/key.pem" />
+              <Input className="mono" value={form.key} onChange={(e) => set({ key: e.target.value })} placeholder={inConfigDir(configDir, 'tls', 'key.pem')} />
             </Row>
           </>
         )}

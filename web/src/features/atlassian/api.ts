@@ -22,6 +22,8 @@ export interface AtlassianStatus {
   authFailed: boolean
   error: string | null
   checkedAt: number
+  /** Where the server's config.toml is (`~`-contracted), for setup help. */
+  configFile?: string
 }
 
 // ---------------------------------------------------------------- confluence
