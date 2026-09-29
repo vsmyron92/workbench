@@ -454,7 +454,7 @@ mod imp {
 
     use tokio::process::Command;
     use windows_sys::Win32::Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, GetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE, ERROR_MORE_DATA, GetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
@@ -832,7 +832,7 @@ mod imp {
             // SAFETY: `name` is NUL-terminated and outlives the call; `Handle` owns the result.
             let Some(event) = Handle::new(unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) }) else {
                 let e = std::io::Error::last_os_error();
-                return if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) { Ok(false) } else { Err(e) };
+                return if e.raw_os_error().is_some_and(no_event) { Ok(false) } else { Err(e) };
             };
             // SAFETY: an event handle with EVENT_MODIFY_STATE.
             if unsafe { SetEvent(event.0) } == 0 {
@@ -861,6 +861,15 @@ mod imp {
                 _ => Err(std::io::Error::last_os_error()),
             }
         }
+    }
+
+    /// Whether `OpenEventW` failing with `code` means that no event has the name. Its docs name
+    /// no code for that: ERROR_FILE_NOT_FOUND is the usual one; ERROR_INVALID_HANDLE is the
+    /// documented one for a name that another kind of object holds (no event either), and the
+    /// one Windows Server 2025 (10.0.26100, the CI runner) gave for names nothing held. Access
+    /// denied (another account's event) and a bad name stay errors.
+    fn no_event(code: i32) -> bool {
+        code == ERROR_FILE_NOT_FOUND as i32 || code == ERROR_INVALID_HANDLE as i32
     }
 
     /// This process's user as a SID string (`S-1-5-21-…`).
@@ -1181,5 +1190,23 @@ mod tests {
         assert!(!event.wait(Duration::from_millis(10)).unwrap(), "auto-reset");
         drop(event);
         assert!(!Event::exists(&name));
+        assert!(!Event::set(&name).unwrap(), "gone with its last handle");
+    }
+
+    /// A name that another kind of object holds is no event: nothing to set, and none of ours
+    /// can be created under it.
+    #[cfg(windows)]
+    #[test]
+    fn a_name_held_by_another_kind_of_object_is_no_event() {
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+        let name = format!("Local\\workbench-test-mutex-{}", std::process::id());
+        let wname = crate::util::os::win32::wide(&name);
+        // SAFETY: no attributes; `wname` is NUL-terminated and outlives the call; `Handle`
+        // owns the result.
+        let mutex = crate::util::os::win32::Handle::new(unsafe { CreateMutexW(std::ptr::null(), 0, wname.as_ptr()) }).expect("a mutex");
+        assert!(!Event::exists(&name));
+        assert!(!Event::set(&name).unwrap());
+        assert!(Event::create(&name).is_err());
+        drop(mutex);
     }
 }
