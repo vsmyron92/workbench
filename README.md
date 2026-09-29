@@ -146,7 +146,8 @@ more; you add or override them in `.workbench.toml` or a machine-local overlay. 
 [keyboard shortcuts](docs/keyboard-shortcuts.md).
 
 Developed and tested on Linux (x86_64). The UI runs in any current browser, phones
-included; the server has not been ported to macOS or Windows.
+included; the server has not been ported to macOS or Windows yet (the
+[Windows plan](docs/windows-port.md)).
 
 For how it is built (the slices, contracts, events and the full security model), read
 [the architecture](docs/ARCHITECTURE.md). To work on Workbench itself, open the

@@ -498,7 +498,8 @@ npm test           # vitest (src/**/*.test.ts)
   `workbench-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz` (binary, `install.sh`, LICENSE, README,
   CHANGELOG, notices) with a `.sha256`, the CHANGELOG section as the notes. Started by hand,
   it builds the archive as an artifact without publishing. Windows is not built: the server
-  uses Unix APIs (PTYs, process groups, file modes, systemd, `/proc`) throughout.
+  uses Unix APIs (PTYs, process groups, file modes, systemd, `/proc`) throughout; the port is
+  planned in [windows-port.md](windows-port.md).
 
 ## Second phase (2026-09-26): Workspace, agent providers, GitHub, broader detection
 
