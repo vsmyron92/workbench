@@ -1,72 +1,115 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-09-29
 
-- **Windows (experimental):** the server is being ported to Windows 10 (1809 or newer) and
-  11 on x86_64 ([plan and status](docs/windows-port.md)). Nothing of it has been tested on
-  a real Windows machine yet. Operating-system code now goes through one layer
-  (`util::os`); on Linux only the items marked "every OS" below change anything. On
-  Windows, private files get an access list for you and SYSTEM only, child processes run in
-  Job Objects, programs are found through `PATHEXT` (npm's `.cmd` shims start through
-  `node.exe`), run commands go through PowerShell, a DLL loaded by name comes only from
-  Workbench's own folder or System32, the configuration is in `%APPDATA%\workbench` and the
-  state in `%LOCALAPPDATA%\workbench`. Terminals run in a pseudoconsole (ConPTY),
-  PowerShell by default, and closing a terminal ends what it started, a browser or editor it
-  opened that was not running yet included; `workbench service` installs a sign-in entry
-  and a Start Menu shortcut that start `workbenchw.exe`, which supervises the server without
-  a console window; git and ssh ask Workbench itself for credentials; each project has one
-  recursive file watch, so its folders stay renamable; language servers, debuggers and
-  detected run commands take their Windows forms; secret files written by Windows
-  PowerShell 5.1 (UTF-16, or UTF-8 with a byte order mark) read as text. A link in a
-  repository to a network path or a device (`\\host\share\x`) is never followed, so
-  nothing Workbench reads by itself makes Windows sign in to another computer. A program
-  installed while Workbench runs is found once it restarts, as the "not found" messages say.
-  `GET /api/health` reports the OS and what it leaves out (dev containers, desktop
-  notifications, gdb attach and rust-gdb's pretty printers, projects on network or WSL
-  paths), and those features answer `unsupported_platform` with the reason.
-- **Terminals (every OS):** `[terminals] shell` in `config.toml` sets the program and
-  arguments of new shells (default: `$SHELL -l`; PowerShell on Windows). Kill, Restart and
-  Close wait (up to 5 seconds) until the process's exit is recorded and saved, where they
-  waited only until it ended (or, for a process that had just ended by itself, not at all),
-  so once they return the terminal reads as exited. A terminal removed from history stays
-  removed: a save still under way cannot write its files back, so it no longer returns at
-  the next start.
-- **Git credentials (every OS):** Workbench's fetch, update and push no longer ask git's
-  credential helpers for the GitLab host Workbench has a token for (the project's own
-  `[repo.gitlab]` token, else `[gitlab]`), nor hand them that token to store: it no longer
-  ends up in Git Credential Manager, `~/.git-credentials`, a credential cache or a keychain,
-  and a stored credential no longer answers in its place, so a project's own token, a
-  rotated token or a removed one takes effect at once. Other hosts keep your helpers. On
-  Linux this changes behaviour if a credential helper of yours knew that host: Workbench's
-  remote operations now use Workbench's token there. Workbench also no longer answers a
-  credential prompt whose user name contains `/` (git before its January 2025 security
-  releases prints it unescaped), which a crafted remote or submodule URL could use to get
-  the GitLab token sent to another host.
-- **Git on Windows:** a working tree git checks out with CRLF over an LF index
-  (`core.autocrlf`, Git for Windows' default, or `eol=crlf` attributes) shows in diffs and
-  conflicts as git reads it, with LF; a conflict resolved with edited text is written back
-  with CRLF; Local History keeps the last commit with the checkout's line ends. A
-  repository git refuses for its owner (`safe.directory`) reports git's own message
-  (`unsafe_repository`) instead of "not a repository". On Linux all of this stays as it was.
-- **Run configurations:** Unity detection takes the editor version from
+- **Windows (experimental):** the first release with a Windows build, for Windows 10 (1809
+  or newer) and 11 on x86_64. Its whole test suite passes on GitHub's `windows-latest`
+  (Windows Server 2025), a required CI job, and the release job installs the build with
+  `install.ps1`, starts the server and installs again over it before publishing the
+  archive. It has not been tried on a Windows 10 or 11 desktop yet
+  ([status](docs/windows-port.md)). The archive holds `workbench.exe` (no Visual C++
+  runtime needed), `workbenchw.exe`, `install.ps1`, and `conpty.dll` and `OpenConsole.exe`
+  from Microsoft's ConPTY package (MIT, see the third-party notices).
+- **On Windows:** terminals, agent sessions included, run in ConPTY. Shells are
+  PowerShell 7 (`pwsh`), else Windows PowerShell. Agent CLIs start directly, and
+  npm-installed ones start as `node` and their script, never through cmd.exe. Run
+  configurations and detected commands also run in PowerShell, so a command written for
+  bash needs PowerShell's syntax (Windows PowerShell 5.1 has no `&&`: install
+  PowerShell 7). Language servers and debug adapters are found in their Windows forms
+  (npm-installed ones run with Node). Rust built with MSVC debugs with lldb-dap or
+  CodeLLDB, which you name in `[debug.default_adapter]`, since gdb reads only MinGW builds.
+  `workbench service install` adds a Start Menu shortcut, and with `--enable` a sign-in
+  entry, without administrator rights. The configuration is in `%APPDATA%\workbench` and
+  the state in `%LOCALAPPDATA%\workbench`, both readable only by you and SYSTEM. A
+  `keyring` secret reference reads Windows Credential Manager. Nothing Workbench reads in a
+  project by itself follows a link to a network path or a device (`\\host\share\x`), which
+  would make Windows sign in to that computer. Programs it starts (git, language servers,
+  agents, your terminals) are not covered. What else works differently there, such as a
+  terminal ending a browser or editor it started, is in
+  [Install on Windows](docs/getting-started.md#install-on-windows-experimental).
+- **Left out on Windows:** dev containers, the server's desktop notifications (turn on
+  browser notifications instead), gdb attaching to a running process (native programs
+  attach with lldb-dap or CodeLLDB, Python with debugpy), rust-gdb's pretty printers, and
+  projects on a network share or inside WSL. The Services window (Docker Desktop) is
+  marked experimental. Workbench hides these or says "Not available on Windows" and why
+  (the API answers `unsupported_platform`, and `GET /api/health` lists them).
+- **Git on Windows:** version control needs Git for Windows. A CRLF checkout
+  (`core.autocrlf`, Git for Windows' default, or `eol=crlf` attributes) diffs as git reads
+  it, with LF. A conflict resolved with edited text is written back with CRLF, and Local
+  History keeps the last commit with the checkout's line ends. A repository that git
+  refuses because of its owner (`safe.directory`) reports git's own message
+  (`unsafe_repository`), which names the command that trusts it. Git Credential Manager
+  never opens a sign-in window for Workbench's remote operations. It answers with what it
+  has stored, and an https host it has nothing for fails at once.
+- **Terminals:** `[terminals] shell` in `config.toml` sets the program and arguments of new
+  shells (default: `$SHELL -l`, as before; PowerShell on Windows). Kill, Restart and Close
+  now wait (up to 5 seconds) until the process's exit is recorded and saved. Before, they
+  waited only until the process ended, or not at all for a process that had just ended by
+  itself. Once they return, the terminal reads as exited. A terminal removed from history
+  stays removed: a save still under way no longer writes its files back, so the terminal
+  does not return at the next start.
+- **Git credentials (security fix):** Workbench no longer answers a credential prompt
+  whose user name contains `/`. Git before its January 2025 security releases prints that
+  name unescaped, so a crafted remote or submodule URL could get the GitLab token sent to
+  another host. Workbench's fetch, update, push and remote-branch deletion also no longer
+  ask git's credential helpers for the GitLab host Workbench has a token for (the
+  project's own `[repo.gitlab]` token, else `[gitlab]`), nor hand them that token to
+  store. The token no longer ends up in Git Credential Manager, `~/.git-credentials`, a
+  credential cache or a keychain. While Workbench has a token for that host, a stored
+  credential no longer answers in its place, so a project's own token or a rotated one
+  takes effect at once. Other hosts keep your helpers. If a credential helper of yours
+  knew the GitLab host, Workbench's remote operations now use Workbench's token there, and
+  that token needs Git-over-HTTPS access (write access to push). A token that earlier
+  versions left with a credential helper stays there: remove it (for `store`, the GitLab
+  host's line in `~/.git-credentials`).
+- **Run configurations (security fix):** Unity detection takes the editor version from
   `ProjectVersion.txt` only when it consists of version characters (letters, digits, `.`,
-  `_`, `-`), since it becomes part of the detected commands (every OS).
-- **Setup help:** the messages about a missing toolchain, an unknown placeholder or an
-  undefined ssh host, the Confluence setup hint and its "not available" message, and the
-  TLS certificate and key placeholders in Settings › Remote name the project's machine
-  overlay, `config.toml` and the config folder where this Workbench reads them
-  (`WORKBENCH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `%APPDATA%` on Windows) instead of always
-  `~/.config/workbench` (every OS; the same text on a default Linux install).
-- **Releases:** the release workflow can also build
-  `workbench-X.Y.Z-x86_64-pc-windows-msvc.zip` with `workbench.exe` (no Visual C++ runtime
-  needed), `workbenchw.exe`, `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY
-  package (MIT, see the third-party notices) and `install.ps1`, which installs per user into
-  `%LOCALAPPDATA%\Programs\Workbench`, adds it to PATH and can install over a running
-  Workbench. The job installs the archive and starts the server before publishing it. A tag
-  publishes it only once the repository variable `RELEASE_WINDOWS` is `true`; until then
-  releases stay Linux-only. A build from source also makes `workbenchw`, which on Linux is
-  a stub that only prints a message and is not installed; the Linux archive still holds
-  `workbench` alone (every OS).
+  `_`, `-`). Otherwise a crafted `ProjectVersion.txt` could put shell syntax into the
+  detected Unity runs.
+- **Setup messages:** several messages now name the project's machine overlay,
+  `config.toml` and the config folder this Workbench actually reads (`WORKBENCH_CONFIG_DIR`,
+  `XDG_CONFIG_HOME`) instead of always `~/.config/workbench`. They are the messages about a
+  missing toolchain, an unknown placeholder or an undefined ssh host, the Confluence setup
+  hint and its "not available" message, and the TLS certificate and key placeholders in
+  Settings › Remote. A default Linux install shows the same text as before.
+- **API:** `GET /api/health` also reports `os`, what that OS leaves out (`unsupported`) and
+  what it has only as experimental (`experimental`). Both are empty on Linux. An
+  `unsupported_platform` error (HTTP 501) names its `feature`. `GET /api/atlassian/status`
+  also returns `configFile`, the `config.toml` this server reads.
+- **Build from source:** the build also makes `workbenchw`, the Windows launcher of
+  `workbench service`. On Linux it is a stub that only prints a message, so install
+  `workbench` alone, as before. The Linux archive still holds `workbench` alone.
+- **Docs:** Help and the guides cover Windows (install, folders, the service, agents, what
+  is left out). customization.md and ARCHITECTURE.md now give the `dotenv` secret
+  reference in the form Workbench reads: `dotenv = { path = "…", key = "…" }`.
+
+**Install:** Linux x86_64 (glibc 2.35 or newer): unpack
+`workbench-0.3.0-x86_64-unknown-linux-gnu.tar.gz` and run `./install.sh`.
+
+Windows 10 (1809 or newer) or 11 on x86_64, experimental: in PowerShell, run
+`Unblock-File` on `workbench-0.3.0-x86_64-pc-windows-msvc.zip`. It removes the Mark of the
+Web that Windows puts on downloads, so the unpacked files do not carry it. Unpack the zip
+with `Expand-Archive .\workbench-0.3.0-x86_64-pc-windows-msvc.zip -DestinationPath .`, then
+run its installer:
+`powershell -ExecutionPolicy Bypass -File .\workbench-0.3.0-x86_64-pc-windows-msvc\install.ps1`
+(`-ExecutionPolicy Bypass` allows the unsigned script for this one run). It installs into
+`%LOCALAPPDATA%\Programs\Workbench` without administrator rights and adds that folder to
+your PATH. Then run `workbench serve --open` in a new terminal. The binaries are not
+code-signed: SmartScreen or an antivirus may warn, and Windows 11's Smart App Control, when
+on, blocks them.
+
+Each archive has a `.sha256` to check it against (`sha256sum -c`, or `Get-FileHash` on
+Windows).
+
+**Update:** install the new release (or pull and rebuild), then restart Workbench
+(`systemctl --user restart workbench.service` or the running `workbench serve`). Your
+configuration and `~/.local/share/workbench` stay as they are. On Windows, a later
+archive's `install.ps1` installs over this one, also while Workbench runs. Then restart
+Workbench:
+- If you started it with `workbench serve`, stop it (Ctrl+C) and start it again in a new
+  terminal.
+- If it runs as the service (from the Start Menu or at sign-in), run
+  `workbench service stop` and open Workbench from the Start Menu.
 
 ## 0.2.0 - 2026-09-29
 
