@@ -314,11 +314,48 @@ const SHELL_BUILTINS: &[&str] = &[
     "local", "exit", "return", "shift", "kill", "let", "readonly", "shopt", "hash", "builtin", "caller", "jobs",
 ];
 
+/// PowerShell's keywords and the aliases every PowerShell has (lowercase): never looked
+/// up on `PATH` either.
+const POWERSHELL_BUILTINS: &[&str] = &[
+    "if", "elseif", "else", "foreach", "for", "while", "do", "switch", "function", "filter", "param", "try", "trap", "throw",
+    "return", "exit", "break", "continue", "begin", "process", "end", "class", "enum", "using", "data", "cd", "chdir", "ls",
+    "dir", "gci", "cat", "gc", "type", "echo", "write", "rm", "del", "erase", "rd", "rmdir", "ri", "cp", "copy", "cpi", "mv",
+    "move", "mi", "ren", "rni", "md", "mkdir", "ni", "pwd", "gl", "sl", "sleep", "start", "saps", "ps", "gps", "kill", "spps",
+    "cls", "clear", "iwr", "irm", "iex", "icm", "ii", "sc", "select", "where", "sort", "measure", "tee", "foreach-object",
+    "%", "?", "set", "sv", "gv", "man", "help", "history", "h", "r", "pushd", "popd", "curl", "wget",
+];
+
+/// PowerShell's approved verbs (`Get-Verb`, lowercase): a `Verb-Noun` word is a cmdlet.
+const POWERSHELL_VERBS: &[&str] = &[
+    "add", "clear", "close", "copy", "enter", "exit", "find", "format", "get", "hide", "join", "lock", "move", "new", "open",
+    "optimize", "pop", "push", "redo", "remove", "rename", "reset", "resize", "search", "select", "set", "show", "skip",
+    "split", "step", "switch", "undo", "unlock", "watch", "connect", "disconnect", "read", "receive", "send", "write",
+    "backup", "checkpoint", "compare", "compress", "convert", "convertfrom", "convertto", "dismount", "edit", "expand",
+    "export", "group", "import", "initialize", "limit", "merge", "mount", "out", "publish", "restore", "save", "sync",
+    "unpublish", "update", "debug", "measure", "ping", "repair", "resolve", "test", "trace", "approve", "assert", "build",
+    "complete", "confirm", "deny", "deploy", "disable", "enable", "install", "invoke", "register", "request", "restart",
+    "resume", "start", "stop", "submit", "suspend", "uninstall", "unregister", "wait", "block", "grant", "protect", "revoke",
+    "unblock", "unprotect", "use", "where", "foreach", "sort", "tee",
+];
+
+/// Whether `w` is a word PowerShell answers itself: a keyword, an alias, a cmdlet.
+fn powershell_builtin(w: &str) -> bool {
+    let w = w.to_ascii_lowercase();
+    POWERSHELL_BUILTINS.contains(&w.as_str()) || w.split_once('-').is_some_and(|(verb, noun)| !noun.is_empty() && POWERSHELL_VERBS.contains(&verb))
+}
+
 /// The program a command line starts when the shell looks it up on `PATH`: `go` for
 /// `go run ./cmd/api`, `npm` for `PORT=3000 npm start`, `cargo` for `cd server &&
 /// cargo build`. `None` for a path (`./gradlew`), a `{toolchain}`, shell syntax and
-/// builtins, which a `PATH` lookup cannot judge.
+/// builtins, which a `PATH` lookup cannot judge. The command is in the run shell's
+/// language (`Dialect::HOST`).
 pub(crate) fn command_program(cmd: &str) -> Option<String> {
+    command_program_in(crate::util::os::shell::Dialect::HOST, cmd)
+}
+
+/// `command_program` for a command line in `dialect`: PowerShell's keywords, aliases
+/// and cmdlets (`Remove-Item`) are its own.
+pub(crate) fn command_program_in(dialect: crate::util::os::shell::Dialect, cmd: &str) -> Option<String> {
     let mut words = cmd.split_whitespace();
     loop {
         let w = words.next()?;
@@ -340,35 +377,18 @@ pub(crate) fn command_program(cmd: &str) -> Option<String> {
             _ => {}
         }
         let plain = w.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'));
-        return (plain && !w.starts_with(['-', '.']) && !SHELL_BUILTINS.contains(&w)).then(|| w.to_string());
+        let builtin = match dialect {
+            crate::util::os::shell::Dialect::Posix => SHELL_BUILTINS.contains(&w),
+            crate::util::os::shell::Dialect::PowerShell => powershell_builtin(w),
+        };
+        return (plain && !w.starts_with(['-', '.']) && !builtin).then(|| w.to_string());
     }
-}
-
-/// Where tools often live when the Workbench process (started from a desktop
-/// launcher or a service) has a shorter `PATH` than the login shell runs get.
-fn user_bin_dirs() -> Vec<std::path::PathBuf> {
-    let Some(home) = dirs::home_dir() else { return vec![] };
-    let mut out: Vec<std::path::PathBuf> = [
-        ".local/bin", "bin", ".cargo/bin", "go/bin", ".bun/bin", ".deno/bin", ".dotnet", ".dotnet/tools", ".volta/bin",
-        ".asdf/shims", ".local/share/mise/shims", ".pyenv/shims", ".rbenv/shims", ".nodenv/shims", ".local/share/pnpm",
-        ".yarn/bin", ".npm-global/bin", ".juliaup/bin", ".ghcup/bin", ".elan/bin", ".mix/escripts", ".composer/vendor/bin",
-        ".config/composer/vendor/bin",
-    ]
-    .iter()
-    .map(|d| home.join(d))
-    .collect();
-    out.extend(["/usr/local/go/bin", "/usr/local/bin", "/snap/bin", "/opt/homebrew/bin", "/home/linuxbrew/.linuxbrew/bin"].map(Into::into));
-    // Version managers with one directory per installed version.
-    for (base, sub) in [(".nvm/versions/node", "bin"), (".sdkman/candidates", "current/bin"), (".rustup/toolchains", "bin")] {
-        if let Ok(rd) = std::fs::read_dir(home.join(base)) {
-            out.extend(rd.flatten().take(20).map(|e| e.path().join(sub)));
-        }
-    }
-    out
 }
 
 /// Whether `prog` can be found: on this process's `PATH` or in a usual user tool
-/// directory. Answers are remembered for a few seconds (run lists poll).
+/// directory (`os::exe::user_tool_dirs`: the Workbench process, started from a desktop
+/// launcher or a service, may have a shorter `PATH` than the login shell runs get).
+/// Answers are remembered for a few seconds (run lists poll).
 fn program_available(prog: &str) -> bool {
     static CACHE: std::sync::LazyLock<Mutex<HashMap<String, (bool, Instant)>>> = std::sync::LazyLock::new(Default::default);
     if let Some((ok, at)) = CACHE.lock().get(prog) {
@@ -376,7 +396,7 @@ fn program_available(prog: &str) -> bool {
             return *ok;
         }
     }
-    let ok = crate::util::which(prog) || crate::util::os::exe::find_in(&user_bin_dirs(), prog).is_some();
+    let ok = crate::util::which(prog) || crate::util::os::exe::find_in(&crate::util::os::exe::user_tool_dirs(), prog).is_some();
     let mut cache = CACHE.lock();
     if cache.len() > 512 {
         cache.clear();
@@ -385,12 +405,14 @@ fn program_available(prog: &str) -> bool {
     ok
 }
 
-/// A run's cwd: project-relative (contained), or absolute / `~/` from user config.
+/// A run's cwd: project-relative (contained), or absolute / `~/` from user config. On
+/// Windows a relative one may be written with `\` too (`web\app`).
 pub fn resolve_cwd(project: &Project, cwd: &str) -> Result<std::path::PathBuf, ApiError> {
     if crate::util::os::path::is_absolute_str(cwd) || crate::util::os::path::home_relative(cwd).is_some() {
         return Ok(crate::config::expand_tilde(cwd));
     }
-    crate::util::paths::resolve_in_root(&project.root, cwd)
+    let rel = crate::util::os::path::segments(cwd).collect::<Vec<_>>().join("/");
+    crate::util::paths::resolve_in_root(&project.root, &rel)
 }
 
 /// Whether a start of `c` would run in the project's dev container: the project uses

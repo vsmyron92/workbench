@@ -76,6 +76,20 @@ pub fn to_slash(p: &Path) -> String {
     }
 }
 
+/// A relative path written with `/` (a client's, a stored one) as a host path, to join to
+/// a root: unchanged on Unix; `\` separators on Windows, where some programs (debuggers
+/// matching breakpoint files) take a mixed `C:\p\src/main.c` for another file.
+pub fn from_slash(rel: &str) -> PathBuf {
+    #[cfg(unix)]
+    {
+        PathBuf::from(rel)
+    }
+    #[cfg(windows)]
+    {
+        PathBuf::from(rel.replace('/', "\\"))
+    }
+}
+
 /// Why `name`, one component of a client's relative path, cannot name a file inside a
 /// root. Unix: always fine (`/`, `.`, `..` and NUL are the callers' business). Windows:
 /// a `\` (a second separator that checks splitting on `/` would not see), `:` (a drive,
@@ -204,6 +218,23 @@ pub fn dir_within(dir: &str, root: &str) -> bool {
     #[cfg(windows)]
     {
         win::strip_prefix(dir, root).is_some()
+    }
+}
+
+/// An absolute path (an absolute glob pattern) as its file system root and the rest
+/// with `/` separators: `/` and `home/u/x/**` (Unix); `C:\` and `Users/me/x/**` on
+/// Windows, where a UNC path's root is its share (`\\server\share\`).
+pub fn root_and_rest(p: &Path) -> (PathBuf, String) {
+    #[cfg(unix)]
+    {
+        (PathBuf::from("/"), p.to_string_lossy().trim_start_matches('/').to_string())
+    }
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+        let root: PathBuf = p.components().take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir)).collect();
+        let rest = p.strip_prefix(&root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        (root, rest)
     }
 }
 
@@ -568,6 +599,7 @@ mod tests {
         assert!(has_separator("a/b") && !has_separator(r"a\b"));
         assert_eq!(segments(r"a\b/c").collect::<Vec<_>>(), [r"a\b", "c"]);
         assert_eq!(to_slash(Path::new(r"a\b/c")), r"a\b/c");
+        assert_eq!(from_slash("src/main.c"), PathBuf::from("src/main.c"));
         for name in [r"a\b", "a:b", "NUL", "com1.txt", "x.", "x ", "GIT~1", "a*b"] {
             assert!(check_component(name).is_ok(), "{name}");
         }
@@ -577,6 +609,7 @@ mod tests {
         assert_eq!(unsupported_root(Path::new(r"\\wsl$\Ubuntu")), None);
         assert_eq!(strip_prefix(Path::new("/a/B/c"), Path::new("/a/b")), None);
         assert_eq!(strip_prefix(Path::new("/a/b/c"), Path::new("/a/b/")), Some(Path::new("c")));
+        assert_eq!(root_and_rest(Path::new("/home/u/p/**/*.rs")), (PathBuf::from("/"), "home/u/p/**/*.rs".to_string()));
         assert!(same_name(".git", ".git") && !same_name(".GIT", ".git"));
         assert!(same_dir("/p/x/", "/p/x") && !same_dir("/p/X", "/p/x") && !same_dir("/p//x", "/p/x"));
         assert!(dir_within("/p/x", "/p/") && dir_within("/p", "/p") && !dir_within("/p2", "/p") && !dir_within("/P/x", "/p"));
@@ -729,6 +762,10 @@ mod tests {
         assert!(is_absolute_str(s) && is_absolute_str(r"\x") && !is_absolute_str("C:x"));
         assert_eq!(home_relative(r"~\x"), Some("x"));
         assert_eq!(to_slash(Path::new(r"a\b")), "a/b");
+        assert_eq!(Path::new(r"C:\p").join(from_slash("src/main.c")).to_str(), Some(r"C:\p\src\main.c"));
+        // Absolute glob patterns (rust-analyzer writes `C:\p/**/*.rs`).
+        assert_eq!(root_and_rest(Path::new(r"C:\Users\me\p/**/*.rs")), (PathBuf::from(r"C:\"), "Users/me/p/**/*.rs".to_string()));
+        assert_eq!(root_and_rest(Path::new(r"\\server\share\p\*.rs")), (PathBuf::from(r"\\server\share\"), "p/*.rs".to_string()));
         assert!(same_name(".GIT", ".git") && CASE_INSENSITIVE);
         assert!(same_dir(r"C:\Proj\", "c:/proj") && !same_dir(r"C:\proj\x", r"C:\proj"));
         assert!(dir_within(r"c:\proj\Sub", r"C:\Proj") && dir_within("C:/proj", r"C:\proj\") && !dir_within(r"C:\proj2", r"C:\proj"));

@@ -8,6 +8,7 @@ use regex::Regex;
 
 use super::{Ctx, on_path, scoped, source, tilde};
 use crate::config::project::{Component, RunConfig, RunKind};
+use crate::util::os::shell::Dialect;
 
 static SLN_PROJECT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?m)^Project\("\{[^}]+\}"\)\s*=\s*"[^"]*",\s*"([^"]+\.csproj)""#).unwrap());
@@ -66,14 +67,16 @@ pub fn detect(cx: &mut Ctx, sln: &Path) {
     }
 }
 
-/// `validate.mjs` & co.: a data check that must exit 0, run in its own folder.
+/// `validate.mjs` & co.: a data check that must exit 0, run in its own folder. Where the
+/// run shell is PowerShell a `validate.sh` is not offered: `bash` there is WSL's, a Linux
+/// system with other paths and tools (as `posix_only` leaves out `.sh` commands).
 pub fn detect_validate_script(cx: &mut Ctx, f: &Path) {
     let Some(dir) = f.parent() else { return };
     let Some(name) = f.file_name().and_then(|n| n.to_str()) else { return };
     let interpreter = match f.extension().and_then(|e| e.to_str()) {
-        Some("mjs" | "js" | "cjs") => "node",
-        Some("py") => "python3",
-        Some("sh") => "bash",
+        Some("mjs" | "js" | "cjs") => "node".to_string(),
+        Some("py") => super::python_words(),
+        Some("sh") if super::dialect() == Dialect::Posix => "bash".to_string(),
         _ => return,
     };
     let cwd = cx.rel(dir);

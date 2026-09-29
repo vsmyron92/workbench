@@ -151,7 +151,7 @@ fn server_json(s: &ServerSpec, disabled_here: &[String], side: Option<&str>, mis
 
 /// A command as shown: `~/…` for paths under the home directory.
 fn display_command(c: &str) -> String {
-    if c.contains('/') { crate::config::contract_tilde(&crate::config::expand_tilde(c)) } else { c.to_string() }
+    if crate::util::os::exe::names_path(c) { crate::config::contract_tilde(&crate::config::expand_tilde(c)) } else { c.to_string() }
 }
 
 // ---------------------------------------------------------------- enable / settings
@@ -397,6 +397,6 @@ async fn source(State(state): State<AppState>, Path(pid): Path<String>, Query(q)
         }
     };
     let content = String::from_utf8(bytes).map_err(|_| ApiError::bad_request("not a UTF-8 text file"))?;
-    let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+    let name = crate::util::os::path::segments(&path).last().unwrap_or(&path).to_string();
     Ok(Json(json!({ "uri": q.uri, "path": path, "name": name, "content": content })))
 }

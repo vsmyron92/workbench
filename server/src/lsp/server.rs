@@ -408,13 +408,18 @@ impl Server {
                     }
                     _ => continue,
                 };
-                // Absolute patterns are relative to `/`.
-                let (pattern, base) = match pattern.strip_prefix('/') {
-                    Some(abs) => match self.map.to_host(&format!("/{abs}")) {
-                        Some(h) => (h.to_string_lossy().trim_start_matches('/').to_string(), PathBuf::from("/")),
+                // Absolute patterns are relative to the file system's root (`/`; on Windows
+                // the drive's, as in rust-analyzer's `C:\p/**/*.rs`).
+                let (pattern, base) = if crate::util::os::path::is_absolute_str(&pattern) {
+                    match self.map.to_host(&pattern) {
+                        Some(h) => {
+                            let (root, rest) = crate::util::os::path::root_and_rest(&h);
+                            (rest, root)
+                        }
                         None => continue,
-                    },
-                    None => (pattern, base),
+                    }
+                } else {
+                    (pattern, base)
                 };
                 let glob = globset::GlobBuilder::new(&pattern).literal_separator(true).build();
                 if let Ok(g) = glob {

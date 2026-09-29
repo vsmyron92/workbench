@@ -1,5 +1,5 @@
 //! Integration tests of the debug slice: a real AppState and router, and a fake DAP
-//! adapter (`fake_dap.py`, run with python3) that behaves like gdb's.
+//! adapter (`fake_dap.py`, run with Python 3: `os::exe::python`) that behaves like gdb's.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -12,7 +12,18 @@ use crate::app::{self, AppState};
 const FAKE: &str = include_str!("fake_dap.py");
 
 fn have_python() -> bool {
-    crate::util::which("python3")
+    crate::util::which(&crate::util::os::exe::python()[0])
+}
+
+/// `s` as a TOML string (Windows paths hold backslashes).
+fn toml_str(s: &str) -> String {
+    toml::Value::String(s.to_string()).to_string()
+}
+
+/// A process that runs for half a minute and has nothing to do with the project.
+fn sleeper() -> std::process::Child {
+    let py = crate::util::os::exe::python();
+    std::process::Command::new(&py[0]).args(&py[1..]).args(["-c", "import time; time.sleep(30)"]).spawn().unwrap()
 }
 
 struct Env {
@@ -33,7 +44,8 @@ async fn setup(extra_toml: &str) -> Env {
 struct Opts<'a> {
     /// `config_dir/projects/proj.toml`.
     overlay: &'a str,
-    /// Appended to config.toml's `[debug]` section (more adapters).
+    /// Appended to config.toml's `[debug]` section (more adapters); `{python}`, `{dir}`
+    /// and `{log}` become TOML strings of the interpreter, the temp dir and the log file.
     debug_toml: &'a str,
     /// A config.toml secret: `(name, value)`, kept in a 0600 file.
     secret: Option<(&'a str, &'a str)>,
@@ -43,7 +55,9 @@ struct Opts<'a> {
 
 async fn setup_with(extra_toml: &str, o: Opts<'_>) -> Env {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("proj");
+    // The project's root as Workbench keeps it (Windows' temp dir may be spelled `RUNNER~1`).
+    let base = crate::util::os::path::canonicalize(dir.path()).unwrap();
+    let root = base.join("proj");
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/main.c"), "int main() {\n  return 0;\n}\n").unwrap();
     std::fs::write(root.join("prog.bin"), "").unwrap();
@@ -62,15 +76,15 @@ env = {{ PLAIN = "1" }}
         ),
     )
     .unwrap();
-    let script = dir.path().join("fake_dap.py");
+    let script = base.join("fake_dap.py");
     std::fs::write(&script, FAKE).unwrap();
-    let log = dir.path().join("fake.log");
+    let log = base.join("fake.log");
     for (path, text) in o.files {
         let f = root.join(path);
         std::fs::create_dir_all(f.parent().unwrap()).unwrap();
         std::fs::write(f, text).unwrap();
     }
-    let paths = crate::config::Paths { config_dir: dir.path().join("config"), data_dir: dir.path().join("data") };
+    let paths = crate::config::Paths { config_dir: base.join("config"), data_dir: base.join("data") };
     std::fs::create_dir_all(paths.config_dir.join("projects")).unwrap();
     std::fs::create_dir_all(&paths.data_dir).unwrap();
     if !o.overlay.is_empty() {
@@ -80,22 +94,29 @@ env = {{ PLAIN = "1" }}
     cfg.projects.roots = vec![];
     cfg.projects.include = vec![root.display().to_string()];
     cfg.agents.restore_on_start = false;
+    // Python 3: `python3`; on Windows `python`, or `py` with its `-3`.
+    let py = crate::util::os::exe::python();
+    let args: Vec<String> = py[1..].iter().map(|a| toml_str(a)).chain([toml_str(&script.display().to_string())]).collect();
     cfg.debug = toml::from_str(&format!(
         r#"
 [adapters.fake]
-command = "python3"
-args = ["{}"]
+command = {}
+args = [{}]
 languages = ["c"]
-env = {{ FAKE_LOG = "{}" }}
+env = {{ FAKE_LOG = {} }}
 {}
 "#,
-        script.display(),
-        log.display(),
-        o.debug_toml.replace("{dir}", &dir.path().display().to_string()).replace("{log}", &log.display().to_string())
+        toml_str(&py[0]),
+        args.join(", "),
+        toml_str(&log.display().to_string()),
+        o.debug_toml
+            .replace("{python}", &toml_str(&py[0]))
+            .replace("{dir}", &toml_str(&base.display().to_string()))
+            .replace("{log}", &toml_str(&log.display().to_string()))
     ))
     .unwrap();
     if let Some((name, value)) = o.secret {
-        let f = dir.path().join("secret.txt");
+        let f = base.join("secret.txt");
         std::fs::write(&f, value).unwrap();
         crate::util::os::perm::apply(&f, 0o600).unwrap();
         cfg.secrets.insert(name.to_string(), crate::config::project::SecretRef::File(f.display().to_string()));
@@ -177,7 +198,7 @@ fn bp_of<'a>(view: &'a Value, line: u64) -> &'a Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_session_against_a_fake_adapter() {
     if !have_python() {
-        eprintln!("skipped: python3 is not installed");
+        eprintln!("skipped: Python 3 is not installed");
         return;
     }
     let env = setup("").await;
@@ -214,7 +235,7 @@ async fn a_session_against_a_fake_adapter() {
     assert_eq!(bp_of(&bps, 150)["status"]["message"], "no code at this line");
     // Disabled breakpoints are not sent; the source path is the host path.
     let sent = env.requests("setBreakpoints");
-    let main_c = env.root.join("src/main.c").display().to_string();
+    let main_c = env.root.join("src").join("main.c").display().to_string();
     assert_eq!(sent[0]["arguments"]["source"]["path"], main_c);
     assert_eq!(sent[0]["arguments"]["breakpoints"], json!([{ "line": 5 }, { "line": 150 }]));
     // Launch arguments: program resolved in the project, args, env, cwd.
@@ -345,7 +366,7 @@ async fn a_session_against_a_fake_adapter() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_terminates_and_debuggee_terminals_are_killed() {
     if !have_python() {
-        eprintln!("skipped: python3 is not installed");
+        eprintln!("skipped: Python 3 is not installed");
         return;
     }
     let env = setup("extra = { wantTerminal = true }").await;
@@ -375,7 +396,7 @@ async fn stop_terminates_and_debuggee_terminals_are_killed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pre_launch_commands_run_in_a_terminal_and_failures_end_the_session() {
     if !have_python() {
-        eprintln!("skipped: python3 is not installed");
+        eprintln!("skipped: Python 3 is not installed");
         return;
     }
     let env = setup(
@@ -399,7 +420,8 @@ program = "prog.bin"
     // No breakpoints: the fake program runs to its end.
     let end = env.wait_session(&sid, "the end", |v| v["state"] == "terminated").await;
     assert!(end["prelaunchTerminalId"].is_string());
-    assert_eq!(std::fs::read_to_string(env.root.join("built.txt")).unwrap(), "built\n");
+    // (Windows PowerShell 5.1 writes UTF-16 and CRLF.)
+    assert_eq!(crate::util::os::shell::read_output(&env.root.join("built.txt")).unwrap().trim_end(), "built");
     assert_eq!(end["exitCode"], 0);
 
     let info = env.post("sessions", json!({ "config": "broken" })).await;
@@ -418,7 +440,7 @@ program = "prog.bin"
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adapters_can_start_child_sessions() {
     if !have_python() {
-        eprintln!("skipped: python3 is not installed");
+        eprintln!("skipped: Python 3 is not installed");
         return;
     }
     let env = setup("extra = { wantChild = true }").await;
@@ -450,7 +472,7 @@ async fn adapters_can_start_child_sessions() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_ends_live_sessions() {
     if !have_python() {
-        eprintln!("skipped: python3 is not installed");
+        eprintln!("skipped: Python 3 is not installed");
         return;
     }
     let env = setup("").await;
@@ -488,7 +510,7 @@ impl Env {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adapters_never_import_the_repositorys_modules() {
     if !have_python() {
-        eprintln!("skipped: python3 is not installed");
+        eprintln!("skipped: Python 3 is not installed");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -503,12 +525,12 @@ async fn adapters_never_import_the_repositorys_modules() {
         r#"
 [adapters.fakemod]
 kind = "debugpy"
-command = "python3"
+command = {{python}}
 args = ["-m", "fakemod"]
 languages = ["python"]
-env = {{ FAKE_LOG = "{{log}}", PYTHONPATH = "{}" }}
+env = {{ FAKE_LOG = {{log}}, PYTHONPATH = {} }}
 "#,
-        modules.display()
+        toml_str(&modules.display().to_string())
     );
     // debugpy's availability probe imports `debugpy`.
     std::fs::create_dir_all(modules.join("debugpy")).unwrap();
@@ -532,7 +554,7 @@ program = "prog.bin"
     env.post(&format!("sessions/{sid}/stop"), json!({})).await;
 
     // Attach to a process that has nothing to do with the project.
-    let mut victim = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+    let mut victim = sleeper();
     let (s, v) = env.send(reqwest::Method::POST, "sessions/attach", json!({ "pid": victim.id(), "adapter": "fakemod" })).await;
     assert_eq!(s, 200, "{v}");
     let aid = v["id"].as_str().unwrap().to_string();
@@ -550,7 +572,7 @@ program = "prog.bin"
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn secret_values_reach_no_rest_or_mcp_answer() {
     if !have_python() {
-        eprintln!("skipped: python3 is not installed");
+        eprintln!("skipped: Python 3 is not installed");
         return;
     }
     const SECRET: &str = "SuperSecretValue-9f3a7c";
@@ -599,7 +621,7 @@ env = { TOKEN = "${secret:api_token}" }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_and_adapter_crashes_are_told_apart() {
     if !have_python() {
-        eprintln!("skipped: python3 is not installed");
+        eprintln!("skipped: Python 3 is not installed");
         return;
     }
     let env = setup("").await;
@@ -634,7 +656,7 @@ async fn stop_and_adapter_crashes_are_told_apart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pruned_sessions_leave_the_ui() {
     if !have_python() {
-        eprintln!("skipped: python3 is not installed");
+        eprintln!("skipped: Python 3 is not installed");
         return;
     }
     let env = setup("").await;
@@ -663,7 +685,7 @@ async fn pruned_sessions_leave_the_ui() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn attach_configurations_without_a_pid_ask_for_one() {
     if !have_python() {
-        eprintln!("skipped: python3 is not installed");
+        eprintln!("skipped: Python 3 is not installed");
         return;
     }
     let env = setup(
@@ -682,7 +704,7 @@ program = "prog.bin"
     let (s, _) = env.send(reqwest::Method::POST, "sessions", json!({ "config": "attach-nopid", "pid": 1 })).await;
     assert_eq!(s, 400);
 
-    let mut victim = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+    let mut victim = sleeper();
     env.send(reqwest::Method::PUT, "breakpoints/file", json!({ "path": "src/main.c", "breakpoints": [{ "line": 5 }] })).await;
     let info = env.post("sessions", json!({ "config": "attach-nopid", "pid": victim.id() })).await;
     let sid = info["id"].as_str().unwrap().to_string();
@@ -707,7 +729,7 @@ program = "prog.bin"
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn child_sessions_connect_to_the_parents_adapter() {
     if !have_python() {
-        eprintln!("skipped: python3 is not installed");
+        eprintln!("skipped: Python 3 is not installed");
         return;
     }
     let env = setup("extra = { wantChildConnect = true }").await;
@@ -745,7 +767,7 @@ async fn child_sessions_connect_to_the_parents_adapter() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn files_outside_the_project_are_served_only_when_a_frame_named_them() {
     if !have_python() {
-        eprintln!("skipped: python3 is not installed");
+        eprintln!("skipped: Python 3 is not installed");
         return;
     }
     let lib = tempfile::tempdir().unwrap();
@@ -860,7 +882,7 @@ console = "console"
     assert!(c.get("error").is_none(), "{c}");
     if let Some(p) = child_pid {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while std::path::Path::new(&format!("/proc/{p}")).exists() && std::fs::read_to_string(format!("/proc/{p}/stat")).is_ok_and(|s| !s.contains(") Z ")) {
+        while crate::util::os::proc::pid_running(p as i32) {
             assert!(tokio::time::Instant::now() < deadline, "the subprocess {p} outlived the stop");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

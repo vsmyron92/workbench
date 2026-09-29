@@ -199,7 +199,7 @@ impl PathMap {
     pub fn to_adapter(&self, host: &Path) -> String {
         if let Some((src, dst)) = &self.container {
             if let Ok(rel) = host.strip_prefix(src) {
-                let rel = rel.to_string_lossy();
+                let rel = crate::util::os::path::to_slash(rel);
                 return if rel.is_empty() { dst.clone() } else { format!("{}/{rel}", dst.trim_end_matches('/')) };
             }
         }
@@ -761,9 +761,12 @@ async fn startup(state: &AppState, project: &Arc<Project>, s: &Arc<Session>, pla
         if plan.adapter.kind == AdapterKind::Gdb && plan.request == DebugRequest::Launch && plan.raw_arguments.is_none() {
             if launch::language_of(&plan.launch, &project.root) == "rust" && target.is_none() {
                 use crate::util::os::support::{Feature, unsupported};
-                match unsupported(Feature::RustGdbPrettyPrinters) {
-                    None => extra_args.extend(rust_gdb_args(&project.root).await),
-                    Some(why) => s.log("workbench", format!("Note: {why}\n"), None),
+                let (args, note) = rust_gdb_args(&project.root).await;
+                // An MSVC toolchain's note says more than the platform's: gdb cannot read
+                // its debug information at all.
+                match note.or_else(|| unsupported(Feature::RustGdbPrettyPrinters).map(|why| format!("Note: {why}"))) {
+                    None => extra_args.extend(args),
+                    Some(n) => s.log("workbench", format!("{n}\n"), None),
                 }
             }
             // Load the program at once: breakpoints resolve when they are set instead of
@@ -928,18 +931,26 @@ async fn traced(pid: u32) -> bool {
 /// `Option`… shown as values). The sysroot is the default toolchain's (`rustc
 /// --print sysroot` outside the project, without rustup installing anything): a
 /// `rust-toolchain.toml` could name a toolchain inside the repository, whose scripts
-/// gdb would then load.
-async fn rust_gdb_args(root: &Path) -> Vec<String> {
+/// gdb would then load. A Windows MSVC toolchain ships no printers (and its PDB debug
+/// information is not something gdb reads): that is said in the console (the second
+/// value) instead.
+async fn rust_gdb_args(root: &Path) -> (Vec<String>, Option<String>) {
     let mut cmd = tokio::process::Command::new("rustc");
     cmd.args(["--print", "sysroot"]).current_dir("/").env("RUSTUP_AUTO_INSTALL", "0");
-    let Ok(out) = crate::util::proc::run_cmd(cmd, Duration::from_secs(10)).await else { return vec![] };
+    let Ok(out) = crate::util::proc::run_cmd(cmd, Duration::from_secs(10)).await else { return (vec![], None) };
     let sysroot = PathBuf::from(out.stdout.trim());
     let etc = sysroot.join("lib/rustlib/etc");
-    if !out.ok() || !sysroot.is_absolute() || !etc.join("gdb_load_rust_pretty_printers.py").is_file() || etc.starts_with(root) {
-        return vec![];
+    if out.ok() && sysroot.file_name().is_some_and(|n| n.to_string_lossy().ends_with("-windows-msvc")) {
+        return (
+            vec![],
+            Some("The Rust toolchain targets MSVC, whose debug information (PDB) gdb cannot read, and has no gdb pretty printers: debug Rust with lldb-dap or CodeLLDB ([debug] default_adapter.rust = \"codelldb\"), or build with a windows-gnu toolchain.".into()),
+        );
+    }
+    if !out.ok() || !sysroot.is_absolute() || !etc.join("gdb_load_rust_pretty_printers.py").is_file() || crate::util::os::path::starts_with(&etc, root) {
+        return (vec![], None);
     }
     let etc = etc.display().to_string();
-    vec![format!("--directory={etc}"), "-iex".into(), format!("add-auto-load-safe-path {etc}")]
+    (vec![format!("--directory={etc}"), "-iex".into(), format!("add-auto-load-safe-path {etc}")], None)
 }
 
 /// A pre-launch run configuration: started through the apps slice (its terminal,
@@ -1045,7 +1056,7 @@ async fn cargo_build(state: &AppState, s: &Arc<Session>, plan: &Plan, t: &derive
     // JSON messages go to the file; the human-readable diagnostics stay in the terminal.
     let cmd = crate::util::os::shell::redirect_stdout(&format!("cargo {}", args.join(" ")), &q(&file_arg));
     let mut root_plan = plan.clone();
-    root_plan.cwd = s.paths.root.join(&t.workspace);
+    root_plan.cwd = s.paths.root.join(crate::util::os::path::from_slash(&t.workspace));
     let title = format!("Build {}", t.config_name().trim_start_matches("Cargo: "));
     let result = run_in_terminal(state, s, &root_plan, &title, &cmd).await;
     let text = match (&host_file, &plan.target) {
@@ -1111,7 +1122,7 @@ pub async fn sync_breakpoints(state: &AppState, s: &Arc<Session>, only: Option<&
                 sent_bps.push((String::new(), json!({ "line": line })));
             }
         }
-        let host = s.paths.root.join(&path);
+        let host = s.paths.root.join(crate::util::os::path::from_slash(&path));
         let name = host.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let body = json!({
             "source": { "path": s.paths.to_adapter(&host), "name": name },
@@ -1830,7 +1841,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let root = d.path().join("app");
         std::fs::create_dir_all(root.join("src")).unwrap();
-        let m = PathMap { root: root.clone(), canon_root: root.canonicalize().unwrap(), container: Some((root.clone(), "/workspaces/app".into())) };
+        let m = PathMap { root: root.clone(), canon_root: crate::util::os::path::canonicalize(&root).unwrap(), container: Some((root.clone(), "/workspaces/app".into())) };
         assert_eq!(m.to_adapter(&root.join("src/main.c")), "/workspaces/app/src/main.c");
         assert_eq!(m.to_adapter(Path::new("/usr/include/stdio.h")), "/usr/include/stdio.h");
         assert_eq!(m.host_of("/workspaces/app/src/main.c"), root.join("src/main.c"));
@@ -1841,11 +1852,17 @@ mod tests {
         assert_eq!(v["inProject"], false);
         let v = m.source_view(&json!({"name": "<generated>", "sourceReference": 7}));
         assert_eq!(v["sourceReference"], 7);
-        // A symlinked view of the project still maps into it.
+        // A symlinked view of the project still maps into it (Windows: a symlink needs
+        // Developer Mode or admin rights).
         let link = d.path().join("link");
-        crate::util::os::fs::symlink(&root, &link).unwrap();
-        let host = PathMap::new(&root, None);
-        assert_eq!(host.project_rel(&link.join("src")), Some("src".into()));
+        match crate::util::os::fs::symlink(&root, &link) {
+            Ok(()) => {
+                let host = PathMap::new(&root, None);
+                assert_eq!(host.project_rel(&link.join("src")), Some("src".into()));
+            }
+            Err(e) if cfg!(windows) => eprintln!("symlink part skipped: {e}"),
+            Err(e) => panic!("symlink: {e}"),
+        }
     }
 
     #[test]

@@ -476,15 +476,21 @@ async fn wait_run(state: &AppState, name: &str, what: &str, ok: impl Fn(&runs::R
 /// on the screen does not make the new one "ready".
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn runs_reuse_their_terminal_across_starts() {
-    let l = live_fixture(
+    // In the run shell: bash, or PowerShell on Windows.
+    let command = if cfg!(windows) {
+        "if (Test-Path .started) { echo second-start; sleep 30 } else { New-Item .started | Out-Null; echo READY-LINE; sleep 30 }"
+    } else {
+        "if [ -f .started ]; then echo second-start; sleep 30; else touch .started; echo READY-LINE; sleep 30; fi"
+    };
+    let l = live_fixture(&format!(
         r#"
 [[run]]
 name = "srv"
 kind = "server"
-command = "if [ -f .started ]; then echo second-start; sleep 30; else touch .started; echo READY-LINE; sleep 30; fi"
-ready = { log = "READY-LINE", timeout_s = 60 }
-"#,
-    )
+command = "{command}"
+ready = {{ log = "READY-LINE", timeout_s = 60 }}
+"#
+    ))
     .await;
     let p = l.state.projects.require("live").unwrap();
     runs::start(&l.state, &p, "srv", false).await.unwrap();
@@ -514,13 +520,16 @@ ready = { log = "READY-LINE", timeout_s = 60 }
 /// answering `port_in_use`. Without it, a busy port is still refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn free_port_config_is_honoured() {
-    if !crate::util::which("fuser") || !crate::util::which("python3") {
-        eprintln!("skip: fuser or python3 missing");
+    // Linux frees ports with fuser; Windows asks the TCP table (`os::net`).
+    let py = crate::util::os::exe::python();
+    if (cfg!(unix) && !crate::util::which("fuser")) || !crate::util::which(&py[0]) {
+        eprintln!("skip: fuser or Python 3 missing");
         return;
     }
     // A foreign process (a child, never this test process) holding a port.
     let hold = |port: u16| {
-        std::process::Command::new("python3")
+        std::process::Command::new(&py[0])
+            .args(&py[1..])
             .args(["-c", &format!("import socket,time\ns=socket.socket()\ns.bind(('127.0.0.1',{port}))\ns.listen()\ntime.sleep(60)")])
             .spawn()
             .unwrap()
@@ -620,7 +629,8 @@ command = "true"
 
 /// A run whose program is not installed (a detected `go run ./cmd/api` without Go)
 /// says so before it starts, as a problem, and after it fails, instead of only
-/// "exited with code 127".
+/// "exited with code 127". (POSIX command lines: `bash -lc` runs them.)
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_programs_are_named() {
     let l = live_fixture(
@@ -650,7 +660,12 @@ command = "cd . && sh -c true"
     runs::start(&l.state, &p, "inner", false).await.unwrap();
     let live = wait_run(&l.state, "inner", "failed", |x| x.state == runs::RunState::Failed).await;
     assert_eq!(live.error.as_deref(), Some("exited with code 127 (command not found)"));
+}
 
+/// The program a command line starts, in each run shell's language.
+#[test]
+fn programs_of_command_lines() {
+    use crate::util::os::shell::Dialect;
     for (cmd, prog) in [
         ("go run ./cmd/api", Some("go")),
         ("PORT=3000 npm start", Some("npm")),
@@ -662,7 +677,22 @@ command = "cd . && sh -c true"
         ("echo hi", None),
         (". ./env.sh", None),
     ] {
-        assert_eq!(runs::command_program(cmd).as_deref(), prog, "{cmd}");
+        assert_eq!(runs::command_program_in(Dialect::Posix, cmd).as_deref(), prog, "{cmd}");
+    }
+    // The run shell on Windows: PowerShell answers its keywords, aliases and cmdlets.
+    for (cmd, prog) in [
+        ("npm run dev", Some("npm")),
+        ("$env:PORT=3000; npm start", Some("npm")),
+        ("cd server; cargo build", Some("cargo")),
+        ("golangci-lint run", Some("golangci-lint")),
+        (r".\build\Debug\app.exe", None),
+        (r"& '.venv\Scripts\my tool.exe'", None),
+        ("Remove-Item -Recurse dist", None),
+        ("get-childitem", None),
+        ("ls", None),
+        ("if ($x) { make }", None),
+    ] {
+        assert_eq!(runs::command_program_in(Dialect::PowerShell, cmd).as_deref(), prog, "{cmd}");
     }
 }
 
@@ -698,7 +728,8 @@ deploy = { command = "echo SANDBOX {sha8} on {branch} >> deploys.log", local = t
     assert_eq!(plan.deploying.as_deref(), Some(tid.as_str()));
     let mut rx = l.state.terminals.exit_watch(&tid).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), rx.wait_for(|x| x.is_some())).await.unwrap().unwrap();
-    let log = std::fs::read_to_string(l.root.join("deploys.log")).unwrap();
+    // (Windows PowerShell 5.1 appends UTF-16.)
+    let log = crate::util::os::shell::read_output(&l.root.join("deploys.log")).unwrap();
     assert_eq!(log.lines().count(), 1, "{log}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while deploy::deploying_terminal(&l.state, "live", "sandbox").is_some() {

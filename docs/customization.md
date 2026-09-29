@@ -122,6 +122,23 @@ shell = ["/bin/zsh", "-l"]         # new shells (default: $SHELL -l; PowerShell 
 Language servers and debug adapters run project code, so they start only after you
 enable code intelligence for a project (its first source file offers it) or press Debug.
 
+On Windows (not released yet) run commands go to PowerShell, and detected ones are
+written for it: `python` or `py -3` and the virtualenv's `Scripts\python.exe`,
+`.\gradlew.bat`, CMake's Debug folder (`.\build\Debug\app.exe`; with Ninja, set
+`CMAKE_GENERATOR` or configure once and detection follows), `curl.exe`, `$env:PORT`, no
+`&&` (Windows PowerShell 5.1 has none). Commands from a Procfile or a README that need a
+POSIX shell, `validate.sh` scripts, and scripts or tasks whose names hold `% ! ^ & | < > "`
+(batch files would misread them) are not offered: add them to `.workbench.toml` in
+PowerShell's syntax. Runs get Workbench's own `PATH`: start Workbench after installing a
+tool, or add the tool's folder to your `PATH`. Language servers installed with `npm install -g` are found in
+`%APPDATA%\npm` and run with Node directly. GDB reads only MinGW builds: to debug Rust
+built with the default MSVC toolchain, install lldb-dap or CodeLLDB and set
+
+```toml
+[debug.default_adapter]
+rust = "codelldb"
+```
+
 ## Change with an agent
 
 | Ask for | Where it belongs |

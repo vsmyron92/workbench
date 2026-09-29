@@ -1,13 +1,14 @@
 //! JVM builds → runs.
 //!
 //! * **Gradle** (the shallowest `settings.gradle[.kts]` or `build.gradle[.kts]`,
-//!   through `./gradlew` when the wrapper exists): `build` and `test`; Spring Boot
-//!   `bootRun` (server, `server.port` or 8080), Quarkus `quarkusDev`, the
-//!   `application` plugin's `run`; Android apps `assembleDebug`. Subprojects
-//!   (`include("app")`) with those plugins get `:app:bootRun` & co.
-//! * **Maven** (the shallowest `pom.xml`, through `./mvnw` when the wrapper exists):
-//!   `test` and `package`; Spring Boot `spring-boot:run`, Quarkus `quarkus:dev`,
-//!   Micronaut `mn:run` (in the module that declares the plugin, `-pl <module>`).
+//!   through `./gradlew` when the wrapper exists, `.\gradlew.bat` on Windows): `build`
+//!   and `test`; Spring Boot `bootRun` (server, `server.port` or 8080), Quarkus
+//!   `quarkusDev`, the `application` plugin's `run`; Android apps `assembleDebug`.
+//!   Subprojects (`include("app")`) with those plugins get `:app:bootRun` & co.
+//! * **Maven** (the shallowest `pom.xml`, through `./mvnw` when the wrapper exists,
+//!   `.\mvnw.cmd` on Windows): `test` and `package`; Spring Boot `spring-boot:run`,
+//!   Quarkus `quarkus:dev`, Micronaut `mn:run` (in the module that declares the plugin,
+//!   `-pl <module>`).
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -16,6 +17,7 @@ use regex::Regex;
 
 use super::{Ctx, scoped, sh, source};
 use crate::config::project::{Component, Ready, RunConfig, RunKind};
+use crate::util::os::shell::Dialect;
 
 /// Spring Boot (`Started App in 2.3 seconds`, `Tomcat started on port 8080`), Quarkus
 /// (`Listening on: http://localhost:8080`) and Micronaut (`Server Running: http://…`).
@@ -28,6 +30,17 @@ static XML_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-
 static PLUGIN_MANAGEMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<pluginManagement>.*?</pluginManagement>").unwrap());
 static SERVER_PORT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^\s*(?:server\.port\s*[=:]\s*|port:\s*)\$?\{?(?:[A-Z_]+:)?(\d{2,5})\}?\s*$").unwrap());
+
+/// The project's build wrapper in `dir` as a command's first word: the script
+/// (`gradlew`, `./gradlew`), or on Windows (`super::dialect`) its batch file
+/// (`gradlew.bat`, `.\gradlew.bat`). `None` without one.
+fn wrapper(dir: &Path, posix: (&str, &'static str), windows: (&str, &'static str)) -> Option<&'static str> {
+    let (file, command) = match super::dialect() {
+        Dialect::Posix => posix,
+        Dialect::PowerShell => windows,
+    };
+    dir.join(file).is_file().then_some(command)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum App {
@@ -101,7 +114,7 @@ pub fn detect_gradle(cx: &mut Ctx, f: &Path) {
         return;
     }
     let cwd = cx.rel(dir);
-    let gradle = if dir.join("gradlew").is_file() { "./gradlew" } else { "gradle" };
+    let gradle = wrapper(dir, ("gradlew", "./gradlew"), ("gradlew.bat", r".\gradlew.bat")).unwrap_or("gradle");
     let settings = ["settings.gradle.kts", "settings.gradle"].iter().map(|n| dir.join(n)).find(|p| p.is_file());
     let build = ["build.gradle.kts", "build.gradle"].iter().map(|n| dir.join(n)).find(|p| p.is_file());
     let manifest = build.clone().or(settings.clone()).unwrap_or_else(|| f.to_path_buf());
@@ -205,7 +218,7 @@ pub fn detect_maven(cx: &mut Ctx, f: &Path) {
         return;
     }
     let cwd = cx.rel(dir);
-    let mvn = if dir.join("mvnw").is_file() { "./mvnw" } else { "mvn" };
+    let mvn = wrapper(dir, ("mvnw", "./mvnw"), ("mvnw.cmd", r".\mvnw.cmd")).unwrap_or("mvn");
     cx.tag("maven");
     cx.tag("jvm");
     cx.pf.components.push(Component { name: scoped("maven", &cwd), path: cwd.clone(), kind: "maven".into(), version: None });

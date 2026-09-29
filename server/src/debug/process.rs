@@ -180,8 +180,19 @@ pub async fn spawn(adapter: &Adapter, session_id: &str, dir: AdapterDir<'_>, tar
             inside = Some((t.docker.clone(), t.container_id.clone()));
         }
         None => {
-            let r = crate::util::os::exe::resolve(&adapter.command).ok_or_else(|| format!("`{}` was not found on PATH. {}", adapter.command, adapter.install_hint))?;
-            cmd = crate::util::os::exe::command(&r);
+            use crate::util::os::exe;
+            let r = exe::resolve(&adapter.command).ok_or_else(|| format!("`{}` was not found on PATH. {}", adapter.command, adapter.install_hint))?;
+            // A batch file (Windows) gets its arguments through cmd.exe, which would
+            // reparse paths and names that hold its metacharacters.
+            if r.kind == exe::Kind::Batch && !exe::batch_args_safe(&args) {
+                return Err(format!(
+                    "{} is a batch file ({}), and cmd.exe would misread an argument with % ! ^ & | < > \" or a line break: point [debug.adapters.{}] command at the program itself",
+                    adapter.label,
+                    r.program.display(),
+                    adapter.id
+                ));
+            }
+            cmd = exe::command(&r);
             cmd.args(&args);
             for (k, v) in &adapter.env {
                 cmd.env(k, v);

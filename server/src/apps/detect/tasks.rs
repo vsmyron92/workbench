@@ -550,13 +550,16 @@ pub fn detect_procfile(cx: &mut Ctx, f: &Path) {
     let mut added = 0;
     for line in src.lines() {
         let Some(c) = PROC_LINE.captures(line.trim_end()) else { continue };
-        let (proc, cmd) = (c[1].to_string(), c[2].trim().to_string());
+        let (proc, line_cmd) = (c[1].to_string(), c[2].trim().to_string());
         // Heroku's release phase runs on deploy (migrations against the live database).
         if proc == "release" || added >= MAX_PER_FILE {
             continue;
         }
+        // Procfile lines are POSIX shell: where the run shell is PowerShell, only those that
+        // read the same there, or have a Windows form (`$env:PORT`), are offered.
+        let Some(cmd) = super::repository_command(cx, &line_cmd, &cwd) else { continue };
         let web = proc == "web";
-        let named_port = port_in(&cmd);
+        let named_port = port_in(&line_cmd);
         // The same server already detected in this directory: the same command
         // (`web: bin/rails server`), the same program with options (`bin/rails server
         // -p 3000` next to `rails server` on :3000), or a web process on its port.
@@ -570,7 +573,7 @@ pub fn detect_procfile(cx: &mut Ctx, f: &Path) {
             continue;
         }
         // foreman / honcho give the first process PORT=5000.
-        let uses_port = cmd.contains("$PORT") || cmd.contains("${PORT");
+        let uses_port = line_cmd.contains("$PORT") || line_cmd.contains("${PORT");
         let port = named_port.or(uses_port.then_some(5000));
         let kind = if web { RunKind::Server } else { RunKind::Task };
         let mut env = BTreeMap::new();

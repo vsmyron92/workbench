@@ -212,14 +212,15 @@ fn run_named<'a>(project: &'a Project, name: &str) -> Option<&'a crate::config::
 
 /// A program path of a launch configuration on the host: placeholders
 /// (`{root}`, `${workspaceFolder}`, toolchains) expanded; relative ones resolved in
-/// the project (and kept inside it).
+/// the project (and kept inside it), on Windows also written with `\` (`build\app.exe`).
 pub fn host_program(project: &Project, program: &str) -> Result<PathBuf, ApiError> {
     let vars = crate::apps::expand::base_vars(project);
     let p = crate::apps::expand::placeholders(program, &vars).replace("${workspaceFolder}", &project.root.display().to_string());
     if crate::util::os::path::is_absolute_str(&p) || crate::util::os::path::home_relative(&p).is_some() {
         return Ok(crate::config::expand_tilde(&p));
     }
-    crate::util::paths::resolve_in_root(&project.root, &p)
+    let rel = crate::util::os::path::segments(&p).collect::<Vec<_>>().join("/");
+    crate::util::paths::resolve_in_root(&project.root, &rel)
 }
 
 /// Views for the UI, with problems found without running anything.

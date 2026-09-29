@@ -152,6 +152,57 @@ pub fn posix_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// The language of command lines for the local run shell (`run_argv`), which detected
+/// run commands are written in (docs/windows-port.md §2, "Detected commands"). A
+/// command for an ssh host or a container is POSIX on every OS (`posix_quote`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    /// `bash -lc` (Unix).
+    Posix,
+    /// PowerShell (Windows): `pwsh`, or Windows PowerShell 5.1, which has no `&&`.
+    PowerShell,
+}
+
+impl Dialect {
+    /// The run shell's language on this OS.
+    pub const HOST: Dialect = if cfg!(windows) { Dialect::PowerShell } else { Dialect::Posix };
+
+    /// `s` as one word of this language (`quote` on its OS).
+    pub fn quote(self, s: &str) -> String {
+        match self {
+            Dialect::Posix => posix_quote(s),
+            Dialect::PowerShell => ps_quote(s),
+        }
+    }
+
+    /// The program at `path` as the first word of a command: quoted like `quote`; a
+    /// quoted one needs PowerShell's call operator (`& 'C:\my tools\x.exe'`), without
+    /// which it is a string, not a command.
+    pub fn program(self, path: &str) -> String {
+        let q = self.quote(path);
+        match self {
+            Dialect::PowerShell if q.starts_with('\'') => format!("& {q}"),
+            _ => q,
+        }
+    }
+
+    /// `first`, then `then` when `first` succeeded: `first && then`. Windows PowerShell
+    /// 5.1 has no `&&`, and `first; if ($?) { then }` would leave the exit status to what
+    /// `$?` is after an `if`: a failure exits at once with `first`'s status, as `&&` does
+    /// (`first; PS_EXIT_ON_FAILURE; then`).
+    pub fn and_then(self, first: &str, then: &str) -> String {
+        match self {
+            Dialect::Posix => format!("{first} && {then}"),
+            Dialect::PowerShell => format!("{first}; {PS_EXIT_ON_FAILURE}; {then}"),
+        }
+    }
+}
+
+/// The PowerShell statement that ends a script when the command before it failed, with the
+/// status bash would give: the failed program's exit code, 127 when the command was not
+/// found, else 1. `-Command` alone ends with 1 for any failure.
+const PS_EXIT_ON_FAILURE: &str = "if (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE }; if ($Error[0].Exception -is [System.Management.Automation.CommandNotFoundException]) { exit 127 }; exit 1 }";
+
 /// A path for insertion at a shell or agent prompt (a pasted image), quoted like `quote`.
 pub fn quote_path(p: &str) -> String {
     #[cfg(unix)]
@@ -194,7 +245,6 @@ pub fn helper_command(exe: &Path, args: &[&str]) -> String {
 /// `s` as one PowerShell word: unchanged when plain, else a single-quoted string, in which
 /// nothing is special but the quote itself, doubled (PowerShell also ends such a string
 /// at a typographic quote, `‘ ’ ‚ ‛`).
-#[cfg(any(windows, test))]
 fn ps_quote(s: &str) -> String {
     if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:\\=+".contains(c)) {
         return s.to_string();
@@ -211,15 +261,12 @@ fn ps_quote(s: &str) -> String {
     out
 }
 
-/// The script PowerShell runs for `command`: the command, then on its own line a
-/// statement that keeps its exit status. `-Command` alone ends with 1 for any failure; this
-/// exits with the failed program's code, 127 when the command was not found (as bash
-/// does), else 1. A command that ends with `exit N` keeps N.
+/// The script PowerShell runs for `command`: the command, then on its own line
+/// `PS_EXIT_ON_FAILURE`, which keeps its exit status as bash does. A command that ends
+/// with `exit N` keeps N.
 #[cfg(any(windows, test))]
 fn ps_script(command: &str) -> String {
-    format!(
-        "{command}\nif (-not $?) {{ if ($LASTEXITCODE) {{ exit $LASTEXITCODE }}; if ($Error[0].Exception -is [System.Management.Automation.CommandNotFoundException]) {{ exit 127 }}; exit 1 }}"
-    )
+    format!("{command}\n{PS_EXIT_ON_FAILURE}")
 }
 
 /// `-EncodedCommand`'s value: the command as UTF-16LE, base64.
@@ -291,6 +338,22 @@ mod tests {
         assert_eq!(posix_quote("a b"), "'a b'");
         assert_eq!(posix_quote("it's"), r"'it'\''s'");
         assert_eq!(posix_quote(r"C:\x"), r"'C:\x'");
+    }
+
+    #[test]
+    fn dialects_quote_programs_and_chain_commands() {
+        let (sh, ps) = (Dialect::Posix, Dialect::PowerShell);
+        assert_eq!(sh.quote("a b"), "'a b'");
+        assert_eq!(ps.quote("it's"), "'it''s'");
+        assert_eq!(sh.program("./build/app"), "./build/app");
+        assert_eq!(sh.program("./my app"), "'./my app'");
+        assert_eq!(ps.program(r".\build\Debug\app.exe"), r".\build\Debug\app.exe");
+        assert_eq!(ps.program(r".\my app.exe"), r"& '.\my app.exe'");
+        assert_eq!(sh.and_then("make", "./app"), "make && ./app");
+        // A failure keeps its status: the program's exit code, 127 for a command not found.
+        assert_eq!(ps.and_then("cmake --build build", r".\app.exe"), format!(r"cmake --build build; {PS_EXIT_ON_FAILURE}; .\app.exe"));
+        assert!(PS_EXIT_ON_FAILURE.contains("exit $LASTEXITCODE") && PS_EXIT_ON_FAILURE.contains("exit 127"));
+        assert_eq!(Dialect::HOST, if cfg!(windows) { ps } else { sh });
     }
 
     #[test]

@@ -194,6 +194,48 @@ pub fn python() -> Vec<String> {
     }
 }
 
+/// `python()` as the start of a command line for the run shell: the program's name, which
+/// the shell finds on `PATH` as `python()` did, then its arguments: `python3` (Unix);
+/// `python` or `py -3` (Windows).
+pub fn python_words() -> String {
+    let v = python();
+    let name = Path::new(&v[0]).file_stem().map_or_else(|| v[0].clone(), |s| s.to_string_lossy().into_owned());
+    std::iter::once(name).chain(v[1..].iter().cloned()).collect::<Vec<_>>().join(" ")
+}
+
+/// Folders where tools often live when this process has a shorter `PATH` than the run
+/// shell's (started from a desktop launcher or as a service), which is a login shell on
+/// Unix: `~/.cargo/bin`, version managers' shims, `/usr/local/bin`… None on Windows: the
+/// run shell (PowerShell without a profile) inherits this process's `PATH`, so a program
+/// off it is off the run's too, whichever folder it is in.
+pub fn user_tool_dirs() -> Vec<PathBuf> {
+    #[cfg(unix)]
+    {
+        let Some(home) = dirs::home_dir() else { return vec![] };
+        let mut out: Vec<PathBuf> = [
+            ".local/bin", "bin", ".cargo/bin", "go/bin", ".bun/bin", ".deno/bin", ".dotnet", ".dotnet/tools", ".volta/bin",
+            ".asdf/shims", ".local/share/mise/shims", ".pyenv/shims", ".rbenv/shims", ".nodenv/shims", ".local/share/pnpm",
+            ".yarn/bin", ".npm-global/bin", ".juliaup/bin", ".ghcup/bin", ".elan/bin", ".mix/escripts", ".composer/vendor/bin",
+            ".config/composer/vendor/bin",
+        ]
+        .iter()
+        .map(|d| home.join(d))
+        .collect();
+        out.extend(["/usr/local/go/bin", "/usr/local/bin", "/snap/bin", "/opt/homebrew/bin", "/home/linuxbrew/.linuxbrew/bin"].map(Into::into));
+        // Version managers with one directory per installed version.
+        for (base, sub) in [(".nvm/versions/node", "bin"), (".sdkman/candidates", "current/bin"), (".rustup/toolchains", "bin")] {
+            if let Ok(rd) = std::fs::read_dir(home.join(base)) {
+                out.extend(rd.flatten().take(20).map(|e| e.path().join(sub)));
+            }
+        }
+        out
+    }
+    #[cfg(windows)]
+    {
+        vec![]
+    }
+}
+
 /// Environment for a program Workbench starts by itself (not a terminal's shell): on
 /// Windows `NoDefaultCurrentDirectoryInExePath=1`, so a cmd.exe among its processes (a
 /// batch file, a shim's bare `node`) never takes a program from its current directory, a
@@ -597,6 +639,10 @@ exit $ret
         assert_eq!(resolve(&tool.display().to_string()), Some(Resolved { program: tool.clone(), prefix_args: vec![], kind: Kind::Exe }));
         assert!(names_path("./x") && names_path("~/bin/x") && !names_path("x") && !names_path("C:x"));
         assert_eq!(python(), vec!["python3"]);
+        assert_eq!(python_words(), "python3");
+        let home = dirs::home_dir().unwrap();
+        let tools = user_tool_dirs();
+        assert!(tools.contains(&home.join(".cargo/bin")) && tools.contains(&PathBuf::from("/usr/local/bin")), "{tools:?}");
         // A rustup proxy is a link to `rustup`; `rustup` itself is not one.
         std::fs::write(dir.path().join("rustup"), "").unwrap();
         std::os::unix::fs::symlink(dir.path().join("rustup"), dir.path().join("rust-analyzer")).unwrap();
@@ -641,6 +687,11 @@ exit $ret
         assert_eq!(rustup_proxy(&d.join("rust-analyzer.exe")), Some(d.join("rustup.exe")));
         assert_eq!(rustup_proxy(&d.join("tool.exe")), None);
         assert_eq!(rustup_proxy(&d.join("rustup.exe")), None);
+        // The run shell finds Python by name: `python` or the launcher with its `-3`.
+        let words = python_words();
+        assert!(words == "python" || words == "py -3", "{words}");
+        // Runs inherit this process's `PATH`: no other folder has their programs.
+        assert!(user_tool_dirs().is_empty());
     }
 
     #[cfg(windows)]

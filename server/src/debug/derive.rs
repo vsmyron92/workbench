@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::util::os::shell::Dialect;
+
 const MAX_MEMBERS: usize = 64;
 const MAX_TARGETS: usize = 120;
 
@@ -459,9 +461,78 @@ pub fn split_words(cmd: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
-fn is_python(w: &str) -> bool {
-    let name = w.rsplit('/').next().unwrap_or(w);
-    name == "python" || name == "python3" || (name.starts_with("python3.") && name[8..].chars().all(|c| c.is_ascii_digit()))
+/// `split_words` for a PowerShell command line (the run shell on Windows): `'…'` (a
+/// doubled `''` is a quote), `"…"` without variables, the backtick escape of a character
+/// that stays itself (`` `" ``, `` `$ ``, a space), and a leading
+/// call operator (`& 'C:\my tools\python.exe' x.py`); `\` is a character like any other.
+/// `None` when it uses syntax we do not interpret (`$x`, pipes, `;`, `&&`, `(…)`, `@x`).
+pub fn split_words_ps(cmd: &str) -> Option<Vec<String>> {
+    let cmd = cmd.trim_start();
+    let cmd = match cmd.strip_prefix('&') {
+        Some(rest) if rest.starts_with(char::is_whitespace) => rest,
+        _ => cmd,
+    };
+    let mut words = vec![];
+    let mut cur = String::new();
+    let mut has = false;
+    let mut chars = cmd.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('\''), '\'') if chars.peek() == Some(&'\'') => {
+                chars.next();
+                cur.push('\'');
+            }
+            (Some('"'), '"') if chars.peek() == Some(&'"') => {
+                chars.next();
+                cur.push('"');
+            }
+            (Some(q), c) if c == q => quote = None,
+            // `` `n ``, `` `t ``, `` `0 ``… are control characters: not interpreted.
+            (Some('"'), '`') | (None, '`') => match chars.next()? {
+                '0' | 'a' | 'b' | 'e' | 'f' | 'n' | 'r' | 't' | 'u' | 'v' => return None,
+                c => cur.push(c),
+            },
+            (Some('"'), '$') => return None,
+            (Some(_), c) => cur.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                has = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if has || !cur.is_empty() {
+                    words.push(std::mem::take(&mut cur));
+                    has = false;
+                }
+            }
+            (None, '$' | '|' | '&' | ';' | '<' | '>' | '(' | ')' | '{' | '}') => return None,
+            (None, '@' | '#') if cur.is_empty() && !has => return None,
+            (None, c) => cur.push(c),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if has || !cur.is_empty() {
+        words.push(cur);
+    }
+    // `--%` passes the rest of the line on as it is.
+    (!words.iter().any(|w| w == "--%")).then_some(words)
+}
+
+fn is_python(dialect: Dialect, w: &str) -> bool {
+    let name = match dialect {
+        Dialect::Posix => w.rsplit('/').next().unwrap_or(w).to_string(),
+        // `python.exe`, `C:\Python313\python.exe`, the `py` launcher.
+        Dialect::PowerShell => {
+            let n = w.rsplit(['/', '\\']).next().unwrap_or(w).to_ascii_lowercase();
+            n.strip_suffix(".exe").map(str::to_string).unwrap_or(n)
+        }
+    };
+    name == "python"
+        || name == "python3"
+        || (name.starts_with("python3.") && name[8..].chars().all(|c| c.is_ascii_digit()))
+        || (dialect == Dialect::PowerShell && name == "py")
 }
 
 /// Console scripts that are Python modules of the same name.
@@ -469,8 +540,18 @@ const MODULE_SCRIPTS: &[&str] = &["pytest", "uvicorn", "flask", "gunicorn", "str
 
 /// A debugpy launch for a run command: `python x.py args`, `python -m pkg args`,
 /// `uv run python …`, `poetry run pytest …`, `.venv/bin/python manage.py runserver`.
+/// The command is in the run shell's language (`Dialect::HOST`).
 pub fn python_from_command(cmd: &str) -> Option<PythonLaunch> {
-    let words = split_words(cmd)?;
+    python_from_command_in(Dialect::HOST, cmd)
+}
+
+/// `python_from_command` for a command line in `dialect`: on Windows also
+/// `.venv\Scripts\python.exe app.py` and `py -3 -m app`.
+pub fn python_from_command_in(dialect: Dialect, cmd: &str) -> Option<PythonLaunch> {
+    let words = match dialect {
+        Dialect::Posix => split_words(cmd)?,
+        Dialect::PowerShell => split_words_ps(cmd)?,
+    };
     let mut i = 0;
     // VAR=value prefixes.
     while i < words.len() && words[i].contains('=') && !words[i].starts_with('-') && words[i].split('=').next().is_some_and(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
@@ -487,8 +568,12 @@ pub fn python_from_command(cmd: &str) -> Option<PythonLaunch> {
     }
     let first = words.get(i)?;
     let mut out = PythonLaunch::default();
-    if is_python(first) {
-        if first.contains('/') {
+    if is_python(dialect, first) {
+        let path = match dialect {
+            Dialect::Posix => first.contains('/'),
+            Dialect::PowerShell => first.contains(['/', '\\']),
+        };
+        if path {
             out.python = Some(first.clone());
         }
         i += 1;
@@ -523,15 +608,10 @@ pub fn python_from_command(cmd: &str) -> Option<PythonLaunch> {
     Some(out)
 }
 
-/// The project's virtualenv interpreter, if it has one.
+/// The project's virtualenv interpreter, if it has one (`.venv/bin/python`; on Windows
+/// `.venv\Scripts\python.exe`).
 pub fn venv_python(root: &Path) -> Option<String> {
-    for d in [".venv", "venv", "env"] {
-        let p = root.join(d).join("bin/python");
-        if p.exists() {
-            return Some(format!("{d}/bin/python"));
-        }
-    }
-    None
+    crate::apps::detect::venv_python(root, Dialect::HOST)
 }
 
 // ---------------------------------------------------------------- Go
@@ -673,7 +753,7 @@ not json at all
 
     #[test]
     fn python_launches_from_run_commands() {
-        let p = |c: &str| python_from_command(c);
+        let p = |c: &str| python_from_command_in(Dialect::Posix, c);
         assert_eq!(p("python3 manage.py runserver 8000").unwrap().program.as_deref(), Some("manage.py"));
         let m = p("uv run --with rich python -u -m app.main --port 8000").unwrap();
         assert_eq!((m.module.as_deref(), m.args.clone()), (Some("app.main"), vec!["--port".to_string(), "8000".to_string()]));
@@ -688,6 +768,42 @@ not json at all
         assert!(p("python3 x.py | tee log").is_none(), "shell pipelines are not guessed");
         assert!(p("python3 -c 'print(1)'").is_none());
         assert_eq!(split_words("a 'b c' \"d\\\"e\" f\\ g ''"), Some(vec!["a".into(), "b c".into(), "d\"e".into(), "f g".into(), "".into()]));
+        assert!(p("py -3 app.py").is_none() && p("python.exe app.py").is_none(), "Windows names are not Unix ones");
+    }
+
+    #[test]
+    fn python_launches_from_powershell_commands() {
+        let p = |c: &str| python_from_command_in(Dialect::PowerShell, c);
+        let v = p(r".venv\Scripts\python.exe -m pytest -x").unwrap();
+        assert_eq!((v.python.as_deref(), v.module.as_deref(), v.args.clone()), (Some(r".venv\Scripts\python.exe"), Some("pytest"), vec!["-x".to_string()]));
+        let v = p("py -3 manage.py runserver 8000").unwrap();
+        assert_eq!((v.python, v.program.as_deref()), (None, Some("manage.py")));
+        assert_eq!(p("python app.py").unwrap().program.as_deref(), Some("app.py"));
+        let v = p(r"& 'C:\My Tools\Python313\python.exe' 'my script.py' --x 'it''s'").unwrap();
+        assert_eq!(v.python.as_deref(), Some(r"C:\My Tools\Python313\python.exe"));
+        assert_eq!((v.program.as_deref(), v.args.clone()), (Some("my script.py"), vec!["--x".to_string(), "it's".to_string()]));
+        assert_eq!(p("uv run uvicorn app:app --reload").unwrap().module.as_deref(), Some("uvicorn"));
+        assert_eq!(p(r"python tools\gen.py").unwrap().program.as_deref(), Some(r"tools\gen.py"));
+        for shell_syntax in ["$env:X=1; python a.py", "python a.py | tee log", "python \"$HOME\\a.py\"", "python (Get-Item a.py)", "python a.py && b", "python @args", "python --% a.py"] {
+            assert!(p(shell_syntax).is_none(), "{shell_syntax}");
+        }
+        assert_eq!(split_words_ps(r#"a 'b c' "d`"e" f`` g '' "x""y""#), Some(vec!["a".into(), "b c".into(), "d\"e".into(), "f`".into(), "g".into(), "".into(), "x\"y".into()]));
+        assert_eq!(split_words_ps(r"C:\x\y.exe a\b"), Some(vec![r"C:\x\y.exe".into(), r"a\b".into()]));
+        // `` `n `` is a line break, `` `t `` a tab: not guessed at.
+        for escape in ["python a.py `n", "python \"a`tb.py\"", "python a`0.py"] {
+            assert_eq!(split_words_ps(escape), None, "{escape}");
+        }
+    }
+
+    #[test]
+    fn virtualenv_interpreters_follow_the_os() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(venv_python(d.path()), None);
+        write(d.path(), ".venv/bin/python", "");
+        write(d.path(), "venv/Scripts/python.exe", "");
+        assert_eq!(crate::apps::detect::venv_python(d.path(), Dialect::Posix).as_deref(), Some(".venv/bin/python"));
+        assert_eq!(crate::apps::detect::venv_python(d.path(), Dialect::PowerShell).as_deref(), Some(r"venv\Scripts\python.exe"));
+        assert_eq!(venv_python(d.path()), crate::apps::detect::venv_python(d.path(), Dialect::HOST));
     }
 
     #[test]

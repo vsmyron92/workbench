@@ -6,6 +6,7 @@ use std::path::Path;
 
 use super::{Ctx, scoped, source};
 use crate::config::project::{Component, Ready, RunConfig, RunKind};
+use crate::util::os::shell::Dialect;
 
 /// Puma / WEBrick: `* Listening on http://127.0.0.1:3000`, `WEBrick::HTTPServer#start … port=4000`.
 const RUBY_READY: &str = r"Listening on (https?://\S+)|Server address: (https?://\S+)|WEBrick::HTTPServer#start";
@@ -37,13 +38,23 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
         ..Default::default()
     };
     let rails = dir.join("config/application.rb").is_file() && (has_gem(&gemfile, "rails") || dir.join("bin/rails").is_file());
-    let rails_cmd = if dir.join("bin/rails").is_file() { "bin/rails" } else { "bundle exec rails" };
+    // Windows starts no script by its shebang: `ruby bin/rails` there (`super::dialect`).
+    let windows = super::dialect() == Dialect::PowerShell;
+    let rails_cmd = match (dir.join("bin/rails").is_file(), windows) {
+        (true, false) => "bin/rails",
+        (true, true) => "ruby bin/rails",
+        (false, _) => "bundle exec rails",
+    };
     let mut runs: Vec<RunConfig> = vec![];
     if rails {
         cx.tag("rails");
         // Rails 7+: `bin/dev` runs Procfile.dev (server + asset watchers) through foreman.
-        if dir.join("bin/dev").is_file() {
-            runs.push(server("bin/dev", "bin/dev".into(), 3000, source(cx, &dir.join("bin/dev"), "")));
+        // On Windows only a Ruby `bin/dev` (Rails 8) runs; a shell script does not.
+        let dev = dir.join("bin/dev");
+        if dev.is_file() && !windows {
+            runs.push(server("bin/dev", "bin/dev".into(), 3000, source(cx, &dev, "")));
+        } else if dev.is_file() && cx.read(&dev).is_some_and(|t| t.lines().next().is_some_and(|l| l.starts_with("#!") && l.contains("ruby"))) {
+            runs.push(server("bin/dev", "ruby bin/dev".into(), 3000, source(cx, &dev, "")));
         }
         runs.push(server("rails server", format!("{rails_cmd} server"), 3000, source(cx, &dir.join("config/application.rb"), "")));
         if dir.join("test").is_dir() {
