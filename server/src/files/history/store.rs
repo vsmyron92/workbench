@@ -252,7 +252,8 @@ impl Store {
             if parsed {
                 (&f).write_all(b"\n")?;
             } else {
-                f.set_len(complete)?;
+                // Not `f.set_len`: a Windows append handle cannot truncate (access denied).
+                perm::set_len(&f, complete)?;
                 bad -= 1;
             }
         }

@@ -815,6 +815,32 @@ mod tests {
         assert_mode(&log, 0o600);
     }
 
+    /// A Windows append handle has no FILE_WRITE_DATA, so it cannot truncate: `set_len` cuts
+    /// a torn tail through `open_append`'s and std's append handles alike, while another
+    /// handle reads the file (Local History's index), and appends still land at the new end.
+    #[test]
+    fn set_len_truncates_append_handles() {
+        use std::io::Write;
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("index");
+        let mut f = open_append(&p, 0o600).unwrap();
+        f.write_all(b"one\ntorn").unwrap();
+        let reader = File::open(&p).unwrap();
+        set_len(&f, 4).unwrap();
+        f.write_all(b"two\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\ntwo\n");
+
+        let mut g = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        g.write_all(b"torn").unwrap();
+        #[cfg(windows)]
+        assert!(g.set_len(12).is_err(), "std's append handle cannot truncate on Windows");
+        set_len(&g, 8).unwrap();
+        g.write_all(b"three\n").unwrap();
+        drop(reader);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\ntwo\nthree\n");
+        assert_mode(&p, 0o600);
+    }
+
     #[test]
     fn private_dirs_are_created_with_their_parents() {
         let d = tempfile::tempdir().unwrap();
