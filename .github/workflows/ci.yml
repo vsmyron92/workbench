@@ -51,8 +51,6 @@ jobs:
   server-windows:
     name: Server · Windows (build, test)
     runs-on: windows-latest
-    # Informational until the port is done (docs/windows-port.md).
-    continue-on-error: true
     defaults:
       run:
         working-directory: server
@@ -68,6 +66,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
+          # A cold Windows build takes ~25 minutes: keep the cache when tests fail.
+          cache-on-failure: true
       - id: build
         run: cargo build --locked
       - run: cargo test --locked --no-fail-fast

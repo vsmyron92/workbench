@@ -1,8 +1,8 @@
 # Porting the server to Windows
 
-**Status: in progress, experimental.** Nothing has run on a real Windows machine yet: the
-informational `windows-latest` CI job is the first place the Windows build, `install.ps1`
-and the tests run.
+**Status: experimental.** The server builds with MSVC and its whole test suite passes on
+GitHub's `windows-latest` (Windows Server 2025), which is now a required CI job. It has not
+run on a Windows 10 or 11 desktop yet.
 
 - **Phase A (merged):** `.gitattributes`, the CI job, and the `util::os` areas `perm`, `fs`,
   `proc`, `shell`, `exe`, `path`, `net` and `desktop` with their Windows bodies (their shared
@@ -22,11 +22,14 @@ and the tests run.
   split with `\`, Local History's repair of a torn index line (`perm::set_len` on an append
   handle), `Event::set` of a name nothing holds (ERROR_INVALID_HANDLE), a terminal exit
   announced before it was recorded (every OS) and a reused leader pid (`session::Handle`),
-  and tests that assumed `sh`, `/etc` or `/`-joined paths. The next run confirms them.
-- **Next:** the CI job passing on `windows-latest` and becoming required (steps 6 and 13),
-  then real Windows 10 and 11 machines (§5). Until then a tag publishes the Linux archive
-  alone: the release workflow builds the Windows archive on a tag only once the repository
-  variable `RELEASE_WINDOWS` is `true` (by hand it always does).
+  and tests that assumed `sh`, `/etc` or `/`-joined paths.
+- **Second `windows-latest` run:** 1033 passed, 0 failed, 3 ignored (the same three as on
+  Linux), and `install.ps1` installed the build. The job is required from here on.
+- **Next:** real Windows 10 and 11 desktops (§5): ConPTY terminals with agent CLIs, the
+  service and its Start Menu shortcut, git over SSH and HTTPS, language servers. Until then a
+  tag publishes the Linux archive alone: the release workflow builds the Windows archive on
+  a tag only once the repository variable `RELEASE_WINDOWS` is `true` (by hand it always
+  does).
 
 This is the plan for a native `x86_64-pc-windows-msvc` build that works on Windows 10 and
 11, with Linux behaviour unchanged. File and line references are from 0.1.0 (commit
