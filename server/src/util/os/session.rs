@@ -118,6 +118,11 @@ pub const REPAINTS: bool = cfg!(windows);
 /// the answer: ConPTY does (portable-pty creates it with INHERIT_CURSOR). Unix does not.
 pub const ASKS_CURSOR: bool = cfg!(windows);
 
+/// Variables that describe the terminal Workbench itself was started from on this OS only,
+/// beyond those every OS shares (the caller's list): a terminal's session clears them, as
+/// they are wrong for it. Windows: Windows Terminal's. Unix: none (these names are not its).
+pub const PARENT_TERMINAL_VARS: &[&str] = if cfg!(windows) { &["WT_SESSION", "WT_PROFILE_ID"] } else { &[] };
+
 /// A PTY's output, for the thread that reads it.
 ///
 /// Windows: a thread of its own reads the pipe until it ends and hands the chunks over, so
@@ -620,6 +625,14 @@ mod tests {
         assert!(holders(&[0, 1], &[PathBuf::from("x")]).is_empty());
         #[cfg(windows)]
         assert!(members(i32::MAX - 7).is_empty());
+    }
+
+    #[test]
+    fn windows_terminal_variables_are_cleared_only_on_windows() {
+        let wt = ["WT_SESSION", "WT_PROFILE_ID"];
+        assert_eq!(wt.iter().all(|v| PARENT_TERMINAL_VARS.contains(v)), cfg!(windows));
+        #[cfg(unix)]
+        assert!(PARENT_TERMINAL_VARS.is_empty());
     }
 
     /// Windows: a session is a job that holds what its leader starts (a grandchild

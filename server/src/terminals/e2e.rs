@@ -161,6 +161,105 @@ time.sleep(30)")).await.unwrap();
     assert!(!tdir.exists(), "a forgotten terminal's files came back");
 }
 
+/// Holds a terminal's saves (each write waits for `files_removed`) until dropped, so the
+/// save of an exit, and with it the exit's announcement, stays under way meanwhile. On a
+/// real disk that window is the time of a few fsyncs; on the tmpfs tests use it is too
+/// short to hit.
+struct SavesHeld {
+    _release: std::sync::mpsc::Sender<()>,
+}
+
+fn hold_saves(entry: &std::sync::Arc<super::Entry>) -> SavesHeld {
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (held_tx, held) = std::sync::mpsc::channel::<()>();
+    let e = entry.clone();
+    std::thread::spawn(move || {
+        let _saves = e.files_removed.lock();
+        let _ = held_tx.send(());
+        let _ = released.recv();
+    });
+    held.recv().unwrap();
+    SavesHeld { _release: release }
+}
+
+/// Make the terminal's process (waiting for a line) exit, and return once the exit is
+/// recorded while its save is held, before it is announced.
+async fn exit_while_saves_are_held(state: &AppState, id: &str) -> SavesHeld {
+    let t = &state.terminals;
+    let held = hold_saves(&t.get(id).unwrap());
+    t.send_text(id, "bye", true).await.unwrap();
+    wait_for("the exit to be recorded", || t.info(id).is_some_and(|i| i.status == TerminalStatus::Exited)).await;
+    assert!(t.exit_watch(id).unwrap().borrow().is_none(), "announced before it was saved");
+    held
+}
+
+/// A restart that comes while the exit before it is being saved starts once that exit is
+/// announced: the new process never reads as exited (`exit_watch`, and the waits of the
+/// next kill, restart or close on it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_during_the_save_of_an_exit_is_not_taken_for_exited() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let t = &state.terminals;
+    let s = SpawnSpec { meta: json!({ "run": "demo", "restartable": true }), ..spec(dir.path(), "input()") };
+    let id = t.spawn(&state, s).await.unwrap().id;
+
+    let held = exit_while_saves_are_held(&state, &id).await;
+    let restart = tokio::spawn({
+        let (state, id) = (state.clone(), id.clone());
+        async move { state.terminals.restart(&state, &id).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let restarted_early = restart.is_finished();
+    drop(held);
+    restart.await.unwrap().unwrap();
+    // Whatever was still under way for the old process is over by now.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(t.info(&id).unwrap().status, TerminalStatus::Running);
+    let exit = t.exit_watch(&id).unwrap().borrow().clone();
+    assert!(exit.is_none(), "the running process reads as exited: {exit:?}");
+    assert!(!restarted_early, "the restart started before the exit was saved and announced");
+
+    // Close (forget) while the next exit is being saved: it waits for that save, and the
+    // files stay gone.
+    let tdir = state.paths.data_dir.join("terminals").join(&id);
+    let held = exit_while_saves_are_held(&state, &id).await;
+    let close = tokio::spawn({
+        let (state, id) = (state.clone(), id.clone());
+        async move { state.terminals.close(&state, &id, true).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!close.is_finished());
+    drop(held);
+    close.await.unwrap().unwrap();
+    assert!(t.info(&id).is_none());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!tdir.exists(), "a forgotten terminal's files came back");
+}
+
+/// Kill returns once the exit is saved, also when the process exited by itself and its
+/// exit is being saved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kill_during_the_save_of_an_exit_waits_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let t = &state.terminals;
+    let id = t.spawn(&state, spec(dir.path(), "input()")).await.unwrap().id;
+    let held = exit_while_saves_are_held(&state, &id).await;
+    let kill = tokio::spawn({
+        let (state, id) = (state.clone(), id.clone());
+        async move { state.terminals.kill(&id).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!kill.is_finished(), "kill returned before the exit was saved");
+    drop(held);
+    kill.await.unwrap().unwrap();
+    assert!(t.exit_watch(&id).unwrap().borrow().is_some());
+    let meta = state.paths.data_dir.join("terminals").join(&id).join("meta.json");
+    let saved: super::store::Record = crate::util::fs::read_json(&meta).unwrap().unwrap();
+    assert_eq!(saved.info.status, TerminalStatus::Exited);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mcp_output_tool_reads_a_terminal() {
     let dir = tempfile::tempdir().unwrap();
