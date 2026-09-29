@@ -264,10 +264,9 @@ impl ProjectRegistry {
 
 /// `data_dir/scratches` (created 0700) as the scratch files' project.
 fn scratch_project(state: &AppState) -> anyhow::Result<Project> {
-    use std::os::unix::fs::PermissionsExt;
     let dir = state.paths.data_dir.join("scratches");
     std::fs::create_dir_all(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    util::os::perm::apply(&dir, 0o700)?;
     let root = dir.canonicalize()?;
     let mut config = ProjectFile::default();
     config.project.id = SCRATCH_ID.into();
@@ -753,14 +752,13 @@ mod tests {
         use crate::mcp::{McpCtx, call_api};
         use axum::http::Method;
         use serde_json::json;
-        use std::os::unix::fs::PermissionsExt;
 
         let t = crate::platform::testutil::app().await;
         assert!(t.state.projects.list().iter().all(|p| p.id != SCRATCH_ID));
         let p = t.state.projects.require(SCRATCH_ID).unwrap();
         assert_eq!(p.name, "Scratches");
         assert_eq!(p.root, t.state.paths.data_dir.join("scratches").canonicalize().unwrap());
-        assert_eq!(std::fs::metadata(&p.root).unwrap().permissions().mode() & 0o777, 0o700);
+        crate::util::os::perm::assert_mode(&p.root, 0o700);
         assert_eq!(t.state.projects.find_by_path(&p.root.join("a.md")).map(|x| x.id.clone()).as_deref(), Some(SCRATCH_ID));
 
         let ctx = McpCtx::default();

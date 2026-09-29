@@ -8,9 +8,7 @@
 //! before the rename, so an agent writing the same file at the same time is never
 //! silently overwritten.
 
-use std::fs::{OpenOptions, Permissions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use axum::Json;
@@ -24,6 +22,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use super::{MAX_TEXT_BYTES, Sensitive, blocking, in_git_dir, mtime_ms, resolve, sha256_hex};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::util::os::perm;
 
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
@@ -457,13 +456,9 @@ pub fn write_file(path: &Path, mut data: Vec<u8>, expected: Option<&str>, force:
     if current.is_none() {
         std::fs::create_dir_all(dir)?;
     }
-    let keep_mode = std::fs::metadata(&target).ok().map(|m| m.permissions().mode() & 0o7777);
     let tmp = dir.join(format!(".{name}.wb-tmp-{}", crate::util::random_token(6)));
     let result = (|| -> ApiResult<()> {
-        let mut f = OpenOptions::new().write(true).create_new(true).mode(0o666).open(&tmp)?;
-        if let Some(m) = keep_mode {
-            f.set_permissions(Permissions::from_mode(m))?;
-        }
+        let mut f = perm::create_replacement(&tmp, &target, None)?;
         f.write_all(&data)?;
         f.sync_all()?;
         drop(f);
@@ -474,7 +469,7 @@ pub fn write_file(path: &Path, mut data: Vec<u8>, expected: Option<&str>, force:
                 return Err(ApiError::conflict(format!("{name} changed on disk while saving")));
             }
         }
-        std::fs::rename(&tmp, &target)?;
+        perm::rename_into_place(&tmp, &target)?;
         Ok(())
     })();
     if result.is_err() {
@@ -561,10 +556,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("run.sh");
         std::fs::write(&p, b"\xEF\xBB\xBFecho hi\n").unwrap();
-        std::fs::set_permissions(&p, Permissions::from_mode(0o755)).unwrap();
+        perm::expose(&p, 0o755);
         let etag = sha256_hex(&std::fs::read(&p).unwrap());
         write_checked(&p, b"echo bye\n".to_vec(), Some(&etag), false).unwrap();
-        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o755);
+        perm::assert_mode(&p, 0o755);
+        assert!(perm::privacy(&p).unwrap().is_exposed(), "Windows: the DACL is kept");
         assert_eq!(std::fs::read(&p).unwrap(), b"\xEF\xBB\xBFecho bye\n");
 
         let link = dir.path().join("link.sh");

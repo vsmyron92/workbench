@@ -306,9 +306,7 @@ mod tests {
         let again = Store::default().get(d.path(), "app");
         assert_eq!(again.breakpoints.len(), 2);
         assert_eq!(again.watches, vec!["total", "p.name"]);
-        let mode = std::fs::metadata(file_of(d.path(), "app")).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(mode.mode() & 0o777, 0o600);
+        crate::util::os::perm::assert_mode(&file_of(d.path(), "app"), 0o600);
         // Only enabled ones are sent.
         let files = again.by_file();
         assert_eq!(files["src/main.c"].iter().map(|b| b.line).collect::<Vec<_>>(), vec![12]);

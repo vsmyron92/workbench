@@ -113,8 +113,7 @@ async fn only_the_user_connects_and_the_overlay_is_edited_in_place() {
     let path = s.t.state.paths.project_overlay(&s.pid);
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.starts_with("# mine") && text.contains("name = \"reporting\"") && !text.contains("\"reports\""), "{text}");
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    crate::util::os::perm::assert_mode(&path, 0o600);
     let e = call(&s, Method::PUT, "/_sources/bad", Some(json!({ "source": { "name": "bad", "password": "hunter2 plain" } }))).await.unwrap_err();
     assert_eq!(e.status.as_u16(), 400, "a password value is refused");
     call(&s, Method::DELETE, "/_sources/reporting", None).await.unwrap();

@@ -17,10 +17,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::util::os::perm;
 
 /// Largest file version kept (larger files are not tracked).
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -172,7 +173,7 @@ pub struct Store {
 }
 
 fn mkdir(p: &Path) -> std::io::Result<()> {
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(p)
+    perm::create_dir_private(p)
 }
 
 pub fn valid_hash(h: &str) -> bool {
@@ -370,7 +371,7 @@ impl Store {
         let packed = zstd::bulk::compress(content, ZSTD_LEVEL)?;
         let tmp = dir.join(format!(".{hash}.tmp-{}", crate::util::random_token(4)));
         let written = (|| -> std::io::Result<()> {
-            let mut f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+            let mut f = perm::open_new(&tmp, 0o600, false)?;
             f.write_all(&packed)?;
             f.sync_data()?;
             std::fs::rename(&tmp, &path)
@@ -386,7 +387,7 @@ impl Store {
         mkdir(&self.dir)?;
         let mut line = serde_json::to_vec(e).map_err(std::io::Error::other)?;
         line.push(b'\n');
-        let mut f = OpenOptions::new().create(true).append(true).mode(0o600).open(self.dir.join(INDEX))?;
+        let mut f = perm::open_append(&self.dir.join(INDEX), 0o600)?;
         let before = f.metadata()?.len();
         let written = f.write_all(&line);
         if written.is_err() {
@@ -675,7 +676,7 @@ impl Store {
         }
         let tmp = self.dir.join(format!(".{INDEX}.tmp-{}", crate::util::random_token(4)));
         let written = (|| -> std::io::Result<()> {
-            let f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+            let f = perm::open_new(&tmp, 0o600, false)?;
             let mut w = std::io::BufWriter::new(f);
             for e in &self.entries {
                 serde_json::to_writer(&mut w, e).map_err(std::io::Error::other)?;
@@ -775,8 +776,7 @@ mod tests {
         assert_eq!(s2.stored_bytes(), s.stored_bytes());
         assert_eq!(s2.next_id, s.next_id);
         // File mode: private.
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(dir.join(INDEX)).unwrap().permissions().mode() & 0o777, 0o600);
+        crate::util::os::perm::assert_mode(&dir.join(INDEX), 0o600);
     }
 
     #[test]

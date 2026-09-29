@@ -113,7 +113,7 @@ packaging/linux/   install.sh shipped in the release archive
   - `WORKBENCH_CONFIG_DIR` and `WORKBENCH_DATA_DIR` isolate instances. Every test or dev run that is not the owner's real instance must set both.
   - `WORKBENCH_LOG` sets the tracing filter.
 
-Data dir (`~/.local/share/workbench/`), all files mode 0600:
+Data dir (`~/.local/share/workbench/`), all files mode 0600 (on Windows a protected DACL for the user and SYSTEM only, set at creation and passed on by the data dir to everything inside; `util::os::perm`):
 - `token`: the master token.
 - `auth.json`: device sessions, stored as SHA-256 hashes.
 - `runtime.json`: pid and URL of the running server.
@@ -767,7 +767,7 @@ The Database tool window (right; CLion's Database view) and SQL consoles, for Po
 `postgres://…` or `key=value` URL, e.g. `{ dotenv = ".env", key = "DATABASE_URL" }`; the other
 fields override its parts), `sslmode` and `read_only`. Unset: host `localhost`, port 5432, user
 the OS user, database the user. Without a password `~/.pgpass` is read with libpq's rules (and
-only when it is not readable by others). `sslmode`: `disable`, `prefer` (default) and `require`
+only when it is not readable by others; on Windows, like libpq, without that check). `sslmode`: `disable`, `prefer` (default) and `require`
 encrypt without checking the certificate, as libpq does; `verify-full` checks it and the host name
 against the system's roots (rustls-platform-verifier). `read_only` starts sessions with
 `default_transaction_read_only`: a guard against slips, not a permission. The Add / Edit dialog

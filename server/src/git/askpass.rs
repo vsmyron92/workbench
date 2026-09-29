@@ -155,7 +155,6 @@ mod tests {
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.starts_with("#!/bin/sh\n"));
         assert!(text.contains(" askpass \"$1\""));
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o700);
+        crate::util::os::perm::assert_mode(&p, 0o700);
     }
 }

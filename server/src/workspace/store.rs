@@ -288,15 +288,15 @@ pub fn update_registry<R>(path: &Path, create: bool, mut f: impl FnMut(&mut Doc)
 /// Write `bytes` to a synced temp file beside `path` (the registry's mode, else 0600).
 fn stage_registry(path: &Path, bytes: &[u8]) -> ApiResult<PathBuf> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use util::os::perm;
     let dir = path.parent().ok_or_else(|| ApiError::internal("registry path without a directory"))?;
     std::fs::create_dir_all(dir)?;
-    let mode = std::fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+    let mode = std::fs::metadata(path).ok().and_then(|m| perm::mode(&m)).map_or(0o600, |m| m & 0o777);
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "workspace.json".into());
     let tmp = dir.join(format!(".{name}.wb-tmp-{}", util::random_token(6)));
     let written = (|| -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(mode).open(&tmp)?;
-        f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        let mut f = perm::open_new(&tmp, mode, true)?;
+        perm::apply_to(&f, mode)?;
         f.write_all(bytes)?;
         f.sync_all()
     })();
@@ -919,11 +919,12 @@ fn free_name(dir: &Path, wanted: &str) -> String {
 /// existing entry (a symlink planted in the card folder, a file that appeared
 /// meanwhile: `AlreadyExists`). Keeps the permission bits, like `fs::copy`.
 fn copy_new_file(src: &Path, dest: &Path) -> std::io::Result<u64> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use util::os::perm;
     let mut from = std::fs::File::open(src)?;
-    let mode = from.metadata()?.permissions().mode() & 0o777;
-    let mut to = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(0o600).open(dest)?;
-    let copied = std::io::copy(&mut from, &mut to).and_then(|n| to.set_permissions(std::fs::Permissions::from_mode(mode)).map(|_| n));
+    let mode = perm::mode(&from.metadata()?).map(|m| m & 0o777);
+    let mut to = perm::open_new(dest, 0o600, true)?;
+    // Windows has no mode: the copy stays private.
+    let copied = std::io::copy(&mut from, &mut to).and_then(|n| mode.map_or(Ok(()), |m| perm::apply_to(&to, m)).map(|_| n));
     if copied.is_err() {
         let _ = std::fs::remove_file(dest);
     }

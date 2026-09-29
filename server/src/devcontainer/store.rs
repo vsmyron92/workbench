@@ -68,7 +68,6 @@ mod tests {
 
     #[test]
     fn round_trip_private() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         assert_eq!(load(d.path(), "app"), Saved::default());
         let mut s = Saved::default();
@@ -76,7 +75,6 @@ mod tests {
         s.use_container = Some(false);
         save(d.path(), "app", &s).unwrap();
         assert_eq!(load(d.path(), "app"), s);
-        let mode = std::fs::metadata(file(d.path(), "app")).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
+        crate::util::os::perm::assert_mode(&file(d.path(), "app"), 0o600);
     }
 }

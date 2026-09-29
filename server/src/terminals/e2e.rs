@@ -601,10 +601,9 @@ async fn a_restarted_remote_control_server_shows_its_new_link_only() {
 
 /// Write an executable script into `dir`.
 pub(super) fn script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let p = dir.join(name);
     std::fs::write(&p, body).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::util::os::perm::apply(&p, 0o755).unwrap();
     p
 }
 

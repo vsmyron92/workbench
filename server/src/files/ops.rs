@@ -7,7 +7,6 @@
 use std::ffi::CString;
 use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use axum::Json;
@@ -21,6 +20,7 @@ use tokio::io::AsyncWriteExt;
 use super::{Resolved, basename, blocking, in_git_dir, join_rel, resolve, resolve_entry, trash, valid_name};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::util::os::perm;
 
 /// Largest single upload.
 pub const MAX_UPLOAD_BYTES: u64 = 200 * 1024 * 1024;
@@ -203,7 +203,10 @@ fn copy_recursive(from: &Path, to: &Path, budget: &mut usize) -> std::io::Result
             let ent = ent?;
             copy_recursive(&ent.path(), &to.join(ent.file_name()), budget)?;
         }
-        std::fs::set_permissions(to, std::fs::Permissions::from_mode(md.permissions().mode() & 0o7777))?;
+        // Windows has no mode: copies inherit their folder's ACL, as `CopyFileW`'s do.
+        if let Some(mode) = perm::mode(&md) {
+            perm::apply(to, mode & 0o7777)?;
+        }
     } else {
         let mut src = std::fs::File::open(from)?;
         let mut dst = std::fs::OpenOptions::new().write(true).create_new(true).open(to)?;
@@ -212,7 +215,9 @@ fn copy_recursive(from: &Path, to: &Path, budget: &mut usize) -> std::io::Result
             let _ = std::fs::remove_file(to);
             return Err(e);
         }
-        dst.set_permissions(std::fs::Permissions::from_mode(md.permissions().mode() & 0o7777))?;
+        if let Some(mode) = perm::mode(&md) {
+            perm::apply_to(&dst, mode & 0o7777)?;
+        }
     }
     Ok(())
 }
@@ -346,13 +351,13 @@ mod tests {
         let src = dir.path().join("src");
         std::fs::create_dir_all(src.join("inner")).unwrap();
         std::fs::write(src.join("inner/x.sh"), "echo").unwrap();
-        std::fs::set_permissions(src.join("inner/x.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        perm::apply(&src.join("inner/x.sh"), 0o755).unwrap();
         std::os::unix::fs::symlink("inner/x.sh", src.join("link")).unwrap();
         let mut budget = 100;
         copy_recursive(&src, &dir.path().join("dst"), &mut budget).unwrap();
         let x = dir.path().join("dst/inner/x.sh");
         assert_eq!(std::fs::read_to_string(&x).unwrap(), "echo");
-        assert_eq!(std::fs::metadata(&x).unwrap().permissions().mode() & 0o777, 0o755);
+        perm::assert_mode(&x, 0o755);
         assert!(std::fs::symlink_metadata(dir.path().join("dst/link")).unwrap().file_type().is_symlink());
         // Copying onto an existing destination fails.
         let mut budget = 100;

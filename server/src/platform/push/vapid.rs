@@ -237,14 +237,13 @@ mod tests {
 
     #[test]
     fn key_file_is_created_once_private_and_recovered_when_broken() {
-        use std::os::unix::fs::PermissionsExt;
+        use crate::util::os::perm;
         let dir = tempfile::tempdir().unwrap();
         let push = dir.path().join("push");
         let (a, fresh) = Vapid::load_or_create(&push).unwrap();
         assert!(fresh);
-        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(&push.join("vapid.json")), 0o600);
-        assert_eq!(mode(&push), 0o700);
+        perm::assert_mode(&push.join("vapid.json"), 0o600);
+        perm::assert_mode(&push, 0o700);
         let (b, fresh) = Vapid::load_or_create(&push).unwrap();
         assert!(!fresh);
         assert_eq!(a.public_key(), b.public_key());

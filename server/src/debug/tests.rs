@@ -97,8 +97,7 @@ env = {{ FAKE_LOG = "{}" }}
     if let Some((name, value)) = o.secret {
         let f = dir.path().join("secret.txt");
         std::fs::write(&f, value).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        crate::util::os::perm::apply(&f, 0o600).unwrap();
         cfg.secrets.insert(name.to_string(), crate::config::project::SecretRef::File(f.display().to_string()));
     }
     let state = AppState::new(paths, cfg, "127.0.0.1:0".parse().unwrap()).await.unwrap();

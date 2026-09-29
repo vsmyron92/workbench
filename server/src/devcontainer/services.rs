@@ -861,8 +861,7 @@ esac
         );
         let bin = dir.join("docker");
         std::fs::write(&bin, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::util::os::perm::apply(&bin, 0o755).unwrap();
         bin
     }
 

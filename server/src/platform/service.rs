@@ -481,7 +481,7 @@ pub fn cli(args: ServiceArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use crate::util::os::perm;
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -507,7 +507,7 @@ mod tests {
             if fail { "echo 'Failed to connect to bus' >&2; exit 1\n" } else { "exit 0\n" }
         );
         std::fs::write(&fake, script).unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        perm::apply(&fake, 0o755).unwrap();
         // Another test's child forked while the script was open for writing can hold it
         // until that child execs: running it then fails with ETXTBSY. Wait that out, then
         // start the log clean.
@@ -557,8 +557,7 @@ mod tests {
         assert!(desktop.contains(&format!("Icon={}\n", f.env.data_home.join("icons/hicolor/scalable/apps/workbench.svg").display())));
         let icon = std::fs::read_to_string(f.env.data_home.join("icons/hicolor/scalable/apps/workbench.svg")).unwrap();
         assert!(icon.contains("<svg"));
-        let mode = std::fs::metadata(f.env.config_home.join("systemd/user/workbench.service")).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o644);
+        perm::assert_mode(&f.env.config_home.join("systemd/user/workbench.service"), 0o644);
         assert!(calls(&f).is_empty(), "nothing is started without --enable");
         assert!(String::from_utf8(out).unwrap().contains("nothing was started"));
     }
