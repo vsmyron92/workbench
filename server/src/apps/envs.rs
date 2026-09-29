@@ -30,6 +30,7 @@ use crate::config::project::{EnvKind, Environment};
 use crate::error::ApiError;
 use crate::projects::Project;
 use crate::terminals::{SpawnSpec, TerminalInfo, TerminalKind};
+use crate::util::os::shell::Dialect;
 
 pub const HISTORY: usize = 60;
 const MAX_BODY: usize = 256 * 1024;
@@ -391,7 +392,18 @@ pub fn describe(err: &reqwest::Error, timeout: Duration) -> String {
 /// Auth is never passed: a host-local port is not behind the site's basic auth, and a
 /// password must not appear in a remote argv.
 pub fn via_host_command(target: &remote::Target, url: &str, secs: u64) -> String {
-    format!("curl -sS -o /dev/null -w '%{{http_code}} %{{time_total}}' --max-time {secs} {}", remote::quote(target, url))
+    via_host_command_in(remote::dialect(target), url, secs)
+}
+
+/// `via_host_command` for a shell of `dialect`. PowerShell's `curl` is `Invoke-WebRequest`
+/// in Windows PowerShell 5.1: there it is `curl.exe` (part of Windows since 10 1803),
+/// which writes to `NUL`.
+fn via_host_command_in(dialect: Dialect, url: &str, secs: u64) -> String {
+    let (curl, null) = match dialect {
+        Dialect::Posix => ("curl", "/dev/null"),
+        Dialect::PowerShell => ("curl.exe", "NUL"),
+    };
+    format!("{curl} -sS -o {null} -w '%{{http_code}} %{{time_total}}' --max-time {secs} {}", dialect.quote(url))
 }
 
 /// Parse `via_host_command` output: `(status, latency_ms)`; status 0 means no response.
@@ -666,6 +678,12 @@ mod tests {
         // POSIX quoting on the ssh host, on every OS.
         assert!(via_host_command(&ssh, "http://x/it's", 5).ends_with(r"'http://x/it'\''s'"));
         assert!(via_host_command(&remote::Target::Local, "http://x/a b", 5).ends_with("'http://x/a b'"));
+        // This computer's PowerShell (Windows): curl.exe, never 5.1's `curl` alias.
+        assert_eq!(
+            via_host_command_in(Dialect::PowerShell, "http://127.0.0.1:8081/it's", 5),
+            "curl.exe -sS -o NUL -w '%{http_code} %{time_total}' --max-time 5 'http://127.0.0.1:8081/it''s'"
+        );
+        assert_eq!(via_host_command(&remote::Target::Local, "http://x/", 5), via_host_command_in(Dialect::HOST, "http://x/", 5));
         assert_eq!(parse_via_host("200 0.0123"), (Some(200), Some(12)));
         assert_eq!(parse_via_host("000 5.001"), (None, Some(5001)));
         assert_eq!(parse_via_host(""), (None, None));

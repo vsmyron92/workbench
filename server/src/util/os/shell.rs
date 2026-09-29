@@ -152,6 +152,51 @@ pub fn posix_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// The language of command lines for the local run shell (`run_argv`), which detected
+/// run commands are written in (docs/windows-port.md §2, "Detected commands"). A
+/// command for an ssh host or a container is POSIX on every OS (`posix_quote`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    /// `bash -lc` (Unix).
+    Posix,
+    /// PowerShell (Windows): `pwsh`, or Windows PowerShell 5.1, which has no `&&`.
+    PowerShell,
+}
+
+impl Dialect {
+    /// The run shell's language on this OS.
+    pub const HOST: Dialect = if cfg!(windows) { Dialect::PowerShell } else { Dialect::Posix };
+
+    /// `s` as one word of this language (`quote` on its OS).
+    pub fn quote(self, s: &str) -> String {
+        match self {
+            Dialect::Posix => posix_quote(s),
+            Dialect::PowerShell => ps_quote(s),
+        }
+    }
+
+    /// The program at `path` as the first word of a command: quoted like `quote`; a
+    /// quoted one needs PowerShell's call operator (`& 'C:\my tools\x.exe'`), without
+    /// which it is a string, not a command.
+    pub fn program(self, path: &str) -> String {
+        let q = self.quote(path);
+        match self {
+            Dialect::PowerShell if q.starts_with('\'') => format!("& {q}"),
+            _ => q,
+        }
+    }
+
+    /// `first`, then `then` when `first` succeeded: `first && then`. Windows PowerShell
+    /// 5.1 has no `&&`, and `first; if ($?) { then }` would leave the exit status to what
+    /// `$?` is after an `if`: a failure exits at once, `first; if (-not $?) { exit 1 }; then`.
+    pub fn and_then(self, first: &str, then: &str) -> String {
+        match self {
+            Dialect::Posix => format!("{first} && {then}"),
+            Dialect::PowerShell => format!("{first}; if (-not $?) {{ exit 1 }}; {then}"),
+        }
+    }
+}
+
 /// A path for insertion at a shell or agent prompt (a pasted image), quoted like `quote`.
 pub fn quote_path(p: &str) -> String {
     #[cfg(unix)]
@@ -194,7 +239,6 @@ pub fn helper_command(exe: &Path, args: &[&str]) -> String {
 /// `s` as one PowerShell word: unchanged when plain, else a single-quoted string, in which
 /// nothing is special but the quote itself, doubled (PowerShell also ends such a string
 /// at a typographic quote, `‘ ’ ‚ ‛`).
-#[cfg(any(windows, test))]
 fn ps_quote(s: &str) -> String {
     if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:\\=+".contains(c)) {
         return s.to_string();
@@ -291,6 +335,20 @@ mod tests {
         assert_eq!(posix_quote("a b"), "'a b'");
         assert_eq!(posix_quote("it's"), r"'it'\''s'");
         assert_eq!(posix_quote(r"C:\x"), r"'C:\x'");
+    }
+
+    #[test]
+    fn dialects_quote_programs_and_chain_commands() {
+        let (sh, ps) = (Dialect::Posix, Dialect::PowerShell);
+        assert_eq!(sh.quote("a b"), "'a b'");
+        assert_eq!(ps.quote("it's"), "'it''s'");
+        assert_eq!(sh.program("./build/app"), "./build/app");
+        assert_eq!(sh.program("./my app"), "'./my app'");
+        assert_eq!(ps.program(r".\build\Debug\app.exe"), r".\build\Debug\app.exe");
+        assert_eq!(ps.program(r".\my app.exe"), r"& '.\my app.exe'");
+        assert_eq!(sh.and_then("make", "./app"), "make && ./app");
+        assert_eq!(ps.and_then("cmake --build build", r".\app.exe"), r"cmake --build build; if (-not $?) { exit 1 }; .\app.exe");
+        assert_eq!(Dialect::HOST, if cfg!(windows) { ps } else { sh });
     }
 
     #[test]

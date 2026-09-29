@@ -7,7 +7,6 @@
 //! (`gdb --version`, `python3 -c "import debugpy"`), never anything from a project.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -216,6 +215,8 @@ fn lldb_dap_command() -> String {
             let Ok(rd) = std::fs::read_dir(&dir) else { continue };
             for e in rd.flatten().take(5000) {
                 let n = e.file_name().to_string_lossy().into_owned();
+                // `lldb-dap-19.exe` on Windows is looked up as `lldb-dap-19`.
+                let n = n.strip_suffix(std::env::consts::EXE_SUFFIX).unwrap_or(&n).to_string();
                 for prefix in ["lldb-dap-", "lldb-vscode-"] {
                     if let Some(v) = n.strip_prefix(prefix).and_then(|v| v.parse::<u32>().ok()) {
                         if best.as_ref().is_none_or(|(b, _)| v > *b) {
@@ -356,22 +357,19 @@ pub fn gdb_version(first_line: &str) -> Option<(u32, u32)> {
 
 const PROBE_TTL: Duration = Duration::from_secs(30);
 
-fn resolve_command(cmd: &str) -> Option<PathBuf> {
-    crate::util::which_path(cmd)
-}
-
 async fn probe_uncached(a: &Adapter) -> Availability {
     if !a.enabled {
         return Availability::missing(format!("disabled in config.toml ([debug.adapters.{}] enabled = false)", a.id));
     }
-    let Some(path) = resolve_command(&a.command) else {
+    // An npm shim (a Node.js adapter on Windows) is probed as node and its script.
+    let Some(resolved) = crate::util::os::exe::resolve(&a.command) else {
         return Availability::missing(format!("`{}` was not found on PATH", a.command));
     };
-    let path_s = path.display().to_string();
+    let path_s = resolved.program.display().to_string();
     let lead = launcher_args(a);
     let run = |args: Vec<&'static str>| {
-        let mut cmd = tokio::process::Command::new(&path);
-        cmd.args(&lead).args(args).current_dir("/").envs(crate::util::os::exe::child_env().iter().copied());
+        let mut cmd = crate::util::os::exe::command(&resolved);
+        cmd.args(&lead).args(args).current_dir("/");
         for (k, v) in &a.env {
             cmd.env(k, v);
         }

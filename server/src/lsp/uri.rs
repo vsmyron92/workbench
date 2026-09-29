@@ -319,12 +319,16 @@ mod tests {
 
     #[test]
     fn file_uris_encode_and_decode() {
-        assert_eq!(file_uri("/home/u/my proj/a#b.rs"), "file:///home/u/my%20proj/a%23b.rs");
-        assert_eq!(parse_file_uri("file:///home/u/my%20proj/a%23b.rs").unwrap(), "/home/u/my proj/a#b.rs");
-        assert_eq!(parse_file_uri("file://localhost/x/y").unwrap(), "/x/y");
-        assert_eq!(parse_file_uri("file:///x/%C3%A9.rs").unwrap(), "/x/é.rs");
-        assert_eq!(parse_file_uri("file:///x/%3A.rs").unwrap(), "/x/:.rs");
-        assert_eq!(parse_file_uri("file:///x/y?q=1").unwrap(), "/x/y");
+        // Unix paths (on Windows a path without a drive names nothing: see the Windows test).
+        #[cfg(unix)]
+        {
+            assert_eq!(file_uri("/home/u/my proj/a#b.rs"), "file:///home/u/my%20proj/a%23b.rs");
+            assert_eq!(parse_file_uri("file:///home/u/my%20proj/a%23b.rs").unwrap(), "/home/u/my proj/a#b.rs");
+            assert_eq!(parse_file_uri("file://localhost/x/y").unwrap(), "/x/y");
+            assert_eq!(parse_file_uri("file:///x/%C3%A9.rs").unwrap(), "/x/é.rs");
+            assert_eq!(parse_file_uri("file:///x/%3A.rs").unwrap(), "/x/:.rs");
+            assert_eq!(parse_file_uri("file:///x/y?q=1").unwrap(), "/x/y");
+        }
         assert!(parse_file_uri("file://server/share").is_none());
         assert!(parse_file_uri("https://x/y").is_none());
         assert!(parse_file_uri("file:///x/%00").is_none());
@@ -344,6 +348,7 @@ mod tests {
         assert_eq!(parse_client_uri("file:///api/a/../b.rs"), Some(ClientUri::Project { pid: "api".into(), rel: "b.rs".into() }));
         assert_eq!(parse_client_uri("file:///api/../etc/passwd"), None);
         assert_eq!(parse_client_uri("file:///~abs/etc/passwd"), None);
+        #[cfg(unix)]
         assert_eq!(
             parse_client_uri("lsp-src://api/home/u/.cargo/registry/x.rs"),
             Some(ClientUri::Source { pid: "api".into(), path: "/home/u/.cargo/registry/x.rs".into() })
@@ -390,6 +395,8 @@ mod tests {
         assert!(tr.to_client("file:///C:/Users/me/ws/api-2/x.rs", &mut allow).unwrap().starts_with("lsp-src://"));
     }
 
+    /// Unix host paths (the Windows counterpart is `windows_uris_carry_drive_letters`).
+    #[cfg(unix)]
     #[test]
     fn host_servers_see_host_paths() {
         let root = PathBuf::from("/home/u/ws/api");
@@ -415,6 +422,9 @@ mod tests {
         assert!(tr.to_client("file:///home/u/ws/api-2/x.rs", &mut allow).unwrap().starts_with("lsp-src://"));
     }
 
+    /// Dev containers: a Unix host (Windows hosts run no language server in one yet, and
+    /// there a path without a drive names nothing).
+    #[cfg(unix)]
     #[test]
     fn container_servers_see_container_paths_both_ways() {
         let root = PathBuf::from("/home/u/ws/api");
@@ -516,18 +526,24 @@ mod tests {
 
     #[test]
     fn only_uri_fields_enter_the_allow_set() {
-        let root = PathBuf::from("/home/u/ws/api");
+        // A host path and its URI on this OS.
+        #[cfg(unix)]
+        let (root, dir, dir_uri) = ("/home/u/ws/api", "/etc/", "file:///etc/");
+        #[cfg(windows)]
+        let (root, dir, dir_uri) = (r"C:\Users\u\ws\api", r"C:\Windows\", "file:///C:/Windows/");
+        let root = PathBuf::from(root);
         let map = PathMap::host();
         let tr = host_tr(&root, &map);
         let mut allow = AllowSet::default();
-        let mut v = json!({ "items": [{ "label": "file:///etc/hostname", "textEdit": { "newText": "file:///etc/hostname" }, "data": { "uri": "file:///etc/passwd" } }] });
+        let text = format!("{dir_uri}hostname");
+        let mut v = json!({ "items": [{ "label": text, "textEdit": { "newText": text }, "data": { "uri": format!("{dir_uri}passwd") } }] });
         rewrite(&mut v, &["file://"], &mut |s| tr.to_client(s, &mut allow));
-        assert_eq!(v["items"][0]["label"], "file:///etc/hostname");
-        assert!(allow.get("/etc/hostname").is_none() && allow.get("/etc/passwd").is_none());
-        let mut v = json!([{ "uri": "file:///usr/lib/x.rs", "range": {} }]);
+        assert_eq!(v["items"][0]["label"], text);
+        assert!(allow.get(&format!("{dir}hostname")).is_none() && allow.get(&format!("{dir}passwd")).is_none());
+        let mut v = json!([{ "uri": format!("{dir_uri}x.rs"), "range": {} }]);
         rewrite(&mut v, &["file://"], &mut |s| tr.to_client(s, &mut allow));
-        assert_eq!(v[0]["uri"], "lsp-src://api/usr/lib/x.rs");
-        assert!(allow.get("/usr/lib/x.rs").is_some());
+        assert_eq!(v[0]["uri"], format!("lsp-src://api{}x.rs", dir_uri.trim_start_matches("file://")));
+        assert!(allow.get(&format!("{dir}x.rs")).is_some());
     }
 
     #[test]

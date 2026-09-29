@@ -758,6 +758,17 @@ Rules for these runs:
 - Files below `SAMPLE_DIRS` (`examples/`, `third_party/`, `testdata/`, `fixtures/`…) propose
   runs only when the rest of the project proposes none.
 - A name clash in one directory is qualified by the tool (`serve · uv`).
+- Commands are written in the run shell's language (`detect::dialect`, the one helper
+  every Windows form goes through; `util::os::shell::Dialect`): POSIX for `bash -lc`, so
+  Linux gets exactly what it always did. On Windows (PowerShell): the venv's
+  `Scripts\python.exe`, `python` or `py -3` for `python3`, `a; if (-not $?) { exit 1 };
+  b` for `a && b` (Windows PowerShell 5.1 has no `&&`), `.\build\Debug\app.exe` after
+  `cmake --build build --config Debug` (Visual Studio, CMake's default there, keeps a
+  folder per configuration; a Ninja preset does not), CMake presets for `Windows`,
+  `.\gradlew.bat` and `.\mvnw.cmd`, `ruby bin/rails`, `php vendor/bin/phpunit`, the Unity
+  editor in `%ProgramFiles%` called with `&`. Procfile lines and documented commands in
+  POSIX syntax (`$VAR`, `&&`, `VAR=x cmd`, `.sh`…) are not offered there. Deploys and
+  probes for an ssh host stay POSIX; a local `via_host` probe runs `curl.exe -o NUL`.
 
 ## Database (db)
 
@@ -1079,7 +1090,12 @@ rust-analyzer` names a real binary, which is then run. The TypeScript preset get
 (typescript-language-server only looks in the workspace root, which fails for monorepos
 with `web/node_modules`); TypeScript 7's native server (`tsc --lsp --stdio`) has no
 `tsserver.js` and is configured as a server of your own. The LSP `languageId` comes from
-the extension (`typescriptreact`, `shellscript`…).
+the extension (`typescriptreact`, `shellscript`…). Servers start through `util::os::exe`:
+on Windows an npm `.cmd` shim (typescript-language-server, pyright, bash, yaml, json)
+runs as `node.exe` and its package script (whose folder `fallbackPath` is looked for
+from), a rustup proxy is a hard link to `rustup.exe`, and another batch file runs only
+with arguments cmd.exe cannot misread; absolute watcher globs (`C:\p/**/*.rs`) are
+matched below their drive.
 
 **Trust** (`trust.rs`). Nothing starts before the user enables code intelligence for the
 project: `POST …/lsp/enable {mode?}` writes `data_dir/lsp/<id>.json` (0600, `{enabled, root,
@@ -1319,7 +1335,11 @@ Adapter Protocol, for any language with a DAP adapter.
 **Adapters** (`adapters.rs`). Presets, in preference order: `gdb` (`gdb -q -i dap`, GDB ≥ 14;
 C, C++, Rust, Fortran, Ada, D), `lldb-dap` (also `lldb-vscode` or a versioned `lldb-dap-NN`
 on PATH), `codelldb` (`codelldb --port {port}`, TCP), `debugpy` (`python3 -m
-debugpy.adapter`), `delve` (`dlv dap --listen 127.0.0.1:{port}`, TCP). `[debug.adapters.<id>]`
+debugpy.adapter`; on Windows `python`, else `py -3`), `delve` (`dlv dap --listen
+127.0.0.1:{port}`, TCP). Adapters are found and started through `util::os::exe` (an npm
+shim as node and its script; another batch file only with arguments cmd.exe cannot
+misread). On Windows gdb reads only MinGW debug information: with an MSVC Rust
+toolchain a gdb session says so and loads no pretty printers. `[debug.adapters.<id>]`
 overrides a preset field by field or defines another adapter (`command` required): `kind`
 (`gdb|lldb|codelldb|debugpy|delve|generic`, the launch-argument dialect), `label`, `command`,
 `args`, `languages`, `transport` (`stdio|tcp`: `{port}` in `args` becomes a free loopback
@@ -1354,11 +1374,12 @@ session. Deriving configurations runs nothing (no `cargo metadata`: a
 
 **Launch configurations** (`launch.rs`, `derive.rs`, `config/project.rs`). `[[debug]]`
 entries merge by `name` like `[[run]]`: `name`, `adapter`, `request` (`launch|attach`),
-`language`, `program` (project-relative, absolute or `~/`; `{root}`, toolchain
+`language`, `program` (project-relative, on Windows with `/` or `\`, absolute or `~/`; `{root}`, toolchain
 placeholders and `${workspaceFolder}` expand), `module` (Python `-m`), `args`, `cwd`, `env`,
 `pre_launch` (alias `preLaunch`: a run configuration's name, started through the apps
-slice and waited for until it exits 0 or is ready, or a command run with `bash -lc` in a
-Command terminal; runs that need confirmation are refused), `stop_on_entry` (alias
+slice and waited for until it exits 0 or is ready, or a command run in the run shell
+(`bash -lc`; PowerShell on Windows) in a Command terminal; runs that need confirmation
+are refused), `stop_on_entry` (alias
 `stopOnEntry`; for gdb it means "stop at `main`": `stopAtBeginningOfMainSubprogram`),
 `console` (`terminal` — the default where the adapter supports `runInTerminal` — or
 `console`), `pid` (attach), `extra` (adapter arguments merged last). Derived ones, after

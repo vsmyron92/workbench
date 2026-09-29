@@ -73,7 +73,11 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
             cx.add_run(RunConfig {
                 name: scoped("phpunit", &cwd),
                 kind: RunKind::Test,
-                command: "vendor/bin/phpunit".into(),
+                // Composer's proxy is a PHP script, which Windows does not start by its shebang.
+                command: match super::dialect() {
+                    crate::util::os::shell::Dialect::Posix => "vendor/bin/phpunit".into(),
+                    crate::util::os::shell::Dialect::PowerShell => "php vendor/bin/phpunit".into(),
+                },
                 cwd: cwd.clone(),
                 source: source(cx, &cfg, ""),
                 group: Some("test".into()),

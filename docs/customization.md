@@ -119,6 +119,19 @@ cli = ""                           # devcontainer CLI, for configs with features
 Language servers and debug adapters run project code, so they start only after you
 enable code intelligence for a project (its first source file offers it) or press Debug.
 
+On Windows (not released yet) run commands go to PowerShell, and detected ones are
+written for it: `python` or `py -3` and the virtualenv's `Scripts\python.exe`,
+`.\gradlew.bat`, CMake's Debug folder (`.\build\Debug\app.exe`), no `&&` (Windows
+PowerShell 5.1 has none). Commands from a Procfile or a README that need a POSIX shell are
+not offered. Language servers installed with `npm install -g` are found in
+`%APPDATA%\npm` and run with Node directly. GDB reads only MinGW builds: to debug Rust
+built with the default MSVC toolchain, install lldb-dap or CodeLLDB and set
+
+```toml
+[debug.default_adapter]
+rust = "codelldb"
+```
+
 ## Change with an agent
 
 | Ask for | Where it belongs |

@@ -39,7 +39,7 @@ pub async fn on_fs_changed(state: &AppState, pid: &str, data: &Value) {
         let list: Vec<Value> = changes
             .iter()
             .filter(|(host, kind)| {
-                watchers.iter().any(|w| w.kind & (1 << (kind - 1)) != 0 && host.strip_prefix(&w.base).is_ok_and(|rel| w.glob.is_match(rel)))
+                watchers.iter().any(|w| w.kind & (1 << (kind - 1)) != 0 && crate::util::os::path::strip_prefix(host, &w.base).is_some_and(|rel| w.glob.is_match(rel)))
             })
             .filter_map(|(host, kind)| s.map.to_server(host).map(|p| json!({ "uri": uri::file_uri(&p), "type": kind })))
             .collect();

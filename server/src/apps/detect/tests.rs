@@ -17,6 +17,13 @@ mod layout;
 mod make;
 mod python;
 mod web;
+mod windows;
+
+/// Detection with the POSIX forms (`bash -lc`), on every OS: the fixtures pin what Unix
+/// gets. `windows` checks the PowerShell forms (`detect_as`).
+pub(super) fn detect(root: &Path) -> ProjectFile {
+    detect_as(root, crate::util::os::shell::Dialect::Posix)
+}
 
 pub(super) fn write(root: &Path, rel: &str, text: &str) {
     let p = root.join(rel);
@@ -51,7 +58,12 @@ pub(super) fn has_run(pf: &ProjectFile, name: &str) -> bool {
 /// `detected:` source (documentation suggestions: `<doc>:L<n>`), nothing that runs
 /// by itself (`status`), dependencies that exist, and no unknown `{placeholder}`.
 pub(super) fn detect_checked(root: &Path) -> ProjectFile {
-    let pf = detect(root);
+    detect_checked_as(root, crate::util::os::shell::Dialect::Posix)
+}
+
+/// `detect_checked` with the forms of `dialect`'s run shell.
+pub(super) fn detect_checked_as(root: &Path, dialect: crate::util::os::shell::Dialect) -> ProjectFile {
+    let pf = detect_as(root, dialect);
     let mut seen = std::collections::BTreeSet::new();
     for r in &pf.runs {
         assert!(seen.insert(r.name.clone()), "duplicate run name {:?} in {:?}", r.name, names(&pf));

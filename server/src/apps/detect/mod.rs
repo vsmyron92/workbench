@@ -63,6 +63,7 @@ pub(crate) use {
     cargo::CARGO_TEST_RESULT, cmake::CTEST_RESULT, dotnet::DOTNET_TEST_RESULT, go::GO_TEST_RESULT, node::VITEST_RESULT,
     python::PYTEST_RESULT,
 };
+pub(crate) use python::venv_python;
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -71,6 +72,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ProjectFile;
 use crate::config::project::{RunConfig, RunKind};
+use crate::util::os::shell::Dialect;
 
 /// Directories never descended into by the project walk. `.claude` holds Claude
 /// Code's settings and its agent worktrees (full copies of the repository); the
@@ -397,10 +399,18 @@ pub(crate) fn scoped(name: &str, cwd: &str) -> String {
 }
 
 /// The program a command line starts, past `VAR=value` assignments: `uv` for
-/// `uv run serve`, `make` for `make test`, `phpunit` for `vendor/bin/phpunit`.
+/// `uv run serve`, `make` for `make test`, `phpunit` for `vendor/bin/phpunit` (and in
+/// PowerShell `python` for `.venv\Scripts\python.exe`).
 pub(crate) fn command_tool(cmd: &str) -> String {
     let first = cmd.split_whitespace().find(|t| !(t.contains('=') && !t.starts_with('-'))).unwrap_or("");
-    first.rsplit('/').next().unwrap_or("").trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').to_string()
+    let base = match dialect() {
+        Dialect::Posix => first.rsplit('/').next().unwrap_or(""),
+        Dialect::PowerShell => {
+            let b = first.rsplit(['/', '\\']).next().unwrap_or("");
+            b.strip_suffix(".exe").unwrap_or(b)
+        }
+    };
+    base.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').to_string()
 }
 
 /// What tells a run apart from another of the same name in the same directory:
@@ -695,13 +705,80 @@ pub(crate) fn npm_graph(scripts: &serde_json::Map<String, serde_json::Value>) ->
     g
 }
 
+/// The language detected commands are written in: the local run shell's
+/// (`Dialect::HOST`: POSIX for `bash -lc` on Unix, PowerShell on Windows). Every Windows
+/// form of a detected command is decided here and in the helpers below (`python` or
+/// `py -3` for `python3`, `.venv\Scripts\python.exe`, `.\build\Debug\app.exe`,
+/// `.\gradlew.bat`, no `&&`), so detection on Unix writes exactly what it always did.
+/// Commands bound for an ssh host or a container stay POSIX (`posix_quote`).
+pub(crate) fn dialect() -> Dialect {
+    #[cfg(test)]
+    if let Some(d) = TEST_DIALECT.with(std::cell::Cell::get) {
+        return d;
+    }
+    Dialect::HOST
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DIALECT: std::cell::Cell<Option<Dialect>> = const { std::cell::Cell::new(None) };
+}
+
+/// `detect` as it runs where the run shell speaks `d`: the tests check the POSIX and the
+/// Windows forms on every OS.
+#[cfg(test)]
+pub(crate) fn detect_as(root: &Path, d: Dialect) -> ProjectFile {
+    TEST_DIALECT.with(|c| c.set(Some(d)));
+    let pf = detect(root);
+    TEST_DIALECT.with(|c| c.set(None));
+    pf
+}
+
 /// `s` as one shell word: unchanged when it is plain (`build`, `db:migrate`,
-/// `./cmd/api`), single-quoted otherwise. Detected commands run in the local run shell
-/// (`bash -lc` on Unix; a deploy for an ssh host quotes with `posix_quote`), and names
-/// from repository files (Make targets, Taskfile keys, script names, directory names)
-/// must never add a command of their own.
+/// `./cmd/api`), single-quoted otherwise (`dialect`'s rules). Names from repository
+/// files (Make targets, Taskfile keys, script names, directory names) must never add a
+/// command of their own.
 pub(crate) fn sh(s: &str) -> String {
-    crate::apps::expand::shell_quote(s)
+    dialect().quote(s)
+}
+
+/// `first`, then `then` when it succeeded (`Dialect::and_then`: `&&`, which Windows
+/// PowerShell 5.1 does not have).
+pub(crate) fn and_then(first: &str, then: &str) -> String {
+    dialect().and_then(first, then)
+}
+
+/// A program the project builds, at `rel` (`/` separators) below the run's directory,
+/// as a command's first word: `./build/app`; on Windows `.\build\app.exe`.
+pub(crate) fn local_program(rel: &str) -> String {
+    match dialect() {
+        Dialect::Posix => sh(&format!("./{rel}")),
+        Dialect::PowerShell => Dialect::PowerShell.program(&format!(".\\{}.exe", rel.replace('/', "\\"))),
+    }
+}
+
+/// Python 3 at the start of a command line: `python3`; on Windows `python`, or the
+/// launcher's `py -3` (`os::exe::python_words`).
+pub(crate) fn python_words() -> String {
+    match dialect() {
+        Dialect::Posix => "python3".into(),
+        Dialect::PowerShell => crate::util::os::exe::python_words(),
+    }
+}
+
+static ENV_PREFIX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^\s*[A-Za-z_][A-Za-z0-9_]*=").unwrap());
+
+/// Whether a command from a repository file (a Procfile line, a documented command) needs
+/// a POSIX shell: `$VAR` or `$(…)`, backquotes, `VAR=value cmd`, `&&` or `||`, `<`,
+/// `~/`, `/dev/…`, `export`/`source`, a `.sh` script. Where the run shell is PowerShell
+/// such a command is not offered.
+pub(crate) fn posix_only(cmd: &str) -> bool {
+    let first = cmd.split_whitespace().next().unwrap_or("");
+    cmd.contains(['$', '`', '<'])
+        || ["&&", "||", "~/", "/dev/"].iter().any(|s| cmd.contains(s))
+        || ENV_PREFIX.is_match(cmd)
+        || matches!(first, "export" | "source" | "." | "unset" | "alias")
+        || cmd.split_whitespace().any(|w| w.trim_matches(['"', '\'']).ends_with(".sh"))
 }
 
 static BODY_PORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {

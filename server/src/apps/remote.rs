@@ -4,9 +4,10 @@
 //! * `env.host` names a `[hosts.<name>]` entry → `ssh -o BatchMode=yes [-i key] [-p port] user@host '<cmd>'`.
 //!   BatchMode means ssh never prompts (no password or host-key questions in a PTY
 //!   nobody watches); the command is one argv element, so no local shell sees it.
-//! * No `env.host` (or `host = "local"` without such a `[hosts]` entry) → `bash -lc '<cmd>'`
-//!   in the project root. Deploys additionally require `deploy.local = true` to run
-//!   locally, so a missing host can never turn a remote deploy into a local one.
+//! * No `env.host` (or `host = "local"` without such a `[hosts]` entry) → the run shell
+//!   (`bash -lc '<cmd>'`; PowerShell on Windows) in the project root. Deploys additionally
+//!   require `deploy.local = true` to run locally, so a missing host can never turn a
+//!   remote deploy into a local one.
 
 use crate::config::expand_tilde;
 use crate::config::project::{Environment, SshHost};
@@ -104,12 +105,12 @@ pub fn argv(target: &Target, cmd: &str, tty: bool) -> Vec<String> {
     }
 }
 
-/// `s` as one word of the shell `argv` gives a command on `target`: the local run shell's
-/// (`util::os::shell::quote`), or POSIX on an ssh host whatever OS Workbench runs on.
-pub fn quote(target: &Target, s: &str) -> String {
+/// The language of the shell `argv` gives a command on `target`: the local run shell's
+/// (`Dialect::HOST`), or POSIX on an ssh host whatever OS Workbench runs on.
+pub fn dialect(target: &Target) -> crate::util::os::shell::Dialect {
     match target {
-        Target::Local => crate::util::os::shell::quote(s),
-        Target::Ssh(_) => crate::util::os::shell::posix_quote(s),
+        Target::Local => crate::util::os::shell::Dialect::HOST,
+        Target::Ssh(_) => crate::util::os::shell::Dialect::Posix,
     }
 }
 
@@ -146,6 +147,8 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(argv(&Target::Local, "echo hi", true), vec!["bash", "-lc", "echo hi"]);
         assert_eq!(Target::Ssh(host()).label(), "root@203.0.113.10");
+        assert_eq!(dialect(&Target::Local), crate::util::os::shell::Dialect::HOST);
+        assert_eq!(dialect(&Target::Ssh(host())), crate::util::os::shell::Dialect::Posix);
     }
 
     #[test]

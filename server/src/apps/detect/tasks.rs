@@ -552,7 +552,9 @@ pub fn detect_procfile(cx: &mut Ctx, f: &Path) {
         let Some(c) = PROC_LINE.captures(line.trim_end()) else { continue };
         let (proc, cmd) = (c[1].to_string(), c[2].trim().to_string());
         // Heroku's release phase runs on deploy (migrations against the live database).
-        if proc == "release" || added >= MAX_PER_FILE {
+        // Procfile lines are POSIX shell: where the run shell is PowerShell, only those
+        // that read the same there are offered.
+        if proc == "release" || added >= MAX_PER_FILE || (super::dialect() == crate::util::os::shell::Dialect::PowerShell && super::posix_only(&cmd)) {
             continue;
         }
         let web = proc == "web";

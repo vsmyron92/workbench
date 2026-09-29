@@ -642,7 +642,7 @@ https://example.com/plain
         tokio::spawn(async move { axum::serve(listener, echo).await.unwrap() });
 
         let (cfg, data, proj) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let root = proj.path().canonicalize().unwrap().join("api");
+        let root = crate::util::os::path::canonicalize(proj.path()).unwrap().join("api");
         std::fs::create_dir_all(root.join("http")).unwrap();
         std::fs::write(root.join("http/api.http"), "@base = http://127.0.0.1:{{port}}\n\n### Get\nGET {{base}}/things?q={{token}}\nAuthorization: Bearer {{token}}\n\n### Put\nPUT {{base}}/files\n\n< ./body.json\n\n### Broken\nGET {{base}}/{{nope}}\n").unwrap();
         std::fs::write(root.join("http/body.json"), "{\"a\": 1}").unwrap();

@@ -246,7 +246,9 @@ fn suggestions(cx: &mut Ctx) {
             if added >= MAX_SUGGESTIONS {
                 return;
             }
-            if !is_offerable(&fc.text) {
+            // Shell blocks are POSIX: where the run shell is PowerShell, only commands
+            // that read the same there are offered.
+            if !is_offerable(&fc.text) || (super::dialect() == crate::util::os::shell::Dialect::PowerShell && super::posix_only(&fc.text)) {
                 continue;
             }
             let Some(cwd) = choose_cwd(cx, &fc) else { continue };

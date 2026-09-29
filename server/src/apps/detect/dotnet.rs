@@ -71,9 +71,9 @@ pub fn detect_validate_script(cx: &mut Ctx, f: &Path) {
     let Some(dir) = f.parent() else { return };
     let Some(name) = f.file_name().and_then(|n| n.to_str()) else { return };
     let interpreter = match f.extension().and_then(|e| e.to_str()) {
-        Some("mjs" | "js" | "cjs") => "node",
-        Some("py") => "python3",
-        Some("sh") => "bash",
+        Some("mjs" | "js" | "cjs") => "node".to_string(),
+        Some("py") => super::python_words(),
+        Some("sh") => "bash".to_string(),
         _ => return,
     };
     let cwd = cx.rel(dir);

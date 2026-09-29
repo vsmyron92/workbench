@@ -97,6 +97,13 @@ pub fn own_pid_alive(pid: u32) -> bool {
     imp::own_pid_alive(pid)
 }
 
+/// Whether process `pid` still runs: alive and, on Unix, not a zombie its parent has yet
+/// to reap (Windows has none: an ended process is gone for all but its handles' holders).
+#[cfg(test)]
+pub fn pid_running(pid: i32) -> bool {
+    imp::pid_running(pid)
+}
+
 /// End process `pid` at once (SIGKILL). The caller makes sure the pid is still the one
 /// it means (a child not yet reaped). Pids below 1 are ignored.
 pub fn kill_pid(pid: i32) {
@@ -284,6 +291,12 @@ mod imp {
 
     pub fn own_pid_alive(pid: u32) -> bool {
         Path::new(&format!("/proc/{pid}")).exists()
+    }
+
+    #[cfg(test)]
+    pub fn pid_running(pid: i32) -> bool {
+        // The state follows the command name's last `)`.
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.rsplit_once(')').is_some_and(|(_, rest)| rest.split_whitespace().next() != Some("Z")))
     }
 
     pub fn kill_pid(pid: i32) {
@@ -576,6 +589,11 @@ mod imp {
 
     pub fn own_pid_alive(pid: u32) -> bool {
         pid > 0 && open_process(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, pid).is_some_and(|h| running(&h))
+    }
+
+    #[cfg(test)]
+    pub fn pid_running(pid: i32) -> bool {
+        pid_alive(pid)
     }
 
     pub fn kill_pid(pid: i32) {
@@ -885,10 +903,11 @@ mod tests {
         assert!(own_pid_alive(pid as u32) && own_pid_alive(std::process::id()));
         assert_eq!(parent_of(pid), Some(std::process::id() as i32));
         assert!(!debugger_attached(pid as u32).await);
+        assert!(pid_running(pid));
         kill_pid(pid);
         let status = child.wait().unwrap();
         assert!(!status.success());
-        assert!(!pid_alive(pid));
+        assert!(!pid_alive(pid) && !pid_running(pid));
         assert!(!own_pid_alive(pid as u32));
         assert!(!pid_alive(0) && !pid_alive(-1));
         kill_pid(0); // ignored, not Workbench's own group

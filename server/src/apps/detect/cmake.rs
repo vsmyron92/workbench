@@ -10,7 +10,10 @@
 //! and `cmake --workflow --preset` runs instead.
 //!
 //! `add_executable(name …)` targets become `cmake --build … --target name &&
-//! <binary dir>/name` runs.
+//! <binary dir>/name` runs. On Windows (`super::dialect`) presets are those for
+//! `Windows`, and a multi-configuration build dir (Visual Studio, CMake's default
+//! there) builds and runs Debug: `cmake --build build --config Debug --target name`,
+//! then `.\build\Debug\name.exe`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,8 +21,9 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::{Ctx, scoped, sh, source, text};
+use super::{Ctx, and_then, local_program, scoped, sh, source, text};
 use crate::config::project::{Component, RunConfig, RunKind};
+use crate::util::os::shell::Dialect;
 
 /// `  3/12 Test  #3: parser_tests .....................   Passed    0.01 sec`
 pub const CTEST_RESULT: &str = r"^\s*\d+/\d+ Test\s+#\d+: (?P<name>\S+) \.+\s*(?:\*+)?(?P<status>Passed|Failed)\b";
@@ -105,7 +109,26 @@ fn exe_path(bin: &str, rel_dir: &str, runtime_dir: Option<&str>, name: &str) -> 
     if sub.is_empty() { format!("{bin}/{name}") } else { format!("{bin}/{sub}/{name}") }
 }
 
+/// Whether a build dir made by `generator` keeps one folder per configuration
+/// (`Debug/app.exe`): Visual Studio, which is CMake's default on Windows (also for a
+/// preset that names no generator), Ninja Multi-Config and Xcode.
+fn multi_config(generator: Option<&str>) -> bool {
+    generator.is_none_or(|g| g.starts_with("Visual Studio") || g.contains("Multi-Config") || g == "Xcode")
+}
+
+/// Build `name` in the binary dir `bin`, then run it. On Windows a multi-configuration
+/// build dir (`multi`) builds and runs its Debug configuration: `cmake --build build
+/// --config Debug --target app`, then `.\build\Debug\app.exe`.
+fn build_and_run(bin: &str, rel_dir: &str, runtime_dir: Option<&str>, name: &str, multi: bool) -> String {
+    let windows = super::dialect() == Dialect::PowerShell;
+    let (config, exe) = if windows && multi { (" --config Debug", format!("Debug/{name}")) } else { ("", name.to_string()) };
+    and_then(&format!("cmake --build {}{config} --target {}", sh(bin), sh(name)), &local_program(&exe_path(bin, rel_dir, runtime_dir, &exe)))
+}
+
 fn plain(cx: &mut Ctx, cwd: &str, top: &Path, tests: bool, exes: &[(String, String, PathBuf)], runtime_dir: Option<&str>) {
+    // `build` is configured by the run below: on Windows with CMake's default generator,
+    // Visual Studio, whose configurations are chosen when building (Debug by default).
+    let windows = super::dialect() == Dialect::PowerShell;
     let configure = cx.add_run(RunConfig {
         name: scoped("cmake configure", cwd),
         kind: RunKind::Build,
@@ -119,7 +142,7 @@ fn plain(cx: &mut Ctx, cwd: &str, top: &Path, tests: bool, exes: &[(String, Stri
     let build = cx.add_run(RunConfig {
         name: scoped("cmake build", cwd),
         kind: RunKind::Build,
-        command: "cmake --build build".into(),
+        command: if windows { "cmake --build build --config Debug".into() } else { "cmake --build build".into() },
         cwd: cwd.to_string(),
         depends_on: deps.clone(),
         source: source(cx, top, ""),
@@ -130,7 +153,7 @@ fn plain(cx: &mut Ctx, cwd: &str, top: &Path, tests: bool, exes: &[(String, Stri
         cx.add_run(RunConfig {
             name: scoped("ctest", cwd),
             kind: RunKind::Test,
-            command: "ctest --test-dir build --output-on-failure".into(),
+            command: if windows { "ctest --test-dir build -C Debug --output-on-failure".into() } else { "ctest --test-dir build --output-on-failure".into() },
             cwd: cwd.to_string(),
             depends_on: build.into_iter().collect(),
             result_pattern: Some(CTEST_RESULT.into()),
@@ -140,11 +163,10 @@ fn plain(cx: &mut Ctx, cwd: &str, top: &Path, tests: bool, exes: &[(String, Stri
         });
     }
     for (name, rel_dir, list) in exes {
-        let bin = exe_path("build", rel_dir, runtime_dir, name);
         cx.add_run(RunConfig {
             name: scoped(name, cwd),
             kind: RunKind::Task,
-            command: format!("cmake --build build --target {} && {}", sh(name), sh(&format!("./{bin}"))),
+            command: build_and_run("build", rel_dir, runtime_dir, name, true),
             cwd: cwd.to_string(),
             depends_on: deps.clone(),
             source: source(cx, list, &format!(" add_executable({name})")),
@@ -158,8 +180,8 @@ fn plain(cx: &mut Ctx, cwd: &str, top: &Path, tests: bool, exes: &[(String, Stri
 #[derive(Debug, Default)]
 pub struct Presets {
     pub file: PathBuf,
-    /// (name, binary dir relative to the project when known)
-    pub configure: Vec<(String, Option<String>)>,
+    /// (name, binary dir relative to the project when known, generator when named)
+    pub configure: Vec<(String, Option<String>, Option<String>)>,
     /// (name, its configure preset)
     pub build: Vec<(String, Option<String>)>,
     pub test: Vec<(String, Option<String>)>,
@@ -201,7 +223,8 @@ fn read_presets(cx: &mut Ctx, dir: &Path) -> Presets {
         match kind.as_str() {
             "configurePresets" if out.configure.len() < MAX_PRESETS => {
                 let bin = binary_dir(&name, &pr, &all, 0);
-                out.configure.push((name, bin));
+                let generator = generator(&pr, &all, 0);
+                out.configure.push((name, bin, generator));
             }
             "buildPresets" if out.build.len() < MAX_PRESETS => out.build.push((name, conf)),
             "testPresets" if out.test.len() < MAX_PRESETS => out.test.push((name, conf)),
@@ -216,11 +239,15 @@ fn read_presets(cx: &mut Ctx, dir: &Path) -> Presets {
     out
 }
 
-/// A preset's `condition` for this machine (Linux): `equals`/`notEquals`/`inList`
-/// on `${hostSystemName}`; inherited from the configure presets it inherits.
+/// A preset's `condition` for this machine (Linux; `Windows` where the run shell is
+/// PowerShell): `equals`/`notEquals`/`inList` on `${hostSystemName}`; inherited from the
+/// configure presets it inherits.
 fn condition_holds(pr: &serde_json::Value, all: &BTreeMap<String, serde_json::Value>) -> bool {
     fn check(c: &serde_json::Value) -> bool {
-        let host = "Linux";
+        let host = match super::dialect() {
+            Dialect::Posix => "Linux",
+            Dialect::PowerShell => "Windows",
+        };
         let s = |k: &str| c.get(k).and_then(|x| x.as_str()).unwrap_or("");
         let is_host = |x: &str| x == "${hostSystemName}";
         match s("type") {
@@ -269,10 +296,22 @@ fn binary_dir(name: &str, pr: &serde_json::Value, all: &BTreeMap<String, serde_j
     (!d.is_empty() && !d.contains("${") && !crate::util::os::path::is_absolute_str(&d) && !d.contains("..")).then_some(d)
 }
 
+/// A configure preset's `generator` (inherited if unset).
+fn generator(pr: &serde_json::Value, all: &BTreeMap<String, serde_json::Value>, depth: usize) -> Option<String> {
+    pr.get("generator").and_then(|g| g.as_str()).map(str::to_string).or_else(|| {
+        let parents: Vec<&str> = match pr.get("inherits") {
+            Some(serde_json::Value::String(s)) => vec![s.as_str()],
+            Some(serde_json::Value::Array(a)) => a.iter().filter_map(|x| x.as_str()).collect(),
+            _ => vec![],
+        };
+        (depth <= 6).then(|| parents.iter().filter_map(|p| all.get(*p)).find_map(|p| generator(p, all, depth + 1))).flatten()
+    })
+}
+
 fn with_presets(cx: &mut Ctx, dir: &Path, cwd: &str, p: &Presets, tests: bool, exes: &[(String, String, PathBuf)], runtime_dir: Option<&str>) {
     let file = if p.file.as_os_str().is_empty() { dir.join("CMakePresets.json") } else { p.file.clone() };
     let mut configure_runs: BTreeMap<String, String> = BTreeMap::new();
-    for (name, _) in &p.configure {
+    for (name, _, _) in &p.configure {
         if let Some(n) = cx.add_run(RunConfig {
             name: scoped(&format!("cmake configure: {name}"), cwd),
             kind: RunKind::Build,
@@ -331,14 +370,13 @@ fn with_presets(cx: &mut Ctx, dir: &Path, cwd: &str, p: &Presets, tests: bool, e
         });
     }
     // Executables: built and run in the first configure preset whose binary dir is known.
-    let Some((preset, Some(bin))) = p.configure.iter().find(|c| c.1.is_some()) else { return };
+    let Some((preset, Some(bin), generator)) = p.configure.iter().find(|c| c.1.is_some()) else { return };
     let deps: Vec<String> = configure_runs.get(preset).cloned().into_iter().collect();
     for (name, rel_dir, list) in exes {
-        let path = exe_path(bin, rel_dir, runtime_dir, name);
         cx.add_run(RunConfig {
             name: scoped(name, cwd),
             kind: RunKind::Task,
-            command: format!("cmake --build {} --target {} && {}", sh(bin), sh(name), sh(&format!("./{path}"))),
+            command: build_and_run(bin, rel_dir, runtime_dir, name, multi_config(generator.as_deref())),
             cwd: cwd.to_string(),
             depends_on: deps.clone(),
             source: source(cx, list, &format!(" add_executable({name})")),
