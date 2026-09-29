@@ -943,7 +943,7 @@ async fn rust_gdb_args(root: &Path) -> (Vec<String>, Option<String>) {
     if out.ok() && sysroot.file_name().is_some_and(|n| n.to_string_lossy().ends_with("-windows-msvc")) {
         return (
             vec![],
-            Some("The Rust toolchain targets MSVC, whose debug information (PDB) gdb cannot read, and has no gdb pretty printers: debug Rust with lldb-dap or CodeLLDB ([debug] default_adapter.rust = \"codelldb\"), or build with a windows-gnu toolchain.".into()),
+            Some("The Rust toolchain targets MSVC, whose debug information (PDB) gdb cannot read, and has no gdb pretty printers: debug Rust with lldb-dap or CodeLLDB ([debug] default_adapter.rust = \"lldb-dap\" or \"codelldb\", whichever is installed), or build with a windows-gnu toolchain.".into()),
         );
     }
     if !out.ok() || !sysroot.is_absolute() || !etc.join("gdb_load_rust_pretty_printers.py").is_file() || crate::util::os::path::starts_with(&etc, root) {
