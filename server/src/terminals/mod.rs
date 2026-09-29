@@ -532,7 +532,8 @@ impl Terminals {
         self.get(id).map(|e| e.screen.out_tx.subscribe())
     }
 
-    /// Resolves to `Some(exit)` when the process has exited.
+    /// Resolves to `Some(exit)` when the process has exited, once `info` says so (Exited,
+    /// with `exit`), except while the server shuts down.
     pub fn exit_watch(&self, id: &str) -> Option<watch::Receiver<Option<ExitInfo>>> {
         self.get(id).map(|e| e.exit_tx.subscribe())
     }
@@ -792,16 +793,17 @@ impl Terminals {
                 let msg = format!("cannot start {program}: {e:#}");
                 entry.screen.feed(format!("\r\n\x1b[31m{msg}\x1b[0m\r\n").as_bytes());
                 let exit = ExitInfo { code: None, signal: Some("failed to start".into()), at: util::now_ms() };
-                entry.exit_tx.send_replace(Some(exit.clone()));
+                // Recorded before it is announced, as in `on_exit`.
                 self.update_as("terminal.exited", entry, |r| {
                     r.info.status = TerminalStatus::Exited;
-                    r.info.exit = Some(exit);
+                    r.info.exit = Some(exit.clone());
                     if let Some(a) = r.info.agent.as_mut() {
                         a.state = AgentState::Error;
                         a.attention = Some(msg.clone());
                     }
                     true
                 });
+                entry.exit_tx.send_replace(Some(exit));
                 Err(ApiError::internal(msg))
             }
         }
@@ -816,10 +818,16 @@ impl Terminals {
                 _ => return,
             }
         }
-        entry.exit_tx.send_replace(Some(info.clone()));
+        // While the server shuts down, the record keeps saying it runs (it is restarted
+        // on the next start): only the watchers learn of the exit.
         if self.shutting_down.load(Ordering::Relaxed) {
+            entry.exit_tx.send_replace(Some(info));
             return;
         }
+        // Recorded before `exit_tx` announces it, so whoever wakes on it (`kill`, `restart`,
+        // `exit_watch`) reads Exited. On Windows `kill` is usually waiting by then (the
+        // output ends only once the pseudoconsole has closed, after the leader is gone), and
+        // woken by an earlier announcement it could read Running.
         let is_agent = self.update_as("terminal.exited", entry, |r| {
             r.info.status = TerminalStatus::Exited;
             r.info.exit = Some(info.clone());
@@ -835,6 +843,7 @@ impl Terminals {
         if is_agent {
             state.auth.revoke_agent_tokens(&entry.id);
         }
+        entry.exit_tx.send_replace(Some(info));
         self.save_now(entry).await;
         // Background jobs the process left in its session keep running (a shell's
         // `npm run dev &` before `exit`): keep track of them so Kill and Close reach them.

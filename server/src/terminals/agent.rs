@@ -2908,7 +2908,9 @@ mod tests {
     fn workspace_folders_are_created_private() {
         let data = tempfile::tempdir().unwrap();
         let dirs = workspace_dirs(data.path(), Some("shop"));
-        assert_eq!(dirs, [data.path().join("workspace/shop").display().to_string(), data.path().join("workspace/home").display().to_string()]);
+        // Native separators (`join("workspace/shop")` would keep the `/` on Windows).
+        let root = data.path().join("workspace");
+        assert_eq!(dirs, [root.join("shop").display().to_string(), root.join("home").display().to_string()]);
         for d in &dirs {
             crate::util::os::perm::assert_mode(Path::new(d), 0o700);
         }

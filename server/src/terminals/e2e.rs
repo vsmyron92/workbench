@@ -103,6 +103,9 @@ async fn contract_spawn_input_output_exit_restart_forget() {
     t.send_text(&info.id, "hello", true).await.unwrap();
     let exit = wait_exit(&state, &info.id).await;
     assert_eq!(exit.code, Some(3));
+    // The exit is recorded by the time it is announced.
+    let now = t.info(&info.id).unwrap();
+    assert_eq!((now.status, now.exit.as_ref().and_then(|e| e.code)), (TerminalStatus::Exited, Some(3)));
     // Live output reached the subscriber.
     let mut seen = String::new();
     while let Ok(chunk) = out.try_recv() {
@@ -112,17 +115,16 @@ async fn contract_spawn_input_output_exit_restart_forget() {
     // The mirror keeps the final screen.
     let text = t.screen_text(&info.id, 50).unwrap();
     assert!(text.contains("got:hello env:from-spec"), "screen: {text:?}");
+    // Saved to disk with the final screen, right after the exit was announced.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let after = t.info(&info.id).unwrap();
-    assert_eq!(after.status, TerminalStatus::Exited);
-    assert_eq!(after.exit.as_ref().and_then(|e| e.code), Some(3));
-    // Saved to disk with the final screen.
     let tdir = state.paths.data_dir.join("terminals").join(&info.id);
     assert!(tdir.join("meta.json").is_file() && tdir.join("screen.bin").is_file());
 
     // Restart re-runs the command below the old output.
     t.restart(&state, &info.id).await.unwrap();
     assert_eq!(t.info(&info.id).unwrap().status, TerminalStatus::Running);
+    // Kill returns once the exit is recorded (on Windows it usually waits for the record:
+    // the output ends only once the pseudoconsole has closed).
     t.kill(&info.id).await.unwrap();
     assert_eq!(t.info(&info.id).unwrap().status, TerminalStatus::Exited);
     assert!(t.write(&info.id, b"x").is_err(), "writing to an exited terminal must fail");
@@ -761,7 +763,7 @@ async fn codex_sessions_are_discovered_tracked_and_resumed() {
         .find(|l| l.contains(&format!("X-Workbench-Terminal\"=\"{}\"", a.id)))
         .unwrap_or_else(|| panic!("{argv}"));
     assert!(first.starts_with("--no-daemon --no-alt-screen -c mcp_servers.workbench.url=\"http://127.0.0.1:"), "{first}");
-    assert!(first.contains(&format!("--add-dir {}", state.paths.data_dir.join("workspace/home").display())), "{first}");
+    assert!(first.contains(&format!("--add-dir {}", state.paths.data_dir.join("workspace").join("home").display())), "{first}");
     assert!(first.ends_with("-- first task"), "{first}");
     assert!(!first.contains("wba_"), "a token reached argv: {first}");
 
