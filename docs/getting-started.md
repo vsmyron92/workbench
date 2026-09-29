@@ -116,6 +116,24 @@ workbench service uninstall
 `install` without `--enable` only writes the files and prints the next steps
 (`--dry-run` shows them first). The launcher runs `workbench open`.
 
+On Windows (the port is in progress, see [windows-port.md](windows-port.md)) the same
+commands, plus `workbench service stop`, use a sign-in entry instead of a service, with no
+administrator rights:
+
+- `install` writes `%LOCALAPPDATA%\workbench\service.json` (the `WORKBENCH_*` variables set
+  in your shell) and a Start Menu shortcut, **Workbench**, that opens a signed-in window and
+  starts Workbench first when it is not running.
+- `--enable` also adds `Workbench` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+  and starts it now. Task Manager › Startup apps can turn it off.
+- Both run `workbenchw.exe`, which has to stay next to `workbench.exe`. It runs the server
+  without a console window, logs to `%LOCALAPPDATA%\workbench\service.log`, restarts the
+  server 5 seconds after it fails and gives up after 5 failures within a minute.
+- To restart (after an update, or a setting that needs it): `workbench service stop`, then
+  open Workbench from the Start Menu. `install --enable` over a running service restarts it
+  with the new settings when run from a terminal outside Workbench.
+- In a terminal started with *Run as administrator*, `install --enable` starts nothing:
+  Workbench and its agents would run as administrator too.
+
 ## Next steps
 
 - [Customization](customization.md): project config, run configurations, environments,

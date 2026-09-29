@@ -30,7 +30,9 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
     Win32_UI_Shell.
   - `sysinfo` (default features off, `system`), for process lists; confirm the version with
     `cargo add`.
-  - `mslnk` for the Start Menu shortcut; `dunce` (already in the lock).
+  - `dunce` (already in the lock). The Start Menu shortcut is written through the shell's
+    ShellLink COM object with windows-sys (`os::autostart`), not `mslnk` (unmaintained since
+    2022, bitflags 1, a subset of the format).
 - Windows dev-dependency `junction`; build-dependency `winresource` (icon and version
   resource, a no-op elsewhere).
 - Not needed: `if-addrs`, `trash`, `winreg`, `windows` (each replacement is under 80 lines of
@@ -312,17 +314,27 @@ overflow maps to `overflow: true`.
 **Symlinks.** Creating one needs Developer Mode or admin: report `ERROR_PRIVILEGE_NOT_HELD`
 clearly. Reading and containment are unaffected.
 
-**Service: an HKCU `Run` value and a supervisor binary.**
+**Service: an HKCU `Run` value and a supervisor binary.** (Done: `platform/service_windows.rs`,
+`os::autostart`, `src/bin/workbenchw.rs`; see "Service install" in ARCHITECTURE.md.)
 
 - A second binary, `src/bin/workbenchw.rs` (`windows_subsystem = "windows"`; a stub
   elsewhere), starts `workbench.exe serve` with `CREATE_NO_WINDOW`, restarts it 5 s after a
   non-zero exit (parity with `RestartSec=5`), gives up after 5 failures within 60 s, and does
-  not loop when a server started by hand holds the data dir.
+  not loop when a server started by hand holds the data dir. As built, `workbenchw` only
+  starts the hidden `workbench service run` (the supervisor) or `service open` without a
+  console: it cannot use the server's modules (no library target), and the supervisor needs
+  the data dir and the stop event's name. `workbench service stop` sets the server's stop
+  event and the supervisor's (`<stop event>-service`); "a server holds the data dir" is its
+  stop event existing, which, unlike runtime.json, cannot be stale.
 - Its environment (`WORKBENCH_CONFIG_DIR`, `WORKBENCH_DATA_DIR`, `WORKBENCH_LOG`) lives in
   `%LOCALAPPDATA%\workbench\service.json`; PATH is not captured (a logon process already gets
   the user's PATH).
 - A Start Menu `Workbench.lnk` runs `workbenchw.exe open`. `workbench service status` also
   reads `StartupApproved\Run` to report an entry disabled in Task Manager.
+- `install --enable` over a running service starts the new supervisor outside its own job
+  (`CREATE_BREAKAWAY_FROM_JOB`), since stopping the old server closes the terminal it may run
+  in. Workbench terminals' jobs do not allow that yet (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, for
+  the terminals slice), so from one it restarts nothing and says so.
 - Rejected: a logon scheduled task (`schtasks /SC ONLOGON` is refused for standard users in
   common setups, shows a console window, and its restart policy ignores the exit code); S4U
   tasks and Windows services (they lose Credential Manager and the desktop, and a service

@@ -45,6 +45,7 @@ Python would have been fine for I/O, but Rust is lower overhead and fits better.
 server/            Rust crate `workbench`
   src/main.rs        CLI: serve | open | url | askpass | git-editor | statusline | service
                      (and git/ssh's askpass call on Windows: WORKBENCH_HELPER=askpass <prompt>)
+  src/bin/workbenchw.rs  Windows launcher behind `workbench service` (GUI subsystem; a stub elsewhere)
   src/app.rs         AppState + router assembly (core)
   src/auth.rs        token → device cookie, pairing, Host/Origin guard, agent tokens (core)
   src/config/        global config.toml + project model (layered TOML) (core)
@@ -78,6 +79,7 @@ web/               React 19 + TS + Vite 8
   src/features/<slice>/   one folder per slice; index.ts exports a FeatureModule
 docs/              this file
 packaging/linux/   install.sh shipped in the release archive
+packaging/windows/ workbench.ico, embedded in the Windows executables (from web/scripts/icons.mjs)
 .github/workflows/ ci.yml (web and server build + tests), release.yml (tag → Linux archive + GitHub release)
 ```
 
@@ -1944,10 +1946,12 @@ cards, footer-comment resolution (the v2 API has no field for it).
 
 ### Phone app and push, service install (platform)
 
-`server/src/platform/push/**`, `server/src/platform/service.rs`, `web/src/features/platform/**`
+`server/src/platform/push/**`, `server/src/platform/service.rs` (`service_windows.rs` and
+`src/bin/workbenchw.rs` on Windows), `web/src/features/platform/**`
 (`push.ts`, `pushLib.ts`, `sections/Push.tsx`), `web/public/**` (`manifest.webmanifest`,
-`sw.js`, `icons/`), `web/scripts/icons.mjs`. Workbench on a phone behaves like an app and reaches
-the owner while it is closed: "Claude needs your permission" with Allow and Deny on the lock screen.
+`sw.js`, `icons/`), `web/scripts/icons.mjs`, `packaging/windows/workbench.ico`. Workbench on a
+phone behaves like an app and reaches the owner while it is closed: "Claude needs your permission"
+with Allow and Deny on the lock screen.
 
 **Installable app (PWA).** `/manifest.webmanifest`: `id`/`start_url`/`scope` `/`, `display:
 standalone`, `background_color` and `theme_color` equal to the dark `--bg` and `--bg-panel` tokens
@@ -1957,7 +1961,10 @@ standalone`, `background_color` and `theme_color` equal to the dark `--bg` and `
 (`PushBridge` reads the token after each theme change). The icons are drawn from one geometry (the
 favicon's) by `node web/scripts/icons.mjs` (no dependencies; generated PNGs are committed):
 `icons/workbench.svg`, `icon-192/512.png`, `maskable-192/512.png` (glyph inside the 80 % safe
-circle), `apple-touch-icon.png` (180, full bleed), `badge-96.png` (monochrome notification badge).
+circle), `apple-touch-icon.png` (180, full bleed), `badge-96.png` (monochrome notification badge),
+and, outside the web bundle, `packaging/windows/workbench.ico` (PNG images of 16–256 px: the icon
+`server/build.rs` embeds in the Windows executables with a version resource, through the
+build-dependency `winresource`; a build without a resource compiler only warns).
 `spa.rs` serves `/sw.js` as `text/javascript` with `no-cache` and its own CSP (`spa::SW_CSP`:
 `default-src 'self'`, same-origin fetches only) and the manifest as `application/manifest+json`
 with `no-cache`; the SPA's CSP is unchanged (`worker-src 'self'` covers the registration). A launch
@@ -2131,6 +2138,46 @@ panel is narrow.
 - `uninstall [--dry-run]` runs `disable --now`, removes only marked files, then `daemon-reload`.
 - `status` shows each file (installed, differs from this binary's, not ours), `is-enabled` /
   `is-active`, and whether a server runs for the data dir.
+- **Windows** (`platform/service_windows.rs`, chosen by `cfg` in `platform/mod.rs`; registry,
+  shortcut and detached starts in `util::os::autostart`): no Windows service (it would lose
+  the desktop and Credential Manager and need admin), a per-user sign-in entry instead.
+  `install` writes `%LOCALAPPDATA%\workbench\service.json` (`service-<name>.json`: a marker
+  `note` and the set `WORKBENCH_CONFIG_DIR`/`DATA_DIR`/`LOG`; not `PATH`) and the Start Menu
+  shortcut `Workbench.lnk` (`Workbench-<name>.lnk`; written by the shell's ShellLink object,
+  the marker in its description) running `workbenchw.exe [--name <name>] open`. `--enable`
+  sets `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `Workbench`
+  (`Workbench-<name>`) to `"<folder>\workbenchw.exe"` (an existing one of ours is always kept
+  up to date) and starts the service now; it refuses while a server started by hand serves
+  the data dir. Over a running service (on this data dir or the one of the settings being
+  replaced) it hands the restart over: stopping the old server ends its terminals, and a
+  command run in one with them, so it starts a new supervisor outside its own job
+  (`service run --replace <old data dir>`, which stops the old service before it claims its
+  event) and only waits; when its job keeps what it starts (Workbench's terminals until they
+  allow breakaway), it restarts nothing and says how. From a process elevated through UAC
+  (`os::autostart::elevated`: the elevated half of a split token; the built-in Administrator
+  and UAC off have no unelevated alternative and do not count) nothing is started or
+  stopped, since the service and its agents would run as administrator; `service open`
+  refuses to start one there too. Values and files not written by Workbench are refused.
+  `workbenchw.exe` (GUI subsystem, no console) cannot use the server's modules (no library
+  target), so it only starts `workbench.exe` from its own folder with `CREATE_NO_WINDOW`:
+  `service run` (hidden), the supervisor, or `service open` (hidden; its error shown in a
+  message box). The supervisor creates the data dir (so the event names hash its canonical
+  path, as the server's do), then holds the event
+  `<os::proc::stop_event_name(data_dir)>-service` (one per data dir; a second supervisor
+  exits quietly), runs `workbench serve` in the saved environment with its output appended to
+  `service.log` (moved to `.log.old` past 10 MB when a supervisor starts), restarts it 5 s
+  after a non-zero exit, gives up after 5 failures within 60 s (a message box says so), and
+  starts nothing while a server holds the data dir's stop event (`os::proc::server_running`:
+  the server keeps it until its process ends, a graceful shutdown included; unlike
+  runtime.json it cannot be stale). `service open` starts the supervisor when neither runs
+  (apart from the caller: no inherited handles, outside its job when allowed), waits up to
+  60 s for the server, then runs `workbench open` in the saved environment. `stop` sets both
+  events and waits for the server's process to end and its port to close: up to 30 s, 40 s
+  under the supervisor, which ends the server after 30 s. `status` reports the settings, the
+  shortcut, the entry (on, differs, turned off in Task Manager: a `StartupApproved\Run` value
+  with an odd first byte, or another program's) and the server (under the service or not);
+  `uninstall` removes the entry, its `StartupApproved` value, the shortcut and the settings
+  when they are ours, and stops a supervised server last.
 
 **Verified.**
 - Rust unit and integration tests. RFC 8291 Appendix A gives exactly the RFC's intermediate values
@@ -2151,6 +2198,12 @@ panel is narrow.
   `uninstall`; the printed hint while a server runs by hand; a re-install over a running unit
   (`restart`). The launcher passes `desktop-file-validate` and the unit `systemd-analyze --user
   verify`.
+- Windows `workbench service`: `cfg(windows)` tests on scratch folders and a scratch
+  `HKCU\Software\Workbench-test-<random>` key (install, dry run, refusals, `--enable`, the
+  restart handover, Task Manager's off state, uninstall, status, names, stop and its wait for
+  the supervisor's kill, and the supervisor's restarts, give-up, hands-off and stop), plus
+  `util::os::autostart` (registry, a real shortcut, detached start, command-line quoting, the
+  elevation type) and `os::proc::Event`. Type-checked for Windows only: none of it has run on Windows yet.
 - Review fixes: config_edit keeps comments when only `[push]` changes (unit test, and the Settings
   PATCH replayed on an isolated instance); presence per tab (two tabs of one device, one hiding;
   the real browser sends a distinct `tab` per page and a closing tab reports only itself); no send
@@ -2194,7 +2247,8 @@ outside the area: `AuthState::sessions_ended()` (auth), `getDeviceKey()` in `api
 `Command::Service` in `main.rs`, the `sw.js`/manifest types in `spa.rs`, the manifest, icon and
 theme-color tags in `index.html`, and the RustCrypto dependencies `p256` 0.14 (ecdh, ecdsa),
 `aes-gcm` 0.11 and `hkdf` 0.12 in `Cargo.toml`. For the shared tables: REST prefix `/api/push/**`
-(platform); event `push.changed`; CLI `workbench service install|uninstall|status`; files
+(platform); event `push.changed`; CLI `workbench service install|uninstall|status` (and `stop`
+on Windows); files
 `data_dir/push/vapid.json` and `subscriptions.json`.
 
 ### Approvals and more agent CLIs (terminals)
