@@ -266,6 +266,13 @@ pub(crate) struct Entry {
     pub input_lock: tokio::sync::Mutex<()>,
     /// Serializes start/stop/restart.
     pub lifecycle: tokio::sync::Mutex<()>,
+    /// Held by `on_exit` from the moment it takes the exited process out of `pty` until the
+    /// exit is recorded, saved and announced, and by `launch` while it starts a process.
+    /// `on_exit` cannot take `lifecycle` (a stop holds it while it waits for the exit), and
+    /// once `pty` is empty a start or stop would otherwise not see the exit under way: a
+    /// start would then send `exit_tx` its `None` before the old exit's `Some`, and the new
+    /// process would read as exited. `stop_process` waits for it too.
+    exit_lock: tokio::sync::Mutex<()>,
     /// How a run/command terminal was started (in memory only: its env may hold secrets).
     pub spec: Mutex<Option<SpawnSpec>>,
     /// Secret values its processes may print (in memory only), masked in the output.
@@ -609,6 +616,7 @@ impl Terminals {
             files_removed: Mutex::new(false),
             input_lock: tokio::sync::Mutex::new(()),
             lifecycle: tokio::sync::Mutex::new(()),
+            exit_lock: tokio::sync::Mutex::new(()),
             spec: Mutex::new(None),
             redact: Mutex::new(vec![]),
             lingering: Mutex::new(vec![]),
@@ -704,6 +712,9 @@ impl Terminals {
         mut spec: pty::LaunchSpec,
         fresh_screen: bool,
     ) -> Result<(), ApiError> {
+        // An exit still being recorded is announced before this start begins, and none is
+        // recorded while it runs (`Entry::exit_lock`).
+        let _exit = entry.exit_lock.lock().await;
         // A terminal forgotten while this start waited for the lifecycle lock stays dead.
         if !self.is_registered(entry) {
             return Err(ApiError::not_found(format!("no terminal {:?}", entry.id)));
@@ -824,6 +835,8 @@ impl Terminals {
     }
 
     async fn on_exit(&self, state: &AppState, entry: &Arc<Entry>, pty: &Arc<pty::Pty>, info: ExitInfo) {
+        // Held until the exit is announced: no start slips in between (`Entry::exit_lock`).
+        let _exit = entry.exit_lock.lock().await;
         {
             let mut cur = entry.pty.lock();
             match &*cur {
@@ -843,7 +856,8 @@ impl Terminals {
         // save is over before `close` removes the files of a terminal it forgets. On Windows
         // `kill` is usually waiting by then (the output ends only once the pseudoconsole has
         // closed, after the leader is gone), and woken by an earlier announcement it could
-        // read Running.
+        // read Running. A stop or start that finds `pty` empty meanwhile waits for
+        // `exit_lock`, so no restart's `None` comes before this `Some`.
         let is_agent = self.update_as("terminal.exited", entry, |r| {
             r.info.status = TerminalStatus::Exited;
             r.info.exit = Some(info.clone());
@@ -867,8 +881,9 @@ impl Terminals {
         self.maybe_hibernate(entry);
     }
 
-    /// Kill the current process (if any) and wait until its exit is recorded and saved;
-    /// also end whatever earlier processes left running in their sessions.
+    /// Kill the current process (if any) and wait until its exit is recorded and saved
+    /// (also that of one that exited by itself and is being recorded); also end whatever
+    /// earlier processes left running in their sessions.
     pub(crate) async fn stop_process(&self, entry: &Arc<Entry>) {
         if let Some(p) = entry.running_pty() {
             // Killing `docker exec` leaves its process running in the container: end
@@ -881,6 +896,8 @@ impl Terminals {
             let mut rx = entry.exit_tx.subscribe();
             let _ = tokio::time::timeout(Duration::from_secs(5), async move { rx.wait_for(|v| v.is_some()).await.map(|_| ()) }).await;
         }
+        // `on_exit` holds it from the moment `pty` is empty until the exit is announced.
+        let _ = tokio::time::timeout(Duration::from_secs(5), entry.exit_lock.lock()).await;
         // The handles, held until the kills are over, keep each sid naming its session.
         let held: Vec<util::os::session::Handle> = entry.lingering.lock().iter().map(|(s, _)| s.clone()).collect();
         if held.is_empty() {
@@ -1038,11 +1055,13 @@ impl Terminals {
             for id in ids {
                 let Some(e) = map.get(&id).cloned() else { continue };
                 let Ok(l) = e.lifecycle.try_lock() else { continue };
+                // An exit still being recorded counts as stopping.
+                let Ok(x) = e.exit_lock.try_lock() else { continue };
                 if e.running_pty().is_some() {
                     continue;
                 }
                 map.remove(&id);
-                drop(l);
+                drop((x, l));
                 removed.push(e);
             }
         }
@@ -1315,9 +1334,6 @@ const PARENT_TERMINAL_VARS: &[&str] = &[
     "LINES",
 ];
 
-/// Windows Terminal's, likewise (only on Windows: elsewhere these names are not its).
-const PARENT_WINDOWS_TERMINAL_VARS: &[&str] = if cfg!(windows) { &["WT_SESSION", "WT_PROFILE_ID"] } else { &[] };
-
 /// Variables Codex sets for the commands it runs: they describe the Codex session
 /// Workbench itself may have been started from, never ours.
 const PARENT_AGENT_VARS: &[&str] = &[
@@ -1340,7 +1356,7 @@ pub(crate) fn base_env(state: &AppState, id: &str) -> Vec<(String, Option<String
         ("WORKBENCH_URL".into(), Some(state.local_base_url())),
         ("WORKBENCH_TERMINAL_ID".into(), Some(id.to_string())),
     ];
-    for k in PARENT_TERMINAL_VARS.iter().chain(PARENT_WINDOWS_TERMINAL_VARS).chain(PARENT_AGENT_VARS) {
+    for k in PARENT_TERMINAL_VARS.iter().chain(util::os::session::PARENT_TERMINAL_VARS).chain(PARENT_AGENT_VARS) {
         env.push((k.to_string(), None));
     }
     for (k, _) in std::env::vars_os() {

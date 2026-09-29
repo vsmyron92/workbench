@@ -287,7 +287,8 @@ shells Workbench starts.
 | "powershell" | "bash"` selects cmd, PowerShell 5.1 (no `&&`) or Git Bash, shown in the
 run's argv; `quote()` follows the choice. (Not done: runs always use PowerShell, `pwsh` else
 Windows PowerShell; there is no `run_shell`.) Add `WT_SESSION` and `WT_PROFILE_ID` to
-`PARENT_TERMINAL_VARS`.
+`PARENT_TERMINAL_VARS`. (Done: `os::session::PARENT_TERMINAL_VARS`, which terminals clear
+besides their own list.)
 
 **Detected commands.** Detection writes POSIX forms (`.venv/bin/python`, `python3`, `cmake
 --build … && ./bin`, `cd dir && ./x.sh`), and the `health.via_host` probe is `curl -o
