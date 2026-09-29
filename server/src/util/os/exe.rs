@@ -244,10 +244,10 @@ pub fn user_tool_dirs() -> Vec<PathBuf> {
     }
 }
 
-/// Environment for a program Workbench starts by itself (not a terminal's shell): on
-/// Windows `NoDefaultCurrentDirectoryInExePath=1`, so a cmd.exe among its processes (a
-/// batch file, a shim's bare `node`) never takes a program from its current directory, a
-/// repository. Nothing on Unix.
+/// Environment for a program Workbench starts by itself (not an interactive shell, whose
+/// user types the commands): on Windows `NoDefaultCurrentDirectoryInExePath=1`, so a cmd.exe
+/// among its processes (a batch file, a shim's bare `node`) never takes a program from its
+/// current directory, a repository. Nothing on Unix.
 pub fn child_env() -> &'static [(&'static str, &'static str)] {
     #[cfg(unix)]
     {
@@ -301,7 +301,8 @@ pub struct Launch {
     pub argv: Vec<String>,
     /// Set on top of the terminal's environment: `child_env` for a batch file, so its
     /// cmd.exe never takes a program named by a bare name (`node`) from the terminal's cwd,
-    /// a repository. Empty for anything else (a shell keeps the usual lookup) and on Unix.
+    /// a repository, even as a shell. Empty for anything else and on Unix (the terminals
+    /// slice adds `child_env` to every terminal but an interactive shell's).
     pub env: &'static [(&'static str, &'static str)],
 }
 

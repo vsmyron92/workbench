@@ -1,12 +1,13 @@
 //! Shells: the user's interactive shell, the shell that runs command lines (runs,
-//! pre-launch steps, service commands, the notify command), quoting for it, and the
-//! command line other programs use to start Workbench (the status line helper).
+//! pre-launch steps, service commands, the notify command), quoting for it, what it writes
+//! to a piped stderr as text, and the command line other programs use to start Workbench
+//! (the status line helper).
 //!
 //! Unix: `$SHELL -l`, `bash -lc`, POSIX quoting. Windows: PowerShell (`pwsh`, else the
 //! Windows PowerShell every Windows 10 and 11 has); a command line travels UTF-16LE and
 //! base64-encoded (`-EncodedCommand`), so no argv quoting on the way (portable-pty's,
-//! cmd.exe's) can change it, and `quote` follows PowerShell's rules
-//! (docs/windows-port.md §2).
+//! cmd.exe's) can change it, `quote` follows PowerShell's rules, and the CLIXML PowerShell
+//! writes its errors in on a pipe is read as text (docs/windows-port.md §2).
 
 use std::path::Path;
 
@@ -126,6 +127,236 @@ pub(super) fn decode_output(bytes: Vec<u8>) -> Option<String> {
         None => bytes,
     };
     String::from_utf8(bytes).ok()
+}
+
+/// What a program started from `run_command` or `command` wrote to its piped stderr, as the
+/// text to show (`util::proc::run_cmd`): UTF-8 (lossy) on Unix. On Windows also the run
+/// shell's own records made readable (`powershell_stderr`).
+pub fn readable_stderr(bytes: &[u8]) -> String {
+    let s = String::from_utf8_lossy(bytes);
+    #[cfg(unix)]
+    {
+        s.into_owned()
+    }
+    #[cfg(windows)]
+    {
+        powershell_stderr(&s)
+    }
+}
+
+/// The line PowerShell writes before the CLIXML it puts on a redirected stream.
+#[cfg(any(windows, test))]
+const CLIXML_HEADER: &str = "#< CLIXML";
+
+/// PowerShell's stderr as the text its console would show. Started with `-EncodedCommand`,
+/// not interactive and with stderr redirected, PowerShell serializes its own records there
+/// as CLIXML (`#< CLIXML`, then `<Objs …><S S="Error">…_x000D__x000A_</S>…</Objs>`), in
+/// Windows PowerShell 5.1 and pwsh alike (`win::argv_for`). Error strings stay as they are,
+/// warning, verbose and debug ones get the console's `WARNING: ` prefix, objects (progress,
+/// information) are dropped, and any other text (a native program's own stderr, which
+/// PowerShell leaves raw) is kept. Colour escapes (pwsh 7's error view writes them into its
+/// CLIXML strings too) and carriage returns are removed.
+#[cfg(any(windows, test))]
+fn powershell_stderr(s: &str) -> String {
+    let text = if s.contains(CLIXML_HEADER) { from_clixml(s) } else { s.to_string() };
+    crate::util::ansi::strip(&text)
+}
+
+/// `s` with its CLIXML (`powershell_stderr`) turned into text. Tolerant: text between or
+/// around the elements stays, an element that does not parse stays as text, and an
+/// unterminated `<Objs>` (a process ended mid-write) ends where the text does.
+#[cfg(any(windows, test))]
+fn from_clixml(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    let mut in_objs = false;
+    while let Some(i) = rest.find(['#', '<']) {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        match clixml_markup(rest, &mut in_objs, &mut out) {
+            Some(len) => rest = &rest[len..],
+            // Not markup: the character is text.
+            None => {
+                out.push_str(&rest[..1]);
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The CLIXML markup at the start of `s` (`from_clixml`), its text written to `out`: how
+/// long it is. `None` when there is none.
+#[cfg(any(windows, test))]
+fn clixml_markup(s: &str, in_objs: &mut bool, out: &mut String) -> Option<usize> {
+    if let Some(r) = s.strip_prefix(CLIXML_HEADER) {
+        let eol = if r.starts_with("\r\n") { 2 } else { usize::from(r.starts_with('\n')) };
+        return Some(CLIXML_HEADER.len() + eol);
+    }
+    if *in_objs && s.starts_with("</Objs>") {
+        *in_objs = false;
+        return Some("</Objs>".len());
+    }
+    let (name, tag, closed) = start_tag(s)?;
+    if !*in_objs {
+        // Outside the list, only its start is markup.
+        if name != "Objs" {
+            return None;
+        }
+        *in_objs = !closed;
+        return Some(tag.len());
+    }
+    let body = &s[tag.len()..];
+    match name {
+        "S" => {
+            let (text, len) = match body.find("</S>") {
+                _ if closed => ("", 0),
+                Some(end) => (&body[..end], end + "</S>".len()),
+                // Cut off (the process ended mid-write): to the end.
+                None => (body, body.len()),
+            };
+            clixml_line(out, &attr(tag, "S").unwrap_or_default(), &clixml_string(text));
+            Some(tag.len() + len)
+        }
+        // An object (a progress or information record): dropped, to the end when cut off.
+        "Obj" => Some(tag.len() + if closed { 0 } else { element_end(body, name).unwrap_or(body.len()) }),
+        // Only strings and objects are records: anything else is text (a native program's).
+        _ => None,
+    }
+}
+
+/// The start tag at the beginning of `s` (`<Name attr="…">` or `<Name …/>`): its name, the
+/// whole tag, and whether it closes itself.
+#[cfg(any(windows, test))]
+fn start_tag(s: &str) -> Option<(&str, &str, bool)> {
+    /// CLIXML's start tags are short: a `<` in text that no `>` follows soon is text.
+    const MAX_TAG: usize = 256;
+    let b = s.as_bytes();
+    if b.first() != Some(&b'<') {
+        return None;
+    }
+    let name_len = b[1..].iter().position(|c| !(c.is_ascii_alphanumeric() || *c == b'_'))?;
+    if name_len == 0 || !matches!(b[1 + name_len], b' ' | b'>' | b'/') {
+        return None;
+    }
+    let end = b.iter().take(MAX_TAG).position(|&c| c == b'>')?;
+    // ASCII at 1 + name_len and at end: character boundaries.
+    let tag = &s[..end + 1];
+    Some((&s[1..1 + name_len], tag, tag.ends_with("/>")))
+}
+
+/// The value of the attribute `name` in the start tag `tag`, unescaped.
+#[cfg(any(windows, test))]
+fn attr(tag: &str, name: &str) -> Option<String> {
+    let at = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+    let len = tag[at..].find('"')?;
+    Some(xml_unescape(&tag[at..at + len]))
+}
+
+/// How far into `body` (what follows a `<name …>` start tag) its element ends, after its
+/// `</name>`, counting nested elements of the same name.
+#[cfg(any(windows, test))]
+fn element_end(body: &str, name: &str) -> Option<usize> {
+    let close = format!("</{name}>");
+    let mut depth = 1;
+    let mut at = 0;
+    while depth > 0 {
+        let i = at + body[at..].find('<')?;
+        let s = &body[i..];
+        if s.starts_with(&close) {
+            depth -= 1;
+            at = i + close.len();
+        } else {
+            match start_tag(s) {
+                Some((n, tag, closed)) => {
+                    depth += usize::from(n == name && !closed);
+                    at = i + tag.len();
+                }
+                None => at = i + 1,
+            }
+        }
+    }
+    Some(at)
+}
+
+/// One string of the CLIXML stream `stream` as a console line (`powershell_stderr`).
+#[cfg(any(windows, test))]
+fn clixml_line(out: &mut String, stream: &str, text: &str) {
+    let prefix = match stream.to_ascii_lowercase().as_str() {
+        "warning" => "WARNING: ",
+        "verbose" => "VERBOSE: ",
+        "debug" => "DEBUG: ",
+        _ => "",
+    };
+    out.push_str(prefix);
+    out.push_str(text);
+    if !text.ends_with('\n') {
+        out.push('\n');
+    }
+}
+
+/// A CLIXML string's text: XML's character references, then PowerShell's `_xHHHH_` escapes
+/// (UTF-16 code units: control characters, each half of a surrogate pair, `_x005F_` for an
+/// `_` that comes before an `x`).
+#[cfg(any(windows, test))]
+fn clixml_string(raw: &str) -> String {
+    let s = xml_unescape(raw);
+    let b = s.as_bytes();
+    let mut units: Vec<u16> = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if b[i] == b'_' && b.get(i + 1) == Some(&b'x') && b.get(i + 6) == Some(&b'_') && b[i + 2..i + 6].iter().all(u8::is_ascii_hexdigit) {
+            // ASCII at i + 2 and i + 6: both are character boundaries.
+            if let Ok(u) = u16::from_str_radix(&s[i + 2..i + 6], 16) {
+                units.push(u);
+                i += 7;
+                continue;
+            }
+        }
+        let c = s[i..].chars().next().unwrap_or_default();
+        units.extend_from_slice(c.encode_utf16(&mut [0; 2]));
+        i += c.len_utf8();
+    }
+    String::from_utf16_lossy(&units)
+}
+
+/// `s` with XML's entities and character references replaced; anything else stays.
+#[cfg(any(windows, test))]
+fn xml_unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        // A reference is short (`&#x10FFFF;`): look no further for its `;`.
+        let decoded = rest.as_bytes().iter().take(11).position(|&b| b == b';').and_then(|e| {
+            let c = match &rest[1..e] {
+                "amp" => '&',
+                "lt" => '<',
+                "gt" => '>',
+                "quot" => '"',
+                "apos" => '\'',
+                r => match r.strip_prefix("#x").or_else(|| r.strip_prefix("#X")) {
+                    Some(hex) => char::from_u32(u32::from_str_radix(hex, 16).ok()?)?,
+                    None => char::from_u32(r.strip_prefix('#')?.parse().ok()?)?,
+                },
+            };
+            Some((c, e + 1))
+        });
+        match decoded {
+            Some((c, len)) => {
+                out.push(c);
+                rest = &rest[len..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `s` as one word of the local run shell (`run_argv`): unchanged when it is plain, else
@@ -279,7 +510,7 @@ fn encode_command(command: &str) -> String {
 
 #[cfg(windows)]
 mod win {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::super::exe;
 
@@ -288,16 +519,34 @@ mod win {
         if let Some(p) = exe::which("pwsh") {
             return p;
         }
-        let inbox = std::env::var_os("SystemRoot").map(|r| PathBuf::from(r).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"));
-        inbox.filter(|p| p.is_file()).or_else(|| exe::which("powershell")).unwrap_or_else(|| "powershell.exe".into())
+        windows_powershell().or_else(|| exe::which("powershell")).unwrap_or_else(|| "powershell.exe".into())
     }
 
-    /// PowerShell running `command` (`ps_script`). Windows PowerShell's default execution
-    /// policy (Restricted) blocks every script, `npm.ps1` included, which PowerShell picks
-    /// over `npm.cmd`: it gets pwsh's default, RemoteSigned, for this process only (Group
-    /// Policy still wins; pwsh keeps what the user set).
+    /// Windows PowerShell 5.1, which every Windows 10 and 11 has in System32.
+    pub(super) fn windows_powershell() -> Option<PathBuf> {
+        let inbox = std::env::var_os("SystemRoot").map(|r| PathBuf::from(r).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"));
+        inbox.filter(|p| p.is_file())
+    }
+
+    /// PowerShell running `command` (`ps_script`).
     pub(super) fn encoded_argv(command: &str) -> Vec<String> {
-        let ps = powershell();
+        argv_for(&powershell(), command)
+    }
+
+    /// The PowerShell `ps` running `command` (`ps_script`).
+    /// - No `-OutputFormat`: started so (`-EncodedCommand`, not interactive) and with stderr
+    ///   redirected, both PowerShells write their own records (errors, warnings, verbose
+    ///   and debug lines, progress) to stderr as CLIXML, which `readable_stderr` reads, and
+    ///   stdout carries only the command's output. Given `-OutputFormat Text`, pwsh writes
+    ///   its errors as text instead, but its warning, verbose and debug lines, coloured, to
+    ///   stdout, where a version probe reads the version
+    ///   (`ConsoleHostUserInterface.WriteWarningLine`); Windows PowerShell 5.1 has no such
+    ///   exception.
+    /// - Windows PowerShell's default execution policy (Restricted) blocks every script,
+    ///   `npm.ps1` included, which PowerShell picks over `npm.cmd`: it gets pwsh's default,
+    ///   RemoteSigned, for this process only (Group Policy still wins; pwsh keeps what the
+    ///   user set).
+    pub(super) fn argv_for(ps: &Path, command: &str) -> Vec<String> {
         let mut argv = vec![ps.display().to_string(), "-NoLogo".into(), "-NoProfile".into()];
         if !ps.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("pwsh")) {
             argv.extend(["-ExecutionPolicy".into(), "RemoteSigned".into()]);
@@ -380,6 +629,114 @@ mod tests {
         assert_eq!(decode_output(vec![0xC3]), None);
     }
 
+    /// What PowerShell 7.4.6 wrote to a piped stderr for `no-such-cmd-xyz` run as the run shell
+    /// runs it (`-NoLogo -NoProfile -EncodedCommand`, stdin null), byte for byte.
+    const PWSH_NOT_FOUND_CLIXML: &str = concat!(
+        "#< CLIXML\n",
+        r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">"#,
+        r#"<S S="Error">_x001B_[31;1mno-such-cmd-xyz: _x001B_[31;1mThe term 'no-such-cmd-xyz' is not recognized as a name of a cmdlet, function, script file, or executable program._x001B_[0m_x000A_</S>"#,
+        r#"<S S="Error">_x001B_[31;1m_x001B_[31;1mCheck the spelling of the name, or if a path was included, verify that the path is correct and try again._x001B_[0m_x000A_</S>"#,
+        "</Objs>"
+    );
+    /// The same as text (pwsh given `-OutputFormat Text`, which the run shell does not pass):
+    /// colour escapes included.
+    const PWSH_NOT_FOUND_TEXT: &str = "\x1b[31;1mno-such-cmd-xyz: \x1b[31;1mThe term 'no-such-cmd-xyz' is not recognized as a name of a cmdlet, function, script file, or executable program.\x1b[0m\n\x1b[31;1m\x1b[31;1mCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\x1b[0m\n";
+    const PWSH_NOT_FOUND: &str = "no-such-cmd-xyz: The term 'no-such-cmd-xyz' is not recognized as a name of a cmdlet, function, script file, or executable program.\nCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\n";
+
+    #[test]
+    fn powershell_clixml_errors_read_as_the_console_shows_them() {
+        assert_eq!(powershell_stderr(PWSH_NOT_FOUND_CLIXML), PWSH_NOT_FOUND);
+        assert_eq!(powershell_stderr(PWSH_NOT_FOUND_TEXT), PWSH_NOT_FOUND);
+
+        // PowerShell 7.4.6 for `Write-Warning 'careful: a_x & <b>'; Write-Progress …;
+        // Write-Information 'info'; Write-Verbose 'loud' -Verbose; sh -c 'echo native-err >&2';
+        // Write-Error "bad: é ✓ 😀 _x000A_ tab`tend"`. Its information record's user,
+        // computer, ids and time are replaced. The native program's stderr stays raw, before
+        // the list PowerShell's XML writer held back; XML and `_xHHHH_` escapes (a surrogate
+        // pair, `_x005F_` for an `_` before an `x`) are decoded; objects are dropped.
+        let mixed = concat!(
+            "#< CLIXML\nnative-err\n",
+            r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">"#,
+            r#"<S S="warning">careful: a_x005F_x &amp; &lt;b&gt;</S>"#,
+            r#"<Obj S="information" RefId="0"><TN RefId="0"><T>System.Management.Automation.InformationRecord</T><T>System.Object</T></TN><ToString>info</ToString>"#,
+            r#"<Props><S N="MessageData">info</S><S N="Source">Write-Information</S><DT N="TimeGenerated">2026-01-01T12:00:00.0000000+00:00</DT>"#,
+            r#"<Obj N="Tags" RefId="1"><TN RefId="1"><T>System.Collections.Generic.List`1[[System.String, System.Private.CoreLib, Version=8.0.0.0, Culture=neutral, PublicKeyToken=7cec85d7bea7798e]]</T><T>System.Object</T></TN><LST /></Obj>"#,
+            r#"<S N="User">user</S><S N="Computer">host</S><U32 N="ProcessId">4242</U32><U32 N="NativeThreadId">4243</U32><U32 N="ManagedThreadId">15</U32></Props></Obj>"#,
+            r#"<S S="verbose">loud</S>"#,
+            "<S S=\"Error\">_x001B_[31;1mWrite-Error: _x001B_[31;1mbad: é ✓ _xD83D__xDE00_ _x005F_x000A_ tab_x0009_end_x001B_[0m_x000A_</S>",
+            "</Objs>"
+        );
+        assert_eq!(powershell_stderr(mixed), "native-err\nWARNING: careful: a_x & <b>\nVERBOSE: loud\nWrite-Error: bad: é ✓ 😀 _x000A_ tab\tend\n");
+
+        // PowerShell 7.4.6 for `Write-Warning 'first'; <a native program printing "usage:
+        // tool <file> & more" to stderr>; throw 'stopped: 100% <done>'`: raw text is not XML.
+        let thrown = concat!(
+            "#< CLIXML\nusage: tool <file> & more\n",
+            r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">"#,
+            r#"<S S="warning">first</S><S S="Error">_x001B_[31;1mException: _x001B_[31;1mstopped: 100% &lt;done&gt;_x001B_[0m_x000A_</S></Objs>"#
+        );
+        assert_eq!(powershell_stderr(thrown), "usage: tool <file> & more\nWARNING: first\nException: stopped: 100% <done>\n");
+
+        // Windows PowerShell 5.1's form: CRLF, the error view's lines one string each (wrapped
+        // at the console's width), after the progress record of its first module load.
+        let windows_powershell = concat!(
+            "#< CLIXML\r\n",
+            r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">"#,
+            r#"<Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64>"#,
+            r#"<PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj>"#,
+            r#"<S S="Error">no-such-cmd-xyz : The term 'no-such-cmd-xyz' is not recognized as the name of a cmdlet, function, script file, or operable _x000D__x000A_</S>"#,
+            r#"<S S="Error">program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again._x000D__x000A_</S>"#,
+            r#"<S S="Error">At line:1 char:1_x000D__x000A_</S><S S="Error">+ no-such-cmd-xyz_x000D__x000A_</S><S S="Error">+ ~~~~~~~~~~~~~~~_x000D__x000A_</S>"#,
+            r#"<S S="Error">    + CategoryInfo          : ObjectNotFound: (no-such-cmd-xyz:String) [], CommandNotFoundException_x000D__x000A_</S>"#,
+            r#"<S S="Error">    + FullyQualifiedErrorId : CommandNotFoundException_x000D__x000A_</S><S S="Error"> _x000D__x000A_</S></Objs>"#
+        );
+        assert_eq!(
+            powershell_stderr(windows_powershell),
+            "no-such-cmd-xyz : The term 'no-such-cmd-xyz' is not recognized as the name of a cmdlet, function, script file, or operable \n\
+             program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.\n\
+             At line:1 char:1\n+ no-such-cmd-xyz\n+ ~~~~~~~~~~~~~~~\n\
+             \x20   + CategoryInfo          : ObjectNotFound: (no-such-cmd-xyz:String) [], CommandNotFoundException\n\
+             \x20   + FullyQualifiedErrorId : CommandNotFoundException\n \n"
+        );
+    }
+
+    #[test]
+    fn powershell_stderr_is_read_tolerantly() {
+        // Not CLIXML: as it is, without colour escapes and carriage returns.
+        assert_eq!(powershell_stderr("fatal: not a git repository\r\n"), "fatal: not a git repository\n");
+        assert_eq!(powershell_stderr("a <b> & c"), "a <b> & c");
+        let objs = r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">"#;
+        // pwsh run from pwsh: two headers, two lists.
+        assert_eq!(powershell_stderr(&format!("#< CLIXML\r\n#< CLIXML\r\n{objs}<S S=\"Error\">one</S></Objs>{objs}<S S=\"Error\">two</S></Objs>")), "one\ntwo\n");
+        // Cut off mid-write: what there is.
+        assert_eq!(powershell_stderr(&format!("#< CLIXML\r\n{objs}<S S=\"Error\">one_x000D__x000A_</S><S S=\"Error\">tw")), "one\ntw\n");
+        assert_eq!(powershell_stderr(&format!("#< CLIXML\r\n{objs}<S S=\"Error\">one</S><Obj S=\"progress\" RefId=\"0\"><TN>")), "one\n");
+        // Native text among the records, markup-like or not; an empty string; the debug stream.
+        assert_eq!(
+            powershell_stderr(&format!("#< CLIXML\n{objs}<S S=\"debug\">d</S>usage: x <file>\n<S S=\"Error\" />&amp;</Objs>")),
+            "DEBUG: d\nusage: x <file>\n\n&amp;"
+        );
+        let long = format!("<Obj {}>", "x".repeat(300));
+        assert_eq!(powershell_stderr(&format!("#< CLIXML\n{objs}{long}</Obj></Objs>")), format!("{long}</Obj>"));
+        // Escapes that are not ones stay.
+        assert_eq!(clixml_string("_x00G1_ _x41 &unknown; &#xZZ; _x0041_&#65;&#x42;"), "_x00G1_ _x41 &unknown; &#xZZ; AAB");
+        // A lone surrogate becomes U+FFFD, not an error.
+        assert_eq!(clixml_string("_xD83D_!"), "\u{FFFD}!");
+    }
+
+    /// Reading stays linear in what a program wrote: an `&` looks no further than a
+    /// reference's length for its `;` (searching the whole rest took a minute here).
+    #[test]
+    fn powershell_stderr_reads_in_linear_time() {
+        let n = 1_000_000;
+        let objs = r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">"#;
+        let started = std::time::Instant::now();
+        let text = powershell_stderr(&format!("#< CLIXML\n{objs}<S S=\"Error\">{}&amp;;</S></Objs>", "&".repeat(n)));
+        assert_eq!(text, format!("{}&;\n", "&".repeat(n)));
+        assert_eq!(xml_unescape(&format!("{};", "&".repeat(n))).len(), n + 1);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_shells_and_quoting() {
@@ -402,6 +759,8 @@ mod tests {
     fn windows_shells_and_quoting() {
         let argv = run_argv("cargo run");
         assert_eq!(argv[1..3], ["-NoLogo", "-NoProfile"]);
+        // pwsh would write its warnings to stdout (`win::argv_for`).
+        assert!(!argv.iter().any(|a| a.eq_ignore_ascii_case("-OutputFormat")), "{argv:?}");
         assert_eq!(argv[argv.len() - 2], "-EncodedCommand");
         assert_eq!(argv[argv.len() - 1], encode_command(&ps_script("cargo run")));
         assert!(Path::new(&argv[0]).is_absolute() || argv[0] == "powershell.exe", "{}", argv[0]);
@@ -412,5 +771,36 @@ mod tests {
             helper_command(Path::new(r"C:\Program Files\Workbench\workbench.exe"), &["statusline"]),
             r#""C:/Program Files/Workbench/workbench.exe" statusline"#
         );
+    }
+
+    /// A failing command's message, as a stop command's or a version probe's error shows it,
+    /// is text in both PowerShells, which write CLIXML to the pipe (pwsh with colour escapes
+    /// in it), and a warning stays off stdout, where a version probe reads the version.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_powershell_errors_read_as_text() {
+        let mut shells = vec![win::windows_powershell().expect("System32 powershell.exe")];
+        match crate::util::os::exe::which("pwsh") {
+            Some(pwsh) => shells.push(pwsh),
+            None => eprintln!("pwsh is not installed: only Windows PowerShell is checked"),
+        }
+        // Windows PowerShell wraps its error view at the console's width.
+        let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        for ps in shells {
+            let run = |line: &str| crate::util::proc::run_cmd(super::command(&win::argv_for(&ps, line)), std::time::Duration::from_secs(90));
+            let out = run("no-such-cmd-xyz").await.unwrap();
+            let msg = out.message();
+            assert_eq!(out.code, Some(127), "{}: {msg}", ps.display());
+            assert!(words(&msg).contains("'no-such-cmd-xyz' is not recognized"), "{}: {msg:?}", ps.display());
+            assert!(!msg.contains("CLIXML") && !msg.contains("_x00") && !msg.contains(['<', '\u{1b}', '\r']), "{}: {msg:?}", ps.display());
+            let out = run("Write-Warning 'w & <x>'; Write-Error 'e & <y>'").await.unwrap();
+            let msg = out.message();
+            assert_eq!(out.code, Some(1), "{}: {msg}", ps.display());
+            assert!(words(&msg).contains("e & <y>") && !msg.contains("CLIXML") && !msg.contains("&lt;") && !msg.contains('\u{1b}'), "{}: {msg:?}", ps.display());
+            let out = run("Write-Warning 'w & <x>'; Write-Verbose 'loud' -Verbose; Write-Output 'v1.2.3'").await.unwrap();
+            assert_eq!((out.code, out.stdout.trim()), (Some(0), "v1.2.3"), "{}: {out:?}", ps.display());
+            let lines: Vec<&str> = out.stderr.lines().collect();
+            assert!(lines.contains(&"WARNING: w & <x>") && lines.contains(&"VERBOSE: loud") && !out.stderr.contains("CLIXML"), "{}: {out:?}", ps.display());
+        }
     }
 }

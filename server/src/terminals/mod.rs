@@ -745,6 +745,8 @@ impl Terminals {
                 Err(msg) => container_error = Some(msg),
             }
         }
+        // After a container's wrap: it is for the processes on this computer.
+        spec.env.extend(program_env(entry.kind()));
         if fresh_screen {
             entry.screen.reset();
         } else {
@@ -1347,6 +1349,19 @@ const PARENT_AGENT_VARS: &[&str] = &[
     "CODEX_PERMISSION_PROFILE",
     "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
 ];
+
+/// Set last on a terminal of `kind`, so nothing in its spec undoes it: for what Workbench
+/// starts (a run, a pre-launch step, a command, an agent CLI) `util::os::exe::child_env`,
+/// with which a cmd.exe among its processes never runs a program from the current
+/// directory, a repository (Windows). An interactive shell keeps the lookup its user types
+/// commands for: in cmd.exe `build` runs the `build.bat` there, as in any terminal
+/// (PowerShell and bash never take a program from the current directory by a bare name).
+fn program_env(kind: TerminalKind) -> Vec<(String, Option<String>)> {
+    if kind == TerminalKind::Shell {
+        return vec![];
+    }
+    util::os::exe::child_env().iter().map(|&(k, v)| (k.to_string(), Some(v.to_string()))).collect()
+}
 
 /// Environment every Workbench terminal gets (session hygiene is applied by `pty`).
 pub(crate) fn base_env(state: &AppState, id: &str) -> Vec<(String, Option<String>)> {

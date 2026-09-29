@@ -279,7 +279,14 @@ cmd's "Terminate batch job (Y/N)?" and its current-directory search for `node`. 
 `.bat`/`.cmd` files run only when their arguments contain none of `%!^&|<>"` or newlines;
 otherwise the prompt is pasted instead. Prefer a native `claude.exe` in
 `%USERPROFILE%\.local\bin`. Set `NoDefaultCurrentDirectoryInExePath=1` for non-interactive
-shells Workbench starts.
+shells Workbench starts. Done (`os::exe::child_env`): the programs and command lines
+Workbench starts get it (`run_cmd`, `exe::command`, `exe::configured`, `shell::command`,
+language servers), and so does every terminal but an interactive shell's: runs, pre-launch
+steps, debuggees, env and one-off commands, agent CLIs. An interactive shell keeps Windows'
+usual lookup, since its user types the commands: in cmd.exe `build` runs the `build.bat` in
+the current folder, as in any other terminal. PowerShell and bash never take a program from
+the current folder by a bare name, and a shell that is a batch file (`[terminals] shell`)
+gets the variable as every batch file does.
 
 **Shells.** Terminals: `pwsh.exe -NoLogo`, then `powershell.exe -NoLogo`, configurable in
 `[terminals] shell`. Runs, pre-launch steps and the notify command: `pwsh -NoLogo -NoProfile
@@ -289,6 +296,19 @@ run's argv; `quote()` follows the choice. (Not done: runs always use PowerShell,
 Windows PowerShell; there is no `run_shell`.) Add `WT_SESSION` and `WT_PROFILE_ID` to
 `PARENT_TERMINAL_VARS`. (Done: `os::session::PARENT_TERMINAL_VARS`, which terminals clear
 besides their own list.)
+
+**PowerShell's errors on a pipe.** Started with `-EncodedCommand`, not interactive and with
+stderr redirected (a service's stop command, a local version or health probe: `run_cmd`),
+PowerShell writes its own error, warning, verbose, debug, progress and information records
+to stderr as CLIXML (`#< CLIXML` then `<Objs …><S S="Error">…_x000D__x000A_</S>…`),
+assuming PowerShell reads it. `os::shell::readable_stderr` turns CLIXML back into what the
+console would show (error lines as they are, `WARNING: `… prefixes, records that are objects
+dropped, a native program's raw stderr kept) and drops the colour escapes pwsh 7's error
+view puts in it. The run shell passes no `-OutputFormat`: pwsh 6.2 and later given
+`-OutputFormat Text` write errors as text, but warning, verbose and debug lines, coloured,
+to stdout, where a version probe reads the version (Windows PowerShell 5.1 has no such
+exception). Stdout thus carries only the command's output in both PowerShells. Terminals
+are unaffected: their stderr is the console.
 
 **Detected commands.** Detection writes POSIX forms (`.venv/bin/python`, `python3`, `cmake
 --build … && ./bin`, `cd dir && ./x.sh`), and the `health.via_host` probe is `curl -o

@@ -96,8 +96,11 @@ terminals behave there.
 - A CLI that is a batch file of its own (`.bat` or `.cmd`, not an npm shim) gets its first
   prompt pasted instead of passed on the command line when the prompt holds
   `% ! ^ & | < > "` or a line break, which cmd.exe would read as its own. It does not start
-  when another of its arguments or its own path holds one. Its cmd.exe never runs a program
-  from the project folder by a bare name (`NoDefaultCurrentDirectoryInExePath`).
+  when another of its arguments or its own path holds one.
+- A cmd.exe among an agent's processes (a batch-file CLI's own, or one the agent starts)
+  never runs a program from the project folder by a bare name
+  (`NoDefaultCurrentDirectoryInExePath`). A terminal's shell keeps Windows' usual lookup,
+  since you type its commands.
 - Killing or closing a terminal ends every process started in it, programs with windows
   included. Only a program that asks to leave the terminal's job keeps running, as the
   service that `workbench service install --enable` starts does.
