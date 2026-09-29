@@ -339,9 +339,11 @@ fn port_open(port: u16) -> bool {
 
 /// The server runtime.json names when it runs in a Windows session other than `mine` (a
 /// desktop sign-in while this command runs over SSH, or the other way round), and answers
-/// on its port: its pid and session. Named events belong to one session (`Local\`; a
-/// `Global\` one needs a privilege users lack), so neither its stop event nor its
-/// supervisor's can be seen or set from here.
+/// on its port: its pid and session. Its stop event and its supervisor's are `Local\` names,
+/// in that session's own namespace, so neither can be seen or set from here. (`Global\`
+/// events would need no privilege, but any account can create names there, and these are
+/// predictable: another account could take a data dir's first and leave its server without
+/// a stop event.)
 fn in_other_session(mine: Option<u32>, rt: &Runtime) -> Option<(u32, u32)> {
     let pid = rt.live_pid()?;
     let theirs = proc::session_of(pid)?;

@@ -396,7 +396,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `mcp.call` | one activity record (tool, ok, ms, terminalId…) | platform |
 | `platform.activity` | one activity record (kinds `attention`, `env`, `deploy`, `pipeline` for GitLab pipelines and GitHub workflow runs, `notify`) | platform |
 
-**Files watcher** (`files/watch.rs` over `util::os::watch`): one per project, 200 ms debounce, 500 paths per event. Linux: an inotify watch per directory the tree shows (gitignore-aware, at most 8000), added as folders appear. Windows: one recursive `ReadDirectoryChangesW` watch on the root, since an open directory handle keeps the folders above it from being renamed; only changes in the folders the same walk covers are kept (not in hard-ignored or gitignored ones), and a folder Windows reports as modified because its entries changed is dropped, so both report the same paths. On Windows a lost batch of notifications (the 64 KB buffer overflowed) is `overflow: true`, and a watch that stops on an error is made again (after 1 s, doubling), also with `overflow: true`; inotify's queue overflow is not reported. After lost notifications Local History gets the paths the batch did report plus the files the same walk finds modified since 5 s before the previous batch was taken (`changed_since`, at most 50,000 entries looked at; more than 500 such files are a checkout and left to the VCS, as a batch over the cap is). `GET …/files/watch` reports `dirs` (the folders covered), `capped` and `errors`.
+**Files watcher** (`files/watch.rs` over `util::os::watch`): one per project, 200 ms debounce, 500 paths per event. Linux: an inotify watch per directory the tree shows (gitignore-aware, at most 8000), added as folders appear. Windows: one recursive `ReadDirectoryChangesW` watch on the root, since an open directory handle keeps the folders above it from being renamed; only changes in the folders the same walk covers are kept (not in hard-ignored or gitignored ones), and a folder Windows reports as modified because its entries changed is dropped, so both report the same paths. On Windows a lost batch of notifications (the 64 KB buffer overflowed) is `overflow: true`, and a watch that stops on an error is made again (after 1 s, doubling), also with `overflow: true`; inotify's queue overflow is not reported. After lost notifications Local History gets the paths the batch did report plus the files the same walk finds modified since 5 s before the previous batch was taken (`changed_since`, at most 50,000 entries looked at; more than 500 such files are a checkout and left to the VCS, as a batch over the cap is). That walk runs in a task of its own, one at a time (lost changes that come during a walk are merged for the next), so `fs.changed` and `git.changed` never wait for it. `GET …/files/watch` reports `dirs` (the folders covered), `capped` and `errors`.
 
 **Terminal socket** (`/api/terminals/{id}/ws`): the server sends `{t:"snapshot", cols, rows}` followed by a binary snapshot, then binary output; `{t:"resync", cols, rows}` + a binary snapshot when the client fell behind; `{t:"exit", code, signal}` and `{t:"running"}`. The client sends binary input, `{t:"resize", cols, rows}` and `{t:"ping"}` (answered with `{t:"pong"}`).
 
@@ -2275,14 +2275,17 @@ panel is narrow.
   with an odd first byte, or another program's) and the server (under the service or not);
   `uninstall` removes the entry, its `StartupApproved` value, the shortcut and the settings
   when they are ours, and stops a supervised server last. The events are `Local\` names,
-  which each Windows session keeps apart (a `Global\` one needs a privilege users lack): a
-  server of the data dir in another session (started on the desktop while the command runs
-  over SSH, whose processes run in session 0, or the other way round) is runtime.json's live
-  pid in another session (`os::proc::session_of`) answering on its port. `status` names it,
-  `stop` and `install --enable` refuse and say to manage it from its own session (or end it in
-  Task Manager), `service open` opens it, and the supervisor leaves it alone. No message box
-  is shown where nobody could answer it (`os::autostart::interactive`: session 0, or a window
-  station that is not visible).
+  which each Windows session keeps apart. `Global\` events would reach across sessions with
+  no privilege (`SeCreateGlobalPrivilege` is checked only for file mappings and symbolic
+  links), but any account can create names there, and these are predictable (a hash of the
+  data dir's path): another account could create one first and leave that server without a
+  stop event. A server of the data dir in another session (started on the desktop while the
+  command runs over SSH, whose processes run in session 0, or the other way round) is
+  runtime.json's live pid in another session (`os::proc::session_of`) answering on its port.
+  `status` names it, `stop` and `install --enable` refuse and say to manage it from its own
+  session (or end it in Task Manager), `service open` opens it, and the supervisor leaves it
+  alone. No message box is shown where nobody could answer it (`os::autostart::interactive`:
+  session 0, or a window station that is not visible).
 
 **Verified.**
 - Rust unit and integration tests. RFC 8291 Appendix A gives exactly the RFC's intermediate values

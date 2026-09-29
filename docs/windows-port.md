@@ -396,12 +396,19 @@ project.
   the data dir and the stop event's name. `workbench service stop` sets the server's stop
   event and the supervisor's (`<stop event>-service`); "a server holds the data dir" is its
   stop event existing, which, unlike runtime.json, cannot be stale. The events are `Local\`,
-  one set per Windows session: creating a `Global\` name needs `SeCreateGlobalPrivilege`,
-  which a standard user's desktop processes lack. So a server in another session (the desktop
-  one, seen from an SSH sign-in in session 0) is found by runtime.json's live pid in another
-  session answering on its port; `status` names it, `stop` and `install --enable` refuse with
-  that reason, `service open` uses it, and message boxes are skipped where no one could
-  answer them (session 0).
+  one set per Windows session. `Global\` events would reach across sessions without any
+  privilege (`SeCreateGlobalPrivilege` is checked only when a file mapping or symbolic link
+  is created there), but every account can create names in `Global\`, and these are
+  predictable (a hash of the data dir's path): another account could create a data dir's
+  name first and leave its server without a stop event. A desktop session's own namespace is
+  out of other accounts' reach (session 0's, where SSH sign-ins run, is the global one). A
+  private namespace bounded by the user's SID cannot be squatted, but it closes with the
+  process that created it (later `OpenPrivateNamespace` calls fail), and the server and its
+  supervisor come and go apart. So a server in another session (the desktop one, seen from
+  an SSH sign-in in session 0) is found by runtime.json's live pid in another session
+  answering on its port; `status` names it, `stop` and `install --enable` refuse with that
+  reason, `service open` uses it, and message boxes are skipped where no one could answer
+  them (session 0).
 - Its environment (`WORKBENCH_CONFIG_DIR`, `WORKBENCH_DATA_DIR`, `WORKBENCH_LOG`) lives in
   `%LOCALAPPDATA%\workbench\service.json`; PATH is not captured (a logon process already gets
   the user's PATH).

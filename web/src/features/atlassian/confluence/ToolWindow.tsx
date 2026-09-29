@@ -7,11 +7,12 @@ import { Archive, FilePlus, FileText, Layers, Pin, RefreshCw, Search, X } from '
 import { ApiError } from '@/api/client'
 import { configFileHint, useHealth } from '@/api/health'
 import { useProject } from '@/api/queries'
+import { useUi } from '@/state/store'
 import { Button, EmptyState, ErrorBox, IconButton, Input, Loading, Section, Select, Spinner, TimeAgo } from '@/ui'
 import { ConfluenceIcon } from '@/ui/brand'
 import { confluenceApi, needsSetup, qk, refreshAtlassianStatus, useAtlassianStatusQuery, useSpaces, type SearchHit, type Space, type TreeNode } from '../api'
 import { confluenceLinks, setupSummary } from '../links'
-import { useAtlassianStatus, useAtlassianUi, usePrefs } from '../state'
+import { useAtlassianUi, usePrefs } from '../state'
 import { openConfluencePage } from './actions'
 import { nodeMenu, PageTree } from './PageTree'
 
@@ -23,9 +24,12 @@ export function SetupHint({ error, message, onRetry }: { error?: unknown; messag
   const setup = !error || (error instanceof ApiError && error.notConfigured)
   const text = error instanceof Error ? error.message : message
   const err = setup ? new ApiError(412, 'not_configured', setupSummary(text)) : error
-  // Where the server says config.toml is; before its status arrives, its OS's usual place.
+  // Where the server says config.toml is (its status answers even where Atlassian is not set
+  // up, and nothing may have asked yet: a panel restored in a project without links); until
+  // it answers, its OS's usual place.
+  const projectId = useUi((s) => s.projectId)
   const os = useHealth()?.os
-  const configFile = useAtlassianStatus((s) => s.status?.configFile) ?? configFileHint(os)
+  const configFile = useAtlassianStatusQuery(projectId).data?.configFile ?? configFileHint(os)
   return (
     <div className="wb-scroll atl-setup">
       <ErrorBox error={err} onRetry={onRetry} />

@@ -19,7 +19,8 @@
 //! emit `git.changed`. Changed files are handed to Local History (`history::changed`):
 //! not those of a batch over the cap (a checkout, which the VCS records), but after the
 //! watcher lost events (Windows) the files it did report and those the disk shows changed
-//! since the batch before (`changed_since`).
+//! since the batch before (`changed_since`), looked for by a task of their own (`rescan`)
+//! so `fs.changed` does not wait for the walk.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -89,17 +90,23 @@ struct Inner {
     /// When the last batch was taken (at first, when watching began): changes lost after
     /// it are looked for from shortly before.
     taken: Mutex<SystemTime>,
+    /// Lost changes waiting for the look on disk (`queue_lost`, `rescan`).
+    lost: Mutex<Option<Lost>>,
+    lost_wake: tokio::sync::Notify,
 }
 
 pub struct ProjectWatch {
     pub root: PathBuf,
     inner: Arc<Inner>,
     task: tokio::task::JoinHandle<()>,
+    /// `rescan`.
+    rescan: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for ProjectWatch {
     fn drop(&mut self) {
         self.task.abort();
+        self.rescan.abort();
         if let Some(deb) = self.inner.deb.lock().take() {
             deb.stop_nonblocking();
         }
@@ -266,6 +273,18 @@ struct Batch {
     created: Vec<String>,
 }
 
+/// Changes the watcher lost, waiting for the look on disk (`rescan`): since when, and what
+/// the batches that lost them did report.
+#[derive(Debug, PartialEq)]
+struct Lost {
+    since: SystemTime,
+    paths: BTreeSet<String>,
+    created: Vec<String>,
+    /// Those batches reported more paths than an event holds together: left to the VCS, as
+    /// a capped batch is.
+    capped: bool,
+}
+
 /// What Local History snapshots of a batch (`history::changed`): nothing of a `capped` one;
 /// after lost events (`lost_since`), its `paths` and what the disk shows changed since
 /// (`changed_since`), or nothing when that is too much as well. Blocking with `lost_since`.
@@ -299,7 +318,31 @@ impl Inner {
             errors: AtomicUsize::new(0),
             rewatches: AtomicU32::new(0),
             taken: Mutex::new(SystemTime::now()),
+            lost: Mutex::new(None),
+            lost_wake: tokio::sync::Notify::new(),
         })
+    }
+
+    /// Queues a look on disk for the changes lost since `since`, with what their batch did
+    /// report, and wakes `rescan`. Lost changes that wait already (a walk runs) are looked
+    /// for together with these, from the earlier time on.
+    fn queue_lost(&self, since: SystemTime, paths: BTreeSet<String>, created: Vec<String>) {
+        let mut lost = self.lost.lock();
+        let l = lost.get_or_insert_with(|| Lost { since, paths: BTreeSet::new(), created: vec![], capped: false });
+        l.since = l.since.min(since);
+        l.paths.extend(paths);
+        l.created.extend(created);
+        l.created.truncate(MAX_NEW_DIRS);
+        if l.capped || l.paths.len() > MAX_EVENT_PATHS {
+            *l = Lost { since: l.since, paths: BTreeSet::new(), created: vec![], capped: true };
+        }
+        drop(lost);
+        self.lost_wake.notify_one();
+    }
+
+    /// The lost changes `queue_lost` gathered, for one walk.
+    fn take_lost(&self) -> Option<Lost> {
+        self.lost.lock().take()
     }
 
     /// Create the debouncer (`debounce`: how long events settle); the watches come with
@@ -554,7 +597,8 @@ async fn start_watch(state: &AppState, project: &Project) -> anyhow::Result<Proj
     tracing::debug!("watching {} ({} dirs)", root.display(), inner.dirs.lock().len());
 
     let task = tokio::spawn(run(state.clone(), project.id.clone(), inner.clone()));
-    Ok(ProjectWatch { root, inner, task })
+    let rescan = tokio::spawn(rescan(state.clone(), project.id.clone(), inner.clone()));
+    Ok(ProjectWatch { root, inner, task, rescan })
 }
 
 /// Drains debounced batches (`Inner::next_batch`) and emits events.
@@ -576,16 +620,31 @@ async fn run(state: AppState, pid: String, inner: Arc<Inner>) {
         }
         // Local History snapshots what changed: not a capped batch (a checkout of thousands
         // of files is recorded by the VCS, not by us); after lost events, what the disk shows
-        // changed too.
+        // changed too, looked for apart from this loop.
         let Batch { paths, capped, lost_since, created, .. } = batch;
-        let paths = if lost_since.is_some() {
-            let inner = inner.clone();
-            tokio::task::spawn_blocking(move || history_paths(paths, capped, lost_since, &inner.root, inner.git.as_ref())).await.ok().flatten()
-        } else {
-            history_paths(paths, capped, None, &inner.root, inner.git.as_ref())
-        };
-        if let Some(paths) = paths {
-            super::history::changed(&state, &pid, paths, created);
+        match lost_since {
+            Some(since) if !capped => inner.queue_lost(since, paths, created),
+            _ => {
+                if let Some(paths) = history_paths(paths, capped, None, &inner.root, inner.git.as_ref()) {
+                    super::history::changed(&state, &pid, paths, created);
+                }
+            }
+        }
+    }
+}
+
+/// Looks on disk for the changes the watcher lost (`Inner::queue_lost`) and hands them to
+/// Local History, one walk at a time, while `run` goes on with the next batches. Changes lost
+/// during a walk wait for the next one.
+async fn rescan(state: AppState, pid: String, inner: Arc<Inner>) {
+    loop {
+        inner.lost_wake.notified().await;
+        while let Some(Lost { since, paths, created, capped }) = inner.take_lost() {
+            let walk = inner.clone();
+            let found = tokio::task::spawn_blocking(move || history_paths(paths, capped, Some(since), &walk.root, walk.git.as_ref())).await;
+            if let Ok(Some(paths)) = found {
+                super::history::changed(&state, &pid, paths, created);
+            }
         }
     }
 }
@@ -948,6 +1007,65 @@ mod tests {
         }
         assert_eq!(changed_since(&root, git.as_ref(), since), None);
         assert_eq!(all(false, Some(since)), None);
+    }
+
+    /// Lost changes wait for one walk at a time: those lost during a walk are looked for
+    /// together, from the earliest time on; more together than an event holds are left to
+    /// the VCS, as a capped batch is.
+    #[test]
+    fn lost_changes_wait_for_one_walk() {
+        let inner = Inner::new(PathBuf::from(if cfg!(windows) { r"C:\p" } else { "/p" }), None);
+        let set = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<BTreeSet<_>>();
+        let t = SystemTime::now();
+        let early = t - Duration::from_secs(10);
+        assert_eq!(inner.take_lost(), None);
+        inner.queue_lost(t, set(&["a"]), vec!["d".into()]);
+        inner.queue_lost(early, set(&["b"]), vec![]);
+        assert_eq!(inner.take_lost(), Some(Lost { since: early, paths: set(&["a", "b"]), created: vec!["d".into()], capped: false }));
+        assert_eq!(inner.take_lost(), None);
+
+        inner.queue_lost(t, (0..MAX_EVENT_PATHS).map(|i| format!("f{i}")).collect(), vec![]);
+        inner.queue_lost(t, set(&["one more"]), vec!["d".into()]);
+        inner.queue_lost(t, set(&["after"]), vec![]);
+        assert_eq!(inner.take_lost(), Some(Lost { since: t, paths: BTreeSet::new(), created: vec![], capped: true }));
+    }
+
+    /// Through a real AppState: the look on disk for lost changes, a task apart from the
+    /// batches, hands what it finds to Local History.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lost_changes_reach_local_history() {
+        use crate::config::{GlobalConfig, Paths};
+        let (cfg, data, tmp) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let root = crate::util::os::path::canonicalize(tmp.path()).unwrap().join("app");
+        std::fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let since = SystemTime::now() - Duration::from_secs(60);
+        // Written before the watch began, so no event reports it: only the look on disk can.
+        std::fs::write(root.join("src/lost.rs"), "fn lost() {}\n").unwrap();
+        let mut config = GlobalConfig::default();
+        config.projects.roots = vec![];
+        config.projects.include = vec![root.display().to_string()];
+        config.notify.desktop = false;
+        let paths = Paths { config_dir: cfg.path().to_path_buf(), data_dir: data.path().to_path_buf() };
+        let state = AppState::new(paths, config, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let _ = crate::app::build_router(state.clone());
+        let pid = state.projects.list()[0].id.clone();
+        sync_all(&state).await;
+        let inner = state.files.watchers.lock()[&pid].inner.clone();
+
+        inner.queue_lost(since, BTreeSet::new(), vec![]);
+        let url = format!("/api/projects/{pid}/files/history?path=src/lost.rs");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let v = crate::mcp::call_api(&state, axum::http::Method::GET, &url, None, &crate::mcp::McpCtx::default()).await.unwrap();
+            if v["entries"].as_array().is_some_and(|e| !e.is_empty()) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "no snapshot of the lost change: {v}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(inner.take_lost().is_none(), "the walk took the lost changes");
     }
 
     /// A watch that stopped on an error (Windows) is made again, and everything refreshed.
