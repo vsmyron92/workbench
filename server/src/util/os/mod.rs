@@ -6,6 +6,7 @@
 #[cfg(windows)]
 pub mod autostart;
 pub mod desktop;
+pub mod dll;
 pub mod exe;
 pub mod fs;
 pub mod helper;

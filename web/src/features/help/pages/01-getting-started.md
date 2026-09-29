@@ -27,6 +27,8 @@ The first start writes `~/.config/workbench/config.toml` from what it finds on t
 
 The config holds *references* to secrets, never the secrets themselves. See [Configuration](configuration).
 
+**On Windows** (experimental) the config is `%APPDATA%\workbench\config.toml`, and `~` means your user folder (`%USERPROFILE%`), so projects come from `%USERPROFILE%\workspace` and tokens from files such as `%USERPROFILE%\.gitlab_token`. [Configuration](configuration) lists the other folders. The release archive's `install.ps1` installs Workbench, and updates it when you run a newer archive's: a running Workbench keeps its old files until you restart it.
+
 ## Where next
 
 - [Projects and files](projects)

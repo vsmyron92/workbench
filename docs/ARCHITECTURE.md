@@ -54,6 +54,7 @@ server/            Rust crate `workbench`
   src/secrets.rs     secret references → values (core)
   src/mcp.rs         MCP tool type + in-process REST dispatch (core)
   src/util/          atomic writes, path containment, process runs, ANSI strip, git helpers (core)
+  src/util/os/       the operating-system layer: Unix and Windows bodies behind one interface (core)
   src/terminals/     SLICE terminals: PTYs, agents, hooks, history, remote control, permission requests
   src/files/         SLICE files: tree, read/write, watch, search, quick open, local history (history/)
   src/git/           SLICE git: CLion-style VCS, line staging, interactive rebase, changelists, shelf, bisect
@@ -69,6 +70,7 @@ server/            Rust crate `workbench`
   src/devcontainer/  SLICE devcontainer: devcontainer.json review, engines, terminals and runs inside, bridge listener
   src/platform/      SLICE platform: MCP server, remote access, settings, notifications, Web Push (push/), service install
   src/spa.rs         core: the embedded SPA, its CSP, /sw.js and /manifest.webmanifest
+  .cargo/config.toml Windows (MSVC) builds link the C runtime statically
 web/               React 19 + TS + Vite 8
   public/            manifest.webmanifest, sw.js (service worker), icons/ (from scripts/icons.mjs)
   src/api/           fetch client, events socket, shared types, shared queries (core)
@@ -78,16 +80,16 @@ web/               React 19 + TS + Vite 8
   src/lib/           monacoSetup, languages.ts (file → Monaco language), vhdl.ts (grammar) (core)
   src/features/<slice>/   one folder per slice; index.ts exports a FeatureModule
 docs/              this file
-packaging/linux/   install.sh shipped in the release archive
-packaging/windows/ workbench.ico, embedded in the Windows executables (from web/scripts/icons.mjs)
-.github/workflows/ ci.yml (web and server build + tests), release.yml (tag → Linux archive + GitHub release)
+packaging/linux/   install.sh shipped in the Linux release archive
+packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows release archive; workbench.ico, embedded in the Windows executables (from web/scripts/icons.mjs)
+.github/workflows/ ci.yml (web and server build + tests, Linux and Windows), release.yml (tag → Linux archive, Windows zip when `RELEASE_WINDOWS` is set, + GitHub release)
 ```
 
 **Ownership rule.** A slice owns `server/src/<slice>/**` and `web/src/features/<slice>/**`. Core files change only when the contract changes. `Cargo.toml` and `package.json` already list everything a slice is expected to need; adding a dependency is allowed but should be rare.
 
 ## Configuration
 
-- `~/.config/workbench/config.toml` holds global settings (`config/global.rs`). It is written with detected defaults on first run.
+- `~/.config/workbench/config.toml` (`%APPDATA%\workbench\config.toml` on Windows) holds global settings (`config/global.rs`). It is written with detected defaults on first run.
   - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions` and `permission_wait`) and `[agents.providers.*]`, `[terminals]` (`shell`: the argv of new shells; default `$SHELL -l`, on Windows PowerShell), `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
   - Settings saves edit config.toml in place (`platform::config_edit`): comments and layout survive, for every section.
   - Settings saves apply at once. Edits made outside Workbench (an editor, a setup hint followed by hand) apply too: `platform::settings::watch_config` watches the config directory and applies a valid `config.toml` like a raw save (config swapped, secret cache cleared, projects reloaded, `settings.changed`). A file that does not parse or fails the hard checks is reported once (`ui.notify`) and the running config stays; the watcher never writes the file.
@@ -196,6 +198,32 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 - Errors come from the `ApiError` constructors. Use `not_configured` for a missing token, site or similar, which makes the UI show setup help.
 - A feature the OS leaves out answers `ApiError::unsupported(feature, reason)`: HTTP 501, `{error: {code: "unsupported_platform", message, feature}}`. The table of such features is `util::os::support` (`Feature`, `unsupported(f)`, `require(f)`, `require_root(path)`); everything is supported on Linux. MCP tools return the same reason.
 - Use `conflict` for optimistic-concurrency failures and `upstream` for remote failures.
+
+### Operating-system layer (util::os)
+
+`server/src/util/os/` (core) holds everything that differs between Linux and Windows: a file
+per area with its `cfg(unix)` body (the code Workbench always had) and its `cfg(windows)`
+body; `win32.rs` has the Windows helpers they share (handle and `LocalFree` guards, wide
+strings). **Call sites stay free of `cfg(unix)` / `cfg(windows)`** (tests excepted): a slice
+that needs something OS-specific adds it to an area here, and Linux behaviour does not change.
+The plan and its status are in [windows-port.md](windows-port.md).
+
+| Area | What callers get | Where Windows differs |
+|---|---|---|
+| `perm` | private files and directories: `apply(path, mode)`, `create_dir_private`, `open_new`, `privacy`, `owned_by_me`; `util::fs::write_atomic` sits on it | A mode without group or other bits (0600, 0700) is a protected DACL for the user and SYSTEM, set at creation and inherited inside a directory; other modes inherit the folder's ACL. `privacy` reads the DACL; a replacement gets the replaced file's DACL. |
+| `fs` | `rename_noreplace`, `rename_exchange`, symlinks, `trash` | `MoveFileExW` without replacing; no atomic exchange (`rename_unsupported`, callers fall back); creating a symlink needs Developer Mode or an administrator; the Recycle Bin. |
+| `proc` | `ProcGroup` (a child and what it starts), `pid_alive`, `kill_pid`, `exit_text`, `current_exe`, `user_processes`, `debugger_attached`, `shutdown_signal(data_dir)` | Job Objects instead of process groups: a child gets a hidden console of its own and joins a job with `KILL_ON_JOB_CLOSE`; `terminate` and `kill` both end the job (the graceful step is the protocol's: LSP exit, DAP disconnect). Process lists through sysinfo. The server stops on Ctrl-C, Ctrl-Break, the console closing or the event `Local\workbench-<hash of data_dir>` (`request_stop`). |
+| `shell` | `interactive()` (terminals), `run_argv` / `run_command` (runs, pre-launch steps, service commands), `plain_command` (the notify command), `quote` for that shell, `posix_quote` for POSIX shells elsewhere (ssh hosts, containers), `helper_command` | PowerShell: `pwsh`, else Windows PowerShell. Commands run as `-NoProfile -EncodedCommand` (UTF-16LE, base64), which no argv quoting can alter, and keep the failing program's exit code (127 when not found). |
+| `exe` | `resolve` / `which`, `is_executable`, `configured(argv)` (a config.toml command), `launch_argv` (a terminal's argv), `python()`, `rustup_proxy`, `child_env` | Lookup over `PATH` × `PATHEXT`, then `%USERPROFILE%\.local\bin` and `%APPDATA%\npm`, never the current directory. An npm `.cmd` shim starts as `node.exe <script>` (`Kind::NpmShim`); another batch file only when `batch_args_safe` (BatBadBut). Children get `NoDefaultCurrentDirectoryInExePath=1`. |
+| `path` | `is_absolute_str`, `check_component` / `check_relative`, `stays_inside`, `to_slash`, `canonicalize`, `strip_prefix`, file-URI helpers, `data_home`, `private_dirs`, `pgpass_file` | Drive letters and `\`; device names, `:` streams, 8.3 names and trailing dots refused; UNC roots unsupported; dunce and an uppercase drive letter; case-insensitive comparisons (see "Paths" in the security model). Data in `%LOCALAPPDATA%`, config in `%APPDATA%`. |
+| `net` | `interfaces`, `bind` (the server's socket), `kill_port_holders` | `GetAdaptersAddresses`; `[::]` made dual-stack; port owners from `GetExtendedTcpTable`, only the same user's processes. |
+| `desktop` | `open_url`, `notify_send` | A Chromium browser from App Paths with `--app=`, else `ShellExecuteW`, for http(s) URLs only; no desktop notifications yet. |
+| `dll` | `restrict_search()`, called at the start of `serve` | `SetDefaultDllDirectories`: a DLL loaded by name (portable-pty's `conpty.dll`) comes only from the executable's folder or System32, never the current directory or `PATH`. A no-op on Unix. |
+
+Windows builds use the MSVC target with a static C runtime (`server/.cargo/config.toml`). The
+release archive adds `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY package next to
+`workbench.exe`, where portable-pty loads them instead of the console host built into Windows
+(`os::dll` keeps it from finding a `conpty.dll` anywhere else).
 
 ### TypeScript
 
@@ -501,7 +529,11 @@ npm test           # vitest (src/**/*.test.ts)
 - **Stopping a server.** Use `fuser -k <port>/tcp`, never `pkill -f`.
 - **CI** (`.github/workflows/ci.yml`, GitHub Actions): every push to `main` and every pull
   request runs the web job (`npm ci`, build, lint, test; Node 22) and the server job
-  (`cargo build --locked`, `cargo test --locked`; stable Rust) on Ubuntu 24.04.
+  (`cargo build --locked`, `cargo test --locked`; stable Rust) on Ubuntu 24.04. A
+  `windows-latest` job builds the server, runs `cargo test --no-fail-fast` (with Python for
+  the test fakes and `core.autocrlf false`) and then, whether the tests passed or not,
+  `install.ps1` under Windows PowerShell 5.1; it is informational (`continue-on-error`) until
+  the port is done.
 - **Releases** (`release.yml`): bump `version` in `server/Cargo.toml` (and `web/package.json`),
   give CHANGELOG.md a `## X.Y.Z - date` section, commit, then push a `vX.Y.Z` tag. The
   workflow refuses a tag that does not match the crate version, builds the UI and the
@@ -509,9 +541,25 @@ npm test           # vitest (src/**/*.test.ts)
   scratch config to check that the embedded UI is served, and publishes
   `workbench-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz` (binary, `install.sh`, LICENSE, README,
   CHANGELOG, notices) with a `.sha256`, the CHANGELOG section as the notes. Started by hand,
-  it builds the archive as an artifact without publishing. Windows is not built: the server
-  uses Unix APIs (PTYs, process groups, file modes, systemd, `/proc`) throughout; the port is
-  planned in [windows-port.md](windows-port.md).
+  it builds the archives as artifacts without publishing.
+- **The Windows release** is a job of its own on `windows-latest`. It builds the UI and
+  `workbench.exe` (MSVC, static C runtime), takes `conpty.dll` and `OpenConsole.exe` (x64)
+  from the pinned `Microsoft.Windows.Console.ConPTY` NuGet package (checked against pinned
+  SHA-256s), installs the staged package with `install.ps1` under Windows PowerShell 5.1,
+  checks that the binary imports no Visual C++ runtime, starts it on scratch directories and
+  a free port until the UI is served, installs again over the running server (whose exe must
+  end up renamed aside), and builds `workbench-X.Y.Z-x86_64-pc-windows-msvc.zip`
+  (`workbench.exe`, `workbenchw.exe` once the crate builds it, `install.ps1`, `conpty.dll`,
+  `OpenConsole.exe`, LICENSE, README, CHANGELOG, the notices and `CONPTY_NOTICE.md`) with a
+  `.sha256`. Started by hand, the job always runs; on a tag it runs only while the repository
+  variable `RELEASE_WINDOWS` is `true`, and `publish` then needs both jobs. Until then a tag
+  publishes the Linux archive alone, as before the port. `install.ps1` installs per user into
+  `%LOCALAPPDATA%\Programs\Workbench` (or `-Prefix`) without elevation, gives a folder it
+  creates an access list for the user, SYSTEM and Administrators only (and warns when an
+  existing one lets others write), adds it to the user PATH (`HKCU\Environment`, then
+  `WM_SETTINGCHANGE`), renames files in use aside (`*.old`, removed by the next install,
+  renames retried on sharing violations), removes the Mark of the Web from what it installs
+  and exits non-zero on failure.
 
 ## Second phase (2026-09-26): Workspace, agent providers, GitHub, broader detection
 
@@ -796,7 +844,7 @@ The Database tool window (right; CLion's Database view) and SQL consoles, for Po
 
 **Data sources** are `[[database]]` entries of the project config: `name`, `host`, `port`,
 `database`, `user`, `password` (a secret *name*), `url` (a secret name whose value is a whole
-`postgres://…` or `key=value` URL, e.g. `{ dotenv = ".env", key = "DATABASE_URL" }`; the other
+`postgres://…` or `key=value` URL, e.g. `{ dotenv = { path = ".env", key = "DATABASE_URL" } }`; the other
 fields override its parts), `sslmode` and `read_only`. Unset: host `localhost`, port 5432, user
 the OS user, database the user. Without a password `~/.pgpass` is read with libpq's rules (and
 only when it is not readable by others; on Windows, like libpq, without that check). `sslmode`: `disable`, `prefer` (default) and `require`

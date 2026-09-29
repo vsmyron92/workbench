@@ -82,6 +82,25 @@ under `~/workspace` becomes a project, and token files such as `~/.gitlab_token`
 picked up as secret references. See [getting started](docs/getting-started.md) for the
 whole setup.
 
+## Run on Windows (experimental)
+
+The Windows port is in progress and has not been tested on a real Windows machine yet
+([status](docs/windows-port.md)). A release that includes
+`workbench-<version>-x86_64-pc-windows-msvc.zip` (Windows 10 1809 or newer, or 11; x86_64)
+installs from PowerShell:
+
+```powershell
+Unblock-File .\workbench-<version>-x86_64-pc-windows-msvc.zip   # removes the Mark of the Web
+Expand-Archive .\workbench-<version>-x86_64-pc-windows-msvc.zip -DestinationPath .
+powershell -ExecutionPolicy Bypass -File .\workbench-<version>-x86_64-pc-windows-msvc\install.ps1
+```
+
+`install.ps1` installs into `%LOCALAPPDATA%\Programs\Workbench` without administrator
+rights and adds it to your PATH; then run `workbench serve --open` in a new terminal. The
+configuration is `%APPDATA%\workbench\config.toml`, the state `%LOCALAPPDATA%\workbench`.
+See [Install on Windows](docs/getting-started.md#install-on-windows-experimental) for what
+works differently there.
+
 ## Help
 
 The user documentation is also in the app: press **F1**, use the status bar's **Help**,
@@ -146,8 +165,9 @@ more; you add or override them in `.workbench.toml` or a machine-local overlay. 
 [keyboard shortcuts](docs/keyboard-shortcuts.md).
 
 Developed and tested on Linux (x86_64). The UI runs in any current browser, phones
-included; the server has not been ported to macOS or Windows yet (the
-[Windows plan](docs/windows-port.md)).
+included. A Windows port of the server is in progress and experimental: it has not been
+tested on a real Windows machine yet ([status](docs/windows-port.md)). macOS is not
+supported.
 
 For how it is built (the slices, contracts, events and the full security model), read
 [the architecture](docs/ARCHITECTURE.md). To work on Workbench itself, open the
