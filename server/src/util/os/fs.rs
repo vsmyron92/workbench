@@ -66,6 +66,9 @@ pub fn copy_symlink(from: &Path, to: &Path) -> io::Result<()> {
 /// it; should Windows still find it cannot recycle the item, it asks on the host's
 /// desktop, and after a minute the request stops waiting with an error).
 pub async fn trash(path: &Path) -> ApiResult<&'static str> {
+    #[cfg(test)]
+    return scratch_trash(path);
+    #[cfg(not(test))]
     sys::trash(path).await
 }
 
@@ -73,7 +76,29 @@ pub async fn trash(path: &Path) -> ApiResult<&'static str> {
 /// exits non-zero, an error when it cannot run), the Recycle Bin on Windows (`Ok(false)`
 /// when it refuses, an error while it is asking on the desktop, as in [`trash`]).
 pub async fn desktop_trash(path: &Path) -> ApiResult<bool> {
+    #[cfg(test)]
+    {
+        let _ = path;
+        return Ok(false);
+    }
+    #[cfg(not(test))]
     sys::desktop_trash(path).await
+}
+
+/// Tests never touch the trash of the machine running them (the desktop's trash, `gio`, the
+/// Recycle Bin): [`trash`] moves into a scratch folder of the test process instead, and
+/// [`desktop_trash`] reports that there is no desktop trash. The tests of the real
+/// implementations call `sys` directly.
+#[cfg(test)]
+fn scratch_trash(path: &Path) -> ApiResult<&'static str> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!("workbench-test-trash-{}", std::process::id()));
+    let fail = |e: io::Error| crate::error::ApiError::internal(format!("cannot move {} to the test trash: {e}", path.display()));
+    std::fs::create_dir_all(&dir).map_err(fail)?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+    std::fs::rename(path, dir.join(format!("{}-{name}", N.fetch_add(1, Ordering::Relaxed)))).map_err(fail)?;
+    Ok("test-trash")
 }
 
 #[cfg(unix)]
@@ -131,6 +156,8 @@ mod unix {
         std::os::unix::fs::symlink(std::fs::read_link(from)?, to)
     }
 
+    // Tests use the scratch trash (super::scratch_trash).
+    #[cfg_attr(test, allow(dead_code))]
     pub async fn trash(path: &Path) -> ApiResult<&'static str> {
         if super::super::exe::which("gio").is_some() {
             let p = path.to_string_lossy().into_owned();
@@ -154,6 +181,8 @@ mod unix {
         .map_err(|e| ApiError::internal(format!("background task failed: {e}")))?
     }
 
+    // Tests use the scratch trash (super::scratch_trash).
+    #[cfg_attr(test, allow(dead_code))]
     pub async fn desktop_trash(path: &Path) -> ApiResult<bool> {
         if super::super::exe::which("gio").is_some() {
             let out = crate::util::proc::run("gio", &["trash", "--", &path.to_string_lossy()], Path::new("/"), Duration::from_secs(30)).await?;
@@ -439,6 +468,8 @@ mod win {
     /// recycle takes longer: Windows is then asking on the desktop.
     const RECYCLE_WAIT: Duration = Duration::from_secs(60);
 
+    // Tests use the scratch trash (super::scratch_trash).
+    #[cfg_attr(test, allow(dead_code))]
     pub async fn trash(path: &Path) -> ApiResult<&'static str> {
         recycle_waiting(path)
             .await?
@@ -446,6 +477,8 @@ mod win {
             .map_err(|e| ApiError::internal(format!("cannot move {} to the Recycle Bin: {e}", path.display())))
     }
 
+    // Tests use the scratch trash (super::scratch_trash).
+    #[cfg_attr(test, allow(dead_code))]
     pub async fn desktop_trash(path: &Path) -> ApiResult<bool> {
         match recycle_waiting(path).await? {
             Ok(()) => Ok(true),
@@ -711,7 +744,7 @@ mod tests {
     /// `trash(path)`, `false` where the drive has no Recycle Bin.
     #[cfg(windows)]
     async fn recycled(path: &Path) -> bool {
-        match trash(path).await {
+        match sys::trash(path).await {
             Ok(with) => {
                 assert_eq!(with, "recycle-bin");
                 true
