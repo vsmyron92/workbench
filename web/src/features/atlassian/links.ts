@@ -2,6 +2,7 @@
 // agent prompts. No React, no DOM (unit-tested in links.test.ts).
 
 import type { ProjectConfig } from '@/api/types'
+import type { AtlassianStatus } from './api'
 
 /** A Confluence page id from `65601`, a page URL, a `viewpage.action?pageId=` URL or an edit URL. */
 export function parsePageRef(input: string): string | null {
@@ -147,4 +148,15 @@ export function setupSummary(message: string | null | undefined): string {
   const i = m.indexOf('Add to config.toml:')
   const head = (i >= 0 ? m.slice(0, i) : m).trim()
   return head || 'Atlassian is not set up.'
+}
+
+/**
+ * Why Confluence commands cannot run, for their toast: the status call's failure, the
+ * problem a configured site has, else where to set Atlassian up, in the config.toml the
+ * status names (the server knows where it reads it) or, without a status, `fallbackFile`.
+ */
+export function unavailableDetail(errorMessage: string | null, status: AtlassianStatus | null, fallbackFile: string): string {
+  if (errorMessage) return errorMessage
+  if (status?.confluence) return 'Workbench is still connecting to Atlassian; try again in a moment.'
+  return (status?.configured ? status.error : null) ?? `Set [atlassian] site, email and token in ${status?.configFile ?? fallbackFile}.`
 }

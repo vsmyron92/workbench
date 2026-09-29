@@ -1588,6 +1588,8 @@ async fn status_endpoint_answers_not_configured_as_data() {
     assert_eq!(v["configured"], false);
     assert_eq!((v["confluence"].as_bool(), v["jira"].as_bool(), v["authFailed"].as_bool()), (Some(false), Some(false), Some(false)));
     assert!(v["error"].as_str().unwrap().contains("[atlassian]"), "{v}");
+    // The help names config.toml where this server reads it.
+    assert_eq!(v["configFile"].as_str(), Some(crate::config::contract_tilde(&state.paths.config_file()).as_str()), "{v}");
 
     // Other routes still answer 412 not_configured (the UI shows setup help from it).
     let (code, v) = get(app, "/api/confluence/spaces").await;

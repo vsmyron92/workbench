@@ -64,7 +64,7 @@
     <tr>
       <td><b>PostgreSQL</b></td>
       <td>The Database window: schemas and SQL consoles</td>
-      <td>Host, database, user, and the <em>name</em> of a secret with the password or a connection URL; else <code>~/.pgpass</code></td>
+      <td>Host, database, user, and the <em>name</em> of a secret with the password or a connection URL; else <code>~/.pgpass</code> (on Windows <code>%APPDATA%\postgresql\pgpass.conf</code>)</td>
       <td>Database › Add Data Source</td>
     </tr>
     <tr>
@@ -99,7 +99,7 @@
 
 <div class="grid-3">
   <div class="card"><h3 class="good">Safe to share</h3><p><code>.workbench.toml</code> in the repository: run configurations and the <em>names</em> of secrets.</p></div>
-  <div class="card"><h3 class="warn">Machine only</h3><p><code>~/.config/workbench/projects/&lt;id&gt;.toml</code>: hosts, deploys, secret references.</p></div>
+  <div class="card"><h3 class="warn">Machine only</h3><p><code>~/.config/workbench/projects/&lt;id&gt;.toml</code> (on Windows under <code>%APPDATA%\workbench</code>): hosts, deploys, secret references.</p></div>
   <div class="card"><h3 class="bad">Never in a file you commit</h3><p>A token's value. Use a file, an environment variable, a <code>.env</code> key, the keyring or a command.</p></div>
 </div>
 </main>

@@ -5,7 +5,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Archive, FilePlus, FileText, Layers, Pin, RefreshCw, Search, X } from 'lucide-react'
 import { ApiError } from '@/api/client'
+import { configFileHint, useHealth } from '@/api/health'
 import { useProject } from '@/api/queries'
+import { useUi } from '@/state/store'
 import { Button, EmptyState, ErrorBox, IconButton, Input, Loading, Section, Select, Spinner, TimeAgo } from '@/ui'
 import { ConfluenceIcon } from '@/ui/brand'
 import { confluenceApi, needsSetup, qk, refreshAtlassianStatus, useAtlassianStatusQuery, useSpaces, type SearchHit, type Space, type TreeNode } from '../api'
@@ -22,11 +24,17 @@ export function SetupHint({ error, message, onRetry }: { error?: unknown; messag
   const setup = !error || (error instanceof ApiError && error.notConfigured)
   const text = error instanceof Error ? error.message : message
   const err = setup ? new ApiError(412, 'not_configured', setupSummary(text)) : error
+  // Where the server says config.toml is (its status answers even where Atlassian is not set
+  // up, and nothing may have asked yet: a panel restored in a project without links); until
+  // it answers, its OS's usual place.
+  const projectId = useUi((s) => s.projectId)
+  const os = useHealth()?.os
+  const configFile = useAtlassianStatusQuery(projectId).data?.configFile ?? configFileHint(os)
   return (
     <div className="wb-scroll atl-setup">
       <ErrorBox error={err} onRetry={onRetry} />
       <div className="wb-pad wb-small wb-muted" style={{ lineHeight: 1.6 }}>
-        Workbench reads Confluence and Jira with an Atlassian API token. In <code>~/.config/workbench/config.toml</code>:
+        Workbench reads Confluence and Jira with an Atlassian API token. In <code style={{ overflowWrap: 'anywhere' }}>{configFile}</code>:
         <pre className="mono wb-small" style={{ background: 'var(--bg-inset)', padding: 8, borderRadius: 6, overflowX: 'auto' }}>
           {`[atlassian]
 site = "https://<your-site>.atlassian.net"

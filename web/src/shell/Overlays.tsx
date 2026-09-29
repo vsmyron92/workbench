@@ -23,7 +23,7 @@ export function Toasts() {
             <I size={16} className="icon" />
             <div className="wb-grow">
               <div className="msg">{t.message}</div>
-              {t.detail && <div className="wb-small wb-muted">{t.detail}</div>}
+              {t.detail && <div className="wb-small wb-muted wb-toast-detail">{t.detail}</div>}
               {t.code && <pre className="wb-toast-code">{t.code}</pre>}
               {(!!t.action || !!t.actions?.length) && (
                 <div className="wb-toast-actions">

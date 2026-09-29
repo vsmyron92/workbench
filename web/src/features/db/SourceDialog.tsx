@@ -5,6 +5,7 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { create } from 'zustand'
+import { useHealth } from '@/api/health'
 import { openSettings, toast, toastError } from '@/shell/actions'
 import { Button, Checkbox, Field, Input, Modal, Select } from '@/ui'
 import { dbApi, dbKeys, useDbSources, type DbSource } from './api'
@@ -34,6 +35,8 @@ function SourceDialog({ pid, source }: { pid: string; source: DbSource | null })
   const [busy, setBusy] = useState(false)
   const names = list.data?.secretNames ?? []
   const fromRepo = source?.origin === 'repository'
+  // libpq's password file where the server's OS keeps it (`util::os::path::pgpass_file`).
+  const pgpass = useHealth()?.os === 'windows' ? '%APPDATA%\\postgresql\\pgpass.conf' : '~/.pgpass'
   useEffect(() => {
     if (!source && !d.name && d.database) setD((x) => ({ ...x, name: x.database }))
   }, [d.database, d.name, source])
@@ -129,7 +132,7 @@ function SourceDialog({ pid, source }: { pid: string; source: DbSource | null })
                 <button type="button" className="wb-db-link" onClick={() => (hide(), openSettings('secrets'))}>
                   Settings › Secrets
                 </button>{' '}
-                shows them. Without one, ~/.pgpass is used (or the server's trust / peer authentication).
+                shows them. Without one, {pgpass} is used (or the server's trust / peer authentication).
               </>
             }
           >

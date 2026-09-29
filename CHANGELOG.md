@@ -5,8 +5,8 @@
 - **Windows (experimental):** the server is being ported to Windows 10 (1809 or newer) and
   11 on x86_64 ([plan and status](docs/windows-port.md)). Nothing of it has been tested on
   a real Windows machine yet. Operating-system code now goes through one layer
-  (`util::os`), and Linux behaviour is unchanged (apart from the Unity and git credentials
-  items below). On Windows, private files get an access list for you and SYSTEM only, child processes run in
+  (`util::os`), and Linux behaviour is unchanged (apart from the items marked every OS). On
+  Windows, private files get an access list for you and SYSTEM only, child processes run in
   Job Objects, programs are found through `PATHEXT` (npm's `.cmd` shims start through
   `node.exe`), run commands go through PowerShell, a DLL loaded by name comes only from
   Workbench's own folder or System32, the configuration is in `%APPDATA%\workbench` and the
@@ -45,6 +45,12 @@
 - **Run configurations:** Unity detection takes the editor version from
   `ProjectVersion.txt` only when it consists of version characters (letters, digits, `.`,
   `_`, `-`), since it becomes part of the detected commands (every OS).
+- **Setup help:** the messages about a missing toolchain, an unknown placeholder or an
+  undefined ssh host, the Confluence setup hint and its "not available" message, and the
+  TLS certificate and key placeholders in Settings › Remote name the project's machine
+  overlay, `config.toml` and the config folder where this Workbench reads them
+  (`WORKBENCH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `%APPDATA%` on Windows) instead of always
+  `~/.config/workbench` (every OS; the same text on a default Linux install).
 - **Releases:** the release workflow can also build
   `workbench-X.Y.Z-x86_64-pc-windows-msvc.zip` with `workbench.exe` (no Visual C++ runtime
   needed), `workbenchw.exe`, `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY

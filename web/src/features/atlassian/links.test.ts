@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { initials, issuePrompt, jqlFilters, lozengeTone, pagePrompt, parseIssueKey, parsePageRef, pushRecent, setupSummary, statusTone } from './links'
+import { initials, issuePrompt, jqlFilters, lozengeTone, pagePrompt, parseIssueKey, parsePageRef, pushRecent, setupSummary, statusTone, unavailableDetail } from './links'
 import type { ProjectConfig } from '@/api/types'
+import type { AtlassianStatus } from './api'
 
 describe('references', () => {
   it('parses page ids and URLs', () => {
@@ -80,5 +81,32 @@ describe('setup messages', () => {
     expect(setupSummary(m)).toBe(m)
     expect(setupSummary('Atlassian rejected the credentials for me@x.dev (HTTP 401). Check [atlassian] email and the API token.')).toContain('HTTP 401')
     expect(setupSummary(null)).toBe('Atlassian is not set up.')
+  })
+
+  it('says why Confluence is not available, naming the config.toml the server reads', () => {
+    const status = (s: Partial<AtlassianStatus>): AtlassianStatus => ({
+      configured: false,
+      site: '',
+      user: null,
+      confluence: false,
+      jira: false,
+      jiraTitle: null,
+      authFailed: false,
+      error: `Atlassian is not set up. ${help}`,
+      checkedAt: 1,
+      configFile: '/srv/wb/config.toml',
+      ...s,
+    })
+    const fallback = '~/.config/workbench/config.toml'
+    // Asked for on demand (no project links Atlassian): the file the server reads.
+    expect(unavailableDetail(null, status({}), fallback)).toBe('Set [atlassian] site, email and token in /srv/wb/config.toml.')
+    expect(unavailableDetail(null, status({ configFile: undefined }), fallback)).toBe(`Set [atlassian] site, email and token in ${fallback}.`)
+    expect(unavailableDetail(null, null, fallback)).toBe(`Set [atlassian] site, email and token in ${fallback}.`)
+    // What the status call or a configured site says comes first.
+    expect(unavailableDetail('HTTP 502', status({}), fallback)).toBe('HTTP 502')
+    const rejected = 'Confluence treated me@x.dev as anonymous: check the API token'
+    expect(unavailableDetail(null, status({ configured: true, authFailed: true, error: rejected }), fallback)).toBe(rejected)
+    expect(unavailableDetail(null, status({ configured: true, error: null }), fallback)).toBe('Set [atlassian] site, email and token in /srv/wb/config.toml.')
+    expect(unavailableDetail(null, status({ configured: true, confluence: true, error: null }), fallback)).toContain('try again')
   })
 })

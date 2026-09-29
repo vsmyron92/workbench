@@ -2,8 +2,9 @@
 
 ## Change in Settings
 
-Settings (Ctrl+,) saves into `~/.config/workbench/config.toml` without disturbing its
-comments or layout. Edits you make to the file by hand apply without a restart.
+Settings (Ctrl+,) saves into `~/.config/workbench/config.toml` (on Windows
+`%APPDATA%\workbench\config.toml`) without disturbing its comments or layout. Edits you
+make to the file by hand apply without a restart.
 
 | Section | What it covers |
 | --- | --- |
@@ -20,7 +21,7 @@ comments or layout. Edits you make to the file by hand apply without a restart.
 | Ask for | Where it belongs |
 | --- | --- |
 | “Add a run configuration for the worker.” | `[[run]]` in the project's `.workbench.toml` |
-| “Watch staging's health and let me deploy it.” | `[[env]]` in the machine overlay, `~/.config/workbench/projects/<id>.toml` |
+| “Watch staging's health and let me deploy it.” | `[[env]]` in the machine overlay, `~/.config/workbench/projects/<id>.toml` (on Windows under `%APPDATA%\workbench`) |
 | “Connect the dev database.” | Database › Add Data Source, with the *name* of a secret |
 | “Add another agent CLI.” | `[agents.providers.<name>]` in `config.toml` |
 | “Write up what you found.” | A Workspace card in the project |

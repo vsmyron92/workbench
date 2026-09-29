@@ -139,6 +139,9 @@ pub struct Env {
     /// (`autostart::elevated`): it starts no service, which would run as administrator too,
     /// its agents included.
     pub elevated: bool,
+    /// The Windows session this process runs in (`proc::session_of`): a server running in
+    /// another one is out of reach of its stop events (`in_other_session`).
+    pub session: Option<u32>,
     pub start_timeout: Duration,
     /// The supervisor's stop timeout, after which it ends the server; `stop` waits
     /// `kill_grace` longer.
@@ -162,6 +165,7 @@ impl Env {
             approved_key: autostart::APPROVED_KEY.into(),
             vars: carried_vars(),
             elevated: autostart::elevated(),
+            session: proc::session_of(std::process::id()),
             start_timeout: START_TIMEOUT,
             stop_timeout: STOP_TIMEOUT,
             kill_grace: KILL_GRACE,
@@ -333,6 +337,31 @@ fn port_open(port: u16) -> bool {
     std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), POLL).is_ok()
 }
 
+/// The server runtime.json names when it runs in a Windows session other than `mine` (a
+/// desktop sign-in while this command runs over SSH, or the other way round), and answers
+/// on its port: its pid and session. Its stop event and its supervisor's are `Local\` names,
+/// in that session's own namespace, so neither can be seen or set from here. (`Global\`
+/// events would need no privilege, but any account can create names there, and these are
+/// predictable: another account could take a data dir's first and leave its server without
+/// a stop event.)
+fn in_other_session(mine: Option<u32>, rt: &Runtime) -> Option<(u32, u32)> {
+    let pid = rt.live_pid()?;
+    let theirs = proc::session_of(pid)?;
+    (Some(theirs) != mine && rt.port.is_some_and(port_open)).then_some((pid, theirs))
+}
+
+/// Why this command cannot manage the server `in_other_session` found.
+fn other_session_text(mine: Option<u32>, pid: u32, session: u32) -> String {
+    let here = match mine {
+        Some(0) => " (this command runs in session 0, as it does over SSH)".to_string(),
+        Some(s) => format!(" (this command runs in session {s})"),
+        None => String::new(),
+    };
+    format!(
+        "Workbench (pid {pid}) runs in Windows session {session}{here}; `workbench service` reaches only the Workbench of its own session, so run it in that session, or end Workbench in Task Manager"
+    )
+}
+
 /// Polls `done` until it holds or `timeout` has passed.
 fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + timeout;
@@ -401,6 +430,9 @@ fn stop_instance(env: &Env, data_dir: &Path) -> anyhow::Result<bool> {
     let supervisor = Event::set(&service_event(data_dir)).context("cannot reach the service")?;
     let server = proc::request_stop(data_dir).context("cannot reach Workbench")?;
     if !supervisor && !server {
+        if let Some((pid, session)) = in_other_session(env.session, &before) {
+            bail!("{}", other_session_text(env.session, pid, session));
+        }
         // A server that could not create its stop event still answers on its port. (Without
         // one, runtime.json may be stale: a server ended at sign-out leaves it, and its pid
         // can be another program's by now.)
@@ -476,6 +508,11 @@ pub fn install(env: &Env, name: &str, enable: bool, dry_run: bool, out: &mut dyn
     let pid = Runtime::of(&data_dir).pid_text();
     if enable && outside {
         bail!("Workbench is already running{pid} outside the service; stop it first (`workbench service stop` does), then run this again");
+    }
+    // Invisible to the checks above, and it holds the port: a service started here would
+    // only fail next to it.
+    if enable && let Some((pid, session)) = in_other_session(env.session, &Runtime::of(&data_dir)) {
+        bail!("{}", other_session_text(env.session, pid, session));
     }
     util::fs::write_atomic(&settings, text.as_bytes(), 0o644)?;
     writeln!(out, "wrote {}", settings.display())?;
@@ -652,7 +689,10 @@ pub fn status(env: &Env, name: &str, out: &mut dyn Write) -> anyhow::Result<()> 
         (true, true) => format!("running{}, under the service", rt.pid_text()),
         (true, false) => format!("running{}, started outside the service", rt.pid_text()),
         (false, true) => "not running; the service is about to restart it".into(),
-        (false, false) => "not running".into(),
+        (false, false) => match in_other_session(env.session, &rt) {
+            Some((pid, session)) => format!("running (pid {pid}) in another Windows session ({session}): manage it from there"),
+            None => "not running".into(),
+        },
     };
     writeln!(out, "{:9} {state}", "server")?;
     writeln!(out, "{:9} {}", "log", env.log_file(name).display())?;
@@ -677,7 +717,8 @@ pub fn open(env: &Env, name: &str) -> anyhow::Result<()> {
     check_name(name)?;
     let vars = service_vars(env, name)?;
     let data_dir = data_dir_of(&vars)?;
-    if !proc::server_running(&data_dir) {
+    // A server in another Windows session (started over SSH) serves the browser as well.
+    if !proc::server_running(&data_dir) && in_other_session(env.session, &Runtime::of(&data_dir)).is_none() {
         if !Event::exists(&service_event(&data_dir)) {
             if env.elevated {
                 bail!("Workbench is not running, and started from here it would run as administrator; open it from the Start Menu instead");
@@ -751,6 +792,16 @@ struct Supervisor<'a> {
     delay: Duration,
     failures: Failures,
     stop_timeout: Duration,
+    /// This process's Windows session (`Env::session`).
+    session: Option<u32>,
+}
+
+impl Supervisor<'_> {
+    /// Another server serves the data dir: one this session sees, or one in another
+    /// session that answers on its port.
+    fn held(&self) -> bool {
+        proc::server_running(&self.data_dir) || in_other_session(self.session, &Runtime::of(&self.data_dir)).is_some()
+    }
 }
 
 /// A line of the supervisor in the service log.
@@ -764,7 +815,7 @@ fn log_line(log: &mut dyn Write, msg: &str) {
 /// server serves the data dir already.
 fn supervise(sup: &mut Supervisor, me: &Event, log: &mut dyn Write) -> Outcome {
     loop {
-        if proc::server_running(&sup.data_dir) {
+        if sup.held() {
             let pid = Runtime::of(&sup.data_dir).pid_text();
             log_line(log, &format!("a Workbench server{pid} already serves {}; not starting another", sup.data_dir.display()));
             return Outcome::Held;
@@ -788,7 +839,7 @@ fn supervise(sup: &mut Supervisor, me: &Event, log: &mut dyn Write) -> Outcome {
             Err(e) => format!("cannot start workbench serve: {e}"),
         };
         log_line(log, &failed);
-        if proc::server_running(&sup.data_dir) {
+        if sup.held() {
             log_line(log, &format!("another Workbench server serves {}; not restarting", sup.data_dir.display()));
             return Outcome::Held;
         }
@@ -885,6 +936,7 @@ pub fn run(env: &Env, name: &str, replace: Option<&Path>) -> anyhow::Result<()> 
         delay: RESTART_DELAY,
         failures: Failures::new(MAX_FAILURES, FAILURE_WINDOW),
         stop_timeout: env.stop_timeout,
+        session: env.session,
     };
     if supervise(&mut sup, &me, &mut log) == Outcome::GaveUp {
         // Let a new start (the Start Menu, `install --enable`) run while the box is up.
@@ -958,6 +1010,7 @@ mod tests {
             ],
             // CI runners run tests as administrator; the elevated path has its own test.
             elevated: false,
+            session: proc::session_of(std::process::id()),
             start_timeout: Duration::ZERO,
             stop_timeout: Duration::from_secs(5),
             kill_grace: Duration::from_secs(1),
@@ -965,6 +1018,20 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("data")).unwrap();
         Fixture { dir, env, key }
     }
+
+    /// Makes `data`'s runtime.json name a server that is this test process, answering on the
+    /// returned listener's port: as the server of another Windows session looks to a
+    /// command whose `session` differs.
+    fn server_elsewhere(data: &Path) -> std::net::TcpListener {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let rt = serde_json::json!({ "pid": std::process::id(), "port": port, "url": format!("http://127.0.0.1:{port}") });
+        std::fs::write(data.join("runtime.json"), rt.to_string()).unwrap();
+        listener
+    }
+
+    /// A session no process runs in.
+    const NO_SESSION: Option<u32> = Some(u32::MAX);
 
     fn text(out: Vec<u8>) -> String {
         String::from_utf8(out).unwrap()
@@ -1163,6 +1230,40 @@ mod tests {
         assert!(text(out).contains("started outside the service"));
     }
 
+    /// A server in another Windows session (started on the desktop, while this command runs
+    /// over SSH) holds its stop events where this session cannot see them: every command says
+    /// so instead of reporting it gone or starting a second one.
+    #[test]
+    fn a_server_in_another_session_is_named_not_missed() {
+        let mut f = fixture();
+        let data = f.dir.path().join("data");
+        let _listener = server_elsewhere(&data);
+        // Seen from its own session, runtime.json alone changes nothing.
+        let mut out = vec![];
+        status(&f.env, "workbench", &mut out).unwrap();
+        assert!(text(out).contains("server    not running"));
+        f.env.session = NO_SESSION;
+        let me = std::process::id();
+        let mut out = vec![];
+        status(&f.env, "workbench", &mut out).unwrap();
+        let out = text(out);
+        assert!(out.contains(&format!("running (pid {me}) in another Windows session")), "{out}");
+        install(&f.env, "workbench", false, false, &mut vec![]).unwrap();
+        let e = stop(&f.env, "workbench", &mut vec![]).unwrap_err().to_string();
+        assert!(e.contains(&format!("Workbench (pid {me}) runs in Windows session")) && e.contains("reaches only the Workbench of its own session"), "{e}");
+        // --enable starts no second service next to it.
+        let e = install(&f.env, "workbench", true, false, &mut vec![]).unwrap_err().to_string();
+        assert!(e.contains("reaches only the Workbench of its own session"), "{e}");
+        assert_eq!(run_value(&f), None, "nothing was set to start at sign-in");
+        // The supervisor leaves it alone too.
+        let service = Event::create(&service_event(&data)).unwrap().unwrap();
+        let mut sup = supervisor(&data, cmd_exit(3));
+        sup.session = NO_SESSION;
+        let mut log = vec![];
+        assert_eq!(supervise(&mut sup, &service, &mut log), Outcome::Held);
+        assert!(!text(log).contains("started workbench serve"));
+    }
+
     #[test]
     fn names_pick_their_own_entries() {
         let f = fixture();
@@ -1213,6 +1314,7 @@ mod tests {
             delay: Duration::from_millis(10),
             failures: Failures::new(MAX_FAILURES, FAILURE_WINDOW),
             stop_timeout: Duration::from_secs(5),
+            session: proc::session_of(std::process::id()),
         }
     }
 

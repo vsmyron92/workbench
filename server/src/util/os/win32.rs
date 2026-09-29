@@ -1,5 +1,6 @@
 //! Small Win32 helpers the areas' Windows code shares: owned handles and blocks, UTF-16
-//! strings and paths for the `…W` functions, file identity, and the user a process runs as.
+//! strings and paths for the `…W` functions, file identity, the user a process runs as, and
+//! registry values.
 
 use std::ffi::c_void;
 use std::fs::OpenOptions;
@@ -9,7 +10,8 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, LocalFree};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE, LocalFree};
+use windows_sys::Win32::System::Registry::{HKEY, RRF_RT_REG_SZ, RegGetValueW};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -172,4 +174,40 @@ pub unsafe fn sid_string(sid: PSID) -> Option<String> {
     let _free = Local(s.cast());
     // SAFETY: a NUL-terminated string from the call.
     Some(unsafe { from_wide(s) })
+}
+
+/// The value `name` of the registry key `root\key` (`None`: the key's default value),
+/// restricted to the types in `flags` (`RRF_RT_…`, with an `RRF_SUBKEY_WOW64…` view where
+/// it matters). `Ok(None)` when the key or the value does not exist.
+pub fn reg_value(root: HKEY, key: &str, name: Option<&str>, flags: u32) -> io::Result<Option<Vec<u8>>> {
+    let wkey = wide(key);
+    let wname = name.map(wide);
+    let name_ptr = wname.as_ref().map_or(std::ptr::null(), |n| n.as_ptr());
+    let mut buf = vec![0u8; 512];
+    for _ in 0..4 {
+        let mut len = buf.len() as u32;
+        // SAFETY: the key and the value name (or null, for the default value) are
+        // NUL-terminated and outlive the call; `buf` is writable for `len` bytes.
+        let rc = unsafe { RegGetValueW(root, wkey.as_ptr(), name_ptr, flags, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut len) };
+        match rc {
+            ERROR_SUCCESS => {
+                buf.truncate(len as usize);
+                return Ok(Some(buf));
+            }
+            // `len` is the size needed now; the value may still grow before the next try.
+            ERROR_MORE_DATA => buf = vec![0u8; len as usize + 64],
+            ERROR_FILE_NOT_FOUND => return Ok(None),
+            rc => return Err(io::Error::from_raw_os_error(rc as i32)),
+        }
+    }
+    Err(io::Error::other("the registry value kept changing size"))
+}
+
+/// A string value (`REG_SZ`, or `REG_EXPAND_SZ` expanded) of `root\key` ([`reg_value`]), read
+/// in the registry `view` (`RRF_SUBKEY_WOW64…`, or 0 for this process's own).
+pub fn reg_string(root: HKEY, key: &str, name: Option<&str>, view: u32) -> io::Result<Option<String>> {
+    let Some(bytes) = reg_value(root, key, name, RRF_RT_REG_SZ | view)? else { return Ok(None) };
+    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let end = units.iter().position(|&c| c == 0).unwrap_or(units.len());
+    Ok(Some(String::from_utf16_lossy(&units[..end])))
 }

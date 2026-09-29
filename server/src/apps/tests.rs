@@ -200,6 +200,39 @@ async fn planning_orders_dependencies_and_rejects_cycles() {
     assert_eq!(e.status, StatusCode::NOT_FOUND);
 }
 
+/// Setup help names the project's machine overlay where this Workbench reads it: under its
+/// config dir (`$WORKBENCH_CONFIG_DIR` here, `%APPDATA%\workbench` on Windows), not a fixed
+/// `~/.config/workbench` that only a default Linux install reads.
+#[tokio::test]
+async fn setup_messages_name_the_overlay_workbench_reads() {
+    let f = fixture().await;
+    let overlay_path = f.state.paths.project_overlay("demo");
+    let overlay = crate::config::contract_tilde(&overlay_path);
+    assert!(!overlay.contains(".config/workbench"), "the fixture's config dir is a scratch one: {overlay}");
+    let p = project(&f);
+    let e = runs::start(&f.state, &p, "needs-unity", false).await.unwrap_err();
+    assert_eq!(e.code, "not_configured");
+    assert!(e.message.ends_with(&format!("unknown placeholder {{unity}}; add it under [toolchains] in {overlay}")), "{}", e.message);
+    let remote = envs::find(&p, "remote").unwrap().clone();
+    let e = deploy::plan(&f.state, &p, &remote, None).await.unwrap_err();
+    assert_eq!(e.code, "not_configured");
+    assert!(e.message.ends_with(&format!("which is not defined; add [hosts.box] to {overlay}")), "{}", e.message);
+
+    // A toolchain the overlay names but this machine lacks.
+    let text = std::fs::read_to_string(&overlay_path).unwrap();
+    let missing = f.state.paths.data_dir.join("no-such-toolchain");
+    std::fs::write(
+        &overlay_path,
+        format!("[toolchains]\nghost = {:?}\n\n{text}\n[[run]]\nname = \"needs-ghost\"\ncommand = \"{{ghost}} build\"\n", missing.to_string_lossy()),
+    )
+    .unwrap();
+    f.state.projects.reload(&f.state).await;
+    let p = project(&f);
+    let e = runs::start(&f.state, &p, "needs-ghost", false).await.unwrap_err();
+    assert_eq!(e.code, "not_configured");
+    assert!(e.message.ends_with(&format!("install it or set [toolchains] ghost = \"…\" in {overlay}")), "{}", e.message);
+}
+
 #[tokio::test]
 async fn health_checks_use_pointer_auth_and_notify_on_transitions() {
     let f = fixture().await;
