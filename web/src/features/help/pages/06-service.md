@@ -22,6 +22,10 @@ systemctl --user restart workbench
 
 Use `workbench service status` to see the real unit name. Agent sessions are brought back on start when `[agents] restore_on_start = true`.
 
+## Updating
+
+Download the new release archive, unpack it and run its `install.sh`, which replaces `~/.local/bin/workbench` (a running Workbench keeps using the old file until it restarts). Then restart the service as above. Your configuration and `~/.local/share/workbench` stay as they are.
+
 ## Checking that it is up
 
 ```bash

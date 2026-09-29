@@ -7,6 +7,7 @@ Workbench is a developer workspace in one browser window, on this computer or on
 - **Tool windows** are docked on the left, right and bottom, each opened from the icon stripe. Alt+1 opens Files, Alt+5 Debug, Alt+6 Problems, Alt+9 Git Log, Alt+0 Commit and Alt+F12 the Terminal.
 - **The centre** holds panels as tabs: editors, agent terminals, diffs, merge requests, cards and Settings.
 - **The top bar** has the project switcher. The **status bar** shows remote access and a Settings button.
+- **The Workspace** (left stripe) starts with four example cards in Home: a welcome guide, a tour in screenshots, a report template for agents and a checklist for connecting your services. They stay until you archive them.
 - **On a phone** the same things are tabs along the bottom: Agents, Git, Workspace, Files, CI, Apps and More.
 
 ## The command palette

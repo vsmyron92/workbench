@@ -32,6 +32,6 @@ A repository's own config is **untrusted**. It can never define secrets, loosen 
 
 ## Code intelligence and debugging
 
-Language servers (rust-analyzer, typescript-language-server, pyright, gopls, clangd and others) give diagnostics, hover, completion and navigation. They run project code, so **nothing starts until you enable code intelligence for a project**: use the banner over its first source file, or the status bar item.
+Language servers (rust-analyzer, typescript-language-server, pyright, gopls, clangd, Verible for Verilog and SystemVerilog, vhdl_ls for VHDL and others) give diagnostics, hover, completion and navigation. Install the ones you need; a missing one is named, with how to install it, above the first file it would serve. They run project code, so **nothing starts until you enable code intelligence for a project**: use the banner over its first source file, or the status bar item.
 
 Debugging uses the Debug Adapter Protocol. Click the gutter to set a breakpoint, then press Shift+F9 to debug.
