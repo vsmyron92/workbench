@@ -219,6 +219,36 @@ pub fn leaves_machine_below(base: &Path, p: &Path) -> bool {
     }
 }
 
+/// Whether `leaves` holds for `p` or a folder above it, taken both as written and with
+/// `p`'s links resolved ([`canonicalize`]); true as well when `p` cannot be resolved
+/// without following a link [`canonicalize`] refuses. What is above a link to a folder is
+/// not what is above its target, and code that resolves a path before looking around it
+/// reads the latter: the `ignore` crate reads the ignore files of every folder above a
+/// walk's resolved start. `leaves` is one of the checks here ([`leaves_machine_below`] of
+/// what is read in a folder), so this too answers false on Unix without touching the disk.
+pub fn ancestors_leave(p: &Path, leaves: impl Fn(&Path) -> bool) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = (p, leaves);
+        false
+    }
+    #[cfg(windows)]
+    {
+        ancestors_leave_resolved(p, canonicalize(p), &leaves)
+    }
+}
+
+/// [`ancestors_leave`] given what [`canonicalize`] made of `p`.
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+fn ancestors_leave_resolved(p: &Path, resolved: io::Result<PathBuf>, leaves: &dyn Fn(&Path) -> bool) -> bool {
+    p.ancestors().any(leaves)
+        || match resolved {
+            Ok(r) => r != p && r.ancestors().any(leaves),
+            Err(e) => is_refused_link(&e),
+        }
+}
+
 #[cfg(windows)]
 fn leaves(base: Option<&Path>, p: &Path) -> bool {
     let Ok(abs) = std::path::absolute(p) else { return false };
@@ -900,6 +930,7 @@ mod tests {
         crate::util::os::fs::symlink("//server/share", dir.path().join("link")).unwrap();
         assert!(!leaves_machine(&dir.path().join("link")) && !leaves_machine_below(dir.path(), &dir.path().join("link/x")));
         assert!(!leaves_machine(Path::new(r"\\server\share\x")));
+        assert!(!ancestors_leave(&dir.path().join("link"), |_| true));
         assert_eq!(canonicalize(dir.path().join("link")).unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 
@@ -1027,6 +1058,40 @@ mod tests {
         assert!(e.to_string().contains("/p/remote links to //attacker/share"), "{e}");
         assert!(is_refused_link(&links::Stop::Refused { link: "/p/x".into(), target: None }.into_io()));
         assert!(!is_refused_link(&io::ErrorKind::NotFound.into()) && !is_refused_link(&io::Error::other("x")));
+    }
+
+    /// The folders above a path are checked as written and where its links lead: a link
+    /// `/p/lnk` to `/p/inner/deep` puts `/p/inner` above it for whoever resolves it first.
+    #[test]
+    fn folders_above_a_link_are_checked_where_it_leads() {
+        let asked = std::cell::RefCell::new(vec![]);
+        let flags = |bad: &'static [&'static str]| {
+            let asked = &asked;
+            move |d: &Path| {
+                asked.borrow_mut().push(d.to_path_buf());
+                bad.iter().any(|b| d == Path::new(b))
+            }
+        };
+        let lnk = Path::new("/p/lnk");
+        let deep = || Ok(PathBuf::from("/p/inner/deep"));
+        assert!(ancestors_leave_resolved(lnk, deep(), &flags(&["/p/inner"])));
+        assert!(ancestors_leave_resolved(lnk, deep(), &flags(&["/p/lnk"])));
+        assert!(ancestors_leave_resolved(lnk, deep(), &flags(&["/"])));
+        asked.borrow_mut().clear();
+        assert!(!ancestors_leave_resolved(lnk, deep(), &flags(&["/q"])));
+        let seen: Vec<_> = asked.borrow().iter().map(|d| d.display().to_string()).collect();
+        assert_eq!(seen, ["/p/lnk", "/p", "/", "/p/inner/deep", "/p/inner", "/p", "/"]);
+
+        // No link on the way: each folder is asked once.
+        asked.borrow_mut().clear();
+        assert!(!ancestors_leave_resolved(lnk, Ok(lnk.to_path_buf()), &flags(&[])));
+        assert_eq!(asked.borrow().len(), 3);
+
+        // A start reached through a refused link leaves; one that is missing only as written.
+        let refused = || links::Stop::Refused { link: "/p/lnk".into(), target: Some("//attacker/share".into()) }.into_io();
+        assert!(ancestors_leave_resolved(lnk, Err(refused()), &flags(&[])));
+        assert!(!ancestors_leave_resolved(lnk, Err(io::ErrorKind::NotFound.into()), &flags(&[])));
+        assert!(ancestors_leave_resolved(lnk, Err(io::ErrorKind::NotFound.into()), &flags(&["/p"])));
     }
 
     /// The walk over real links (`links::Disk`), checked against the kernel's own answer.

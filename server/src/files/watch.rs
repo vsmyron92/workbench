@@ -850,6 +850,29 @@ mod tests {
         assert!(!inner.dirs.lock().iter().any(|d| d.starts_with(root.join("remote-dir"))), "{:?}", inner.dirs.lock());
     }
 
+    /// A folder link made while the project is watched (Windows), leading below a folder
+    /// whose ignore file links to another computer: the walk of the new link does not read
+    /// that file either, though it is above where the link leads (the `ignore` crate reads
+    /// the ignore files above a walk's resolved start). Read, it would ignore `gen/`.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_new_folder_link_reads_no_linked_ignore_file_above_its_target() {
+        use crate::util::os::path::{loopback_share, remote_link_or_skip};
+        let (dir, elsewhere) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (root, far) = (os::path::canonicalize(dir.path()).unwrap(), os::path::canonicalize(elsewhere.path()).unwrap());
+        std::fs::write(far.join("ignore"), "gen/\n").unwrap();
+        std::fs::create_dir_all(root.join("inner").join("deep").join("gen")).unwrap();
+        if !remote_link_or_skip(&loopback_share(&far).join("ignore"), &root.join("inner").join(".gitignore"), false) {
+            return;
+        }
+        let inner = watching(&root).await;
+        assert!(!inner.covers(&root.join("inner").join("deep").join("x")), "{:?}", inner.dirs.lock());
+        std::os::windows::fs::symlink_dir(Path::new("inner").join("deep"), root.join("lnk")).unwrap();
+        let (paths, _, _) = collect(&inner).await;
+        assert!(paths.contains("lnk"), "{paths:?}");
+        assert!(inner.covers(&root.join("lnk").join("gen").join("a.rs")), "the linked .gitignore was read: {:?}", inner.dirs.lock());
+    }
+
     /// The folders whose changes are reported: those the walk enters, as a watch each
     /// (Linux) or kept from one recursive watch (Windows). Ignore files above the root
     /// count, as they do for the walk.

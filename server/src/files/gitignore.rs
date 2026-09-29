@@ -28,8 +28,12 @@ fn ignore_file_leaves(dir: &Path) -> bool {
 /// the global excludes included; no repository needed), hidden files included, links
 /// never followed, `HARD_IGNORE` folders left out. No ignore file is read through a link
 /// to another computer (Windows): a folder holding one is left out, and when `start` or a
-/// folder above it holds one the walk reads no `.gitignore` or `.ignore` at all. Callers
-/// may add options, but must not turn ignore files on again or replace `filter_entry`.
+/// folder above it holds one the walk reads no `.gitignore` or `.ignore` at all. "Above"
+/// is also above where `start`'s links lead (`os::path::ancestors_leave`): the crate reads
+/// the ignore files of every folder above the resolved start, and a folder link the
+/// watcher walks can lead below one that the walk from the root left out. `start` itself
+/// must not be reached through a link to another computer (callers check). Callers may
+/// add options, but must not turn ignore files on again or replace `filter_entry`.
 pub fn walk(start: &Path) -> WalkBuilder {
     let keep = |e: &ignore::DirEntry| {
         !HARD_IGNORE.contains(&e.file_name().to_string_lossy().as_ref())
@@ -37,8 +41,8 @@ pub fn walk(start: &Path) -> WalkBuilder {
     };
     let mut b = WalkBuilder::new(start);
     b.hidden(false).git_ignore(true).git_global(true).git_exclude(true).require_git(false).follow_links(false).filter_entry(keep);
-    if start.ancestors().any(ignore_file_leaves) {
-        tracing::warn!("{}: an ignore file there or above it links to another computer; walking it without ignore files", start.display());
+    if os::path::ancestors_leave(start, ignore_file_leaves) {
+        tracing::warn!("{}: an ignore file there or above it (or above where its links lead) links to another computer; walking it without ignore files", start.display());
         b.git_ignore(false).ignore(false);
     }
     b
@@ -160,6 +164,13 @@ mod tests {
         assert_eq!(entries(&root), ["b", "b/x.log"]);
         assert_eq!(entries(&root.join("a")), [".gitignore", "x.log"]);
         assert!(!IgnoreChecker::for_dir(&root, &root.join("a")).is_ignored(&root.join("a").join("x.log"), false));
+
+        // A folder link into the folder left out (the watcher walks one a checkout makes):
+        // the crate reads the ignore files above where it leads, `a`'s among them.
+        std::fs::create_dir(root.join("a").join("deep")).unwrap();
+        std::fs::write(root.join("a").join("deep").join("y.log"), "").unwrap();
+        std::os::windows::fs::symlink_dir(Path::new("a").join("deep"), root.join("lnk")).unwrap();
+        assert_eq!(entries(&root.join("lnk")), ["y.log"]);
     }
 
     #[test]
