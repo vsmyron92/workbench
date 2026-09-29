@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 - 2026-09-29
+
+- **Help:** the user documentation in the app, bundled so it works offline and on a phone:
+  getting started, projects, agents, version control and CI, remote access and the phone
+  (including Tailscale), running as a service, and `config.toml`. Open it with F1, the
+  palette, the status bar's Help, or More → Help on a phone; search covers every page.
+- **Docs:** a plan for porting the server to Windows ([windows-port.md](docs/windows-port.md)).
+
+**Install:** Linux x86_64 (glibc 2.35 or newer): unpack
+`workbench-0.2.0-x86_64-unknown-linux-gnu.tar.gz` and run `./install.sh`, then restart
+Workbench (`systemctl --user restart workbench.service` or the running `workbench serve`).
+
 ## 0.1.0 - 2026-09-29
 
 First public release.
