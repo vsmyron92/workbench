@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::cmd::literal;
-use super::diff::{Side, blob_side, worktree_side};
+use super::diff::{Side, blob_side, worktree_bytes, worktree_side};
 use super::eol;
 use super::repo::Repo;
 use super::status::detect_state;
@@ -149,7 +149,10 @@ pub async fn resolve(repo: &Repo, req: &ResolveRequest) -> Result<(), ApiError> 
     if let Some(content) = &req.content {
         let abs = crate::util::paths::resolve_in_root(&repo.top, &p)?;
         // A file git checks out with CRLF was shown with LF (`versions`): the CRLFs go back.
-        let data = eol::of(repo, &p).await?.write(content.clone()).into_bytes();
+        // Only a file with CRLFs now can be one (LF files write as before, with no lookup).
+        let has_crlf = worktree_bytes(repo, &p).await.is_ok_and(|s| s.text.contains("\r\n"));
+        let eol = if has_crlf { eol::of(repo, &p).await } else { eol::Eol::default() };
+        let data = eol.write(content.clone()).into_bytes();
         tokio::task::spawn_blocking(move || crate::util::fs::write_atomic(&abs, &data, 0o644))
             .await
             .map_err(|e| ApiError::internal(e.to_string()))??;

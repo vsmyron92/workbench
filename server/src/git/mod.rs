@@ -108,7 +108,7 @@ pub async fn start(state: &AppState) {
         Ok(env) => {
             let _ = state.git.askpass.set(env);
         }
-        Err(e) => tracing::warn!("git: cannot set up the askpass helper ({e:#}); remote operations rely on credential helpers"),
+        Err(e) => tracing::warn!("git: cannot write the askpass helper ({e:#}); remote operations rely on credential helpers"),
     }
     match crate::util::os::proc::current_exe() {
         Ok(exe) => {

@@ -1720,7 +1720,8 @@ file renamed since is logged under its old name. The editor action sends it (pan
 `data_dir/git-askpass` wrapper script as before; on Windows the absolute `workbench.exe`
 itself with `WORKBENCH_HELPER=askpass`, also as ssh's `SSH_ASKPASS` with
 `SSH_ASKPASS_REQUIRE=force`, so a passphrase or unknown host key fails the op at once
-(remote ops start without a console). `main.rs` answers such a call before clap parses
+(remote ops start without a console), and `GCM_INTERACTIVE=never`, so Git Credential
+Manager, which git asks first, never opens a sign-in window. `main.rs` answers such a call before clap parses
 anything: the variable set and a single argument that is not a subcommand or an option
 (`askpass_prompt`), so hooks and the rebase editor, which inherit the variable, still run
 their commands. `GIT_EDITOR`/`GIT_SEQUENCE_EDITOR` quote their paths for sh with `/`

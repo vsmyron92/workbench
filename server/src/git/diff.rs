@@ -394,12 +394,13 @@ pub async fn blob_side(repo: &Repo, spec: &str) -> Result<Side, ApiError> {
 pub async fn worktree_side(repo: &Repo, repo_rel: &str) -> Result<Side, ApiError> {
     let mut side = worktree_bytes(repo, repo_rel).await?;
     if side.text.contains("\r\n") {
-        side.text = eol::of(repo, repo_rel).await?.read(side.text);
+        side.text = eol::of(repo, repo_rel).await.read(side.text);
     }
     Ok(side)
 }
 
-async fn worktree_bytes(repo: &Repo, repo_rel: &str) -> Result<Side, ApiError> {
+/// The working-tree file byte for byte (a symlink as its target text).
+pub async fn worktree_bytes(repo: &Repo, repo_rel: &str) -> Result<Side, ApiError> {
     let abs = repo.abs(repo_rel);
     // The parent must stay inside the working tree (no symlinked-directory escapes).
     if let Some(parent) = std::path::Path::new(repo_rel).parent() {

@@ -191,6 +191,13 @@ async fn crlf_by_attribute_and_unconverted_crlf() {
     let diff = working_diff(p, "w.txt").await;
     assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\nb\n", "a\r\nb\r\n"));
     assert_eq!(diff.lines.len(), 4);
+    // `text` converts a file committed with CRLF all the same (git shows every line changed
+    // until it is renormalized): the working-tree side reads with LF.
+    write(p, "c.txt", "a\r\nb\r\n");
+    commit_all(p, "crlf");
+    write(p, ".gitattributes", "c.txt text\n");
+    let diff = working_diff(p, "c.txt").await;
+    assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\r\nb\r\n", "a\nb\n"));
 }
 
 #[tokio::test]

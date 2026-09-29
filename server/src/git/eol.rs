@@ -6,12 +6,12 @@
 //! the working-tree side, and `git apply` without `--cached` (rolling hunks and lines back)
 //! writes CRLF again. What Workbench reads or writes itself follows git: the working-tree side
 //! of a diff and a conflicted file are shown with LF, like the hunks, and a conflict resolved
-//! with edited text is written back with CRLF. Every other file (LF, CRLF committed as it is,
-//! no conversion configured) is read and written byte for byte.
+//! with edited text is written back with CRLF. Every other file (LF, CRLF the automatic
+//! conversions leave alone because the index has CRs too, no conversion configured) is read
+//! and written byte for byte.
 
 use super::cmd::{literal, split_z};
 use super::repo::Repo;
-use crate::error::ApiError;
 
 /// How git converts one working-tree file on its way into the index.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -49,20 +49,31 @@ impl Eol {
 /// The conversion of `repo_path` (repository-relative, tracked or not): `git ls-files --eol`
 /// tells the line endings of the index and the working tree and the attributes' say;
 /// `core.autocrlf` decides for files no attribute covers. A failing lookup converts nothing.
-pub async fn of(repo: &Repo, repo_path: &str) -> Result<Eol, ApiError> {
-    let out = repo.git().args(["ls-files", "--eol", "-z", "--cached", "--others", "--"]).arg(literal(repo_path)).run().await?;
-    if !out.ok() {
-        return Ok(Eol::default());
-    }
-    let records = split_z(&out.stdout);
-    let infos: Vec<EolInfo> = records.iter().filter_map(|r| parse(r)).collect();
-    let autocrlf = if infos.iter().any(|i| i.attr.is_empty()) {
-        let out = repo.git().args(["config", "--get", "core.autocrlf"]).run().await?;
-        out.ok().then(|| out.text().trim().to_string())
-    } else {
-        None
+pub async fn of(repo: &Repo, repo_path: &str) -> Eol {
+    let Some(out) = output(repo, &["ls-files", "--eol", "-z", "--cached", "--others", "--", &literal(repo_path)]).await else {
+        return Eol::default();
     };
-    Ok(decide(&infos, autocrlf.as_deref()))
+    let records = split_z(&out);
+    let infos: Vec<EolInfo> = records.iter().filter_map(|r| parse(r)).collect();
+    let autocrlf = if infos.iter().any(|i| i.attr.is_empty()) { autocrlf(repo).await } else { None };
+    decide(&infos, autocrlf.as_deref())
+}
+
+/// `core.autocrlf`, when set. A bare `autocrlf` key (true) and `autocrlf =` (false) both
+/// print as nothing: git's boolean reading tells them apart.
+async fn autocrlf(repo: &Repo) -> Option<String> {
+    let value = String::from_utf8_lossy(&output(repo, &["config", "--get", "core.autocrlf"]).await?).trim().to_string();
+    if !value.is_empty() {
+        return Some(value);
+    }
+    let value = output(repo, &["config", "--get", "--type=bool", "core.autocrlf"]).await?;
+    Some(String::from_utf8_lossy(&value).trim().to_string())
+}
+
+/// Standard output of a read-only git command that succeeded.
+async fn output(repo: &Repo, args: &[&str]) -> Option<Vec<u8>> {
+    let out = repo.git().args(args.iter().copied()).run().await.ok()?;
+    out.ok().then_some(out.stdout)
 }
 
 /// One record of `git ls-files --eol`: `i/lf    w/crlf  attr/text=auto eol=crlf\t<path>`
@@ -82,17 +93,19 @@ fn parse(record: &str) -> Option<EolInfo<'_>> {
 
 fn decide(infos: &[EolInfo], autocrlf: Option<&str>) -> Eol {
     let Some(first) = infos.first() else { return Eol::default() };
-    // `text=auto` (and `core.autocrlf`) never converts a file whose index version has CRs;
-    // a `text` file committed with CRLF is left as it is here too.
+    // The automatic conversions (`text=auto`, `core.autocrlf`) leave a file whose index
+    // version has CRs alone; `text` (and `eol=`) converts it all the same (git then shows
+    // every line changed, until the file is renormalized).
     let index_lf = infos.iter().all(|i| matches!(i.index, "lf" | "none" | ""));
     let converts = match first.attr {
         "-text" => false,
         // No attribute decides: `core.autocrlf` true or input.
-        "" => autocrlf.is_some_and(autocrlf_on),
-        // text, text eol=lf|crlf, text=auto, text=auto eol=lf|crlf
+        "" => index_lf && autocrlf.is_some_and(autocrlf_on),
+        a if a.starts_with("text=auto") => index_lf,
+        // text, text eol=lf|crlf
         _ => true,
     };
-    let normalized = index_lf && converts && matches!(first.worktree, "crlf" | "mixed");
+    let normalized = converts && matches!(first.worktree, "crlf" | "mixed");
     Eol { normalized, crlf: normalized && first.worktree == "crlf" }
 }
 
@@ -132,8 +145,12 @@ mod tests {
         assert_eq!(decide(&[info("lf", "crlf", "-text")], Some("true")), Eol::default());
         // Mixed endings are read as git reads them, but not written back with CRLF.
         assert_eq!(decide(&[info("lf", "mixed", "")], Some("true")), Eol { normalized: true, crlf: false });
-        // CRs in the index (CRLF committed as is), an LF working tree, nothing known.
+        // CRs in the index (CRLF committed as is) stop the automatic conversions, not `text`.
         assert_eq!(decide(&[info("crlf", "crlf", "")], Some("true")), Eol::default());
+        assert_eq!(decide(&[info("crlf", "crlf", "text=auto")], None), Eol::default());
+        assert_eq!(decide(&[info("crlf", "crlf", "text")], None), Eol { normalized: true, crlf: true });
+        assert_eq!(decide(&[info("mixed", "crlf", "text eol=crlf")], Some("true")), Eol { normalized: true, crlf: true });
+        // An LF working tree, nothing known.
         assert_eq!(decide(&[info("lf", "lf", "")], Some("true")), Eol::default());
         assert_eq!(decide(&[], Some("true")), Eol::default());
         // A conflicted file: every stage must be LF.
@@ -150,6 +167,6 @@ mod tests {
         let raw = Eol::default();
         assert_eq!(raw.read("a\r\nb\n".into()), "a\r\nb\n");
         assert_eq!(raw.write("a\nb\n".into()), "a\nb\n");
-        assert!(!autocrlf_on("0") && !autocrlf_on("off") && autocrlf_on(" True ") && autocrlf_on("yes"));
+        assert!(!autocrlf_on("0") && !autocrlf_on("off") && !autocrlf_on("") && autocrlf_on(" True ") && autocrlf_on("yes"));
     }
 }

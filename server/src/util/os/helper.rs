@@ -6,8 +6,10 @@
 //! start in a new session, where ssh has no terminal to prompt on. Windows: no script (a
 //! batch file would hand the prompt to cmd.exe): the variables name the executable itself,
 //! `WORKBENCH_HELPER=askpass` tells it what the argument is ([`askpass_prompt`], which
-//! `main.rs` checks before it parses the command line), and `SSH_ASKPASS_REQUIRE=force`
-//! makes ssh ask it, instead of a console nobody sees, for passphrases and unknown host keys.
+//! `main.rs` checks before it parses the command line), `SSH_ASKPASS_REQUIRE=force` makes
+//! ssh ask it, instead of a console nobody sees, for passphrases and unknown host keys, and
+//! `GCM_INTERACTIVE=never` keeps Git Credential Manager, which git asks before askpass, from
+//! opening a sign-in window on the host's desktop.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -26,7 +28,11 @@ pub fn askpass_env(data_dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
 /// a command line of Workbench's own (`is_command`: a subcommand, an option). Everything git
 /// starts inherits the variable, so a hook running `workbench url`, and the interactive
 /// rebase's editor (`workbench git-editor todo <dir> <file>`), still run those commands.
+/// Windows only: Unix's wrapper runs `workbench askpass`, and nothing else is looked at there.
 pub fn askpass_prompt(is_command: impl Fn(&str) -> bool) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     prompt_of(std::env::var_os(VAR).as_deref(), &args, is_command)
 }
@@ -75,6 +81,12 @@ mod imp {
             ("SSH_ASKPASS".into(), exe),
             ("SSH_ASKPASS_REQUIRE".into(), "force".into()),
             (super::VAR.into(), "askpass".into()),
+            // Git asks its credential helpers before GIT_ASKPASS, and Git for Windows installs
+            // Credential Manager as one: without this it shows a sign-in window on the host's
+            // desktop for a host it has nothing stored for (the configured GitLab host too) and
+            // the op waits on it. Stored credentials still come back; otherwise it fails at
+            // once and git asks Workbench.
+            ("GCM_INTERACTIVE".into(), "never".into()),
         ])
     }
 }
@@ -126,6 +138,7 @@ mod tests {
         assert_eq!(env["SSH_ASKPASS"], exe);
         assert_eq!(env["SSH_ASKPASS_REQUIRE"], "force");
         assert_eq!(env[VAR], "askpass");
+        assert_eq!(env["GCM_INTERACTIVE"], "never");
         assert!(std::fs::read_dir(d.path()).unwrap().next().is_none(), "no script is written");
     }
 }
