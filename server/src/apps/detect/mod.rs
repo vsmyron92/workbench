@@ -134,6 +134,7 @@ pub fn detect(root: &Path) -> ProjectFile {
 }
 
 fn detect_inner(root: &Path) -> ProjectFile {
+    PYTHON_WORDS.with(|p| p.borrow_mut().take());
     let mut cx = Ctx::new(root);
     cx.pf.schema = 1;
     git::detect(&mut cx);
@@ -311,6 +312,12 @@ impl<'a> Ctx<'a> {
         // A name with a line break or another control character (a crafted Taskfile
         // key, a script name) is nothing a person typed: not offered.
         if run.name.chars().any(char::is_control) {
+            return None;
+        }
+        // On Windows a detected tool is often a batch file (`composer.bat`, `mvn.cmd`,
+        // `.\gradlew.bat`), whose arguments cmd.exe reads again: a quoted name with `&` or
+        // `%` from a repository file would start a command of its own there.
+        if dialect() == Dialect::PowerShell && !batch_safe(&run.command) {
             return None;
         }
         // `npm run deploy`, `release`, a `deploy` binary…: kept apart from everyday tasks
@@ -737,9 +744,38 @@ pub(crate) fn detect_as(root: &Path, d: Dialect) -> ProjectFile {
 /// `s` as one shell word: unchanged when it is plain (`build`, `db:migrate`,
 /// `./cmd/api`), single-quoted otherwise (`dialect`'s rules). Names from repository
 /// files (Make targets, Taskfile keys, script names, directory names) must never add a
-/// command of their own.
+/// command of their own (in PowerShell, `Ctx::add_run` also refuses a quoted word a batch
+/// file would misread: `batch_safe`).
 pub(crate) fn sh(s: &str) -> String {
     dialect().quote(s)
+}
+
+/// Whether the single-quoted strings of a PowerShell command line (`sh`'s quoting of names
+/// from repository files) reach a batch file as they are (`os::exe::batch_args_safe`).
+/// PowerShell passes such a string to a program without quotes when it has no space, and
+/// cmd.exe, which runs `.bat` and `.cmd` files, reads it again: `composer run-script
+/// 't&calc'` would start `calc` too.
+fn batch_safe(cmd: &str) -> bool {
+    const QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
+    let (mut quoted, mut single, mut double) = (String::new(), false, false);
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        if single {
+            // A doubled quote is a quote.
+            if !QUOTES.contains(&c) || chars.next_if(|n| QUOTES.contains(n)).is_some() {
+                quoted.push(c);
+            } else {
+                single = false;
+            }
+        } else if c == '`' {
+            chars.next();
+        } else if c == '"' {
+            double = !double;
+        } else if !double && QUOTES.contains(&c) {
+            single = true;
+        }
+    }
+    crate::util::os::exe::batch_args_safe(&[quoted])
 }
 
 /// `first`, then `then` when it succeeded (`Dialect::and_then`: `&&`, which Windows
@@ -758,12 +794,17 @@ pub(crate) fn local_program(rel: &str) -> String {
 }
 
 /// Python 3 at the start of a command line: `python3`; on Windows `python`, or the
-/// launcher's `py -3` (`os::exe::python_words`).
+/// launcher's `py -3` (`os::exe::python_words`, looked up once per detection).
 pub(crate) fn python_words() -> String {
     match dialect() {
         Dialect::Posix => "python3".into(),
-        Dialect::PowerShell => crate::util::os::exe::python_words(),
+        Dialect::PowerShell => PYTHON_WORDS.with(|p| p.borrow_mut().get_or_insert_with(crate::util::os::exe::python_words).clone()),
     }
+}
+
+thread_local! {
+    /// `os::exe::python_words` for the detection running on this thread (it searches `PATH`).
+    static PYTHON_WORDS: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 static ENV_PREFIX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^\s*[A-Za-z_][A-Za-z0-9_]*=").unwrap());
@@ -779,6 +820,48 @@ pub(crate) fn posix_only(cmd: &str) -> bool {
         || ENV_PREFIX.is_match(cmd)
         || matches!(first, "export" | "source" | "." | "unset" | "alias")
         || cmd.split_whitespace().any(|w| w.trim_matches(['"', '\'']).ends_with(".sh"))
+}
+
+static PORT_VAR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"\$(?:\{PORT\}|PORT\b)").unwrap());
+
+/// A command line from a repository file (a Procfile line, a documented command), which is
+/// POSIX shell, as the run shell reads it in `cwd` (project-relative): unchanged on Unix.
+/// Where the run shell is PowerShell, `None` when it needs a POSIX shell (`posix_only`)
+/// or starts what PowerShell does not run as a program there (`wget`, a script by its
+/// path); `$PORT` becomes `$env:PORT`, `python3` `python_words`, and `curl`, which Windows
+/// PowerShell 5.1 takes for `Invoke-WebRequest`, `curl.exe`.
+pub(crate) fn repository_command(cx: &Ctx, cmd: &str, cwd: &str) -> Option<String> {
+    if dialect() == Dialect::Posix {
+        return Some(cmd.to_string());
+    }
+    if posix_only(&PORT_VAR.replace_all(cmd, "")) {
+        return None;
+    }
+    let cmd = PORT_VAR.replace_all(cmd.trim(), "$$env:PORT");
+    let (first, rest) = cmd.split_at(cmd.find(char::is_whitespace).unwrap_or(cmd.len()));
+    let first = match first {
+        "python3" => python_words(),
+        "curl" => "curl.exe".into(),
+        "wget" => return None,
+        f if f.contains(['/', '\\']) && !f.starts_with(['/', '\\']) && !f.contains(':') && !runs_as_program(&cx.root.join(cwd), f) => return None,
+        f => f.to_string(),
+    };
+    Some(format!("{first}{rest}"))
+}
+
+/// Whether PowerShell runs the file a command names by a relative path (`./gradlew`,
+/// `bin/rails`) as a program: a Windows program (`.exe`, `.bat`, `.cmd`, `.com`, `.ps1`),
+/// or an extensionless name with one beside it (`gradlew.bat`) or with nothing there yet
+/// (a build's output: `./target/release/app` finds `app.exe`). Any other file PowerShell
+/// hands to its file association, which opens it in a window of its own or asks which
+/// program should.
+fn runs_as_program(dir: &Path, rel: &str) -> bool {
+    const PROGRAMS: [&str; 5] = ["exe", "bat", "cmd", "com", "ps1"];
+    let p = rel.split(['/', '\\']).filter(|s| !s.is_empty() && *s != ".").fold(dir.to_path_buf(), |p, s| p.join(s));
+    match p.extension().and_then(|e| e.to_str()) {
+        Some(e) => PROGRAMS.iter().any(|x| e.eq_ignore_ascii_case(x)),
+        None => PROGRAMS.iter().any(|x| p.with_extension(x).is_file()) || !p.exists(),
+    }
 }
 
 static BODY_PORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {

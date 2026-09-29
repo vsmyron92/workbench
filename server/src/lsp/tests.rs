@@ -228,7 +228,11 @@ async fn repository_config_cannot_add_or_change_servers() {
     assert!(!ids.contains(&"evil"), "{ids:?}");
     let fake = st["servers"].as_array().unwrap().iter().find(|s| s["id"] == "fake").unwrap();
     let command = fake["command"].as_str().unwrap();
-    assert!(!command.starts_with("sh") && command.ends_with("fake_ls.py"), "{fake}");
+    // The configured interpreter (`python3`; on Windows its path, shown with `~`).
+    let python = crate::util::os::exe::python();
+    let program = if crate::util::os::exe::names_path(&python[0]) { crate::config::contract_tilde(Path::new(&python[0])) } else { python[0].clone() };
+    let expected = format!("{} ", std::iter::once(program).chain(python[1..].iter().cloned()).collect::<Vec<_>>().join(" "));
+    assert!(command.starts_with(&expected) && command.ends_with("fake_ls.py"), "{fake}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

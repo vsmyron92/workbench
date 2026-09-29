@@ -246,16 +246,17 @@ fn suggestions(cx: &mut Ctx) {
             if added >= MAX_SUGGESTIONS {
                 return;
             }
-            // Shell blocks are POSIX: where the run shell is PowerShell, only commands
-            // that read the same there are offered.
-            if !is_offerable(&fc.text) || (super::dialect() == crate::util::os::shell::Dialect::PowerShell && super::posix_only(&fc.text)) {
+            if !is_offerable(&fc.text) {
                 continue;
             }
             let Some(cwd) = choose_cwd(cx, &fc) else { continue };
-            if cx.pf.runs.iter().any(|r| r.command == fc.text && r.cwd == cwd) {
+            // Shell blocks are POSIX: where the run shell is PowerShell, only commands that
+            // read the same there, or have a Windows form, are offered.
+            let Some(text) = super::repository_command(cx, &fc.text, &cwd) else { continue };
+            if cx.pf.runs.iter().any(|r| r.command == text && r.cwd == cwd) {
                 continue;
             }
-            let base = ellipsize(&fc.text, 56);
+            let base = ellipsize(&text, 56);
             let name = if cx.pf.runs.iter().any(|r| r.name == base) { format!("{base} · L{}", fc.line) } else { base };
             if cx.pf.runs.iter().any(|r| r.name == name) {
                 continue;
@@ -263,7 +264,7 @@ fn suggestions(cx: &mut Ctx) {
             cx.pf.runs.push(RunConfig {
                 name,
                 kind: RunKind::Task,
-                command: fc.text.clone(),
+                command: text,
                 cwd,
                 source: Some(format!("{doc}:L{}", fc.line)),
                 group: Some("suggested".into()),

@@ -462,7 +462,8 @@ pub fn split_words(cmd: &str) -> Option<Vec<String>> {
 }
 
 /// `split_words` for a PowerShell command line (the run shell on Windows): `'…'` (a
-/// doubled `''` is a quote), `"…"` without variables, the backtick escape, and a leading
+/// doubled `''` is a quote), `"…"` without variables, the backtick escape of a character
+/// that stays itself (`` `" ``, `` `$ ``, a space), and a leading
 /// call operator (`& 'C:\my tools\python.exe' x.py`); `\` is a character like any other.
 /// `None` when it uses syntax we do not interpret (`$x`, pipes, `;`, `&&`, `(…)`, `@x`).
 pub fn split_words_ps(cmd: &str) -> Option<Vec<String>> {
@@ -487,7 +488,11 @@ pub fn split_words_ps(cmd: &str) -> Option<Vec<String>> {
                 cur.push('"');
             }
             (Some(q), c) if c == q => quote = None,
-            (Some('"'), '`') | (None, '`') => cur.push(chars.next()?),
+            // `` `n ``, `` `t ``, `` `0 ``… are control characters: not interpreted.
+            (Some('"'), '`') | (None, '`') => match chars.next()? {
+                '0' | 'a' | 'b' | 'e' | 'f' | 'n' | 'r' | 't' | 'u' | 'v' => return None,
+                c => cur.push(c),
+            },
             (Some('"'), '$') => return None,
             (Some(_), c) => cur.push(c),
             (None, '\'' | '"') => {
@@ -784,6 +789,10 @@ not json at all
         }
         assert_eq!(split_words_ps(r#"a 'b c' "d`"e" f`` g '' "x""y""#), Some(vec!["a".into(), "b c".into(), "d\"e".into(), "f`".into(), "g".into(), "".into(), "x\"y".into()]));
         assert_eq!(split_words_ps(r"C:\x\y.exe a\b"), Some(vec![r"C:\x\y.exe".into(), r"a\b".into()]));
+        // `` `n `` is a line break, `` `t `` a tab: not guessed at.
+        for escape in ["python a.py `n", "python \"a`tb.py\"", "python a`0.py"] {
+            assert_eq!(split_words_ps(escape), None, "{escape}");
+        }
     }
 
     #[test]

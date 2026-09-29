@@ -761,14 +761,21 @@ Rules for these runs:
 - Commands are written in the run shell's language (`detect::dialect`, the one helper
   every Windows form goes through; `util::os::shell::Dialect`): POSIX for `bash -lc`, so
   Linux gets exactly what it always did. On Windows (PowerShell): the venv's
-  `Scripts\python.exe`, `python` or `py -3` for `python3`, `a; if (-not $?) { exit 1 };
-  b` for `a && b` (Windows PowerShell 5.1 has no `&&`), `.\build\Debug\app.exe` after
-  `cmake --build build --config Debug` (Visual Studio, CMake's default there, keeps a
-  folder per configuration; a Ninja preset does not), CMake presets for `Windows`,
-  `.\gradlew.bat` and `.\mvnw.cmd`, `ruby bin/rails`, `php vendor/bin/phpunit`, the Unity
-  editor in `%ProgramFiles%` called with `&`. Procfile lines and documented commands in
-  POSIX syntax (`$VAR`, `&&`, `VAR=x cmd`, `.sh`…) are not offered there. Deploys and
-  probes for an ssh host stay POSIX; a local `via_host` probe runs `curl.exe -o NUL`.
+  `Scripts\python.exe`, `python` or `py -3` for `python3`, `a; if (-not $?) { exit … };
+  b` for `a && b` (Windows PowerShell 5.1 has no `&&`; the failure keeps `a`'s status,
+  127 when not found), `.\build\Debug\app.exe` after `cmake --build build --config
+  Debug` (Visual Studio, CMake's default there, keeps a folder per configuration; the
+  generator is the preset's, else the build dir's `CMakeCache.txt`, else
+  `CMAKE_GENERATOR`), CMake presets for `Windows`, `.\gradlew.bat` and `.\mvnw.cmd`,
+  `ruby bin/rails`, `php vendor/bin/phpunit`, the Unity editor in `%ProgramFiles%` called
+  with `&`. Procfile lines and documented commands (`detect::repository_command`) in
+  POSIX syntax (`$VAR` but `$PORT`, which becomes `$env:PORT`; `&&`, `VAR=x cmd`, `.sh`,
+  `bash validate.sh`…), `wget`, and scripts started by their path without a Windows
+  program beside them are not offered there; `python3` and `curl` become `python_words`
+  and `curl.exe`. A run whose quoted words (names from repository files) hold one of
+  `% ! ^ & | < > "` is not offered on Windows either: detected tools are often batch files
+  (`composer.bat`, `mvn.cmd`), whose arguments cmd.exe reads again. Deploys and probes for
+  an ssh host stay POSIX; a local `via_host` probe runs `curl.exe -o NUL`.
 
 ## Database (db)
 

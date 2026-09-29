@@ -13,7 +13,8 @@
 //! <binary dir>/name` runs. On Windows (`super::dialect`) presets are those for
 //! `Windows`, and a multi-configuration build dir (Visual Studio, CMake's default
 //! there) builds and runs Debug: `cmake --build build --config Debug --target name`,
-//! then `.\build\Debug\name.exe`.
+//! then `.\build\Debug\name.exe`. The generator is the preset's, else the one the
+//! build dir's `CMakeCache.txt` records, else `CMAKE_GENERATOR`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -41,6 +42,8 @@ static RUNTIME_DIR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?im)^\s*set\s*\(\s*CMAKE_RUNTIME_OUTPUT_DIRECTORY\s+"?\$\{(?:CMAKE_BINARY_DIR|PROJECT_BINARY_DIR)\}/?([\w./-]*)"?\s*\)"#).unwrap()
 });
 static PROJECT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?im)^\s*(?:project|cmake_minimum_required)\s*\(").unwrap());
+/// The generator a configured build dir was made with, in its `CMakeCache.txt`.
+static CACHED_GENERATOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^CMAKE_GENERATOR:INTERNAL=([^\r\n]+)").unwrap());
 
 pub fn detect(cx: &mut Ctx, files: &[PathBuf]) {
     let lists: Vec<PathBuf> = files.iter().filter(|f| f.file_name().is_some_and(|n| n == "CMakeLists.txt")).cloned().collect();
@@ -97,7 +100,7 @@ fn project(cx: &mut Ctx, dir: &Path, lists: &[PathBuf]) {
 
     let presets = read_presets(cx, dir);
     if presets.configure.is_empty() {
-        plain(cx, &cwd, &top, has_tests, &exes, runtime_dir.as_deref());
+        plain(cx, dir, &cwd, has_tests, &exes, runtime_dir.as_deref());
     } else {
         with_presets(cx, dir, &cwd, &presets, has_tests, &exes, runtime_dir.as_deref());
     }
@@ -116,6 +119,29 @@ fn multi_config(generator: Option<&str>) -> bool {
     generator.is_none_or(|g| g.starts_with("Visual Studio") || g.contains("Multi-Config") || g == "Xcode")
 }
 
+/// `multi_config` for the build dir `bin` of the project in `dir`, by the generator CMake
+/// uses there: the one its preset names, else the one an existing `CMakeCache.txt`
+/// records, else `CMAKE_GENERATOR` (CMake's own fallback, often Ninja on Windows), else
+/// CMake's default. Only the Windows forms depend on it: nothing is read on Unix.
+fn build_dir_multi_config(cx: &mut Ctx, dir: &Path, bin: &str, preset: Option<&str>) -> bool {
+    if super::dialect() == Dialect::Posix {
+        return multi_config(preset);
+    }
+    let cache = dir.join(bin).join("CMakeCache.txt");
+    let cached = || cx.read(&cache).and_then(|t| CACHED_GENERATOR.captures(&t).map(|c| c[1].trim().to_string()));
+    let generator = preset.map(str::to_string).or_else(cached).or_else(env_generator);
+    multi_config(generator.as_deref())
+}
+
+/// `CMAKE_GENERATOR` of this machine, on Windows. Not in tests: the Windows forms they
+/// check must not depend on the machine that runs them.
+fn env_generator() -> Option<String> {
+    if cfg!(test) || !cfg!(windows) {
+        return None;
+    }
+    std::env::var("CMAKE_GENERATOR").ok().map(|g| g.trim().to_string()).filter(|g| !g.is_empty())
+}
+
 /// Build `name` in the binary dir `bin`, then run it. On Windows a multi-configuration
 /// build dir (`multi`) builds and runs its Debug configuration: `cmake --build build
 /// --config Debug --target app`, then `.\build\Debug\app.exe`.
@@ -125,10 +151,12 @@ fn build_and_run(bin: &str, rel_dir: &str, runtime_dir: Option<&str>, name: &str
     and_then(&format!("cmake --build {}{config} --target {}", sh(bin), sh(name)), &local_program(&exe_path(bin, rel_dir, runtime_dir, &exe)))
 }
 
-fn plain(cx: &mut Ctx, cwd: &str, top: &Path, tests: bool, exes: &[(String, String, PathBuf)], runtime_dir: Option<&str>) {
+fn plain(cx: &mut Ctx, dir: &Path, cwd: &str, tests: bool, exes: &[(String, String, PathBuf)], runtime_dir: Option<&str>) {
     // `build` is configured by the run below: on Windows with CMake's default generator,
     // Visual Studio, whose configurations are chosen when building (Debug by default).
     let windows = super::dialect() == Dialect::PowerShell;
+    let top = &dir.join("CMakeLists.txt");
+    let multi = build_dir_multi_config(cx, dir, "build", None);
     let configure = cx.add_run(RunConfig {
         name: scoped("cmake configure", cwd),
         kind: RunKind::Build,
@@ -166,7 +194,7 @@ fn plain(cx: &mut Ctx, cwd: &str, top: &Path, tests: bool, exes: &[(String, Stri
         cx.add_run(RunConfig {
             name: scoped(name, cwd),
             kind: RunKind::Task,
-            command: build_and_run("build", rel_dir, runtime_dir, name, true),
+            command: build_and_run("build", rel_dir, runtime_dir, name, multi),
             cwd: cwd.to_string(),
             depends_on: deps.clone(),
             source: source(cx, list, &format!(" add_executable({name})")),
@@ -372,11 +400,12 @@ fn with_presets(cx: &mut Ctx, dir: &Path, cwd: &str, p: &Presets, tests: bool, e
     // Executables: built and run in the first configure preset whose binary dir is known.
     let Some((preset, Some(bin), generator)) = p.configure.iter().find(|c| c.1.is_some()) else { return };
     let deps: Vec<String> = configure_runs.get(preset).cloned().into_iter().collect();
+    let multi = build_dir_multi_config(cx, dir, bin, generator.as_deref());
     for (name, rel_dir, list) in exes {
         cx.add_run(RunConfig {
             name: scoped(name, cwd),
             kind: RunKind::Task,
-            command: build_and_run(bin, rel_dir, runtime_dir, name, multi_config(generator.as_deref())),
+            command: build_and_run(bin, rel_dir, runtime_dir, name, multi),
             cwd: cwd.to_string(),
             depends_on: deps.clone(),
             source: source(cx, list, &format!(" add_executable({name})")),

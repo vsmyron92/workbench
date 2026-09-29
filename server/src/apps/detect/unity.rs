@@ -13,7 +13,9 @@ use super::{Ctx, rel, scoped, source, tilde, walk_filtered};
 use crate::config::project::{Component, RunConfig, RunKind};
 use crate::util::os::shell::Dialect;
 
-static VERSION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"m_EditorVersion:\s*(\S+)").unwrap());
+/// `m_EditorVersion: 6000.5.6f1`. Only a version's characters: it becomes part of the
+/// editor's path, which commands insert as it is (`{unity}`).
+static VERSION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)m_EditorVersion:\s*([0-9A-Za-z._-]+)[ \t\r]*$").unwrap());
 static MENU_ITEM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"\[(?:UnityEditor\.)?MenuItem\(\s*"([^"]+)"\s*(,[^\]]*)?\)\]\s*(?:\[[^\]]*\]\s*)*public\s+static\s+void\s+(\w+)\s*\(\s*\)"#,
@@ -51,7 +53,8 @@ pub fn detect(cx: &mut Ctx, version_file: &Path) {
     };
     cx.pf.toolchains.insert(key.clone(), editor);
     // `"$PWD"` is the working directory in PowerShell too; there the editor's path (with
-    // a space: `Program Files`) is a quoted string started with the call operator.
+    // a space: `Program Files`) is a quoted string started with the call operator (a
+    // toolchain path set by the user must not contain `'`).
     let unity = match super::dialect() {
         Dialect::Posix => format!("{{{key}}}"),
         Dialect::PowerShell => format!("& '{{{key}}}'"),
