@@ -38,7 +38,7 @@ const MAX_TEXT_CHARS: usize = 120_000;
 
 static PAGE_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/pages/(?:edit-v2/)?(\d+)|[?&]pageId=(\d+)").unwrap());
 
-/// A page id from `458753`, or a Confluence page URL.
+/// A page id from `65601`, or a Confluence page URL.
 pub fn page_id_arg(raw: &str) -> Result<String, ApiError> {
     let raw = raw.trim();
     if raw.bytes().all(|b| b.is_ascii_digit()) && !raw.is_empty() {
@@ -605,7 +605,7 @@ pub fn all() -> Vec<McpTool> {
     vec![
         tool(
             "confluence_search",
-            "Search Confluence pages. Pass `query` (full-text) or raw `cql` (e.g. `ancestor = 458753 AND title ~ \"economy\"`). Returns page ids, titles, spaces and excerpts.",
+            "Search Confluence pages. Pass `query` (full-text) or raw `cql` (e.g. `ancestor = 65601 AND title ~ \"economy\"`). Returns page ids, titles, spaces and excerpts.",
             json!({"type":"object","properties":{
                 "query":{"type":"string","description":"Full-text search terms"},
                 "cql":{"type":"string","description":"Raw CQL; overrides query"},
@@ -806,8 +806,8 @@ mod tests {
 
     #[test]
     fn page_ids_from_urls() {
-        assert_eq!(page_id_arg("458753").unwrap(), "458753");
-        assert_eq!(page_id_arg("https://x.atlassian.net/wiki/spaces/DESIGN/pages/458753/Design+Notes").unwrap(), "458753");
+        assert_eq!(page_id_arg("65601").unwrap(), "65601");
+        assert_eq!(page_id_arg("https://x.atlassian.net/wiki/spaces/DESIGN/pages/65601/Design+Notes").unwrap(), "65601");
         assert_eq!(page_id_arg("https://x.atlassian.net/wiki/pages/viewpage.action?pageId=77").unwrap(), "77");
         assert_eq!(page_id_arg("https://x.atlassian.net/wiki/spaces/D/pages/edit-v2/12").unwrap(), "12");
         assert!(page_id_arg("hello").is_err());

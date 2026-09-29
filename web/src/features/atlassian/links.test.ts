@@ -4,8 +4,8 @@ import type { ProjectConfig } from '@/api/types'
 
 describe('references', () => {
   it('parses page ids and URLs', () => {
-    expect(parsePageRef('458753')).toBe('458753')
-    expect(parsePageRef(' https://x.atlassian.net/wiki/spaces/DESIGN/pages/458753/Design+Notes ')).toBe('458753')
+    expect(parsePageRef('65601')).toBe('65601')
+    expect(parsePageRef(' https://x.atlassian.net/wiki/spaces/DESIGN/pages/65601/Design+Notes ')).toBe('65601')
     expect(parsePageRef('https://x.atlassian.net/wiki/spaces/D/pages/edit-v2/12?draftShareId=1')).toBe('12')
     expect(parsePageRef('https://x.atlassian.net/wiki/pages/viewpage.action?spaceKey=D&pageId=77')).toBe('77')
     expect(parsePageRef('hello')).toBeNull()

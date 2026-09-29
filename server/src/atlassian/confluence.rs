@@ -1295,15 +1295,15 @@ mod tests {
     fn builds_cql() {
         let s = SearchIn { q: Some("army \"cap\"".into()), space: Some("DESIGN".into()), ..Default::default() };
         assert_eq!(build_cql(&s).unwrap(), r#"type = page AND text ~ "army \"cap\"" AND space = "DESIGN""#);
-        let raw = SearchIn { cql: Some(" ancestor = 458753 ".into()), q: Some("ignored".into()), ..Default::default() };
-        assert_eq!(build_cql(&raw).unwrap(), "ancestor = 458753");
+        let raw = SearchIn { cql: Some(" ancestor = 65601 ".into()), q: Some("ignored".into()), ..Default::default() };
+        assert_eq!(build_cql(&raw).unwrap(), "ancestor = 65601");
         assert!(build_cql(&SearchIn::default()).is_err());
         assert_eq!(cql_quote(r"a\b"), r#""a\\b""#);
     }
 
     #[test]
     fn rejects_non_numeric_ids() {
-        assert!(check_id("458753").is_ok());
+        assert!(check_id("65601").is_ok());
         for bad in ["", "12a", "../1", "1/children", "1?x=2", &"9".repeat(30)] {
             assert!(check_id(bad).is_err(), "{bad}");
         }

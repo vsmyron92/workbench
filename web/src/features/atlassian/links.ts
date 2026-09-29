@@ -3,7 +3,7 @@
 
 import type { ProjectConfig } from '@/api/types'
 
-/** A Confluence page id from `458753`, a page URL, a `viewpage.action?pageId=` URL or an edit URL. */
+/** A Confluence page id from `65601`, a page URL, a `viewpage.action?pageId=` URL or an edit URL. */
 export function parsePageRef(input: string): string | null {
   const s = input.trim()
   if (/^\d{1,20}$/.test(s)) return s

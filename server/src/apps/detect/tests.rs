@@ -518,16 +518,16 @@ fn confluence_links_in_docs() {
     write(
         r,
         "CLAUDE.md",
-        "Design lives in Confluence: site `acme.atlassian.net`, space **`DESIGN`**, cloudId `250ba348-039a-466b-afd2-a2bd4b4af531`.\n\
-         Start at <https://acme.atlassian.net/wiki/spaces/DESIGN/pages/458753/Game+Design>.\n",
+        "Design lives in Confluence: site `acme.atlassian.net`, space **`DESIGN`**, cloudId `127de92c-f2ea-4e41-8bc5-8f5b62025841`.\n\
+         Start at <https://acme.atlassian.net/wiki/spaces/DESIGN/pages/65601/Design+Notes>.\n",
     );
-    write(r, "docs/design/README.md", "> Moved from Confluence (Design space, page 5275649) on 2026-09-26.\n");
+    write(r, "docs/design/README.md", "> Moved from Confluence (Design space, page 3342337) on 2026-09-26.\n");
     write(r, "docs/design/note.md", "> Moved from Confluence (Design space, page 999) on 2026-09-26.\n");
     let pf = detect(r);
     let c = pf.links.confluence.as_ref().unwrap();
     assert_eq!((c.site.as_str(), c.space.as_str()), ("https://acme.atlassian.net", "DESIGN"));
-    assert_eq!(c.cloud_id.as_deref(), Some("250ba348-039a-466b-afd2-a2bd4b4af531"));
-    assert!(c.root_pages.contains(&458753) && c.root_pages.contains(&5275649));
+    assert_eq!(c.cloud_id.as_deref(), Some("127de92c-f2ea-4e41-8bc5-8f5b62025841"));
+    assert!(c.root_pages.contains(&65601) && c.root_pages.contains(&3342337));
     assert!(!c.root_pages.contains(&999), "only index docs are scanned");
     assert!(c.archived);
 }
