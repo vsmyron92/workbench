@@ -173,7 +173,7 @@ fn container_env(spec: &ServerSpec, target: &ExecTarget) -> Vec<(String, Option<
     spec.env
         .iter()
         .filter(|(_, v)| {
-            let host_path = v.starts_with('/') || v.starts_with("~/");
+            let host_path = crate::util::os::path::is_absolute_str(v) || crate::util::os::path::home_relative(v).is_some();
             !host_path || target.map_path(&crate::config::expand_tilde(v)).is_some()
         })
         .map(|(k, v)| (k.clone(), Some(v.clone())))

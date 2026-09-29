@@ -304,8 +304,8 @@ fn uploadable_file(root: &std::path::Path, raw: &str, sensitive: &crate::files::
     };
     let rel = relative_to(root, &abs).unwrap_or_else(|| raw.to_string());
     check_uploadable(&rel, sensitive)?;
-    let canon = abs.canonicalize().map_err(|_| ApiError::not_found(format!("{rel} does not exist in the project")))?;
-    let canon_root = root.canonicalize().map_err(|_| ApiError::not_found("the project folder is missing"))?;
+    let canon = crate::util::os::path::canonicalize(&abs).map_err(|_| ApiError::not_found(format!("{rel} does not exist in the project")))?;
+    let canon_root = crate::util::os::path::canonicalize(root).map_err(|_| ApiError::not_found("the project folder is missing"))?;
     let real_rel = relative_to(&canon_root, &canon)
         .filter(|r| !r.is_empty())
         .ok_or_else(|| ApiError::forbidden(format!("{rel} is not uploaded: it resolves outside the project")))?;
@@ -902,7 +902,7 @@ mod tests {
         // A link to an ordinary project file is fine; the canonical file is what is read.
         let (path, rel) = uploadable_file(&root, "docs/alias.txt", &sensitive).unwrap();
         assert_eq!(rel, "docs/alias.txt");
-        assert_eq!(path, root.join("docs/real.txt").canonicalize().unwrap());
+        assert_eq!(path, crate::util::os::path::canonicalize(root.join("docs/real.txt")).unwrap());
         assert_eq!(refused("docs/missing.txt").code, "not_found");
     }
 }

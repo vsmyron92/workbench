@@ -279,7 +279,7 @@ pub fn session_updates(suggestions: Option<&Value>) -> (Vec<Value>, Option<Strin
                     .into_iter()
                     .flatten()
                     .filter_map(Value::as_str)
-                    .filter(|d| d.starts_with('/'))
+                    .filter(|d| crate::util::os::path::is_absolute_str(d))
                     .take(4)
                     .map(str::to_string)
                     .collect();

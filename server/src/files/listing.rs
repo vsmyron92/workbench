@@ -79,7 +79,7 @@ pub fn list_dir(root: &Path, dir: &Path, rel: &str, sensitive: &Sensitive) -> Ap
     if !md.is_dir() {
         return Err(ApiError::bad_request(format!("{rel:?} is not a directory")));
     }
-    let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canon_root = crate::util::os::path::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut raw: Vec<Raw> = vec![];
     let mut total = 0usize;
     for ent in std::fs::read_dir(dir)? {
@@ -94,8 +94,8 @@ pub fn list_dir(root: &Path, dir: &Path, rel: &str, sensitive: &Sensitive) -> Ap
         }
         let Ok(ft) = ent.file_type() else { continue };
         let (is_dir, target) = if ft.is_symlink() {
-            let target = match ent.path().canonicalize() {
-                Ok(t) if !t.starts_with(&canon_root) => "broken",
+            let target = match crate::util::os::path::canonicalize(ent.path()) {
+                Ok(t) if !crate::util::os::path::starts_with(&t, &canon_root) => "broken",
                 Ok(t) if t.is_dir() => "dir",
                 Ok(_) => "file",
                 Err(_) => "broken",

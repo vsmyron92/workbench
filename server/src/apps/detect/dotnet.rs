@@ -40,7 +40,7 @@ pub fn detect(cx: &mut Ctx, sln: &Path) {
     let has_tests = SLN_PROJECT
         .captures_iter(&text)
         .map(|c| c[1].replace('\\', "/"))
-        .filter(|p| !p.contains(".."))
+        .filter(|p| !p.contains("..") && crate::util::os::path::stays_inside(p))
         .any(|p| cx.read(&dir.join(&p)).is_some_and(|csproj| csproj.contains("Microsoft.NET.Test.Sdk")));
     let dotnet = dotnet_cmd(cx);
     cx.add_run(RunConfig {

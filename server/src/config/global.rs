@@ -287,7 +287,7 @@ impl GlobalConfig {
     /// A first-run config built from what exists on this machine.
     fn detect_default() -> Self {
         let mut cfg = Self::default();
-        cfg.extra_roots = vec![format!("/tmp/claude-{}", nix::unistd::getuid()), "~/.claude".into()];
+        cfg.extra_roots = vec![crate::util::os::path::claude_temp_dir(), "~/.claude".into()];
         if expand_tilde("~/.gitlab_token").exists() {
             cfg.secrets.insert("gitlab".into(), SecretRef::File("~/.gitlab_token".into()));
             cfg.gitlab = Some(GitlabConfig { host: gitlab_com(), token: "gitlab".into() });

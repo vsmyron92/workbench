@@ -104,12 +104,12 @@ fn git_dirs(root: &Path) -> Option<GitDirs> {
         // Relative to the directory holding the `.git` file.
         if p.is_absolute() { p } else { top.join(p) }
     };
-    let gitdir = gitdir.canonicalize().unwrap_or(gitdir);
+    let gitdir = crate::util::os::path::canonicalize(&gitdir).unwrap_or(gitdir);
     let commondir = match std::fs::read_to_string(gitdir.join("commondir")) {
         Ok(t) => {
             let p = PathBuf::from(t.trim());
             let p = if p.is_absolute() { p } else { gitdir.join(p) };
-            p.canonicalize().unwrap_or(p)
+            crate::util::os::path::canonicalize(&p).unwrap_or(p)
         }
         Err(_) => gitdir.clone(),
     };
@@ -479,14 +479,14 @@ mod tests {
         std::fs::create_dir_all(&checkout).unwrap();
         std::fs::write(checkout.join(".git"), format!("gitdir: {}\n", wt.display())).unwrap();
         let g = git_dirs(&checkout).unwrap();
-        assert_eq!(g.gitdir, wt.canonicalize().unwrap());
-        assert_eq!(g.commondir, main.canonicalize().unwrap());
+        assert_eq!(g.gitdir, crate::util::os::path::canonicalize(&wt).unwrap());
+        assert_eq!(g.commondir, crate::util::os::path::canonicalize(&main).unwrap());
     }
 
     #[test]
     fn subdirectory_projects_find_the_repository_git_dirs() {
         let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().canonicalize().unwrap().join("mono");
+        let repo = crate::util::os::path::canonicalize(dir.path()).unwrap().join("mono");
         std::fs::create_dir_all(repo.join(".git/refs/heads")).unwrap();
         std::fs::create_dir_all(repo.join("app/web/src")).unwrap();
         let g = git_dirs(&repo.join("app/web")).unwrap();
@@ -518,7 +518,7 @@ mod tests {
     async fn subdirectory_project_emits_git_changed() {
         use crate::config::{GlobalConfig, Paths};
         let (cfg, data, tmp) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let repo = tmp.path().canonicalize().unwrap().join("mono");
+        let repo = crate::util::os::path::canonicalize(tmp.path()).unwrap().join("mono");
         std::fs::create_dir_all(repo.join(".git/refs/heads")).unwrap();
         std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::create_dir_all(repo.join("app/web")).unwrap();
@@ -551,7 +551,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn watcher_reports_changes() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        let root = crate::util::os::path::canonicalize(dir.path()).unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
         std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();

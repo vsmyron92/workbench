@@ -322,7 +322,7 @@ pub fn resolve_launch(provider: &Provider, cfg: &AgentsConfig, project: &Project
             if d.is_empty() {
                 continue;
             }
-            let p = if d.starts_with('/') || d.starts_with('~') { crate::config::expand_tilde(d) } else { project.root.join(d) };
+            let p = if util::os::path::is_absolute_str(d) || d.starts_with('~') { crate::config::expand_tilde(d) } else { project.root.join(d) };
             if !p.is_dir() {
                 return Err(ApiError::bad_request(format!("additional directory {} does not exist", p.display())));
             }
@@ -704,7 +704,7 @@ impl Terminals {
         // Environment: base, the provider's (config.toml), then the project overlay's.
         let mut env = base_env(state, &entry.id);
         for (k, v) in &provider.env {
-            let v = if v.starts_with("~/") { crate::config::expand_tilde(v).display().to_string() } else { v.clone() };
+            let v = if crate::util::os::path::home_relative(v).is_some() { crate::config::expand_tilde(v).display().to_string() } else { v.clone() };
             env.push((k.clone(), Some(v)));
         }
         let mut secrets = vec![];
@@ -2288,7 +2288,7 @@ impl Terminals {
 /// container session's transcript is a path in the container, not here.
 fn note_transcript(rec: &mut store::Record, path: Option<String>) -> bool {
     let inside = super::in_container(&rec.info);
-    let Some(tp) = path.filter(|p| !inside && p.starts_with('/') && p.ends_with(".jsonl") && !p.contains("/../")) else {
+    let Some(tp) = path.filter(|p| !inside && util::os::path::is_absolute_str(p) && p.ends_with(".jsonl") && !util::os::path::segments(p).any(|s| s == "..")) else {
         return false;
     };
     if rec.transcript_path.as_deref() == Some(tp.as_str()) {
@@ -2342,8 +2342,8 @@ impl Drop for HeldPermission {
 /// Expand `~/` and `${secret:NAME}` in a project `[agent].env` value. The secrets used
 /// are added to `used` (for masking the session's output).
 fn expand_env_value(state: &AppState, project: &Project, v: &str, used: &mut Vec<Secret>) -> Result<String, ApiError> {
-    let v = if let Some(rest) = v.strip_prefix("~/") {
-        crate::config::expand_tilde(&format!("~/{rest}")).display().to_string()
+    let v = if crate::util::os::path::home_relative(v).is_some() {
+        crate::config::expand_tilde(v).display().to_string()
     } else {
         v.to_string()
     };

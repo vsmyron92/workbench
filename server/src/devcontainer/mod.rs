@@ -252,7 +252,7 @@ pub fn summary(state: &AppState, p: &Project) -> Option<Summary> {
 /// The container's labels name this project folder.
 fn folder_matches(p: &Project, folder: &str) -> bool {
     let root = p.root.display().to_string();
-    folder == root || std::fs::canonicalize(folder).is_ok_and(|c| c == p.root)
+    folder == root || crate::util::os::path::canonicalize(folder).is_ok_and(|c| c == p.root)
 }
 
 fn config_abs(p: &Project, rel: &str) -> String {
@@ -405,7 +405,7 @@ fn remote_user_of(c: &ContainerInfo, saved: &store::Saved) -> Option<String> {
 /// Host folder ↔ container folder of the project: the bind mount whose source is the
 /// project root or one of its parents (the CLI mounts the git root).
 fn mapping_of(p: &Project, c: &ContainerInfo) -> Option<(std::path::PathBuf, String)> {
-    let canon = |s: &str| std::fs::canonicalize(s).unwrap_or_else(|_| s.into());
+    let canon = |s: &str| crate::util::os::path::canonicalize(s).unwrap_or_else(|_| s.into());
     c.mounts
         .iter()
         .filter(|m| m.kind == "bind" && !m.source.is_empty())

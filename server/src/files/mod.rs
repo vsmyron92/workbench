@@ -172,9 +172,10 @@ pub(crate) fn resolve_entry(state: &AppState, pid: &str, rel: &str) -> ApiResult
     Ok(Resolved { project, abs, rel })
 }
 
-/// Whether a project-relative path lies inside a `.git` directory (read-only for us).
+/// Whether a project-relative path lies inside a `.git` directory (read-only for us;
+/// `.GIT` too where names ignore case).
 pub(crate) fn in_git_dir(rel: &str) -> bool {
-    Path::new(rel).components().any(|c| matches!(c, Component::Normal(n) if n == ".git"))
+    Path::new(rel).components().any(|c| matches!(c, Component::Normal(n) if util::os::path::same_name(n, ".git")))
 }
 
 /// Run blocking filesystem work off the async workers.
@@ -211,14 +212,16 @@ pub(crate) fn join_rel(dir: &str, name: &str) -> String {
     if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") }
 }
 
-/// A file or directory name a client may create: no separators, not `.`/`..`.
+/// A file or directory name a client may create: no separators, not `.`/`..`, and
+/// one Windows keeps as it is (`os::path::check_component`).
 pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 255
         && name != "."
         && name != ".."
-        && !name.contains('/')
+        && !util::os::path::has_separator(name)
         && !name.contains('\0')
+        && util::os::path::check_component(name).is_ok()
 }
 
 #[cfg(test)]
@@ -245,6 +248,12 @@ mod tests {
         assert!(!valid_name("a/b"));
         assert!(!valid_name("a\0b"));
         assert!(!valid_name(&"x".repeat(256)));
+        #[cfg(windows)]
+        for bad in [r"a\b", "a:b", "CON", "nul.txt", "x.", "x "] {
+            assert!(!valid_name(bad), "{bad}");
+        }
+        #[cfg(windows)]
+        assert!(in_git_dir(".GIT/config"));
     }
 
     #[test]

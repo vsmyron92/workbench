@@ -406,7 +406,7 @@ struct FileQuery {
 const CREDENTIAL_NAMES: &[&str] = &[".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".netrc", ".git-credentials", ".pgpass", ".password-store", "keyrings"];
 
 fn credential_path(path: &str) -> bool {
-    path.split('/').any(|c| CREDENTIAL_NAMES.contains(&c))
+    crate::util::os::path::segments(path).any(|c| CREDENTIAL_NAMES.iter().any(|n| crate::util::os::path::same_name(c, n)))
 }
 
 /// Where Workbench never shows a file from, whatever a program's debug information
@@ -416,11 +416,8 @@ fn private_file(state: &AppState, pid: &str, path: &std::path::Path) -> bool {
     if credential_path(&path.to_string_lossy()) {
         return true;
     }
-    let home = crate::config::expand_tilde("~/");
     let mut roots: Vec<std::path::PathBuf> = vec![state.paths.config_dir.clone(), state.paths.data_dir.clone()];
-    for d in [".config/gh", ".config/gcloud", ".config/workbench", ".local/share/workbench"] {
-        roots.push(home.join(d));
-    }
+    roots.extend(crate::util::os::path::private_dirs());
     let mut refs: Vec<crate::config::project::SecretRef> = state.config.read().secrets.values().cloned().collect();
     if let Some(p) = state.projects.get(pid) {
         refs.extend(p.config.secrets.values().cloned());
@@ -430,7 +427,8 @@ fn private_file(state: &AppState, pid: &str, path: &std::path::Path) -> bool {
             roots.push(crate::config::expand_tilde(p));
         }
     }
-    roots.iter().any(|r| path.starts_with(r) || r.canonicalize().is_ok_and(|c| path.starts_with(c)))
+    use crate::util::os::path::{canonicalize, starts_with};
+    roots.iter().any(|r| starts_with(path, r) || canonicalize(r).is_ok_and(|c| starts_with(path, &c)))
 }
 
 /// A file outside the project (a library header, a crate's source, the standard
@@ -440,7 +438,7 @@ fn private_file(state: &AppState, pid: &str, path: &std::path::Path) -> bool {
 async fn file(State(state): State<AppState>, caller: C, Path((pid, sid)): Path<(String, String)>, Query(q): Query<FileQuery>) -> ApiResult<Json<Value>> {
     user_only(&caller)?;
     let s = session_of(&state, &pid, &sid)?;
-    if !q.path.starts_with('/') || !s.knows_source(&q.path) {
+    if !crate::util::os::path::is_absolute_str(&q.path) || !s.knows_source(&q.path) {
         return Err(ApiError::forbidden("only files this debug session's frames named can be shown; select the frame again"));
     }
     if credential_path(&q.path) {
@@ -462,7 +460,7 @@ async fn file(State(state): State<AppState>, caller: C, Path((pid, sid)): Path<(
             let path = std::path::PathBuf::from(&q.path);
             let (st, project) = (state.clone(), pid.clone());
             tokio::task::spawn_blocking(move || -> ApiResult<Vec<u8>> {
-                let canon = path.canonicalize().map_err(|_| ApiError::not_found(format!("{} does not exist on this machine", path.display())))?;
+                let canon = crate::util::os::path::canonicalize(&path).map_err(|_| ApiError::not_found(format!("{} does not exist on this machine", path.display())))?;
                 if private_file(&st, &project, &path) || private_file(&st, &project, &canon) {
                     return Err(ApiError::forbidden("Workbench does not show this file"));
                 }

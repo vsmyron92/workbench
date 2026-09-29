@@ -93,10 +93,14 @@ fn members(root: &Path, manifest: &toml::Value) -> Vec<PathBuf> {
         .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.trim_end_matches('/').to_string())).collect())
         .unwrap_or_default();
     for m in list.iter().filter_map(|v| v.as_str()) {
-        if m.contains("..") || m.starts_with('/') {
+        if m.contains("..") || crate::util::os::path::is_absolute_str(m) {
             continue;
         }
         let m = m.trim_end_matches('/');
+        // On Windows `C:x` would replace `root` (a trailing `*` is expanded below).
+        if !crate::util::os::path::stays_inside(m.trim_end_matches('*')) {
+            continue;
+        }
         if let Some(prefix) = m.strip_suffix("/*").or(if m == "*" { Some("") } else { None }) {
             let dir = root.join(prefix);
             let Ok(rd) = std::fs::read_dir(&dir) else { continue };
@@ -111,7 +115,7 @@ fn members(root: &Path, manifest: &toml::Value) -> Vec<PathBuf> {
         }
     }
     out.retain(|p| {
-        let rel = p.strip_prefix(root).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+        let rel = p.strip_prefix(root).map(crate::util::os::path::to_slash).unwrap_or_default();
         !excluded.contains(&rel)
     });
     out
@@ -159,7 +163,7 @@ fn package_targets(root: &Path, workspace: &str, dir: &Path, manifest: &toml::Va
     if !plain_name(pkg) {
         return;
     }
-    let rel = dir.strip_prefix(root).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+    let rel = dir.strip_prefix(root).map(crate::util::os::path::to_slash).unwrap_or_default();
     let mut push = |name: String, kind: CargoKind| {
         if out.len() < MAX_TARGETS && !out.iter().any(|t| t.package == pkg && t.name == name && t.kind == kind) {
             out.push(CargoTarget { package: pkg.to_string(), workspace: workspace.to_string(), dir: rel.clone(), name, kind });

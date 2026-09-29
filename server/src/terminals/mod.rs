@@ -1244,7 +1244,7 @@ fn login_shell() -> String {
 pub(crate) fn resolve_cwd(base: &Path, cwd: Option<&str>) -> Result<PathBuf, ApiError> {
     let dir = match cwd.map(str::trim).filter(|c| !c.is_empty()) {
         None => base.to_path_buf(),
-        Some(c) if c.starts_with('/') || c.starts_with('~') => crate::config::expand_tilde(c),
+        Some(c) if util::os::path::is_absolute_str(c) || c.starts_with('~') => crate::config::expand_tilde(c),
         Some(c) => util::paths::resolve_in_root(base, c)?,
     };
     if !dir.is_dir() {

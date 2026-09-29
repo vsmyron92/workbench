@@ -191,7 +191,7 @@ impl PathMap {
     pub fn new(root: &Path, target: Option<&ExecTarget>) -> Self {
         Self {
             root: root.to_path_buf(),
-            canon_root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            canon_root: crate::util::os::path::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
             container: target.and_then(|t| t.map.clone()),
         }
     }
@@ -221,7 +221,7 @@ impl PathMap {
         if let Some(r) = crate::util::paths::relative_to(&self.root, host) {
             return Some(r);
         }
-        let canon = host.canonicalize().ok()?;
+        let canon = crate::util::os::path::canonicalize(host).ok()?;
         crate::util::paths::relative_to(&self.canon_root, &canon)
     }
 
@@ -453,7 +453,7 @@ impl Session {
     /// Remember a file outside the project the adapter named (a frame's or an output
     /// line's source): the session's read-only source view may show it.
     pub fn note_source(&self, path: &str) {
-        if !path.starts_with('/') || path.len() > 4096 {
+        if !crate::util::os::path::is_absolute_str(path) || path.len() > 4096 {
             return;
         }
         let mut d = self.data.lock();

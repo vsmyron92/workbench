@@ -157,8 +157,8 @@ pub fn resolve(state: &AppState, project: &Project, src: &DatabaseSource) -> Res
         config.password(pw.expose().as_bytes());
         secrets.push(pw);
     } else if config.get_password().is_none() {
-        if let Some(home) = dirs::home_dir() {
-            if let Some(pw) = pgpass(&home.join(".pgpass"), &host, port, &db, &user) {
+        if let Some(file) = crate::util::os::path::pgpass_file() {
+            if let Some(pw) = pgpass(&file, &host, port, &db, &user) {
                 let s = Secret::from_value(pw.clone());
                 config.password(pw.as_bytes());
                 secrets.push(s);

@@ -18,7 +18,8 @@ pub use project::{ProjectFile, SecretRef};
 pub struct Paths {
     /// `$WORKBENCH_CONFIG_DIR` or `~/.config/workbench`: `config.toml`, `projects/<id>.toml`.
     pub config_dir: PathBuf,
-    /// `$WORKBENCH_DATA_DIR` or `~/.local/share/workbench`: token, sessions, terminal state.
+    /// `$WORKBENCH_DATA_DIR` or `~/.local/share/workbench` (`%LOCALAPPDATA%\workbench` on
+    /// Windows): token, sessions, terminal state.
     pub data_dir: PathBuf,
 }
 
@@ -30,7 +31,7 @@ impl Paths {
         };
         let data_dir = match std::env::var_os("WORKBENCH_DATA_DIR") {
             Some(p) => PathBuf::from(p),
-            None => dirs::data_dir().context("no data dir")?.join("workbench"),
+            None => crate::util::os::path::data_home().context("no data dir")?.join("workbench"),
         };
         for d in [&config_dir, &data_dir] {
             std::fs::create_dir_all(d).with_context(|| format!("create {}", d.display()))?;
@@ -56,12 +57,12 @@ impl Paths {
     }
 }
 
-/// `~/x` → `$HOME/x`. Other paths are returned unchanged.
+/// `~/x` (also `~\x` on Windows) → `$HOME/x`. Other paths are returned unchanged.
 pub fn expand_tilde(p: &str) -> PathBuf {
     if p == "~" {
         return dirs::home_dir().unwrap_or_default();
     }
-    match p.strip_prefix("~/") {
+    match crate::util::os::path::home_relative(p) {
         Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
         None => PathBuf::from(p),
     }
@@ -70,9 +71,31 @@ pub fn expand_tilde(p: &str) -> PathBuf {
 /// Inverse of `expand_tilde` for display.
 pub fn contract_tilde(p: &Path) -> String {
     if let Some(home) = dirs::home_dir() {
-        if let Ok(rest) = p.strip_prefix(&home) {
-            return format!("~/{}", rest.display());
+        if let Some(rest) = crate::util::os::path::strip_prefix(p, &home) {
+            return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
         }
     }
     p.display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tilde_expands_and_contracts() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_tilde("~"), home);
+        assert_eq!(expand_tilde("~/a/b"), home.join("a/b"));
+        assert_eq!(expand_tilde("~x"), PathBuf::from("~x"));
+        assert_eq!(contract_tilde(&home.join("a")), format!("~{}a", std::path::MAIN_SEPARATOR));
+        #[cfg(unix)]
+        assert_eq!(expand_tilde(r"~\a"), PathBuf::from(r"~\a"));
+        #[cfg(windows)]
+        {
+            assert_eq!(expand_tilde(r"~\a\b"), home.join(r"a\b"));
+            let upper = PathBuf::from(home.display().to_string().to_uppercase()).join("x");
+            assert_eq!(contract_tilde(&upper), r"~\x");
+        }
+    }
 }

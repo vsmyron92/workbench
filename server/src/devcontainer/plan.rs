@@ -159,7 +159,7 @@ pub fn resolved(path: &str) -> std::path::PathBuf {
     let mut existing = lexical.clone();
     let mut rest: Vec<std::ffi::OsString> = vec![];
     loop {
-        if let Ok(c) = std::fs::canonicalize(&existing) {
+        if let Ok(c) = crate::util::os::path::canonicalize(&existing) {
             let mut out = c;
             for r in rest.iter().rev() {
                 out.push(r);
@@ -178,7 +178,7 @@ pub fn resolved(path: &str) -> std::path::PathBuf {
 
 /// Whether `path` lies in the project, as the host resolves both.
 fn inside(root: &Path, path: &str) -> bool {
-    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let root = crate::util::os::path::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     resolved(path).starts_with(root)
 }
 

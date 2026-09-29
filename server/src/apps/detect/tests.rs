@@ -123,6 +123,30 @@ fn single_crate_with_several_binaries() {
     assert_eq!(run(&pf, "cargo test").command, "cargo test");
 }
 
+/// On Windows a drive path (or `\\server\share`) in a manifest replaces the project
+/// folder in a join: members, binaries and solution projects outside it are not read.
+#[cfg(windows)]
+#[test]
+fn windows_manifests_cannot_name_files_outside_the_project() {
+    let outside = tree(&[
+        ("api/Cargo.toml", "[package]\nname = \"outside-api\"\n[dependencies]\naxum = \"0.8\"\n"),
+        ("api/src/main.rs", "fn main() { let addr = \"127.0.0.1:3030\"; }"),
+        ("serve.rs", "fn main() { let addr = \"127.0.0.1:4040\"; }"),
+        ("t/T.csproj", "<Project><ItemGroup><PackageReference Include=\"Microsoft.NET.Test.Sdk\" /></ItemGroup></Project>"),
+    ]);
+    let abs = |rel: &str| outside.path().join(rel).display().to_string();
+    let d = tempfile::tempdir().unwrap();
+    let r = d.path();
+    let members = format!("[{:?}, {:?}]", abs("api"), abs("api").replace('\\', "/"));
+    write(r, "Cargo.toml", &format!("[workspace]\nmembers = {members}\n[package]\nname = \"tool\"\n[[bin]]\nname = \"serve\"\npath = {:?}\n[dependencies]\nwarp = \"0.3\"\n", abs("serve.rs")));
+    write(r, "src/main.rs", "fn main() {}");
+    write(r, "App.sln", &format!("Project(\"{{FAE04EC0}}\") = \"T\", \"{}\", \"{{1}}\"\n", abs("t/T.csproj")));
+    let pf = detect(r);
+    assert!(!has_run(&pf, "outside-api"), "{:?}", names(&pf));
+    assert_eq!(run(&pf, "serve").port, None, "the bin's path outside the project was read");
+    assert!(!pf.runs.iter().any(|r| r.name.starts_with("dotnet test")), "{:?}", names(&pf));
+}
+
 #[test]
 fn port_detection_variants() {
     assert_eq!(cargo::detect_port(r#"env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080)"#), Some(8080));

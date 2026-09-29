@@ -100,7 +100,7 @@ fn build<'a>(patterns: impl Iterator<Item = &'a str>) -> GlobSet {
     let mut b = GlobSetBuilder::new();
     for p in patterns {
         for g in expand(p) {
-            match GlobBuilder::new(&g).literal_separator(true).build() {
+            match GlobBuilder::new(&g).literal_separator(true).case_insensitive(crate::util::os::path::CASE_INSENSITIVE).build() {
                 Ok(glob) => {
                     b.add(glob);
                 }

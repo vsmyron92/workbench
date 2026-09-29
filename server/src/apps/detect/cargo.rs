@@ -60,12 +60,15 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
 /// `crates/*` → every subdirectory with a Cargo.toml; other entries as-is.
 fn expand_member(ws_dir: &Path, m: &str) -> Vec<PathBuf> {
     if let Some(prefix) = m.strip_suffix("/*") {
+        if !crate::util::os::path::stays_inside(prefix) {
+            return vec![];
+        }
         let Ok(rd) = std::fs::read_dir(ws_dir.join(prefix)) else { return vec![] };
         let mut v: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.join("Cargo.toml").is_file()).collect();
         v.sort();
         return v;
     }
-    if m.contains('*') || m.contains("..") {
+    if m.contains('*') || m.contains("..") || !crate::util::os::path::stays_inside(m) {
         return vec![];
     }
     vec![ws_dir.join(m)]
@@ -130,6 +133,7 @@ fn package_runs(cx: &mut Ctx, pkg_dir: &Path, v: &toml::Table, cwd: &str, in_wor
         let path = b
             .get("path")
             .and_then(|p| p.as_str())
+            .filter(|p| crate::util::os::path::stays_inside(p))
             .map(|p| pkg_dir.join(p))
             .unwrap_or_else(|| pkg_dir.join(format!("src/bin/{bn}.rs")));
         if !bins.iter().any(|(n, _)| n == bn) {

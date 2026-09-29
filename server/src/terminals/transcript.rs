@@ -26,7 +26,10 @@ pub fn claude_dir(env_override: Option<&str>) -> PathBuf {
 }
 
 /// Claude's project directory name for a working directory: every character that is
-/// not an ASCII letter or digit becomes `-`.
+/// not an ASCII letter or digit becomes `-`. Windows too (`C:\Users\me\proj` →
+/// `C--Users-me-proj`), so `cwd` must be spelled as the session sees it: no `\\?\`
+/// prefix (`os::path::canonicalize`); the drive letter's case does not matter there,
+/// since the directory lookup ignores case.
 pub fn slug(cwd: &Path) -> String {
     cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
@@ -472,6 +475,8 @@ mod tests {
     fn slug_replaces_every_non_alphanumeric() {
         assert_eq!(slug(Path::new("/home/u/workspace/shop")), "-home-u-workspace-shop");
         assert_eq!(slug(Path::new("/tmp/a_b.c d")), "-tmp-a-b-c-d");
+        // Claude Code on Windows: the same rule over `C:\…` (checked against 2.1.284).
+        assert_eq!(slug(Path::new(r"C:\Users\me\my proj")), "C--Users-me-my-proj");
     }
 
     #[test]

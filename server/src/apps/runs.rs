@@ -387,7 +387,7 @@ fn program_available(prog: &str) -> bool {
 
 /// A run's cwd: project-relative (contained), or absolute / `~/` from user config.
 pub fn resolve_cwd(project: &Project, cwd: &str) -> Result<std::path::PathBuf, ApiError> {
-    if cwd.starts_with('/') || cwd.starts_with("~/") {
+    if crate::util::os::path::is_absolute_str(cwd) || crate::util::os::path::home_relative(cwd).is_some() {
         return Ok(crate::config::expand_tilde(cwd));
     }
     crate::util::paths::resolve_in_root(&project.root, cwd)

@@ -208,7 +208,7 @@ fn run_named<'a>(project: &'a Project, name: &str) -> Option<&'a crate::config::
 pub fn host_program(project: &Project, program: &str) -> Result<PathBuf, ApiError> {
     let vars = crate::apps::expand::base_vars(project);
     let p = crate::apps::expand::placeholders(program, &vars).replace("${workspaceFolder}", &project.root.display().to_string());
-    if p.starts_with('/') || p.starts_with("~/") {
+    if crate::util::os::path::is_absolute_str(&p) || crate::util::os::path::home_relative(&p).is_some() {
         return Ok(crate::config::expand_tilde(&p));
     }
     crate::util::paths::resolve_in_root(&project.root, &p)
@@ -251,7 +251,7 @@ pub async fn views(state: &AppState, project: &Project) -> Vec<LaunchConfigView>
         if l.request == DebugRequest::Launch && d.build.is_none() {
             match (&l.program, &l.module) {
                 (None, None) => problems.push("no `program` to launch".into()),
-                (Some(p), _) if l.pre_launch.is_none() && d.origin == "config" && !p.starts_with('/') && !p.contains('{') => {
+                (Some(p), _) if l.pre_launch.is_none() && d.origin == "config" && !crate::util::os::path::is_absolute_str(p) && !p.contains('{') => {
                     if let Ok(path) = host_program(project, p) {
                         if !path.exists() {
                             problems.push(format!("{p} does not exist yet: build it first, or set pre_launch"));
@@ -429,7 +429,7 @@ pub async fn plan_config(state: &AppState, project: &Project, name: &str, stop_o
     };
     // A relative interpreter (`.venv/bin/python`) is the run's or the project's.
     if let Some(py) = l.extra.get("python").and_then(Value::as_str).map(str::to_string) {
-        if py.contains('/') && !py.starts_with('/') {
+        if crate::util::os::path::has_separator(&py) && !crate::util::os::path::is_absolute_str(&py) {
             let in_cwd = cwd.join(&py);
             let abs = if in_cwd.exists() { in_cwd } else { project.root.join(&py) };
             l.extra.insert("python".into(), json!(abs.display().to_string()));
@@ -606,7 +606,7 @@ pub fn arguments(plan: &Plan, program: Option<&str>, terminal: bool) -> Value {
                         m.insert("subProcess".into(), json!(false));
                     }
                     if let Some(py) = l.extra.get("python").and_then(Value::as_str) {
-                        let py = if py.starts_with('/') { adapter_path(target, Path::new(py)) } else { py.to_string() };
+                        let py = if crate::util::os::path::is_absolute_str(py) { adapter_path(target, Path::new(py)) } else { py.to_string() };
                         m.insert("python".into(), json!(py));
                     }
                 }

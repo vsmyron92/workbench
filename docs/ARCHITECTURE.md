@@ -113,7 +113,7 @@ packaging/linux/   install.sh shipped in the release archive
   - `WORKBENCH_CONFIG_DIR` and `WORKBENCH_DATA_DIR` isolate instances. Every test or dev run that is not the owner's real instance must set both.
   - `WORKBENCH_LOG` sets the tracing filter.
 
-Data dir (`~/.local/share/workbench/`), all files mode 0600 (on Windows a protected DACL for the user and SYSTEM only, set at creation and passed on by the data dir to everything inside; `util::os::perm`):
+Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, apart from the roaming config in `%APPDATA%`), all files mode 0600 (on Windows a protected DACL for the user and SYSTEM only, set at creation and passed on by the data dir to everything inside; `util::os::perm`):
 - `token`: the master token.
 - `auth.json`: device sessions, stored as SHA-256 hashes.
 - `runtime.json`: pid and URL of the running server.
@@ -143,6 +143,7 @@ Data dir (`~/.local/share/workbench/`), all files mode 0600 (on Windows a protec
 - **Agent tokens:** `auth.issue_agent_token(terminal_id)` is put into a hosted session's environment (`WORKBENCH_AGENT_TOKEN`). It is valid only on `/api/hooks/**` and `/mcp`, whose handlers check it with `auth.agent_from_headers`.
   - A hosted session is confined to its own project over MCP. Tools resolve the project with `McpCtx::project_for`, which refuses a `projectId` naming another project; terminal tools show only what `McpCtx::may_see_project` allows. Only a caller that is not a session (the master token without `X-Workbench-Terminal`) may name any project.
 - **Paths:** every client path goes through `util::paths::resolve_in_root`, or through `resolve_absolute_in` for extra roots. These reject `..` escapes and symlinks leaving the root.
+  - Whether a string is an absolute path, and the Windows rules, live in `util::os::path`. On Windows client paths use `/` only (a `\` could slip past checks that split on `/`), and names that alias another file or a device are refused (`:`, device names like `NUL` or `com1.txt`, a trailing dot or space, 8.3 short names like `GIT~1`); roots compare without regard to ASCII case; UNC roots (`\\server\share`, `\\wsl$`) are refused. Canonical paths drop `\\?\` wherever a plain path names the same file and have an uppercase drive letter; comparisons take `\\?\C:\` for `C:\`. Linux keeps its rules.
 - **PTY input is code execution.** Every authenticated device is fully trusted, so remote exposure requires pairing and should use TLS (a proxy such as `tailscale serve` or Caddy, or `[server.tls]`).
 - **Dev containers:** a `devcontainer.json` (with its Dockerfile and compose files) is repository content that runs code on the host's Docker. Nothing builds or starts without the user's approval of the exact plan (a sha256 the server checks); agents can only read the status. The bridge listener on a container network's gateway serves only `/api/hooks/**` and `/mcp`, only with agent tokens. See "Dev containers".
 - **Docker (Services)** is root on this computer: `/api/docker/**` acts only for devices (agent tokens are not valid there; in-process callers get 403 on every route that changes something or opens a terminal). Details and `inspect` mask values of secret-looking names (`*PASSWORD*`, `*TOKEN*`, `*_KEY`, `*SECRET*`…), passwords in URLs, and those inside JSON labels (`devcontainer.metadata`'s `remoteEnv`).
@@ -1135,7 +1136,9 @@ filtered by the globs each server registered (created / changed / deleted; open 
 and directories skipped; an overflow is not expanded).
 
 **URIs** (`uri.rs`). Browser models: `file:///<pid>/<rel>` (the files contract) and
-`lsp-src://<pid>/<absolute path on the server's side>` for files outside the project that a
+`lsp-src://<pid>/<absolute path on the server's side>` (on Windows `lsp-src://<pid>/C:/…`,
+and servers get `file:///C:/…`; `/c:/` and `/C%3A/` are read too, and the root matches
+whatever the drive letter's case) for files outside the project that a
 server pointed to (the standard library, `~/.cargo/registry`, `node_modules` through a
 symlink, site-packages). Only URI fields are mapped, both ways: `uri`, `targetUri`,
 `oldUri`, `newUri`, `baseUri` (Location, LocationLink, TextDocumentIdentifier,
