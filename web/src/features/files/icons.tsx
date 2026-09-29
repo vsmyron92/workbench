@@ -45,7 +45,7 @@ const BY_NAME: Record<string, IconSpec> = {
   license: { icon: FileText, tone: 'doc' },
 }
 
-const CODE = new Set(['rs', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts', 'cs', 'c', 'h', 'cc', 'cpp', 'hpp', 'go', 'java', 'kt', 'kts', 'py', 'rb', 'php', 'swift', 'lua', 'html', 'htm', 'css', 'scss', 'less', 'vue', 'svelte', 'shader', 'hlsl', 'glsl', 'uss', 'uxml'])
+const CODE = new Set(['rs', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts', 'cs', 'c', 'h', 'cc', 'cpp', 'cxx', 'c++', 'hpp', 'hh', 'hxx', 'h++', 'ipp', 'tpp', 'inl', 'ino', 'cu', 'cuh', 'v', 'vh', 'sv', 'svh', 'vhd', 'vhdl', 'go', 'java', 'kt', 'kts', 'py', 'rb', 'php', 'swift', 'lua', 'html', 'htm', 'css', 'scss', 'less', 'vue', 'svelte', 'shader', 'hlsl', 'glsl', 'uss', 'uxml'])
 const CONFIG = new Set(['toml', 'yml', 'yaml', 'ini', 'cfg', 'conf', 'env', 'properties', 'editorconfig', 'csproj', 'sln', 'asmdef', 'xml', 'plist', 'lock'])
 const DATA = new Set(['json', 'jsonc', 'json5', 'jsonl', 'ndjson'])
 const TABLE = new Set(['csv', 'tsv', 'xlsx', 'xls', 'ods'])

@@ -20,6 +20,8 @@ import rehypeSlug from 'rehype-slug'
 import rehypeHighlight from 'rehype-highlight'
 import { Check, Copy, Info, Lightbulb, Link2, MessageSquareWarning, OctagonAlert, TriangleAlert, type LucideIcon } from 'lucide-react'
 import bash from 'highlight.js/lib/languages/bash'
+import c from 'highlight.js/lib/languages/c'
+import cpp from 'highlight.js/lib/languages/cpp'
 import csharp from 'highlight.js/lib/languages/csharp'
 import css from 'highlight.js/lib/languages/css'
 import diff from 'highlight.js/lib/languages/diff'
@@ -35,14 +37,26 @@ import rust from 'highlight.js/lib/languages/rust'
 import shell from 'highlight.js/lib/languages/shell'
 import sql from 'highlight.js/lib/languages/sql'
 import typescript from 'highlight.js/lib/languages/typescript'
+import verilog from 'highlight.js/lib/languages/verilog'
+import vhdl from 'highlight.js/lib/languages/vhdl'
 import xml from 'highlight.js/lib/languages/xml'
 import yaml from 'highlight.js/lib/languages/yaml'
 import { useUi } from '@/state/store'
 import { alertTitle, codeLanguage, findAnchor, hastText, rehypeAlerts, splitFrontmatter, type HastNode } from './markdownPlugins'
 
 /** Languages worth highlighting in project docs (TOML reads well as `ini`). */
-const LANGUAGES = { bash, csharp, css, diff, dockerfile, go, ini, java, javascript, json, markdown, python, rust, shell, sql, typescript, xml, yaml }
-const ALIASES = { bash: ['sh', 'zsh', 'console'], ini: ['toml'], javascript: ['js', 'jsx'], typescript: ['ts', 'tsx'], xml: ['html', 'svg'], yaml: ['yml'] }
+const LANGUAGES = { bash, c, cpp, csharp, css, diff, dockerfile, go, ini, java, javascript, json, markdown, python, rust, shell, sql, typescript, verilog, vhdl, xml, yaml }
+const ALIASES = {
+  bash: ['sh', 'zsh', 'console'],
+  cpp: ['cuda'],
+  ini: ['toml'],
+  javascript: ['js', 'jsx'],
+  typescript: ['ts', 'tsx'],
+  verilog: ['systemverilog'],
+  vhdl: ['vhd'],
+  xml: ['html', 'svg'],
+  yaml: ['yml'],
+}
 
 /** GitHub's schema, plus the `data-footnote*` attributes remark-gfm emits. */
 const SCHEMA = {

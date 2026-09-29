@@ -73,7 +73,7 @@ web/               React 19 + TS + Vite 8
   src/shell/         desktop + mobile shells, dock, palette, dialogs, feature registry (core)
   src/ui/            shared components (core)
   src/theme/         tokens.css (design tokens), palette.ts (Monaco/xterm colours) (core)
-  src/lib/           monacoSetup (core)
+  src/lib/           monacoSetup, languages.ts (file → Monaco language), vhdl.ts (grammar) (core)
   src/features/<slice>/   one folder per slice; index.ts exports a FeatureModule
 docs/              this file
 ```
@@ -1040,10 +1040,14 @@ install_hint, env, initialization_options, settings}` (camelCase aliases accepte
 tables become JSON). Built-in presets, in preference order (the first enabled, installed
 server that handles a file by extension, else by language, serves it; servers of your own
 come before the presets): `rust-analyzer`, `typescript` (typescript-language-server
-`--stdio`), `pyright`, `basedpyright`, `pylsp`, `gopls`, `clangd`, `bash`, `yaml`, `json`
-(vscode-json-language-server), `taplo`, `marksman`, `csharp-ls`, `lua`. A preset's fields
-are overridden one by one. Availability comes from PATH (or the configured path); a
-rustup proxy (`~/.cargo/bin/rust-analyzer` → `rustup`) counts only when `rustup which
+`--stdio`), `pyright`, `basedpyright`, `pylsp`, `gopls`, `clangd`, `verible`
+(verible-verilog-ls `--rules_config_search`, so a project's `.rules.verible_lint` applies;
+Verilog and SystemVerilog), `vhdl_ls`, `bash`, `yaml`, `json`
+(vscode-json-language-server), `taplo`, `marksman`, `csharp-ls`, `lua`. vhdl_ls reads the
+project's `vhdl_ls.toml` (its libraries; without one it knows only the open files) and
+stops when the IEEE libraries of its release are not next to its `bin/`. A preset's fields
+are overridden one by one. Availability comes from PATH (or the configured path); a rustup
+proxy (`~/.cargo/bin/rust-analyzer` → `rustup`) counts only when `rustup which
 rust-analyzer` names a real binary, which is then run. The TypeScript preset gets
 `tsserver.fallbackPath` from the `typescript` package installed next to the server
 (typescript-language-server only looks in the workspace root, which fails for monorepos
@@ -1243,7 +1247,11 @@ apply + Save All, file structure, Go to Symbol, quick fixes, popover, log, missi
 banner, both themes, and rust-analyzer in a dev container; with
 typescript-language-server, a completion for a `"file:///etc/hostname"` literal type
 inserts that text, and three tabs on one file with unsaved edits keep their markers on
-their own lines.
+their own lines. With the release binaries of Verible, vhdl_ls (0.88) and clangd (23) on
+PATH: lint and syntax diagnostics as squiggles and in the status bar, definitions and
+usages across files (a Verilog module instance, a VHDL function in another package), hover,
+workspace symbols (vhdl_ls, clangd), a project's `.rules.verible_lint` switching a rule
+off, and the `code_*` MCP tools on all three.
 
 **Not done / limits**: with two tabs editing one file, the servers (and the Problems
 window) follow the tab in use; an edit a server makes to a file the requesting tab does

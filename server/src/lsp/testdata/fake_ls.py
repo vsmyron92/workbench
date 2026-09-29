@@ -9,6 +9,7 @@ and related information are the file URI of $FAKE_LS_EXTERNAL). Custom requests:
 returns its answer). The word `external` is defined in $FAKE_LS_EXTERNAL (a file outside
 the project); completion also offers that file's URI as a string literal.
 $FAKE_LS_NO_VERSION: publishDiagnostics without `version` (like typescript-language-server).
+$FAKE_LS_NO_WORKSPACE_SYMBOL: no `workspaceSymbolProvider` (like Verible).
 """
 
 import json
@@ -162,7 +163,7 @@ def handle(msg):
                 "renameProvider": {"prepareProvider": False},
                 "completionProvider": {"triggerCharacters": ["."], "resolveProvider": True},
                 "documentSymbolProvider": True,
-                "workspaceSymbolProvider": True,
+                "workspaceSymbolProvider": not os.environ.get("FAKE_LS_NO_WORKSPACE_SYMBOL"),
             },
             "serverInfo": {"name": "fake-ls", "version": "1.0"},
         })

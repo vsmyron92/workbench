@@ -465,6 +465,22 @@ async fn a_server_that_cannot_start_is_reported() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn symbol_search_says_when_no_running_server_offers_it() {
+    let e = env_with(&[("FAKE_LS_NO_WORKSPACE_SYMBOL", "1")], None).await;
+    e.enable().await;
+    let mut ws = e.connect().await.unwrap();
+    let mut seen = vec![];
+    send(&mut ws, json!({ "t": "open", "uri": e.uri("a.fk"), "text": e.text("a.fk") })).await;
+    until(&mut ws, &mut seen, |v| v["t"] == "caps").await;
+    let ctx = crate::mcp::McpCtx { terminal_id: Some("t1".into()), project_id: Some(e.pid.clone()) };
+    let tool = |n: &str| super::mcp_tools().into_iter().find(|t| t.name == n).unwrap();
+    let crate::mcp::ToolOutput::Text(out) = (tool("code_symbols").handler)(e.state.clone(), ctx, json!({ "query": "bet" })).await.unwrap() else {
+        panic!("text expected")
+    };
+    assert!(out.starts_with("None of the running language servers searches symbols"), "{out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn disable_stops_servers_and_closes_sockets() {
     let e = env_with(&[], None).await;
     e.enable().await;

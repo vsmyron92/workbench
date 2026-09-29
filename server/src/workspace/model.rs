@@ -464,7 +464,7 @@ pub fn kind_for_path(path: &str) -> &'static str {
         "glb" | "gltf" => "compare3d",
         "txt" | "log" | "json" | "jsonl" | "csv" | "tsv" | "yaml" | "yml" | "toml" | "xml" | "ini" | "cfg" | "conf" | "rs" | "ts"
         | "tsx" | "js" | "mjs" | "jsx" | "py" | "sh" | "css" | "sql" | "diff" | "patch" | "cs" | "go" | "java" | "c" | "h"
-        | "cpp" | "hpp" => "text",
+        | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" | "v" | "vh" | "sv" | "svh" | "vhd" | "vhdl" => "text",
         _ => "file",
     }
 }

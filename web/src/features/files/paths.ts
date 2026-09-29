@@ -151,8 +151,10 @@ export function parseGoto(input: string): { query: string; line?: number; column
 
 const HLJS: Record<string, string> = {
   rs: 'rust', ts: 'typescript', tsx: 'typescript', mts: 'typescript', js: 'javascript', jsx: 'javascript', mjs: 'javascript',
-  cjs: 'javascript', json: 'json', cs: 'csharp', c: 'c', h: 'c', cc: 'cpp', cpp: 'cpp', hpp: 'cpp', go: 'go', java: 'java',
-  kt: 'kotlin', py: 'python', rb: 'ruby', sh: 'bash', bash: 'bash', zsh: 'bash', yml: 'yaml', yaml: 'yaml', toml: 'ini',
+  cjs: 'javascript', json: 'json', cs: 'csharp', c: 'c', h: 'c', cc: 'cpp', cpp: 'cpp', cxx: 'cpp', 'c++': 'cpp', hpp: 'cpp',
+  hh: 'cpp', hxx: 'cpp', 'h++': 'cpp', ipp: 'cpp', tpp: 'cpp', txx: 'cpp', inl: 'cpp', ixx: 'cpp', cppm: 'cpp', ino: 'cpp',
+  cu: 'cpp', cuh: 'cpp', v: 'verilog', vh: 'verilog', sv: 'verilog', svh: 'verilog', vhd: 'vhdl', vhdl: 'vhdl', vho: 'vhdl',
+  vht: 'vhdl', go: 'go', java: 'java', kt: 'kotlin', py: 'python', rb: 'ruby', sh: 'bash', bash: 'bash', zsh: 'bash', yml: 'yaml', yaml: 'yaml', toml: 'ini',
   ini: 'ini', md: 'markdown', sql: 'sql', html: 'xml', xml: 'xml', svg: 'xml', css: 'css', scss: 'scss', less: 'less',
   dockerfile: 'dockerfile', makefile: 'makefile', lua: 'lua', php: 'php', swift: 'swift', diff: 'diff', patch: 'diff',
 }

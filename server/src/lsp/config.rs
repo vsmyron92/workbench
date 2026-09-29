@@ -197,9 +197,35 @@ const PRESETS: &[Preset] = &[
         command: "clangd",
         args: &[],
         languages: &["c", "cpp"],
-        extensions: &["c", "h", "cc", "cpp", "cxx", "c++", "hpp", "hh", "hxx", "h++", "m", "mm", "cu"],
+        extensions: &[
+            "c", "h", "cc", "cpp", "cxx", "c++", "hpp", "hh", "hxx", "h++", "ipp", "tpp", "txx", "inl", "ixx", "cppm", "m", "mm", "cu", "cuh",
+        ],
         root_markers: &["compile_commands.json", "CMakeLists.txt", ".clangd", "compile_flags.txt", "meson.build"],
         install_hint: "install clangd from your distribution (apt install clangd) or LLVM",
+        rustup_component: None,
+    },
+    Preset {
+        id: "verible",
+        label: "Verible (SystemVerilog)",
+        command: "verible-verilog-ls",
+        // Lint with the project's `.rules.verible_lint` (a list of rules) where it has one.
+        args: &["--rules_config_search"],
+        languages: &["verilog", "systemverilog"],
+        extensions: &["v", "vh", "sv", "svh"],
+        root_markers: &["verible.filelist", ".rules.verible_lint"],
+        install_hint: "download verible from github.com/chipsalliance/verible/releases and put its bin/ on PATH",
+        rustup_component: None,
+    },
+    Preset {
+        id: "vhdl_ls",
+        label: "VHDL (vhdl_ls)",
+        command: "vhdl_ls",
+        args: &[],
+        languages: &["vhdl"],
+        extensions: &["vhd", "vhdl", "vho", "vht"],
+        root_markers: &["vhdl_ls.toml"],
+        // vhdl_ls stops when it finds no IEEE libraries next to its binary, so `cargo install` alone is not enough.
+        install_hint: "download vhdl_ls from github.com/VHDL-LS/rust_hdl/releases and put its bin/ on PATH, keeping vhdl_libraries/ next to bin/",
         rustup_component: None,
     },
     Preset {
@@ -372,7 +398,11 @@ pub fn language_id(ext: &str, monaco: Option<&str>) -> String {
         "py" | "pyi" => "python",
         "go" => "go",
         "c" | "h" => "c",
-        "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "cu" => "cpp",
+        "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "ipp" | "tpp" | "txx" | "inl" | "ixx" | "cppm" | "ino"
+        | "cu" | "cuh" => "cpp",
+        "v" | "vh" => "verilog",
+        "sv" | "svh" => "systemverilog",
+        "vhd" | "vhdl" | "vho" | "vht" => "vhdl",
         "m" => "objective-c",
         "mm" => "objective-cpp",
         "sh" | "bash" | "zsh" => "shellscript",
@@ -583,6 +613,18 @@ mod tests {
         assert_eq!(language_id("sh", Some("shell")), "shellscript");
         assert_eq!(language_id("weird", Some("shell")), "shellscript");
         assert_eq!(language_id("weird", None), "plaintext");
+        assert_eq!(language_id("c", Some("c")), "c");
+        assert_eq!(language_id("inl", None), "cpp");
+        assert_eq!(language_id("v", None), "verilog");
+        assert_eq!(language_id("svh", None), "systemverilog");
+        assert_eq!(language_id("vhd", None), "vhdl");
+        assert_eq!(pick("inl", None), Some("clangd"));
+        assert_eq!(pick("c", Some("c")), Some("clangd"));
+        assert_eq!(pick("v", None), Some("verible"));
+        assert_eq!(pick("sv", None), Some("verible"));
+        assert_eq!(pick("", Some("systemverilog")), Some("verible"));
+        assert_eq!(pick("vhd", None), Some("vhdl_ls"));
+        assert_eq!(pick("", Some("vhdl")), Some("vhdl_ls"));
         assert_eq!(extension("src/Main.RS"), "rs");
         assert_eq!(extension(".bashrc"), "");
         assert_eq!(extension("a.b/c"), "");

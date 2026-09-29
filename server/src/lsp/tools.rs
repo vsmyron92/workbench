@@ -139,13 +139,19 @@ async fn symbols(state: &AppState, ctx: &McpCtx, args: &Value) -> Result<String,
         return Err(ApiError::bad_request("query is required"));
     }
     let Some(lsp) = lsp else { return Ok(NOT_RUNNING.into()) };
-    let servers: Vec<Arc<Server>> = lsp
-        .ready_servers()
+    let ready = lsp.ready_servers();
+    if ready.is_empty() {
+        return Ok(NOT_RUNNING.into());
+    }
+    let servers: Vec<Arc<Server>> = ready
         .into_iter()
         .filter(|s| s.capabilities().get("workspaceSymbolProvider").is_some_and(|v| !v.is_null() && v != &Value::Bool(false)))
         .collect();
     if servers.is_empty() {
-        return Ok(NOT_RUNNING.into());
+        // Verible, Taplo and the YAML server, for example, answer at a position only.
+        return Ok("None of the running language servers searches symbols by name (workspace/symbol). \
+                   code_definition and code_references still work at a path:line:column."
+            .into());
     }
     let mut lines = vec![];
     for s in servers {

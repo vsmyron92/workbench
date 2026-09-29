@@ -29,7 +29,9 @@ import 'monaco-editor/editor/contrib/semanticTokens/browser/documentSemanticToke
 import { ContextView } from 'monaco-editor/base/browser/ui/contextview/contextview'
 import { MenuId, MenuRegistry } from 'monaco-editor/platform/actions/common/actions'
 import { loader } from '@monaco-editor/react'
+import { conf as verilogConfiguration, language as verilogLanguage } from 'monaco-editor/languages/definitions/systemverilog/systemverilog'
 import { installEditorKeymap } from './editorKeymap'
+import { vhdlConfiguration, vhdlLanguage } from './vhdl'
 import EditorWorker from 'monaco-editor/editor/editor.worker?worker'
 import JsonWorker from 'monaco-editor/languages/features/json/json.worker?worker'
 
@@ -83,6 +85,23 @@ monaco.languages.setMonarchTokensProvider('toml', {
     ],
   },
 })
+
+// Verilog and SystemVerilog: Monaco's grammar, registered here so that only (), [] and {}
+// are brackets. Monaco's configuration also pairs begin/end, module/endmodule,
+// property/endproperty…: bracket pair colourisation then paints those over the keyword
+// colour, and in red where a keyword has no partner (`assert property`, `extern function`,
+// DPI imports). Its folding markers still fold them.
+monaco.languages.register({ id: 'verilog', extensions: ['.v', '.vh'], aliases: ['Verilog', 'verilog'] })
+monaco.languages.register({ id: 'systemverilog', extensions: ['.sv', '.svh'], aliases: ['SystemVerilog', 'systemverilog'] })
+for (const id of ['verilog', 'systemverilog']) {
+  monaco.languages.setLanguageConfiguration(id, { ...verilogConfiguration, brackets: [['{', '}'], ['[', ']'], ['(', ')']] })
+  monaco.languages.setMonarchTokensProvider(id, verilogLanguage)
+}
+
+// VHDL (lib/vhdl.ts).
+monaco.languages.register({ id: 'vhdl', extensions: ['.vhd', '.vhdl', '.vho', '.vht'], aliases: ['VHDL', 'vhdl'] })
+monaco.languages.setLanguageConfiguration('vhdl', vhdlConfiguration)
+monaco.languages.setMonarchTokensProvider('vhdl', vhdlLanguage)
 
 /** The design tokens of one theme, read from tokens.css (whichever theme is showing). */
 function themeTokens(theme: 'dark' | 'light') {
@@ -202,6 +221,8 @@ function defineThemes() {
       { token: 'keyword', foreground: 'cf8e6d' },
       { token: 'string', foreground: '6aab73' },
       { token: 'number', foreground: '2aacb8' },
+      // vs-dark greens hex literals (C's 0xFF, HDL bit strings); CLion keeps one number colour.
+      { token: 'number.hex', foreground: '2aacb8' },
       { token: 'type', foreground: '16baac' },
       { token: 'variable', foreground: 'c77dbb' },
       ...semanticRules(dark),
@@ -290,24 +311,5 @@ try {
   // Menus stay inside the editor.
 }
 
-/** Monaco language id for a file name. */
-export function languageFor(path: string): string {
-  const name = path.split('/').pop() ?? ''
-  const lower = name.toLowerCase()
-  if (lower === 'dockerfile' || lower.startsWith('dockerfile.')) return 'dockerfile'
-  if (lower === 'makefile') return 'shell'
-  if (lower === 'caddyfile') return 'shell'
-  const ext = lower.includes('.') ? lower.split('.').pop()! : ''
-  const map: Record<string, string> = {
-    rs: 'rust', ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
-    js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
-    json: 'json', jsonc: 'json', json5: 'json', cs: 'csharp', c: 'cpp', h: 'cpp', cc: 'cpp', cpp: 'cpp', hpp: 'cpp',
-    go: 'go', java: 'java', kt: 'kotlin', kts: 'kotlin', yml: 'yaml', yaml: 'yaml', md: 'markdown', markdown: 'markdown',
-    sh: 'shell', bash: 'shell', zsh: 'shell', env: 'shell', sql: 'sql', ini: 'ini', cfg: 'ini', conf: 'ini',
-    html: 'html', htm: 'html', xml: 'xml', svg: 'xml', csproj: 'xml', sln: 'ini', css: 'css', scss: 'css', less: 'css',
-    py: 'python', toml: 'toml', lock: 'toml', http: 'http', rest: 'http',
-  }
-  return map[ext] ?? 'plaintext'
-}
-
+export { languageFor } from './languages'
 export { monaco }

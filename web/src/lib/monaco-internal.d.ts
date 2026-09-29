@@ -14,3 +14,9 @@ declare module 'monaco-editor/base/browser/ui/contextview/contextview' {
     setContainer(container: HTMLElement | null, domPosition: number): void
   }
 }
+
+declare module 'monaco-editor/languages/definitions/systemverilog/systemverilog' {
+  import type { languages } from 'monaco-editor'
+  export const conf: languages.LanguageConfiguration
+  export const language: languages.IMonarchLanguage
+}

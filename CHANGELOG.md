@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Editor:** C, Verilog, SystemVerilog and VHDL syntax, and more C++ extensions (`.cxx`,
+  `.hh`, `.inl`, `.ipp`, `.tpp`, `.ixx`, `.cppm`, `.ino`, `.cu`…), in the editor, diffs,
+  Markdown code blocks and the phone's file viewer. TODO comments, scratch files, file icons
+  and Confluence code blocks know them too.
+- **Code intelligence:** Verilog and SystemVerilog through Verible, VHDL through vhdl_ls
+  (built-in presets; install either and enable code intelligence). clangd also serves the
+  new C++ extensions. `code_symbols` says so when the running servers cannot search
+  symbols by name, instead of reporting that none runs.
+
 ## 0.1.0 - 2026-09-28
 
 First public release.

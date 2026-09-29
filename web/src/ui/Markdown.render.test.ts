@@ -62,4 +62,10 @@ describe('Markdown', () => {
     expect(html).toContain('hljs-keyword')
     expect(html).toContain('aria-label="Copy code"')
   })
+
+  it('highlights C, C++, Verilog and VHDL', () => {
+    for (const fence of ['c\nint main(void) { return 0; }', 'c++\ntemplate <class T> struct S {};', 'systemverilog\nmodule top; endmodule', 'vhdl\nENTITY top IS END ENTITY;']) {
+      expect(render('```' + fence + '\n```'), fence).toContain('hljs-keyword')
+    }
+  })
 })

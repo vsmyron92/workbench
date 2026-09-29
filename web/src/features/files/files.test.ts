@@ -7,6 +7,7 @@ import {
   dirname,
   extname,
   fenced,
+  hljsLanguage,
   isExternalHref,
   mediaKind,
   parseGoto,
@@ -62,6 +63,15 @@ describe('paths', () => {
     expect(parseGoto('main.rs:12')).toEqual({ query: 'main.rs', line: 12, column: undefined })
     expect(parseGoto(':7:3')).toEqual({ query: '', line: 7, column: 3 })
     expect(parseGoto('lib')).toEqual({ query: 'lib' })
+  })
+
+  it('names highlight.js languages', () => {
+    expect(hljsLanguage('main.c')).toBe('c')
+    expect(hljsLanguage('a/b.cxx')).toBe('cpp')
+    expect(hljsLanguage('rtl/top.sv')).toBe('verilog')
+    expect(hljsLanguage('rtl/alu.vhd')).toBe('vhdl')
+    expect(hljsLanguage('Makefile')).toBe('makefile')
+    expect(hljsLanguage('a.unknown')).toBe('')
   })
 
   it('fences code safely', () => {

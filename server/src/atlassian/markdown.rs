@@ -274,7 +274,10 @@ fn code_language(lang: &str) -> String {
         "py" => "python".into(),
         "yml" => "yaml".into(),
         "rs" => "rust".into(),
-        "c++" | "cc" | "hpp" => "cpp".into(),
+        "c++" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "h++" => "cpp".into(),
+        "h" => "c".into(),
+        "v" | "sv" | "svh" | "systemverilog" => "verilog".into(),
+        "vhd" => "vhdl".into(),
         "cs" | "c#" => "csharp".into(),
         "kt" => "kotlin".into(),
         "md" => "markdown".into(),
@@ -866,6 +869,17 @@ mod tests {
     use super::*;
 
     const MD: &str = "# Title\n\nSome **bold** and *em* and `code` and ~~gone~~ with a [link](https://x.dev).\nSoft break.  \nHard break.\n\n- one\n- two\n  1. nested\n\n* [x] done\n* [ ] todo\n\n```rs\nfn main() { if a < b && c {} }\n]]> tricky\n```\n\n> quoted\n\n| a | b |\n|:-:|--:|\n| 1 | <2> |\n\n---\n\n<p>raw <b>ok</b></p>\n\n<div>broken";
+
+    #[test]
+    fn code_languages_use_the_macro_names() {
+        assert_eq!(code_language("C++"), "cpp");
+        assert_eq!(code_language("hxx"), "cpp");
+        assert_eq!(code_language("c"), "c");
+        assert_eq!(code_language("sv"), "verilog");
+        assert_eq!(code_language("SystemVerilog"), "verilog");
+        assert_eq!(code_language("vhd"), "vhdl");
+        assert_eq!(code_language("VHDL"), "vhdl");
+    }
 
     #[test]
     fn markdown_to_storage() {

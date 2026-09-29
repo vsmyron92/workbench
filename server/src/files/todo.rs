@@ -53,6 +53,7 @@ fn markers(path: &str) -> Option<&'static [&'static str]> {
     const C: &[&str] = &["//", "/*"];
     const HASH: &[&str] = &["#"];
     const DASH: &[&str] = &["--"];
+    const VHDL: &[&str] = &["--", "/*"];
     const WEB: &[&str] = &["<!--", "//", "/*"];
     const MARKUP: &[&str] = &["<!--"];
     const SEMI: &[&str] = &[";"];
@@ -65,13 +66,14 @@ fn markers(path: &str) -> Option<&'static [&'static str]> {
     }
     let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
     Some(match ext {
-        "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx"
-        | "cs" | "java" | "kt" | "kts" | "go" | "swift" | "scala" | "dart" | "css" | "scss" | "less" | "proto" | "groovy" | "gradle"
+        "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" | "c" | "h" | "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh"
+        | "hxx" | "h++" | "ipp" | "tpp" | "txx" | "inl" | "ixx" | "cppm" | "ino" | "cu" | "cuh" | "v" | "vh" | "sv" | "svh" | "cs" | "java" | "kt" | "kts" | "go" | "swift" | "scala" | "dart" | "css" | "scss" | "less" | "proto" | "groovy" | "gradle"
         | "jsonc" | "json5" | "glsl" | "hlsl" | "wgsl" | "shader" | "zig" | "m" | "mm" | "sol" | "fs" | "fsx" => C,
         "php" | "vue" | "svelte" | "html" | "htm" | "astro" => WEB,
         "py" | "pyi" | "sh" | "bash" | "zsh" | "fish" | "rb" | "pl" | "pm" | "yaml" | "yml" | "toml" | "conf" | "cfg" | "cmake" | "r"
         | "nix" | "tf" | "hcl" | "ps1" | "psm1" | "properties" | "mk" | "ex" | "exs" | "jl" | "coffee" | "cr" | "nim" | "tcl" => HASH,
         "sql" | "lua" | "hs" | "elm" | "ada" | "adb" | "ads" | "purs" => DASH,
+        "vhd" | "vhdl" | "vho" | "vht" => VHDL,
         "md" | "markdown" | "xml" | "svg" | "xaml" | "csproj" | "plist" => MARKUP,
         "clj" | "cljs" | "cljc" | "edn" | "lisp" | "el" | "scm" | "asm" | "s" | "ini" => SEMI,
         "tex" | "sty" | "erl" | "hrl" | "matlab" => PERCENT,
@@ -181,6 +183,12 @@ mod tests {
         assert!(todo_of(&hit("README.md", "- [ ] TODO write docs", "TODO")).is_none());
         assert!(todo_of(&hit("Dockerfile", "# todo: slim image", "todo")).is_some());
         assert!(todo_of(&hit("notes.unknown", "; TODO ini style", "TODO")).is_some());
+        assert_eq!(todo_of(&hit("rtl/top.sv", "  assign y = a; // TODO: reset", "TODO")).unwrap().text, "TODO: reset");
+        assert!(todo_of(&hit("rtl/top.v", "  $display(\"TODO\");", "TODO")).is_none());
+        assert_eq!(todo_of(&hit("rtl/top.vhd", "  y <= a; -- FIXME: glitch", "FIXME")).unwrap().kind, "FIXME");
+        assert_eq!(todo_of(&hit("rtl/top.vhdl", "  /* todo: 2008 block comment */", "todo")).unwrap().text, "todo: 2008 block comment");
+        assert!(todo_of(&hit("rtl/top.vhd", "  report \"TODO\";", "TODO")).is_none());
+        assert!(todo_of(&hit("src/k.cu", "__global__ void k() {} // XXX", "XXX")).is_some());
     }
 
     #[test]
