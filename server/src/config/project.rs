@@ -1055,4 +1055,30 @@ mod tests {
         assert!(!atlassian_site_ok("https://team.atlassian.net.attacker.example", None));
         assert!(atlassian_site_ok("https://wiki.corp.example/", Some("https://wiki.corp.example")));
     }
+
+    /// The overlay's `[secrets]` hold machine paths. A Windows path written as a TOML
+    /// string parses and vouches for the name the repository uses; pasted raw into a
+    /// basic string it does not parse (`\U` wants eight hex digits). An overlay that
+    /// does not parse vouches for nothing: the repository's name stays confined, never
+    /// reaches config.toml's secret of that name, and the warning says why.
+    #[test]
+    fn overlay_secrets_take_windows_paths_and_a_broken_overlay_vouches_for_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".workbench.toml"), "[repo.github]\npath = \"mock/proj\"\ntoken = \"mock\"\n").unwrap();
+        let overlay = dir.path().join("overlay.toml");
+        let token = r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmp491ixG\token";
+        let global: BTreeMap<String, SecretRef> = [("mock".to_string(), SecretRef::Env("GLOBAL".into()))].into();
+
+        std::fs::write(&overlay, format!("[secrets]\nmock = {{ file = {} }}\n", toml::Value::String(token.into()))).unwrap();
+        let l = load_layers(ProjectFile::default(), dir.path(), &overlay, None);
+        assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+        assert!(l.repo_secret_names.contains("mock"));
+        assert_eq!(l.secret_ref("mock", &global), Some(SecretRef::File(token.into())));
+
+        std::fs::write(&overlay, format!("[secrets]\nmock = {{ file = \"{token}\" }}\n")).unwrap();
+        let l = load_layers(ProjectFile::default(), dir.path(), &overlay, None);
+        assert!(l.warnings.iter().any(|w| w.starts_with("machine overlay (")), "{:?}", l.warnings);
+        assert!(l.config.secrets.is_empty() && l.repo_secret_names.contains("mock"));
+        assert_eq!(l.secret_ref("mock", &global), None, "never config.toml's secret of that name");
+    }
 }
