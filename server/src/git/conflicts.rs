@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::cmd::literal;
 use super::diff::{Side, blob_side, worktree_side};
+use super::eol;
 use super::repo::Repo;
 use super::status::detect_state;
 use crate::error::ApiError;
@@ -19,7 +20,8 @@ pub struct ConflictVersions {
     pub ours: Option<String>,
     /// Their version (stage 3); null when they deleted it.
     pub theirs: Option<String>,
-    /// The working-tree file (with conflict markers); '' when deleted.
+    /// The working-tree file (with conflict markers) as git reads it (LF where git turns
+    /// its CRLFs into LFs); '' when deleted.
     pub merged: String,
     pub binary: bool,
     pub too_large: bool,
@@ -146,7 +148,8 @@ pub async fn resolve(repo: &Repo, req: &ResolveRequest) -> Result<(), ApiError> 
     }
     if let Some(content) = &req.content {
         let abs = crate::util::paths::resolve_in_root(&repo.top, &p)?;
-        let data = content.clone().into_bytes();
+        // A file git checks out with CRLF was shown with LF (`versions`): the CRLFs go back.
+        let data = eol::of(repo, &p).await?.write(content.clone()).into_bytes();
         tokio::task::spawn_blocking(move || crate::util::fs::write_atomic(&abs, &data, 0o644))
             .await
             .map_err(|e| ApiError::internal(e.to_string()))??;

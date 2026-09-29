@@ -20,6 +20,7 @@ mod changelists;
 mod cmd;
 mod conflicts;
 mod diff;
+mod eol;
 mod lines;
 mod log;
 mod mcp;
@@ -58,9 +59,11 @@ pub struct GitState {
     repos: DashMap<String, (PathBuf, Arc<Repo>)>,
     /// Running and recent remote operations.
     pub ops: remote::OpRegistry,
-    /// The GIT_ASKPASS wrapper, once written.
-    pub askpass: OnceLock<PathBuf>,
-    /// Shell command prefix of the git editor helper (`'<exe>' git-editor`).
+    /// Environment pointing remote git commands at the askpass helper, once set up
+    /// (`util::os::helper::askpass_env`).
+    pub askpass: OnceLock<Vec<(String, String)>>,
+    /// Shell command prefix of the git editor helper (`'<exe>' git-editor`; `/`
+    /// separators on Windows, where Git for Windows runs it with its sh).
     pub editor: OnceLock<String>,
     /// Serialize changelist file access per project.
     changelist_locks: DashMap<String, Arc<parking_lot::Mutex<()>>>,
@@ -101,16 +104,15 @@ pub fn router() -> Router<AppState> {
 }
 
 pub async fn start(state: &AppState) {
-    match askpass::write_wrapper(&state.paths.data_dir) {
-        Ok(p) => {
-            let _ = state.git.askpass.set(p);
+    match crate::util::os::helper::askpass_env(&state.paths.data_dir) {
+        Ok(env) => {
+            let _ = state.git.askpass.set(env);
         }
-        Err(e) => tracing::warn!("git: cannot write the askpass helper ({e:#}); remote operations rely on credential helpers"),
+        Err(e) => tracing::warn!("git: cannot set up the askpass helper ({e:#}); remote operations rely on credential helpers"),
     }
     match crate::util::os::proc::current_exe() {
         Ok(exe) => {
-            let exe = exe.to_string_lossy();
-            let _ = state.git.editor.set(format!("{} git-editor", rebase_i::sh_quote(&exe)));
+            let _ = state.git.editor.set(format!("{} git-editor", rebase_i::sh_path(&exe)));
         }
         Err(e) => tracing::warn!("git: cannot locate the workbench binary ({e}); interactive rebase is unavailable"),
     }

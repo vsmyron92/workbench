@@ -6,6 +6,7 @@
 pub mod desktop;
 pub mod exe;
 pub mod fs;
+pub mod helper;
 pub mod net;
 pub mod path;
 pub mod perm;

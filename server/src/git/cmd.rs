@@ -286,6 +286,9 @@ fn is_lock_error(stderr: &str) -> bool {
 /// A failed git command as an API error. Recognizes the common cases so the UI
 /// can react (offer a smart checkout, a force delete…).
 pub fn git_error(out: &GitOutput) -> ApiError {
+    if let Some(e) = unsafe_repository(out) {
+        return e;
+    }
     let raw = format!("{}\n{}", out.stderr, out.text());
     let msg = out.message();
     if is_lock_error(&raw) {
@@ -319,6 +322,16 @@ pub fn git_error(out: &GitOutput) -> ApiError {
         return ApiError::new(StatusCode::NOT_FOUND, "not_a_repo", msg);
     }
     ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "git_error", if msg.is_empty() { "git failed".into() } else { msg })
+}
+
+/// Git refusing a repository that another user owns (the `safe.directory` check: "detected
+/// dubious ownership", "unsafe repository" in older gits; common on Windows for folders an
+/// administrator created and on drives without owners): 403 `unsafe_repository` with git's
+/// message verbatim, which names the owners and the command that trusts the folder.
+pub fn unsafe_repository(out: &GitOutput) -> Option<ApiError> {
+    let text = out.stderr.trim();
+    (text.contains("detected dubious ownership") || text.contains("fatal: unsafe repository"))
+        .then(|| ApiError::new(StatusCode::FORBIDDEN, "unsafe_repository", text.to_string()))
 }
 
 /// Files listed after "Your local changes to the following files would be overwritten by …:".
