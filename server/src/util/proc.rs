@@ -74,7 +74,8 @@ pub async fn run(program: &str, args: &[&str], cwd: &Path, timeout: Duration) ->
 }
 
 /// Run a prepared command (stdin closed, `os::exe::child_env` added), capture output, kill
-/// on timeout.
+/// on timeout. stderr is `os::shell::readable_stderr` (on Windows, PowerShell's CLIXML
+/// records as text).
 pub async fn run_cmd(mut cmd: Command, timeout: Duration) -> Result<Output, ApiError> {
     clean_env(&mut cmd);
     cmd.envs(crate::util::os::exe::child_env().iter().copied());
@@ -84,7 +85,7 @@ pub async fn run_cmd(mut cmd: Command, timeout: Duration) -> Result<Output, ApiE
         Ok(Ok(out)) => Ok(Output {
             code: out.status.code(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            stderr: crate::util::os::shell::readable_stderr(&out.stderr),
         }),
         Ok(Err(e)) => Err(ApiError::internal(format!("process failed: {e}"))),
         Err(_) => Err(ApiError::new(

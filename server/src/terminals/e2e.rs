@@ -161,6 +161,33 @@ time.sleep(30)")).await.unwrap();
     assert!(!tdir.exists(), "a forgotten terminal's files came back");
 }
 
+/// What Workbench starts in a terminal (a run, a pre-launch step, a command, an agent CLI)
+/// gets `util::os::exe::child_env` (on Windows a cmd.exe among its processes never takes a
+/// program from the current directory); an interactive shell keeps its usual lookup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn programs_but_not_interactive_shells_get_the_child_env() {
+    const VAR: &str = "NoDefaultCurrentDirectoryInExePath";
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let set = crate::util::os::exe::child_env().iter().find(|(k, _)| *k == VAR).map(|(_, v)| v.to_string());
+    assert_eq!(set.as_deref(), cfg!(windows).then_some("1"));
+    let code = format!("import os\nprint('value=' + str(os.environ.get({})), flush=True)", py_str(VAR));
+    for (kind, want) in [(TerminalKind::Command, set.clone()), (TerminalKind::Run, set.clone()), (TerminalKind::Shell, None)] {
+        let mut s = spec(dir.path(), &code);
+        s.kind = kind;
+        // Not whatever this process has (the test's own environment may set it), and a spec
+        // cannot undo what Workbench sets.
+        s.env.push((VAR.to_string(), None));
+        let info = state.terminals.spawn(&state, s).await.unwrap();
+        wait_exit(&state, &info.id).await;
+        let text = state.terminals.screen_text(&info.id, 50).unwrap();
+        let want = format!("value={}", want.as_deref().unwrap_or("None"));
+        assert!(text.lines().any(|l| l.trim_end() == want), "{kind:?}: want {want:?} in {text:?}");
+    }
+    let agent: Vec<_> = super::program_env(TerminalKind::Agent).into_iter().map(|(k, v)| (k, v.unwrap_or_default())).collect();
+    assert_eq!(agent, set.map(|v| (VAR.to_string(), v)).into_iter().collect::<Vec<_>>());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mcp_output_tool_reads_a_terminal() {
     let dir = tempfile::tempdir().unwrap();
