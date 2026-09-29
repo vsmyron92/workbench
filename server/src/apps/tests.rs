@@ -698,6 +698,8 @@ fn programs_of_command_lines() {
 
 /// Two deploy requests racing through the (slow) planning phase: only one runs. A
 /// branch name is never spliced into a deploy command when it could inject shell code.
+/// (The commands are bash and PowerShell alike: PowerShell's `echo` writes each of its
+/// arguments on a line of its own, so the deploy writes one quoted string.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_deploys_run_once_and_branch_names_cannot_inject() {
     let l = live_fixture(
@@ -705,7 +707,7 @@ async fn concurrent_deploys_run_once_and_branch_names_cannot_inject() {
 [[env]]
 name = "sandbox"
 url = "http://127.0.0.1:9"
-deploy = { command = "echo DEPLOYED {sha8} >> deploys.log; sleep 1", local = true, confirm = "click" }
+deploy = { command = 'echo "DEPLOYED {sha8}" >> deploys.log; sleep 1', local = true, confirm = "click" }
 
 [[env]]
 name = "branchy"
@@ -730,7 +732,7 @@ deploy = { command = "echo SANDBOX {sha8} on {branch} >> deploys.log", local = t
     tokio::time::timeout(std::time::Duration::from_secs(10), rx.wait_for(|x| x.is_some())).await.unwrap().unwrap();
     // (Windows PowerShell 5.1 appends UTF-16.)
     let log = crate::util::os::shell::read_output(&l.root.join("deploys.log")).unwrap();
-    assert_eq!(log.lines().count(), 1, "{log}");
+    assert_eq!(log.lines().collect::<Vec<_>>(), [format!("DEPLOYED {}", plan.sha8)], "{log}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while deploy::deploying_terminal(&l.state, "live", "sandbox").is_some() {
         assert!(std::time::Instant::now() < deadline);
@@ -741,7 +743,10 @@ deploy = { command = "echo SANDBOX {sha8} on {branch} >> deploys.log", local = t
     assert_eq!(e.code, "bad_request");
     assert!(l.state.apps.envs.deploys.lock().is_empty(), "no reservation is left behind");
 
-    scratch_git(&l.root, &["checkout", "-q", "-b", "fix;touch${IFS}INJECTED"]);
+    // A branch name that would create `INJECTED` if the run shell read it: bash's, or
+    // PowerShell's (git forbids spaces in branch names).
+    let injecting = if cfg!(windows) { "fix;mkdir('INJECTED')" } else { "fix;touch${IFS}INJECTED" };
+    scratch_git(&l.root, &["checkout", "-q", "-b", injecting]);
     let branchy = envs::find(&p, "branchy").unwrap().clone();
     let e = deploy::deploy(&l.state, &p, &branchy, None, &json!(true)).await.unwrap_err();
     assert_eq!(e.code, "bad_request");
