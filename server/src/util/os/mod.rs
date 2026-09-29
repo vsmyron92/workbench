@@ -3,6 +3,8 @@
 //! its Windows counterpart under `cfg(windows)`. Code outside this module calls these
 //! functions instead of using Unix or Windows APIs itself (tests excepted).
 
+#[cfg(windows)]
+pub mod autostart;
 pub mod desktop;
 pub mod exe;
 pub mod fs;

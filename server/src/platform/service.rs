@@ -20,6 +20,9 @@ use clap::{Args, Subcommand};
 
 use crate::util;
 
+/// `workbench service`'s help line (`service_windows.rs` has the Windows one).
+pub const ABOUT: &str = "Run Workbench as a systemd user service, with a desktop launcher.";
+
 const MARKER: &str = "Written by `workbench service install`";
 const ICON_SVG: &str = include_str!("../../../web/public/icons/workbench.svg");
 /// Environment carried into the unit and the launcher when set.

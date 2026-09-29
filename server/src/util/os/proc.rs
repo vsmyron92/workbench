@@ -175,8 +175,7 @@ pub async fn shutdown_signal(data_dir: &Path) {
 }
 
 #[cfg(windows)]
-#[allow(unused_imports)] // for `workbench service stop` and the launcher
-pub use imp::{request_stop, stop_event_name};
+pub use imp::{Event, request_stop, server_running, stop_event_name};
 
 // ---------------------------------------------------------------- Unix
 
@@ -433,7 +432,8 @@ mod imp {
     };
     use windows_sys::Win32::System::Threading::{
         CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateEventW, DETACHED_PROCESS, EVENT_MODIFY_STATE, OpenEventW, OpenProcess, PROCESS_QUERY_INFORMATION,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, SetEvent, TerminateProcess, WaitForSingleObject,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, SYNCHRONIZATION_SYNCHRONIZE, SetEvent, TerminateProcess,
+        WaitForSingleObject,
     };
 
     use super::ProcEntry;
@@ -721,19 +721,75 @@ mod imp {
 
     /// Ask the server serving `data_dir` to stop (sets its stop event). `Ok(false)` when
     /// none is running.
-    #[allow(dead_code)] // for `workbench service stop` and the launcher (docs/windows-port.md §2)
     pub fn request_stop(data_dir: &Path) -> std::io::Result<bool> {
-        let name = wide(&stop_event_name(data_dir));
-        // SAFETY: `name` is NUL-terminated and outlives the call; `Handle` owns the result.
-        let Some(event) = Handle::new(unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) }) else {
-            let e = std::io::Error::last_os_error();
-            return if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) { Ok(false) } else { Err(e) };
-        };
-        // SAFETY: an event handle with EVENT_MODIFY_STATE.
-        if unsafe { SetEvent(event.0) } == 0 {
-            return Err(std::io::Error::last_os_error());
+        Event::set(&stop_event_name(data_dir))
+    }
+
+    /// Whether a server serving `data_dir` runs: it holds the stop event, which it creates
+    /// once it listens and which goes with its process (a crash leaves nothing stale).
+    pub fn server_running(data_dir: &Path) -> bool {
+        Event::exists(&stop_event_name(data_dir))
+    }
+
+    /// A named auto-reset event that only this user and SYSTEM may open, held while the
+    /// value lives: a server's stop event, `workbench service`'s own.
+    pub struct Event(Handle);
+
+    impl Event {
+        /// Creates the event `name`. `Ok(None)` when it exists already: another process holds
+        /// it (or squats the name).
+        pub fn create(name: &str) -> std::io::Result<Option<Event>> {
+            let sd = owner_only_sd().ok_or_else(|| std::io::Error::other("cannot build the event's security descriptor"))?;
+            let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: 0 };
+            let wname = wide(name);
+            // Auto-reset: a waiter started after a request does not see the old one.
+            // SAFETY: `sa` and its descriptor, and the NUL-terminated `wname`, outlive the
+            // call; `Handle` owns the result.
+            let event = Handle::new(unsafe { CreateEventW(&sa, 0, 0, wname.as_ptr()) });
+            // SAFETY: plain call, right after CreateEventW (which sets it on success too).
+            let err = unsafe { GetLastError() };
+            match event {
+                Some(event) if err != ERROR_ALREADY_EXISTS => Ok(Some(Event(event))),
+                Some(_) => Ok(None),
+                None => Err(std::io::Error::from_raw_os_error(err as i32)),
+            }
         }
-        Ok(true)
+
+        /// Sets the event `name`. `Ok(false)` when no process holds it.
+        pub fn set(name: &str) -> std::io::Result<bool> {
+            let name = wide(name);
+            // SAFETY: `name` is NUL-terminated and outlives the call; `Handle` owns the result.
+            let Some(event) = Handle::new(unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) }) else {
+                let e = std::io::Error::last_os_error();
+                return if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) { Ok(false) } else { Err(e) };
+            };
+            // SAFETY: an event handle with EVENT_MODIFY_STATE.
+            if unsafe { SetEvent(event.0) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(true)
+        }
+
+        /// Whether a process holds the event `name`, one this user may open (a name squatted
+        /// by another account does not count).
+        pub fn exists(name: &str) -> bool {
+            let name = wide(name);
+            // SAFETY: `name` is NUL-terminated and outlives the call; `Handle` owns the result
+            // and closes it at once.
+            Handle::new(unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) }).is_some()
+        }
+
+        /// Waits up to `timeout` for the event to be set (which resets it). `Ok(false)` on
+        /// timeout.
+        pub fn wait(&self, timeout: std::time::Duration) -> std::io::Result<bool> {
+            let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
+            // SAFETY: a valid event handle, held by `self`.
+            match unsafe { WaitForSingleObject(self.0.0, ms) } {
+                WAIT_OBJECT_0 => Ok(true),
+                WAIT_TIMEOUT => Ok(false),
+                _ => Err(std::io::Error::last_os_error()),
+            }
+        }
     }
 
     /// This process's user as a SID string (`S-1-5-21-…`).
@@ -757,24 +813,13 @@ mod imp {
     /// Creates the stop event of `data_dir`, for this user and SYSTEM only. `None` (logged)
     /// when it cannot be created or already exists: another server on this data dir, or a
     /// process squatting the name, would otherwise share its stop requests.
-    pub(super) fn create_stop_event(data_dir: &Path) -> Option<Handle> {
+    pub(super) fn create_stop_event(data_dir: &Path) -> Option<Event> {
         let name = stop_event_name(data_dir);
-        let Some(sd) = owner_only_sd() else {
-            tracing::warn!("cannot build the security of the stop event {name}; `workbench service stop` cannot stop this server");
-            return None;
-        };
-        let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: 0 };
-        let wname = wide(&name);
         // Auto-reset: a server started right after a stop does not see the old request.
-        // SAFETY: `sa` and its descriptor, and the NUL-terminated `wname`, outlive the call;
-        // `Handle` owns the result.
-        let event = Handle::new(unsafe { CreateEventW(&sa, 0, 0, wname.as_ptr()) });
-        // SAFETY: plain call, right after CreateEventW (which sets it on success too).
-        let err = unsafe { GetLastError() };
-        match event {
-            Some(event) if err != ERROR_ALREADY_EXISTS => return Some(event),
-            Some(_) => tracing::warn!("the stop event {name} already exists (another Workbench on this data dir?); `workbench service stop` cannot stop this server"),
-            None => tracing::warn!("cannot create the stop event {name} (error {err}); `workbench service stop` cannot stop this server"),
+        match Event::create(&name) {
+            Ok(Some(event)) => return Some(event),
+            Ok(None) => tracing::warn!("the stop event {name} already exists (another Workbench on this data dir?); `workbench service stop` cannot stop this server"),
+            Err(e) => tracing::warn!("cannot create the stop event {name} ({e}); `workbench service stop` cannot stop this server"),
         }
         None
     }
@@ -788,16 +833,15 @@ mod imp {
         // A thread of its own, not `spawn_blocking`: the runtime waits for blocking tasks
         // when it shuts down. It ends (closing the event) once nobody listens.
         let waiter = std::thread::Builder::new().name("workbench-stop-event".into()).spawn(move || {
-            // The whole `Handle` moves here (not just its pointer), and closes with the thread.
+            // The whole `Event` moves here (not just its handle), and closes with the thread.
             let event = event;
             loop {
-                // SAFETY: a valid event handle, owned by this thread.
-                match unsafe { WaitForSingleObject(event.0, 250) } {
-                    WAIT_OBJECT_0 => {
+                match event.wait(std::time::Duration::from_millis(250)) {
+                    Ok(true) => {
                         let _ = tx.send(());
                         return;
                     }
-                    WAIT_TIMEOUT if !tx.is_closed() => {}
+                    Ok(false) if !tx.is_closed() => {}
                     _ => return,
                 }
             }
@@ -967,13 +1011,32 @@ mod tests {
         assert_eq!(name, stop_event_name(&dir.path().join(".")));
         assert_ne!(name, stop_event_name(other.path()));
         assert!(!request_stop(dir.path()).unwrap(), "no server listens yet");
+        assert!(!server_running(dir.path()));
         // A second server on the data dir (or a squatter of the name) is not listened to.
         let first = imp::create_stop_event(dir.path()).expect("the event is created");
+        assert!(server_running(dir.path()) && !server_running(other.path()));
         assert!(imp::create_stop_event(dir.path()).is_none());
         drop(first);
+        assert!(!server_running(dir.path()), "the event goes with its last handle");
         let path = dir.path().to_path_buf();
         let server = tokio::spawn(async move { shutdown_signal(&path).await });
         assert!(eventually(|| request_stop(dir.path()).unwrap()).await, "the server created its event");
         tokio::time::timeout(Duration::from_secs(5), server).await.expect("the server stopped").unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_events_are_held_set_and_waited_for() {
+        let name = format!("Local\\workbench-test-{}", std::process::id());
+        assert!(!Event::exists(&name) && !Event::set(&name).unwrap());
+        let event = Event::create(&name).unwrap().expect("a new event");
+        assert!(Event::create(&name).unwrap().is_none(), "held by `event`");
+        assert!(Event::exists(&name));
+        assert!(!event.wait(Duration::from_millis(10)).unwrap());
+        assert!(Event::set(&name).unwrap());
+        assert!(event.wait(Duration::from_secs(1)).unwrap());
+        assert!(!event.wait(Duration::from_millis(10)).unwrap(), "auto-reset");
+        drop(event);
+        assert!(!Event::exists(&name));
     }
 }

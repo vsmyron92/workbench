@@ -68,7 +68,8 @@ enum Command {
     /// Claude Code status line helper: reads the status JSON on stdin, reports it
     /// to the server and prints a compact line.
     Statusline,
-    /// Run Workbench as a systemd user service, with a desktop launcher.
+    // Linux: a systemd user service; Windows: a sign-in entry (platform::service).
+    #[command(about = platform::service::ABOUT)]
     Service(platform::service::ServiceArgs),
 }
 

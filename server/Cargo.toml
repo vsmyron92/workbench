@@ -9,6 +9,13 @@ license = "MIT"
 name = "workbench"
 path = "src/main.rs"
 
+# The Windows launcher behind `workbench service` (a GUI program, so sign-in shows no
+# console); a stub elsewhere.
+[[bin]]
+name = "workbenchw"
+path = "src/bin/workbenchw.rs"
+test = false
+
 [profile.dev.package."*"]
 opt-level = 2
 
@@ -107,6 +114,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[build-dependencies]
+# The icon and version resource of the Windows executables (build.rs; unused elsewhere).
+winresource = { version = "0.1.31", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.27.0"
