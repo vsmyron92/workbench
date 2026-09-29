@@ -123,9 +123,9 @@ pub fn detect(cx: &mut Ctx, gomod: &Path) {
         mains.push((d, name, port, server));
     }
     for (d, name, port, server) in &mains {
-        let target = if d == dir { ".".to_string() } else { format!("./{}", d.strip_prefix(dir).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default()) };
+        let target = if d == dir { ".".to_string() } else { format!("./{}", d.strip_prefix(dir).map(crate::util::os::path::to_slash).unwrap_or_default()) };
         let main_file = d.join("main.go");
-        let src_file = if main_file.is_file() { main_file } else { gomod.to_path_buf() };
+        let src_file = if cx.is_file(&main_file) { main_file } else { gomod.to_path_buf() };
         cx.add_run(RunConfig {
             name: scoped(name, &cwd),
             kind: if *server { RunKind::Server } else { RunKind::Task },
@@ -140,7 +140,7 @@ pub fn detect(cx: &mut Ctx, gomod: &Path) {
     }
 
     // air: live reload of the package its build command names (the root by default).
-    let air = [dir.join(".air.toml"), dir.join("air.toml")].into_iter().find(|p| p.is_file());
+    let air = [dir.join(".air.toml"), dir.join("air.toml")].into_iter().find(|p| cx.is_file(p));
     if let Some(air) = air {
         let cfg = cx.read(&air).unwrap_or_default();
         let target = AIR_BUILD_TARGET.captures(&cfg).map(|c| c[1].trim_end_matches('/').to_string()).unwrap_or_else(|| ".".into());
@@ -163,7 +163,7 @@ pub fn detect(cx: &mut Ctx, gomod: &Path) {
     let lint_cfg = [".golangci.yml", ".golangci.yaml", ".golangci.toml", ".golangci.json"]
         .iter()
         .map(|n| dir.join(n))
-        .find(|p| p.is_file());
+        .find(|p| cx.is_file(p));
     if let Some(cfg) = lint_cfg {
         cx.add_run(RunConfig {
             name: scoped("golangci-lint", &cwd),

@@ -38,7 +38,7 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
             members.push(dir.to_path_buf());
         }
         for m in ws.get("members").and_then(|m| m.as_array()).into_iter().flatten().filter_map(|m| m.as_str()) {
-            members.extend(expand_member(dir, m));
+            members.extend(expand_member(cx, dir, m));
         }
         for m in members {
             let mt = m.join("Cargo.toml");
@@ -58,14 +58,17 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
 }
 
 /// `crates/*` → every subdirectory with a Cargo.toml; other entries as-is.
-fn expand_member(ws_dir: &Path, m: &str) -> Vec<PathBuf> {
+fn expand_member(cx: &Ctx, ws_dir: &Path, m: &str) -> Vec<PathBuf> {
     if let Some(prefix) = m.strip_suffix("/*") {
-        let Ok(rd) = std::fs::read_dir(ws_dir.join(prefix)) else { return vec![] };
-        let mut v: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.join("Cargo.toml").is_file()).collect();
+        if !crate::util::os::path::stays_inside(prefix) {
+            return vec![];
+        }
+        let Some(rd) = cx.read_dir(&ws_dir.join(prefix)) else { return vec![] };
+        let mut v: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| cx.is_file(&p.join("Cargo.toml"))).collect();
         v.sort();
         return v;
     }
-    if m.contains('*') || m.contains("..") {
+    if m.contains('*') || m.contains("..") || !crate::util::os::path::stays_inside(m) {
         return vec![];
     }
     vec![ws_dir.join(m)]
@@ -78,7 +81,7 @@ fn inside_workspace(cx: &mut Ctx, dir: &Path) -> bool {
             break;
         }
         let manifest = d.join("Cargo.toml");
-        if manifest.is_file() && cx.read(&manifest).is_some_and(|t| t.contains("[workspace]")) {
+        if cx.is_file(&manifest) && cx.read(&manifest).is_some_and(|t| t.contains("[workspace]")) {
             return true;
         }
         a = d.parent();
@@ -122,7 +125,7 @@ fn package_runs(cx: &mut Ctx, pkg_dir: &Path, v: &toml::Table, cwd: &str, in_wor
     let Some(name) = v.get("package").and_then(|p| p.get("name")).and_then(|n| n.as_str()) else { return };
     let mut bins: Vec<(String, PathBuf)> = vec![];
     let autobins = v.get("package").and_then(|p| p.get("autobins")).and_then(|a| a.as_bool()).unwrap_or(true);
-    if autobins && pkg_dir.join("src/main.rs").is_file() {
+    if autobins && cx.is_file(&pkg_dir.join("src/main.rs")) {
         bins.push((name.to_string(), pkg_dir.join("src/main.rs")));
     }
     for b in v.get("bin").and_then(|b| b.as_array()).into_iter().flatten() {
@@ -130,6 +133,7 @@ fn package_runs(cx: &mut Ctx, pkg_dir: &Path, v: &toml::Table, cwd: &str, in_wor
         let path = b
             .get("path")
             .and_then(|p| p.as_str())
+            .filter(|p| crate::util::os::path::stays_inside(p))
             .map(|p| pkg_dir.join(p))
             .unwrap_or_else(|| pkg_dir.join(format!("src/bin/{bn}.rs")));
         if !bins.iter().any(|(n, _)| n == bn) {
@@ -137,7 +141,7 @@ fn package_runs(cx: &mut Ctx, pkg_dir: &Path, v: &toml::Table, cwd: &str, in_wor
         }
     }
     if autobins {
-        if let Ok(rd) = std::fs::read_dir(pkg_dir.join("src/bin")) {
+        if let Some(rd) = cx.read_dir(&pkg_dir.join("src/bin")) {
             let mut extra: Vec<(String, PathBuf)> = rd
                 .flatten()
                 .map(|e| e.path())

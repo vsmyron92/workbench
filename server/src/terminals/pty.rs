@@ -1,7 +1,8 @@
 //! One PTY process plus the server-side screen mirror it feeds.
 //!
 //! * The child runs in its own session (portable-pty calls `setsid`), so its pid is
-//!   also the session id and the leader's process group.
+//!   also the session id and the leader's process group. Windows: a Job Object registered
+//!   under that pid (`util::os::session`), and a pseudoconsole (ConPTY) instead of a PTY.
 //! * Reads and writes block, so each PTY gets dedicated OS threads (reader, writer,
 //!   waiter); tokio workers never block on the PTY.
 //! * The reader feeds a `vt100` mirror and a broadcast channel **under one lock**, so a
@@ -9,7 +10,9 @@
 //!   duplicate (`Screen::attach`).
 //! * While no client is attached, the reader answers the device queries programs send
 //!   at startup (DA1, DA2, DSR, XTVERSION) so a headless agent does not stall waiting.
-//!   With a client attached, xterm.js answers and we stay quiet.
+//!   With a client attached, xterm.js answers and we stay quiet. The pseudoconsole's own
+//!   cursor query (Windows, `session::ASKS_CURSOR`) is always answered here and never
+//!   reaches a client, which would answer it a second time.
 //!
 //! * Secret values a spawner declares (`LaunchSpec::redact`) are replaced before the
 //!   output reaches the mirror, so no consumer (clients, saved screens, `screen_text`,
@@ -17,13 +20,13 @@
 //! * A screen nobody watches and no process feeds can hibernate: only its snapshot is
 //!   kept, and the mirror is rebuilt from it on demand (`Screen::mirror`).
 //!
-//! The snapshot builder and the session kill are the verified probe code (see
-//! docs/ARCHITECTURE.md history): vt100 does not serialize every mode, so `Extra`
+//! The snapshot builder and the session kill (`util::os::session::kill`) are the verified
+//! probe code (see docs/ARCHITECTURE.md history): vt100 does not serialize every mode, so `Extra`
 //! tracks the ones it drops (focus reporting, other DECSET modes, cursor style, kitty
 //! keyboard flags, modifyOtherKeys, title) and the snapshot replays them.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
@@ -36,6 +39,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::ExitInfo;
 use super::viewers::Viewers;
+use crate::util::os::session;
 
 /// Reply to DA1 (`CSI c`): the same answer xterm.js gives, so programs see one terminal
 /// whether or not a browser is attached.
@@ -572,19 +576,34 @@ const HOLD_BACK: Duration = Duration::from_millis(150);
 /// Replaces secret values in a byte stream, including values split across reads: a
 /// chunk that ends with the beginning of a secret keeps that tail until the next chunk
 /// (or `flush`) shows whether the secret follows.
+///
+/// Where the PTY repaints what programs write (ConPTY, `session::REPAINTS`), a secret
+/// written in one piece can reach the reader with escape sequences between its characters
+/// (the cursor hidden around each frame, a move to where the next frame goes on): such a
+/// secret is masked too, its escape sequences kept after the mask.
 pub struct Redactor {
     needles: Vec<Vec<u8>>,
     carry: Vec<u8>,
+    across_escapes: bool,
 }
+
+/// An unfinished escape sequence at the end of a read is held back up to this length.
+const MAX_HELD_ESCAPE: usize = 4096;
 
 impl Redactor {
     /// `None` when there is nothing to redact.
     pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Option<Self> {
+        Self::with_escapes(secrets, session::REPAINTS)
+    }
+
+    /// `new`, masking secrets with escape sequences between their characters too when
+    /// `across_escapes`.
+    fn with_escapes(secrets: impl IntoIterator<Item = Vec<u8>>, across_escapes: bool) -> Option<Self> {
         let mut needles: Vec<Vec<u8>> = secrets.into_iter().filter(|s| s.len() >= MIN_SECRET).collect();
         // Longest first, so a secret that contains another is masked whole.
         needles.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
         needles.dedup();
-        (!needles.is_empty()).then_some(Redactor { needles, carry: vec![] })
+        (!needles.is_empty()).then_some(Redactor { needles, carry: vec![], across_escapes })
     }
 
     /// Redact `chunk`; returns what can be shown now.
@@ -594,7 +613,18 @@ impl Redactor {
         for n in &self.needles {
             buf = replace_all(&buf, n, MASK);
         }
-        let hold = self.held_tail(&buf);
+        let mut hold = self.held_tail(&buf);
+        if self.across_escapes && buf.contains(&0x1b) {
+            // The text's positions, found again only after a secret was masked.
+            let mut pos = text_positions(&buf);
+            for n in &self.needles {
+                if let Some(masked) = replace_across_escapes(&buf, &pos.0, n, MASK) {
+                    buf = masked;
+                    pos = text_positions(&buf);
+                }
+            }
+            hold = self.held_tail(&buf).max(self.held_tail_across_escapes(&buf, &pos));
+        }
         self.carry = buf.split_off(buf.len() - hold);
         buf
     }
@@ -622,6 +652,26 @@ impl Redactor {
         }
         best
     }
+
+    /// `held_tail` with escape sequences between the characters: the longest tail whose
+    /// text (escape sequences left out) is a proper prefix of a secret, or else an
+    /// unfinished escape sequence (what follows decides whether it splits a secret).
+    /// `pos` is `text_positions(buf)`.
+    fn held_tail_across_escapes(&self, buf: &[u8], pos: &(Vec<usize>, Option<usize>)) -> usize {
+        let (text, unfinished) = (&pos.0, pos.1);
+        let mut from = unfinished.filter(|at| buf.len() - at <= MAX_HELD_ESCAPE).unwrap_or(buf.len());
+        for n in &self.needles {
+            let longest = (n.len() - 1).min(text.len());
+            for k in (1..=longest).rev() {
+                let first = text.len() - k;
+                if text[first..].iter().zip(&n[..k]).all(|(at, c)| buf[*at] == *c) {
+                    from = from.min(text[first]);
+                    break;
+                }
+            }
+        }
+        buf.len() - from
+    }
 }
 
 fn replace_all(hay: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
@@ -639,12 +689,100 @@ fn replace_all(hay: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Whether `fd` becomes readable (or hangs up) within `timeout`.
-fn readable_within(fd: i32, timeout: Duration) -> bool {
-    let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-    // SAFETY: one valid pollfd for the duration of the call.
-    let r = unsafe { libc::poll(&mut p, 1, timeout.as_millis().min(i32::MAX as u128) as i32) };
-    r != 0
+/// `replace_all` for `needle` written with escape sequences between its characters: each
+/// occurrence becomes `with`, followed by the escape sequences it contained (they still
+/// take effect: a cursor shown again, a colour). `text` is `text_positions(hay).0`; `None`
+/// when `needle` does not occur.
+fn replace_across_escapes(hay: &[u8], text: &[usize], needle: &[u8], with: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(hay.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while i + needle.len() <= text.len() {
+        if !text[i..i + needle.len()].iter().zip(needle).all(|(at, c)| hay[*at] == *c) {
+            i += 1;
+            continue;
+        }
+        let (start, end) = (text[i], text[i + needle.len() - 1] + 1);
+        out.extend_from_slice(&hay[copied..start]);
+        out.extend_from_slice(with);
+        // Every byte of the span that is not the needle's is an escape sequence's.
+        let mut t = i;
+        for at in start..end {
+            if t < i + needle.len() && text[t] == at {
+                t += 1;
+            } else {
+                out.push(hay[at]);
+            }
+        }
+        copied = end;
+        i += needle.len();
+    }
+    if copied == 0 {
+        return None;
+    }
+    out.extend_from_slice(&hay[copied..]);
+    Some(out)
+}
+
+/// Where the bytes of `buf` that are not part of an escape sequence are, and where an
+/// unfinished escape sequence at its end starts.
+fn text_positions(buf: &[u8]) -> (Vec<usize>, Option<usize>) {
+    let mut text = Vec::with_capacity(buf.len());
+    let mut i = 0;
+    while i < buf.len() {
+        if buf[i] != 0x1b {
+            text.push(i);
+            i += 1;
+            continue;
+        }
+        match escape_len(&buf[i..]) {
+            Some(n) => i += n,
+            None => return (text, Some(i)),
+        }
+    }
+    (text, None)
+}
+
+/// Length of the escape sequence `s` starts with (`s[0]` is ESC); `None` when it is
+/// unfinished. CSI runs to its final byte; OSC to BEL or ST; DCS, SOS, PM and APC to ST;
+/// others to their final byte. An ESC inside a sequence ends it (another one starts).
+fn escape_len(s: &[u8]) -> Option<usize> {
+    let kind = *s.get(1)?;
+    match kind {
+        b'[' => {
+            for (k, &b) in s.iter().enumerate().skip(2) {
+                match b {
+                    0x40..=0x7e => return Some(k + 1),
+                    // Parameters and intermediates; C0 controls execute and the CSI goes on.
+                    0x20..=0x3f => {}
+                    0x1b => return Some(k),
+                    0x00..=0x1f => {}
+                    _ => return Some(k),
+                }
+            }
+            None
+        }
+        b']' | b'P' | b'X' | b'^' | b'_' => {
+            for (k, &b) in s.iter().enumerate().skip(2) {
+                if b == 0x07 && kind == b']' {
+                    return Some(k + 1);
+                }
+                if b == 0x1b {
+                    return match s.get(k + 1) {
+                        Some(b'\\') => Some(k + 2),
+                        Some(_) => Some(k),
+                        None => None,
+                    };
+                }
+            }
+            None
+        }
+        // Intermediates (`ESC ( B`), then a final byte.
+        0x20..=0x2f => s.iter().skip(2).position(|b| !(0x20..=0x2f).contains(b)).map(|k| k + 3),
+        // A lone ESC: what follows is not part of it.
+        0x00..=0x1f => Some(1),
+        _ => Some(2),
+    }
 }
 
 /// Feeds process output to the screen: the mirror and the broadcast under one lock, and
@@ -655,9 +793,15 @@ struct Feeder {
     scanner: QueryScanner,
     queries: Vec<(usize, Query)>,
     in_tx: mpsc::Sender<Bytes>,
+    /// The PTY's own cursor query is still to come (`session::ASKS_CURSOR`).
+    pty_asks_cursor: bool,
 }
 
 impl Feeder {
+    fn new(screen: Arc<Screen>, proc_gen: u64, in_tx: mpsc::Sender<Bytes>) -> Self {
+        Feeder { screen, proc_gen, scanner: QueryScanner::default(), queries: vec![], in_tx, pty_asks_cursor: session::ASKS_CURSOR }
+    }
+
     /// False once a newer process owns the screen (the reader must stop).
     fn feed(&mut self, chunk: &[u8]) -> bool {
         if chunk.is_empty() {
@@ -665,6 +809,17 @@ impl Feeder {
         }
         self.queries.clear();
         self.scanner.scan(chunk, &mut self.queries);
+        // The pseudoconsole's cursor query, its first: answered here whether or not a client
+        // is attached (it may have missed the query in a resync), and cut from what clients
+        // get, since xterm.js's answer would reach the program as typed input. One split
+        // across reads was partly sent already: only its usual answer then.
+        let mut own = None;
+        if self.pty_asks_cursor {
+            if let Some(i) = self.queries.iter().position(|&(_, q)| q == Query::CursorPosition) {
+                self.pty_asks_cursor = false;
+                own = Some(i).filter(|&i| chunk[..self.queries[i].0].ends_with(b"\x1b[6n"));
+            }
+        }
         let mut replies: Vec<Vec<u8>> = vec![];
         {
             let mut s = self.screen.mirror.lock();
@@ -676,19 +831,30 @@ impl Feeder {
             s.hydrate(self.screen.scrollback);
             let m = &mut s.parser;
             let headless = self.screen.attached.load(Ordering::Relaxed) == 0;
-            if headless && !self.queries.is_empty() {
+            if (headless || own.is_some()) && !self.queries.is_empty() {
                 // Process up to each query so a cursor report is exact.
                 let mut at = 0;
-                for &(end, q) in &self.queries {
+                for (i, &(end, q)) in self.queries.iter().enumerate() {
                     m.process(&chunk[at..end]);
                     at = end;
-                    replies.push(reply_for(q, m));
+                    if headless || own == Some(i) {
+                        replies.push(reply_for(q, m));
+                    }
                 }
                 m.process(&chunk[at..]);
             } else {
                 m.process(chunk);
             }
-            let _ = self.screen.out_tx.send(Bytes::copy_from_slice(chunk));
+            let out = match own {
+                Some(i) => {
+                    let end = self.queries[i].0;
+                    Bytes::from([&chunk[..end - 4], &chunk[end..]].concat())
+                }
+                None => Bytes::copy_from_slice(chunk),
+            };
+            if !out.is_empty() {
+                let _ = self.screen.out_tx.send(out);
+            }
         }
         self.screen.dirty.store(true, Ordering::Relaxed);
         self.screen.last_output_at.store(crate::util::now_ms(), Ordering::Relaxed);
@@ -715,7 +881,11 @@ pub struct LaunchSpec {
 /// A running PTY child.
 pub struct Pty {
     pub pid: i32,
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    /// Its session (`pid` names it while this lives).
+    session: session::Handle,
+    /// The PTY's master side. Windows: its session also holds it, to close the
+    /// pseudoconsole once the session is over (`util::os::session`); `None` from then on.
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     in_tx: mpsc::Sender<Bytes>,
     /// Set once the waiter thread has seen the leader exit.
     exited: Arc<AtomicBool>,
@@ -733,14 +903,18 @@ impl Pty {
     /// from `spawn_blocking`.
     pub fn spawn(spec: &LaunchSpec, screen: Arc<Screen>, proc_gen: u64) -> anyhow::Result<(Arc<Pty>, PtyEvents)> {
         anyhow::ensure!(!spec.argv.is_empty(), "empty command");
+        // Windows: an absolute program, npm shims unwrapped, a batch file only with a path and
+        // arguments cmd.exe reads as they are. Unix: unchanged.
+        let launch = crate::util::os::exe::launch(spec.argv.clone(), &spec.cwd, &spec.env).map_err(|e| anyhow::anyhow!(e))?;
+        let argv = launch.argv;
         let pair = native_pty_system().openpty(PtySize {
             rows: spec.rows,
             cols: spec.cols,
             pixel_width: 0,
             pixel_height: 0,
         })?;
-        let mut cmd = CommandBuilder::new(&spec.argv[0]);
-        cmd.args(&spec.argv[1..]);
+        let mut cmd = CommandBuilder::new(&argv[0]);
+        cmd.args(&argv[1..]);
         cmd.cwd(&spec.cwd);
         for k in crate::util::proc::SESSION_ENV_VARS {
             cmd.env_remove(k);
@@ -751,11 +925,15 @@ impl Pty {
                 None => cmd.env_remove(k),
             }
         }
+        // After `spec.env`, which cannot undo it (a batch file's, on Windows).
+        for (k, v) in launch.env {
+            cmd.env(k, v);
+        }
         let mut child = pair.slave.spawn_command(cmd)?;
         // The parent must not keep the slave open, or the reader never sees EOF.
         drop(pair.slave);
         let pid = child.process_id().map(|p| p as i32).unwrap_or(0);
-        let mut reader = pair.master.try_clone_reader()?;
+        let reader = pair.master.try_clone_reader()?;
         // Dropping the writer writes "\n" + VEOF into the PTY: keep it for the session.
         let mut writer = pair.master.take_writer()?;
         let (in_tx, mut in_rx) = mpsc::channel::<Bytes>(512);
@@ -764,29 +942,34 @@ impl Pty {
         let exited = Arc::new(AtomicBool::new(false));
 
         // Secrets: the start of one at the end of a read is held back until the next read
-        // (or a short poll on a duplicate of the master fd times out).
+        // (or a short wait for more output times out).
         let mut redactor = Redactor::new(spec.redact.iter().cloned());
-        let poll_fd = match (&redactor, pair.master.as_raw_fd()) {
-            // SAFETY: dup of a valid fd we own; closed when the reader ends.
-            (Some(_), Some(fd)) => Some(unsafe { libc::dup(fd) }).filter(|fd| *fd >= 0),
-            _ => None,
+        let mut output = session::Output::new(reader, &*pair.master, redactor.is_some(), &pid.to_string())?;
+        let master = Arc::new(Mutex::new(Some(pair.master)));
+        let session = {
+            let master = master.clone();
+            session::register(pid, move || {
+                // Taken first, so resizes do not wait while the pseudoconsole closes.
+                let m = master.lock().take();
+                drop(m);
+            })
         };
 
         // Reader: blocking reads → mirror + broadcast under one lock.
         {
-            let mut feeder = Feeder { screen, proc_gen, scanner: QueryScanner::default(), queries: vec![], in_tx: in_tx.clone() };
+            let mut feeder = Feeder::new(screen, proc_gen, in_tx.clone());
             std::thread::Builder::new().name(format!("pty-read-{pid}")).spawn(move || {
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
-                    if let (Some(r), Some(fd)) = (redactor.as_mut(), poll_fd) {
-                        if r.holding() && !readable_within(fd, HOLD_BACK) {
+                    if let Some(r) = redactor.as_mut() {
+                        if r.holding() && !output.readable_within(HOLD_BACK) {
                             let held = r.flush();
                             if !feeder.feed(&held) {
                                 break;
                             }
                         }
                     }
-                    let n = match reader.read(&mut buf) {
+                    let n = match output.read(&mut buf) {
                         Ok(0) => break, // EOF (portable-pty maps EIO to Ok(0))
                         Ok(n) => n,
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -803,10 +986,7 @@ impl Pty {
                 if let Some(r) = redactor.as_mut() {
                     feeder.feed(&r.flush());
                 }
-                if let Some(fd) = poll_fd {
-                    // SAFETY: our own duplicate, closed once.
-                    unsafe { libc::close(fd) };
-                }
+                drop(output);
                 let _ = done_tx.send(());
             })?;
         }
@@ -832,12 +1012,12 @@ impl Pty {
                 };
                 exited.store(true, Ordering::Release);
                 let _ = exit_tx.send(info);
+                // Windows: once nothing of the session runs, the pseudoconsole closes and
+                // the reader sees EOF (ConPTY gives none by itself).
+                session::leader_exited(pid);
             })?;
         }
-        Ok((
-            Arc::new(Pty { pid, master: Mutex::new(pair.master), in_tx, exited }),
-            PtyEvents { exit: exit_rx, reader_done: done_rx },
-        ))
+        Ok((Arc::new(Pty { pid, session, master, in_tx, exited }), PtyEvents { exit: exit_rx, reader_done: done_rx }))
     }
 
     /// Queue bytes for the child. Fails when the input queue is full (the child stopped
@@ -855,93 +1035,48 @@ impl Pty {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
-        // The kernel sends SIGWINCH to the foreground process group.
-        self.master.lock().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        // The kernel sends SIGWINCH to the foreground process group (Windows:
+        // ResizePseudoConsole).
+        match self.master.lock().as_ref() {
+            Some(m) => m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }),
+            None => anyhow::bail!("the terminal is closed"),
+        }
     }
 
     pub fn has_exited(&self) -> bool {
         self.exited.load(Ordering::Acquire)
     }
 
+    /// Its process session, for following what the process left running after it exited.
+    pub fn session(&self) -> session::Handle {
+        self.session.clone()
+    }
+
     /// Terminate everything in the PTY's session: SIGHUP (and SIGCONT, so stopped jobs
     /// can receive it) to every process group in the session, then SIGKILL whatever is
-    /// left after `grace`. portable-pty's own kill signals the leader only, which leaves
-    /// background and HUP-immune jobs behind.
+    /// left after `grace` (Windows: the pseudoconsole closes, then the job ends).
+    /// portable-pty's own kill signals the leader only, which leaves background and
+    /// HUP-immune jobs behind.
     pub async fn kill(&self, grace: Duration) {
-        kill_session(self.pid, grace, || self.has_exited()).await;
+        session::kill(self.pid, grace, || self.has_exited()).await;
     }
-}
-
-/// SIGHUP (and SIGCONT, so stopped jobs can receive it) to every process group in session
-/// `sid`, then SIGKILL whatever is left after `grace`. Returns once the session is empty
-/// and `leader_gone()` holds, or right after the SIGKILL.
-pub async fn kill_session(sid: i32, grace: Duration, leader_gone: impl Fn() -> bool) {
-    if sid <= 1 {
-        return;
-    }
-    let _ = tokio::task::spawn_blocking(move || {
-        signal_session(sid, libc::SIGHUP);
-        signal_session(sid, libc::SIGCONT);
-    })
-    .await;
-    let deadline = tokio::time::Instant::now() + grace;
-    loop {
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        let exited = leader_gone();
-        let members = tokio::task::spawn_blocking(move || session_members(sid)).await.unwrap_or_default();
-        if exited && members.is_empty() {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            let _ = tokio::task::spawn_blocking(move || signal_session(sid, libc::SIGKILL)).await;
-            return;
-        }
-    }
-}
-
-/// `(pid, pgrp)` of every live process whose session id is `sid` (scans `/proc/*/stat`).
-/// This catches jobs an interactive shell put into their own process groups.
-pub fn session_members(sid: i32) -> Vec<(i32, i32)> {
-    let mut v = Vec::new();
-    let Ok(rd) = std::fs::read_dir("/proc") else { return v };
-    for e in rd.flatten() {
-        let Ok(pid) = e.file_name().to_string_lossy().parse::<i32>() else { continue };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
-        if let Some((state, pgrp, session)) = parse_stat(&stat) {
-            if state != "Z" && session == sid {
-                v.push((pid, pgrp));
-            }
-        }
-    }
-    v
-}
-
-/// Live processes as `(pid, session id)` (zombies left out).
-pub fn processes() -> Vec<(i32, i32)> {
-    let mut v = Vec::new();
-    let Ok(rd) = std::fs::read_dir("/proc") else { return v };
-    for e in rd.flatten() {
-        let Ok(pid) = e.file_name().to_string_lossy().parse::<i32>() else { continue };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
-        if let Some((state, _, session)) = parse_stat(&stat) {
-            if state != "Z" {
-                v.push((pid, session));
-            }
-        }
-    }
-    v
 }
 
 /// Whether the command line runs the CLI `name`: its program, or the script an
 /// interpreter runs (`node …/bin/codex.js`, `bash …/kimi`), is `name`, `name.<ext>` or
 /// `name-<suffix>` (Codex's native `codex-x86_64-…` binary), or lies in the CLI's npm
 /// package (`package`, e.g. `/@moonshot-ai/kimi-code/` for `node …/dist/main.mjs`).
+/// Windows: names without regard to case, `\` separates, and `node.exe` is `node`.
 fn runs_cli(cmdline: &[u8], name: &str, package: &str) -> bool {
+    use crate::util::os::path;
     let mut args = cmdline.split(|&b| b == 0).map(|a| String::from_utf8_lossy(a).into_owned());
-    let base = |a: &str| a.rsplit('/').next().unwrap_or("").to_string();
+    let base = |a: &str| {
+        let b = path::segments(a).last().unwrap_or("");
+        if path::CASE_INSENSITIVE { b.to_ascii_lowercase() } else { b.to_string() }
+    };
     let named = |a: &str| {
         let b = base(a);
-        b == name || b.strip_prefix(name).is_some_and(|rest| rest.starts_with('.') || rest.starts_with('-')) || a.contains(package)
+        b == name || b.strip_prefix(name).is_some_and(|rest| rest.starts_with('.') || rest.starts_with('-')) || path::to_slash(Path::new(a)).contains(package)
     };
     let Some(program) = args.next() else { return false };
     if named(&program) {
@@ -949,48 +1084,17 @@ fn runs_cli(cmdline: &[u8], name: &str, package: &str) -> bool {
     }
     // The script an interpreter runs (`node …/bin/kimi`), not just any file argument.
     const INTERPRETERS: &[&str] = &["node", "nodejs", "bun", "deno", "bash", "sh", "python", "python3"];
-    INTERPRETERS.contains(&base(&program).as_str()) && args.next().is_some_and(|script| named(&script))
+    let interpreter = base(&program);
+    let interpreter = interpreter.strip_suffix(std::env::consts::EXE_SUFFIX).unwrap_or(&interpreter);
+    INTERPRETERS.contains(&interpreter) && args.next().is_some_and(|script| named(&script))
 }
 
 /// Whether a process outside the process sessions `ours` runs the CLI `name` (npm package
-/// path `package`) with `cwd` as its working directory (blocking; reads `/proc`). Used to
-/// tell a session file of that CLI running outside Workbench from a hosted session's own.
+/// path `package`) with `cwd` as its working directory (blocking; reads `/proc`, on
+/// Windows this user's processes). Used to tell a session file of that CLI running
+/// outside Workbench from a hosted session's own.
 pub fn cli_running_in(cwd: &Path, name: &str, package: &str, ours: &std::collections::HashSet<i32>) -> bool {
-    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    processes().into_iter().filter(|(_, sid)| !ours.contains(sid)).any(|(pid, _)| {
-        std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|d| d == cwd)
-            && std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| runs_cli(&c, name, package))
-    })
-}
-
-/// `(state, pgrp, session)` from a `/proc/<pid>/stat` line. The command name may
-/// contain spaces and parentheses, so fields are parsed after the *last* `)`.
-fn parse_stat(stat: &str) -> Option<(&str, i32, i32)> {
-    let rest = stat.rsplit_once(')')?.1;
-    let f: Vec<&str> = rest.split_whitespace().collect();
-    // f[0]=state f[1]=ppid f[2]=pgrp f[3]=session
-    Some((f.first()?, f.get(2)?.parse().ok()?, f.get(3)?.parse().ok()?))
-}
-
-fn signal_session(sid: i32, sig: i32) {
-    let mut pgrps: Vec<i32> = session_members(sid).into_iter().map(|(_, g)| g).filter(|g| *g > 1).collect();
-    pgrps.push(sid);
-    pgrps.sort_unstable();
-    pgrps.dedup();
-    for g in pgrps {
-        // SAFETY: plain syscall; a negative pid signals the process group.
-        unsafe { libc::kill(-g, sig) };
-    }
-}
-
-/// Whether a pid is alive (signal 0 probe).
-pub fn pid_alive(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    // SAFETY: signal 0 only checks existence and permission.
-    let r = unsafe { libc::kill(pid, 0) };
-    r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    session::runs_outside(cwd, ours, |cmdline| runs_cli(cmdline, name, package))
 }
 
 #[cfg(test)]
@@ -1105,6 +1209,13 @@ mod tests {
         // A file named like the CLI is not the CLI.
         assert!(!kimi(b"vim\0kimi-notes.txt\0") && !kimi(b"less\0/w/kimi\0") && !codex(b"bash\0-c\0codex\0"));
         assert!(!kimi(b""));
+        #[cfg(windows)]
+        {
+            assert!(codex(b"C:\\Program Files\\nodejs\\node.exe\0C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js\0"));
+            assert!(codex(b"C:\\Users\\u\\.local\\bin\\Codex.EXE\0resume\0"));
+            assert!(kimi(b"C:\\Python312\\python.exe\0C:\\t\\kimi.py\0"));
+            assert!(!kimi(b"C:\\Windows\\notepad.exe\0C:\\t\\kimi-notes.txt\0"));
+        }
     }
 
     #[test]
@@ -1128,21 +1239,11 @@ mod tests {
         assert_eq!(reply_for(Query::CursorPosition, &m), b"\x1b[3;7R");
     }
 
-    #[test]
-    fn parses_proc_stat_with_odd_command_names() {
-        let line = "1234 (we(ird) name) S 1 1200 1100 34816 1234 4194560 0 0";
-        assert_eq!(parse_stat(line), Some(("S", 1200, 1100)));
-        assert_eq!(parse_stat("garbage"), None);
-    }
-
-    fn spawn_sh(script: &str) -> (Arc<Pty>, PtyEvents, Arc<Screen>) {
-        spawn_sh_redacting(script, &[])
-    }
-
-    fn spawn_sh_redacting(script: &str, secrets: &[&str]) -> (Arc<Pty>, PtyEvents, Arc<Screen>) {
+    /// `argv` in a PTY that feeds a new screen, with `secrets` masked.
+    fn spawn_argv(argv: Vec<String>, secrets: &[&str]) -> (Arc<Pty>, PtyEvents, Arc<Screen>) {
         let screen = Arc::new(Screen::new(24, 80, 1000));
         let spec = LaunchSpec {
-            argv: vec!["bash".into(), "-c".into(), script.into()],
+            argv,
             cwd: std::env::temp_dir(),
             env: vec![],
             cols: 80,
@@ -1152,6 +1253,19 @@ mod tests {
         let gen_ = screen.next_proc_gen();
         let (pty, ev) = Pty::spawn(&spec, screen.clone(), gen_).unwrap();
         (pty, ev, screen)
+    }
+
+    /// A bash script (the Unix-only tests).
+    #[cfg(unix)]
+    fn spawn_sh(script: &str) -> (Arc<Pty>, PtyEvents, Arc<Screen>) {
+        spawn_argv(vec!["bash".into(), "-c".into(), script.into()], &[])
+    }
+
+    /// A Python program, on every OS (`util::os::exe::python`).
+    fn spawn_py(code: &str, secrets: &[&str]) -> (Arc<Pty>, PtyEvents, Arc<Screen>) {
+        let mut argv = crate::util::os::exe::python();
+        argv.extend(["-c".to_string(), code.to_string()]);
+        spawn_argv(argv, secrets)
     }
 
     #[test]
@@ -1171,17 +1285,66 @@ mod tests {
         // Values shorter than 8 bytes are never redacted.
         assert_eq!(r.push(b"short"), b"short");
         assert!(Redactor::new([b"tiny".to_vec()]).is_none());
+        // Without a repainting PTY, escape sequences between the characters are a break.
+        let mut plain = Redactor::with_escapes([b"glpat-SECRET123".to_vec()], false).unwrap();
+        assert_eq!(plain.push(b"glpat-SEC\x1b[?25hRET123\n"), b"glpat-SEC\x1b[?25hRET123\n");
+    }
+
+    #[test]
+    fn a_repainting_pty_cannot_split_a_secret_with_escape_sequences() {
+        let mut r = Redactor::with_escapes([b"glpat-SECRET123".to_vec()], true).unwrap();
+        // ConPTY paints a frame, hides the cursor for the next one and moves to where it goes on.
+        let s = r.push(b"split glpat-SEC\x1b[?25h\x1b[?25l\x1b[5;16HRET123 done\r\n");
+        assert_eq!(s, "split ••••••\x1b[?25h\x1b[?25l\x1b[5;16H done\r\n".as_bytes());
+        // Across reads: the start and its escape sequences are held back.
+        assert_eq!(r.push(b"again glpat-SE\x1b[?25h"), b"again ");
+        assert!(r.holding());
+        assert_eq!(r.push(b"\x1b[?25lCRET123!"), "••••••\x1b[?25h\x1b[?25l!".as_bytes());
+        // An unfinished escape sequence waits for the rest; with none coming, it is flushed.
+        assert_eq!(r.push(b"red \x1b[3"), b"red ");
+        assert_eq!(r.push(b"1mtext"), b"\x1b[31mtext");
+        assert_eq!(r.push(b"\x1b]0;tit"), b"");
+        assert_eq!(r.flush(), b"\x1b]0;tit");
+        // In a title (OSC), in one piece: masked as before.
+        assert_eq!(r.push(b"\x1b]0;glpat-SECRET123\x07ok"), "\x1b]0;••••••\x07ok".as_bytes());
+        // A line break is a break: that is not the secret written in one piece.
+        assert_eq!(r.push(b"glpat-SEC\r\nRET123\n"), b"glpat-SEC\r\nRET123\n");
+        // Escape sequences of every kind are skipped: charset (ESC ( B), keypad (ESC =), OSC with ST.
+        assert_eq!(r.push(b"glpat\x1b(B-SE\x1b=CR\x1b]8;;\x1b\\ET123."), "••••••\x1b(B\x1b=\x1b]8;;\x1b\\.".as_bytes());
+        assert!(!r.holding());
+    }
+
+    #[test]
+    fn escape_sequences_are_measured() {
+        assert_eq!(escape_len(b"\x1b[?25h rest"), Some(6));
+        assert_eq!(escape_len(b"\x1b[38;5;123mx"), Some(11));
+        assert_eq!(escape_len(b"\x1b[12"), None);
+        assert_eq!(escape_len(b"\x1b[1\x1b[2J"), Some(3));
+        assert_eq!(escape_len(b"\x1b]2;title\x07x"), Some(10));
+        assert_eq!(escape_len(b"\x1b]2;title\x1b\\x"), Some(11));
+        assert_eq!(escape_len(b"\x1b]2;tit"), None);
+        assert_eq!(escape_len(b"\x1bP>|x\x1b\\"), Some(7));
+        assert_eq!(escape_len(b"\x1b(B"), Some(3));
+        assert_eq!(escape_len(b"\x1b("), None);
+        assert_eq!(escape_len(b"\x1b7"), Some(2));
+        assert_eq!(escape_len(b"\x1b\x1b[m"), Some(1));
+        assert_eq!(escape_len(b"\x1b"), None);
+        assert_eq!(text_positions(b"a\x1b[mb\x1b[1"), (vec![0, 4], Some(5)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn secrets_never_reach_the_mirror_or_the_stream() {
         let secret = "glpat-FAKEGLOBALTOKEN123456";
-        // The second echo writes the secret in two pieces, with a pause in between.
-        let script = format!("echo \"token is {secret}\"; printf 'split %s' '{}'; sleep 0.05; printf '%s\\n' '{}'; printf 'tail glpat-'", &secret[..9], &secret[9..]);
-        let (_pty, ev, screen) = spawn_sh_redacting(&script, &[secret]);
+        // The second line writes the secret in two pieces, with a pause in between.
+        let code = format!(
+            "import sys, time\no = sys.stdout\no.write('token is {secret}\\n'); o.flush()\no.write('split {}'); o.flush()\ntime.sleep(0.05)\no.write('{}\\n'); o.write('tail glpat-'); o.flush()\n",
+            &secret[..9],
+            &secret[9..]
+        );
+        let (_pty, ev, screen) = spawn_py(&code, &[secret]);
         let mut rx = screen.out_tx.subscribe();
-        let _ = tokio::time::timeout(Duration::from_secs(5), ev.exit).await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), ev.reader_done).await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), ev.exit).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), ev.reader_done).await;
         let text = screen_text(&mut screen.mirror(), 10);
         assert!(!text.contains("FAKEGLOBAL"), "secret on screen: {text:?}");
         assert!(text.contains("token is ••••••") && text.contains("split ••••••"), "{text:?}");
@@ -1233,6 +1396,7 @@ mod tests {
         assert_eq!(screen.size(), (100, 30));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn kill_takes_down_hup_immune_jobs_in_other_process_groups() {
         // An interactive-style shell with a job-controlled, HUP-immune background job.
@@ -1240,27 +1404,139 @@ mod tests {
             spawn_sh("set -m; (trap '' HUP TERM; exec sleep 1003) & sleep 1004 & echo ready; wait");
         let sid = pty.pid;
         for _ in 0..100 {
-            if session_members(sid).len() >= 3 {
+            if session::members(sid).len() >= 3 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let groups: std::collections::HashSet<i32> = session_members(sid).into_iter().map(|(_, g)| g).collect();
+        let groups: std::collections::HashSet<i32> = session::members(sid).into_iter().map(|(_, g)| g).collect();
         assert!(groups.len() >= 2, "expected several process groups, got {groups:?}");
         let started = std::time::Instant::now();
         pty.kill(Duration::from_millis(600)).await;
         let info = tokio::time::timeout(Duration::from_secs(5), ev.exit).await.unwrap().unwrap();
         assert!(info.signal.is_some() || info.code.is_some());
         for _ in 0..50 {
-            if session_members(sid).is_empty() {
+            if session::members(sid).is_empty() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(session_members(sid).is_empty(), "stragglers survived the kill");
+        assert!(session::members(sid).is_empty(), "stragglers survived the kill");
         assert!(started.elapsed() < Duration::from_secs(4));
     }
 
+    /// On every OS (Windows: the job and the pseudoconsole): a kill ends what the
+    /// terminal's process started, and the output ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kill_ends_what_the_session_started() {
+        let code = "import subprocess, sys\nc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(1003)'])\nprint('child', c.pid, flush=True)\nc.wait()\n";
+        let (pty, ev, screen) = spawn_py(code, &[]);
+        let sid = pty.pid;
+        let mut child = None;
+        for _ in 0..400 {
+            let text = screen_text(&mut screen.mirror(), 10);
+            child = text.lines().find_map(|l| l.trim().strip_prefix("child ")).and_then(|p| p.trim().parse::<i32>().ok());
+            if child.is_some_and(|c| session::members(sid).iter().any(|(p, _)| *p == c)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let child = child.expect("the child's pid on screen");
+        assert!(crate::util::os::proc::pid_alive(child));
+        assert!(session::members(sid).iter().any(|(p, _)| *p == child), "{child} not in {:?}", session::members(sid));
+        pty.kill(Duration::from_millis(600)).await;
+        tokio::time::timeout(Duration::from_secs(10), ev.exit).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), ev.reader_done).await.expect("the output ends").unwrap();
+        for _ in 0..200 {
+            if !crate::util::os::proc::pid_alive(child) && session::members(sid).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(!crate::util::os::proc::pid_alive(child), "the child survived the kill");
+        assert!(session::members(sid).is_empty());
+    }
+
+    /// Windows: a batch file runs only with arguments cmd.exe reads as they are, and the
+    /// output ends once the process is gone (ConPTY gives no EOF by itself).
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_files_run_only_with_arguments_cmd_reads_as_they_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join("tool.cmd");
+        std::fs::write(&tool, "@echo args: %*\r\n").unwrap();
+        let screen = Arc::new(Screen::new(24, 80, 100));
+        let argv = vec![tool.display().to_string(), "a & calc".to_string()];
+        let spec = LaunchSpec { argv, cwd: dir.path().to_path_buf(), env: vec![], cols: 80, rows: 24, redact: vec![] };
+        let err = Pty::spawn(&spec, screen.clone(), screen.next_proc_gen()).err().expect("refused");
+        assert!(err.to_string().contains("batch file"), "{err}");
+        let (_pty, ev, screen) = spawn_argv(vec![tool.display().to_string(), "plain".into()], &[]);
+        let info = tokio::time::timeout(Duration::from_secs(10), ev.exit).await.unwrap().unwrap();
+        assert_eq!(info.code, Some(0));
+        tokio::time::timeout(Duration::from_secs(10), ev.reader_done).await.expect("the output ends").unwrap();
+        assert!(screen_text(&mut screen.mirror(), 10).contains("args: plain"));
+    }
+
+    /// A program's cursor query is answered while no client is attached.
+    #[test]
+    fn a_cursor_query_is_answered_while_headless() {
+        let screen = Arc::new(Screen::new(24, 80, 100));
+        let (in_tx, mut in_rx) = mpsc::channel(8);
+        let proc_gen = screen.next_proc_gen();
+        let mut f = Feeder::new(screen.clone(), proc_gen, in_tx);
+        f.pty_asks_cursor = false;
+        let mut out = screen.out_tx.subscribe();
+        assert!(f.feed(b"\x1b[?9001h\x1b[?1004h\x1b[6n"));
+        assert_eq!(&in_rx.try_recv().unwrap()[..], b"\x1b[1;1R");
+        assert_eq!(&out.try_recv().unwrap()[..], b"\x1b[?9001h\x1b[?1004h\x1b[6n");
+        // Split across reads, after some output.
+        assert!(f.feed(b"hello\x1b["));
+        assert!(in_rx.try_recv().is_err());
+        assert!(f.feed(b"6n"));
+        assert_eq!(&in_rx.try_recv().unwrap()[..], b"\x1b[1;6R");
+        // An attached client answers itself.
+        screen.attached.fetch_add(1, Ordering::AcqRel);
+        assert!(f.feed(b"\x1b[6n"));
+        assert!(in_rx.try_recv().is_err());
+    }
+
+    /// ConPTY, created with INHERIT_CURSOR, asks for the cursor position before anything
+    /// else and waits for the answer. The reader gives it even with a client attached (that
+    /// client may never see the query), and the client does not get the query, or the
+    /// program would read its answer as typed input. Later queries are the client's again.
+    #[test]
+    fn the_pseudoconsoles_cursor_query_is_answered_here_only() {
+        let screen = Arc::new(Screen::new(24, 80, 100));
+        let (in_tx, mut in_rx) = mpsc::channel(8);
+        let proc_gen = screen.next_proc_gen();
+        let mut f = Feeder::new(screen.clone(), proc_gen, in_tx);
+        assert_eq!(f.pty_asks_cursor, session::ASKS_CURSOR);
+        f.pty_asks_cursor = true;
+        screen.feed(b"restarted\r\n");
+        let mut out = screen.out_tx.subscribe();
+        screen.attached.fetch_add(1, Ordering::AcqRel);
+        // What ConPTY writes first: win32-input-mode and focus reports on, then the query.
+        assert!(f.feed(b"\x1b[?9001h\x1b[?1004h\x1b[6n"));
+        assert_eq!(&in_rx.try_recv().unwrap()[..], b"\x1b[2;1R");
+        assert_eq!(&out.try_recv().unwrap()[..], b"\x1b[?9001h\x1b[?1004h");
+        assert!(f.feed(b"$ \x1b[6n"));
+        assert!(in_rx.try_recv().is_err());
+        assert_eq!(&out.try_recv().unwrap()[..], b"$ \x1b[6n");
+        // The query alone sends clients nothing.
+        f.pty_asks_cursor = true;
+        assert!(f.feed(b"\x1b[6n"));
+        assert_eq!(&in_rx.try_recv().unwrap()[..], b"\x1b[2;3R");
+        assert!(out.try_recv().is_err());
+        // Split across reads, its start already sent: the client answers it.
+        f.pty_asks_cursor = true;
+        assert!(f.feed(b"\x1b["));
+        assert!(f.feed(b"6n"));
+        assert!(in_rx.try_recv().is_err() && !f.pty_asks_cursor);
+        assert_eq!(&out.try_recv().unwrap()[..], b"\x1b[");
+        assert_eq!(&out.try_recv().unwrap()[..], b"6n");
+    }
+
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn headless_terminal_answers_device_queries() {
         // `read` gets the DA1 reply because no client is attached.

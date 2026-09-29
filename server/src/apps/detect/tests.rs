@@ -17,6 +17,13 @@ mod layout;
 mod make;
 mod python;
 mod web;
+mod windows;
+
+/// Detection with the POSIX forms (`bash -lc`), on every OS: the fixtures pin what Unix
+/// gets. `windows` checks the PowerShell forms (`detect_as`).
+pub(super) fn detect(root: &Path) -> ProjectFile {
+    detect_as(root, crate::util::os::shell::Dialect::Posix)
+}
 
 pub(super) fn write(root: &Path, rel: &str, text: &str) {
     let p = root.join(rel);
@@ -51,7 +58,12 @@ pub(super) fn has_run(pf: &ProjectFile, name: &str) -> bool {
 /// `detected:` source (documentation suggestions: `<doc>:L<n>`), nothing that runs
 /// by itself (`status`), dependencies that exist, and no unknown `{placeholder}`.
 pub(super) fn detect_checked(root: &Path) -> ProjectFile {
-    let pf = detect(root);
+    detect_checked_as(root, crate::util::os::shell::Dialect::Posix)
+}
+
+/// `detect_checked` with the forms of `dialect`'s run shell.
+pub(super) fn detect_checked_as(root: &Path, dialect: crate::util::os::shell::Dialect) -> ProjectFile {
+    let pf = detect_as(root, dialect);
     let mut seen = std::collections::BTreeSet::new();
     for r in &pf.runs {
         assert!(seen.insert(r.name.clone()), "duplicate run name {:?} in {:?}", r.name, names(&pf));
@@ -121,6 +133,30 @@ fn single_crate_with_several_binaries() {
     assert_eq!(s.command, "cargo run --bin serve");
     assert_eq!(s.port, Some(3030));
     assert_eq!(run(&pf, "cargo test").command, "cargo test");
+}
+
+/// On Windows a drive path (or `\\server\share`) in a manifest replaces the project
+/// folder in a join: members, binaries and solution projects outside it are not read.
+#[cfg(windows)]
+#[test]
+fn windows_manifests_cannot_name_files_outside_the_project() {
+    let outside = tree(&[
+        ("api/Cargo.toml", "[package]\nname = \"outside-api\"\n[dependencies]\naxum = \"0.8\"\n"),
+        ("api/src/main.rs", "fn main() { let addr = \"127.0.0.1:3030\"; }"),
+        ("serve.rs", "fn main() { let addr = \"127.0.0.1:4040\"; }"),
+        ("t/T.csproj", "<Project><ItemGroup><PackageReference Include=\"Microsoft.NET.Test.Sdk\" /></ItemGroup></Project>"),
+    ]);
+    let abs = |rel: &str| outside.path().join(rel).display().to_string();
+    let d = tempfile::tempdir().unwrap();
+    let r = d.path();
+    let members = format!("[{:?}, {:?}]", abs("api"), abs("api").replace('\\', "/"));
+    write(r, "Cargo.toml", &format!("[workspace]\nmembers = {members}\n[package]\nname = \"tool\"\n[[bin]]\nname = \"serve\"\npath = {:?}\n[dependencies]\nwarp = \"0.3\"\n", abs("serve.rs")));
+    write(r, "src/main.rs", "fn main() {}");
+    write(r, "App.sln", &format!("Project(\"{{FAE04EC0}}\") = \"T\", \"{}\", \"{{1}}\"\n", abs("t/T.csproj")));
+    let pf = detect(r);
+    assert!(!has_run(&pf, "outside-api"), "{:?}", names(&pf));
+    assert_eq!(run(&pf, "serve").port, None, "the bin's path outside the project was read");
+    assert!(!pf.runs.iter().any(|r| r.name.starts_with("dotnet test")), "{:?}", names(&pf));
 }
 
 #[test]
@@ -669,12 +705,62 @@ fn hostile_and_empty_trees_are_fine() {
     write(r, "Caddyfile", "{{{{ }}");
     write(r, "CLAUDE.md", "```bash\n\\\n\\\n");
     // A symlink loop must not be followed, and a FIFO must not block.
-    std::os::unix::fs::symlink(r, r.join("loop")).unwrap();
-    nix::unistd::mkfifo(&r.join("CLAUDE.md.fifo"), nix::sys::stat::Mode::S_IRWXU).unwrap();
-    std::fs::remove_file(r.join("CLAUDE.md")).unwrap();
-    std::fs::rename(r.join("CLAUDE.md.fifo"), r.join("CLAUDE.md")).unwrap();
+    crate::util::os::fs::symlink(r, r.join("loop")).unwrap();
+    #[cfg(unix)]
+    {
+        nix::unistd::mkfifo(&r.join("CLAUDE.md.fifo"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+        std::fs::remove_file(r.join("CLAUDE.md")).unwrap();
+        std::fs::rename(r.join("CLAUDE.md.fifo"), r.join("CLAUDE.md")).unwrap();
+    }
     let pf = detect(r);
     assert!(pf.runs.is_empty());
+}
+
+/// Files looked up by name that are links to files of the project are read through them,
+/// on every OS (Windows only skips links to other computers, below).
+#[test]
+fn docs_linked_inside_the_project_are_read() {
+    let d = tree(&[("docs/agents.md", "# Commands\n\n```bash\ncargo test --workspace\n```\n")]);
+    if !crate::files::symlink_or_skip("docs/agents.md", d.path().join("CLAUDE.md")) {
+        return;
+    }
+    let pf = detect(d.path());
+    assert!(pf.project.docs.contains(&"CLAUDE.md".to_string()), "{:?}", pf.project.docs);
+    assert!(pf.runs.iter().any(|r| r.command == "cargo test --workspace" && r.group.as_deref() == Some("suggested")), "{:?}", names(&pf));
+}
+
+/// Detection runs for every project at every reload, so links to another computer are
+/// never followed (Windows): docs, build files, marker files and folders looked up by
+/// name, and `.git` files naming a git dir there. The linked files sit on this computer's
+/// own share, so a followed link would show in what detection proposes.
+#[cfg(windows)]
+#[test]
+fn links_to_network_paths_are_not_followed() {
+    use crate::util::os::path::{canonicalize, loopback_share, remote_link_or_skip};
+    let elsewhere = tree(&[
+        ("CLAUDE.md", "# Commands\n\n```bash\ncargo test --workspace\n```\n"),
+        ("web/package.json", r#"{"scripts":{"dev":"vite --port 5173"}}"#),
+        ("pytest.ini", "[pytest]\n"),
+        (".devcontainer/devcontainer.json", r#"{"image":"x"}"#),
+    ]);
+    let share = loopback_share(&canonicalize(elsewhere.path()).unwrap());
+    let d = tree(&[("requirements.txt", "flask\n")]);
+    let root = canonicalize(d.path()).unwrap();
+    if !remote_link_or_skip(&share.join("CLAUDE.md"), &root.join("CLAUDE.md"), false) {
+        return;
+    }
+    for (target, link, dir) in [("CLAUDE.md", "README.md", false), ("web", "web", true), ("pytest.ini", "pytest.ini", false), (".devcontainer", ".devcontainer", true)] {
+        assert!(remote_link_or_skip(&share.join(target), &root.join(link), dir));
+    }
+    write(&root, ".git", &format!("gitdir: {}\n", share.join("gitdir").display()));
+    let t = Instant::now();
+    let pf = detect(&root);
+    assert!(t.elapsed() < Duration::from_secs(5), "took {:?}", t.elapsed());
+    assert!(pf.project.docs.is_empty(), "{:?}", pf.project.docs);
+    assert!(!pf.runs.iter().any(|r| r.command.contains("cargo test") || r.command.contains("vite")), "{:?}", names(&pf));
+    assert!(!pf.project.tags.iter().any(|t| t == "devcontainer" || t == "node"), "{:?}", pf.project.tags);
+    // `pytest.ini` was not looked at: no pytest configured.
+    assert!(pf.runs.iter().filter_map(|r| r.source.as_deref()).all(|s| !s.contains("pytest config")), "{:?}", names(&pf));
 }
 
 #[test]

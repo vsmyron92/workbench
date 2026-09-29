@@ -97,11 +97,16 @@ pub fn preset_defaults(spec: &mut ServerSpec, placement: &Placement) {
     }
 }
 
-/// `…/node_modules/typescript/lib` beside a server installed with npm (locally or globally).
+/// `…/node_modules/typescript/lib` beside a server installed with npm (locally or globally),
+/// looked for from the server's own file: the target of npm's `node_modules/.bin` link
+/// (Unix), or the package script an npm shim runs (`%APPDATA%\npm\<name>.cmd` on Windows).
 fn typescript_near(bin: &Path) -> Option<std::path::PathBuf> {
-    let real = bin.canonicalize().ok()?;
+    use crate::util::os::exe;
+    let r = exe::classify(bin.to_path_buf());
+    let script = if r.kind == exe::Kind::NpmShim { r.prefix_args.iter().rev().map(Path::new).find(|p| p.is_file()) } else { None };
+    let real = crate::util::os::path::canonicalize(script.unwrap_or(bin)).ok()?;
     for dir in real.ancestors().skip(1).take(8) {
-        for cand in [dir.join("node_modules/typescript/lib"), dir.join("typescript/lib")] {
+        for cand in [dir.join("node_modules").join("typescript").join("lib"), dir.join("typescript").join("lib")] {
             if cand.join("tsserver.js").is_file() {
                 return Some(cand);
             }
@@ -116,21 +121,35 @@ fn host_env(spec: &ServerSpec) -> Vec<(String, Option<String>)> {
 }
 
 pub fn launch(project: &Project, spec: &ServerSpec, placement: Placement) -> Result<Launch, String> {
-    let command = if spec.command.contains('/') { crate::config::contract_tilde(&crate::config::expand_tilde(&spec.command)) } else { spec.command.clone() };
+    let command = if crate::util::os::exe::names_path(&spec.command) { crate::config::contract_tilde(&crate::config::expand_tilde(&spec.command)) } else { spec.command.clone() };
     let display = std::iter::once(command).chain(spec.args.iter().cloned()).collect::<Vec<_>>().join(" ");
     match placement {
-        Placement::Host(path) => Ok(Launch {
-            program: path.to_string_lossy().into_owned(),
-            args: spec.args.clone(),
-            env: host_env(spec),
-            cwd: project.root.clone(),
-            map: PathMap::host(),
-            origin: Origin::Host,
-            side: "host",
-            display,
-            container: None,
-            root_server: project.root.to_string_lossy().into_owned(),
-        }),
+        Placement::Host(path) => {
+            // An npm shim (Windows) runs as node and its script, not through cmd.exe; another
+            // batch file's cmd.exe never takes a program from the project (`child_env`), nor
+            // gets an argument it would reparse.
+            let r = crate::util::os::exe::classify(path);
+            if r.kind == crate::util::os::exe::Kind::Batch && !crate::util::os::exe::batch_args_safe(&spec.args) {
+                return Err(format!(
+                    "{} is a batch file, and cmd.exe would misread an argument with % ! ^ & | < > \" or a line break: point [lsp.servers.{}] command at the program itself",
+                    r.program.display(),
+                    spec.id
+                ));
+            }
+            let own = crate::util::os::exe::child_env().iter().map(|(k, v)| (k.to_string(), Some(v.to_string())));
+            Ok(Launch {
+                program: r.program.to_string_lossy().into_owned(),
+                args: r.prefix_args.into_iter().chain(spec.args.iter().cloned()).collect(),
+                env: own.chain(host_env(spec)).collect(),
+                cwd: project.root.clone(),
+                map: PathMap::host(),
+                origin: Origin::Host,
+                side: "host",
+                display,
+                container: None,
+                root_server: project.root.to_string_lossy().into_owned(),
+            })
+        }
         Placement::Container(target, path) => {
             let (src, dst) = target
                 .map
@@ -167,7 +186,7 @@ fn container_env(spec: &ServerSpec, target: &ExecTarget) -> Vec<(String, Option<
     spec.env
         .iter()
         .filter(|(_, v)| {
-            let host_path = v.starts_with('/') || v.starts_with("~/");
+            let host_path = crate::util::os::path::is_absolute_str(v) || crate::util::os::path::home_relative(v).is_some();
             !host_path || target.map_path(&crate::config::expand_tilde(v)).is_some()
         })
         .map(|(k, v)| (k.clone(), Some(v.clone())))
@@ -281,7 +300,11 @@ mod tests {
     fn host_launch_is_the_located_binary_in_the_project_root() {
         let (spec, _) = super::super::config::LspConfig::default().specs();
         let ts = spec.iter().find(|s| s.id == "typescript").unwrap();
-        let l = launch(&project(), ts, Placement::Host(PathBuf::from("/opt/ls/bin/typescript-language-server"))).unwrap();
+        let bin = PathBuf::from("/opt/ls/bin/typescript-language-server");
+        let l = launch(&project(), ts, Placement::Host(bin.clone())).unwrap();
+        // Unix: the file itself; Windows: made absolute (`C:\opt\…`).
+        assert_eq!(l.program, crate::util::os::exe::classify(bin).program.to_string_lossy());
+        #[cfg(unix)]
         assert_eq!(l.program, "/opt/ls/bin/typescript-language-server");
         assert_eq!(l.args, vec!["--stdio"]);
         assert_eq!(l.cwd, PathBuf::from("/home/u/ws/api"));
@@ -289,29 +312,86 @@ mod tests {
         assert!(l.container.is_none());
     }
 
+    /// npm's `.cmd` shim (Windows) runs as node and the package script, never through cmd.exe.
+    #[cfg(windows)]
+    #[test]
+    fn npm_shims_start_node_with_the_package_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = crate::util::os::path::canonicalize(dir.path()).unwrap();
+        let cli = prefix.join(r"node_modules\typescript-language-server\lib\cli.mjs");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, "").unwrap();
+        std::fs::write(prefix.join("node.exe"), "").unwrap();
+        std::fs::write(prefix.join("typescript-language-server.cmd"), "@ECHO off\r\n").unwrap();
+        std::fs::write(
+            prefix.join("typescript-language-server.ps1"),
+            "& \"$basedir/node$exe\"  \"$basedir/node_modules/typescript-language-server/lib/cli.mjs\" $args\n",
+        )
+        .unwrap();
+        let (spec, _) = super::super::config::LspConfig::default().specs();
+        let ts = spec.iter().find(|s| s.id == "typescript").unwrap();
+        let l = launch(&project(), ts, Placement::Host(prefix.join("typescript-language-server.cmd"))).unwrap();
+        assert_eq!(l.program, prefix.join("node.exe").display().to_string());
+        assert_eq!(l.args, vec![cli.display().to_string(), "--stdio".to_string()]);
+        assert!(l.env.iter().any(|(k, v)| k == "NoDefaultCurrentDirectoryInExePath" && v.as_deref() == Some("1")));
+    }
+
     #[test]
     fn typescript_gets_the_library_beside_the_server() {
         let dir = tempfile::tempdir().unwrap();
-        let prefix = dir.path();
+        let prefix = crate::util::os::path::canonicalize(dir.path()).unwrap();
         std::fs::create_dir_all(prefix.join("node_modules/typescript/lib")).unwrap();
         std::fs::write(prefix.join("node_modules/typescript/lib/tsserver.js"), "").unwrap();
         std::fs::create_dir_all(prefix.join("node_modules/typescript-language-server/lib")).unwrap();
         std::fs::write(prefix.join("node_modules/typescript-language-server/lib/cli.mjs"), "").unwrap();
-        std::fs::create_dir_all(prefix.join("node_modules/.bin")).unwrap();
-        std::os::unix::fs::symlink("../typescript-language-server/lib/cli.mjs", prefix.join("node_modules/.bin/typescript-language-server")).unwrap();
+        let lib = prefix.join("node_modules").join("typescript").join("lib").display().to_string();
         let (specs, _) = super::super::config::LspConfig::default().specs();
-        let mut ts = specs.iter().find(|s| s.id == "typescript").unwrap().clone();
-        preset_defaults(&mut ts, &Placement::Host(prefix.join("node_modules/.bin/typescript-language-server")));
-        let lib = prefix.canonicalize().unwrap().join("node_modules/typescript/lib");
-        assert_eq!(ts.initialization_options.unwrap()["tsserver"]["fallbackPath"], lib.display().to_string());
+        let fallback = |bin: PathBuf| {
+            let mut ts = specs.iter().find(|s| s.id == "typescript").unwrap().clone();
+            preset_defaults(&mut ts, &Placement::Host(bin));
+            ts.initialization_options.and_then(|o| o["tsserver"]["fallbackPath"].as_str().map(str::to_string))
+        };
+        // A global install: the server's command sits in the prefix (`%APPDATA%\npm` on Windows).
+        let global = prefix.join(if cfg!(windows) { "typescript-language-server.cmd" } else { "typescript-language-server" });
+        std::fs::write(&global, "").unwrap();
+        assert_eq!(fallback(global.clone()).as_deref(), Some(lib.as_str()));
+        // A local install: npm's `.bin` link (Unix).
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(prefix.join("node_modules/.bin")).unwrap();
+            crate::util::os::fs::symlink("../typescript-language-server/lib/cli.mjs", prefix.join("node_modules/.bin/typescript-language-server")).unwrap();
+            assert_eq!(fallback(prefix.join("node_modules/.bin/typescript-language-server")).as_deref(), Some(lib.as_str()));
+        }
         // An explicit path is kept; other servers are untouched.
         let mut ts = specs.iter().find(|s| s.id == "typescript").unwrap().clone();
         ts.initialization_options = Some(serde_json::json!({ "tsserver": { "path": "/x" } }));
-        preset_defaults(&mut ts, &Placement::Host(prefix.join("node_modules/.bin/typescript-language-server")));
+        preset_defaults(&mut ts, &Placement::Host(global.clone()));
         assert!(ts.initialization_options.unwrap()["tsserver"].get("fallbackPath").is_none());
         let mut py = specs.iter().find(|s| s.id == "pyright").unwrap().clone();
-        preset_defaults(&mut py, &Placement::Host(prefix.join("node_modules/.bin/typescript-language-server")));
+        preset_defaults(&mut py, &Placement::Host(global));
         assert!(py.initialization_options.is_none());
+    }
+
+    /// A local install on Windows: `node_modules\.bin\<name>.cmd` runs the package's
+    /// script, next to which TypeScript is found.
+    #[cfg(windows)]
+    #[test]
+    fn typescript_is_found_from_an_npm_shims_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::util::os::path::canonicalize(dir.path()).unwrap();
+        let nm = root.join("node_modules");
+        std::fs::create_dir_all(nm.join(r"typescript\lib")).unwrap();
+        std::fs::write(nm.join(r"typescript\lib\tsserver.js"), "").unwrap();
+        std::fs::create_dir_all(nm.join(r"typescript-language-server\lib")).unwrap();
+        std::fs::write(nm.join(r"typescript-language-server\lib\cli.mjs"), "").unwrap();
+        std::fs::create_dir_all(nm.join(".bin")).unwrap();
+        std::fs::write(nm.join(r".bin\node.exe"), "").unwrap();
+        std::fs::write(nm.join(r".bin\typescript-language-server.cmd"), "@ECHO off\r\n").unwrap();
+        std::fs::write(nm.join(r".bin\typescript-language-server.ps1"), "& \"$basedir/node$exe\"  \"$basedir/../typescript-language-server/lib/cli.mjs\" $args\n").unwrap();
+        let (specs, _) = super::super::config::LspConfig::default().specs();
+        let mut ts = specs.iter().find(|s| s.id == "typescript").unwrap().clone();
+        preset_defaults(&mut ts, &Placement::Host(nm.join(r".bin\typescript-language-server.cmd")));
+        assert_eq!(ts.initialization_options.unwrap()["tsserver"]["fallbackPath"], nm.join(r"typescript\lib").display().to_string());
     }
 
     #[test]

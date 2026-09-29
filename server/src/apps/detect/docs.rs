@@ -177,7 +177,7 @@ fn change_dir(cwd: &Option<String>, target: &str, oldpwd: &mut Option<String>) -
     let target = target.trim_matches(['"', '\'']);
     let next = if target == "-" {
         oldpwd.clone()
-    } else if target.starts_with('/') || target.starts_with('~') || target.contains('$') {
+    } else if crate::util::os::path::is_absolute_str(target) || target.starts_with('~') || target.contains('$') {
         Some(target.to_string())
     } else {
         match cwd {
@@ -238,7 +238,7 @@ fn suggestions(cx: &mut Ctx) {
     let mut added = 0usize;
     for doc in RUN_DOCS {
         let path = cx.root.join(doc);
-        if !path.is_file() {
+        if !cx.is_file(&path) {
             continue;
         }
         let Some(src) = cx.read(&path) else { continue };
@@ -250,10 +250,13 @@ fn suggestions(cx: &mut Ctx) {
                 continue;
             }
             let Some(cwd) = choose_cwd(cx, &fc) else { continue };
-            if cx.pf.runs.iter().any(|r| r.command == fc.text && r.cwd == cwd) {
+            // Shell blocks are POSIX: where the run shell is PowerShell, only commands that
+            // read the same there, or have a Windows form, are offered.
+            let Some(text) = super::repository_command(cx, &fc.text, &cwd) else { continue };
+            if cx.pf.runs.iter().any(|r| r.command == text && r.cwd == cwd) {
                 continue;
             }
-            let base = ellipsize(&fc.text, 56);
+            let base = ellipsize(&text, 56);
             let name = if cx.pf.runs.iter().any(|r| r.name == base) { format!("{base} · L{}", fc.line) } else { base };
             if cx.pf.runs.iter().any(|r| r.name == name) {
                 continue;
@@ -261,7 +264,7 @@ fn suggestions(cx: &mut Ctx) {
             cx.pf.runs.push(RunConfig {
                 name,
                 kind: RunKind::Task,
-                command: fc.text.clone(),
+                command: text,
                 cwd,
                 source: Some(format!("{doc}:L{}", fc.line)),
                 group: Some("suggested".into()),
@@ -285,7 +288,7 @@ fn choose_cwd(cx: &Ctx, fc: &FenceCmd) -> Option<String> {
     }
     let Some(doc) = resolve_cwd(cx, fc.doc_cwd.as_deref()) else { return shell };
     let Some(sh) = shell else { return Some(doc) };
-    let is_dir = |d: &str| cx.root.join(d).is_dir();
+    let is_dir = |d: &str| cx.is_dir(&cx.root.join(d));
     if !is_dir(&sh) {
         return Some(if is_dir(&doc) { doc } else { sh });
     }
@@ -293,7 +296,7 @@ fn choose_cwd(cx: &Ctx, fc: &FenceCmd) -> Option<String> {
         w.contains('/') && !w.starts_with(['-', '/', '~', '$']) && !w.contains("://") && !w.contains('=')
     });
     match path {
-        Some(p) if cx.root.join(&doc).join(p).exists() && !cx.root.join(&sh).join(p).exists() => Some(doc),
+        Some(p) if crate::util::os::path::stays_inside(p) && cx.exists(&cx.root.join(&doc).join(p)) && !cx.exists(&cx.root.join(&sh).join(p)) => Some(doc),
         _ => Some(sh),
     }
 }

@@ -1,9 +1,9 @@
-//! Processes the user may attach to: this user's own processes from `/proc`, and
-//! what Linux's Yama `ptrace_scope` allows.
-
-use std::path::Path;
+//! Processes the user may attach to: this user's own processes
+//! (`os::proc::user_processes`), and what Linux's Yama `ptrace_scope` allows.
 
 use serde::Serialize;
+
+pub use crate::util::os::proc::ptrace_scope;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -34,10 +34,6 @@ pub struct ProcessList {
 
 pub const MAX_PROCESSES: usize = 2000;
 
-pub fn ptrace_scope() -> Option<u8> {
-    std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").ok()?.trim().parse().ok()
-}
-
 /// Why attaching may fail under this scope, and what to do.
 pub fn ptrace_hint(scope: Option<u8>) -> Option<String> {
     match scope? {
@@ -67,63 +63,26 @@ fn language_of(name: &str, command: &str) -> &'static str {
     }
 }
 
-/// `(ppid, starttime ticks)` from `/proc/<pid>/stat` (the name may contain spaces
-/// and parentheses; fields after the last `)` are fixed).
-fn parse_stat(stat: &str) -> Option<(u32, u64)> {
-    let rest = &stat[stat.rfind(')')? + 1..];
-    let f: Vec<&str> = rest.split_whitespace().collect();
-    // f[0] = state, f[1] = ppid, … f[19] = starttime.
-    Some((f.get(1)?.parse().ok()?, f.get(19)?.parse().ok()?))
-}
-
-fn boot_time_ms() -> Option<i64> {
-    let s = std::fs::read_to_string("/proc/stat").ok()?;
-    let secs: i64 = s.lines().find_map(|l| l.strip_prefix("btime "))?.trim().parse().ok()?;
-    Some(secs * 1000)
-}
-
 /// This user's processes, newest first (Workbench itself and kernel threads left out).
-pub fn list(proc_root: &Path) -> ProcessList {
-    use std::os::unix::fs::MetadataExt;
-    let uid = nix::unistd::getuid().as_raw();
-    let me = std::process::id();
-    let boot = boot_time_ms();
-    let ticks = 100i64; // USER_HZ on Linux
+pub fn list() -> ProcessList {
     let mut out = vec![];
     let mut truncated = false;
-    if let Ok(rd) = std::fs::read_dir(proc_root) {
-        for e in rd.flatten() {
-            let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
-            if pid == me {
-                continue;
+    for p in crate::util::os::proc::user_processes() {
+        let mut command = p.command;
+        if command.len() > 400 {
+            let mut cut = 400;
+            while !command.is_char_boundary(cut) {
+                cut -= 1;
             }
-            let dir = e.path();
-            let Ok(meta) = std::fs::metadata(&dir) else { continue };
-            if meta.uid() != uid {
-                continue;
-            }
-            let cmdline = std::fs::read(dir.join("cmdline")).unwrap_or_default();
-            if cmdline.is_empty() {
-                continue; // kernel thread or zombie
-            }
-            let mut command = cmdline.split(|b| *b == 0).filter(|p| !p.is_empty()).map(|p| String::from_utf8_lossy(p).into_owned()).collect::<Vec<_>>().join(" ");
-            if command.len() > 400 {
-                let mut cut = 400;
-                while !command.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                command.truncate(cut);
-                command.push('…');
-            }
-            let name = std::fs::read_to_string(dir.join("comm")).map(|s| s.trim().to_string()).unwrap_or_default();
-            let (ppid, start) = std::fs::read_to_string(dir.join("stat")).ok().and_then(|s| parse_stat(&s)).unwrap_or((0, 0));
-            if out.len() >= MAX_PROCESSES {
-                truncated = true;
-                break;
-            }
-            let language = language_of(&name, &command);
-            out.push(ProcessInfo { pid, ppid, name, command, started_at: boot.map(|b| b + start as i64 * 1000 / ticks), language });
+            command.truncate(cut);
+            command.push('…');
         }
+        if out.len() >= MAX_PROCESSES {
+            truncated = true;
+            break;
+        }
+        let language = language_of(&p.name, &command);
+        out.push(ProcessInfo { pid: p.pid, ppid: p.ppid, name: p.name, command, started_at: p.started_at, language });
     }
     out.sort_by(|a, b| b.started_at.cmp(&a.started_at).then(b.pid.cmp(&a.pid)));
     let scope = ptrace_scope();
@@ -134,25 +93,19 @@ pub fn list(proc_root: &Path) -> ProcessList {
 mod tests {
     use super::*;
 
-    #[test]
-    fn stat_parsing_survives_odd_names() {
-        let s = "4145729 (my (odd) prog) S 4145700 4145729 1 0 -1 4194304 100 0 0 0 1 2 0 0 20 0 1 0 987654 1000 100";
-        assert_eq!(parse_stat(s), Some((4145700, 987654)));
-        assert_eq!(parse_stat("garbage"), None);
-    }
-
+    #[cfg(unix)]
     #[test]
     fn lists_own_processes_with_a_child() {
         let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
         // `spawn` can return a moment before the kernel renames the child from our thread's
         // name to `sleep` (exec closes the status pipe first), so wait for the name.
-        let mut l = list(Path::new("/proc"));
+        let mut l = list();
         for _ in 0..100 {
             if l.processes.iter().any(|p| p.pid == child.id() && p.name == "sleep") {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
-            l = list(Path::new("/proc"));
+            l = list();
         }
         let found = l.processes.iter().find(|p| p.pid == child.id());
         let _ = child.kill();
@@ -162,8 +115,38 @@ mod tests {
         assert_eq!(p.command, "sleep 30");
         assert_eq!(p.ppid, std::process::id());
         assert!(!l.processes.iter().any(|p| p.pid == std::process::id()), "Workbench itself is not offered");
+    }
+
+    #[test]
+    fn languages_and_hints() {
         assert_eq!(language_of("python3", "/usr/bin/python3 app.py"), "python");
         assert!(ptrace_hint(Some(1)).unwrap().contains("ptrace_scope = 1"));
         assert_eq!(ptrace_hint(Some(0)), None);
+        assert_eq!(ptrace_hint(None), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lists_own_processes_with_a_child() {
+        let mut child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let mut l = list();
+        for _ in 0..100 {
+            if l.processes.iter().any(|p| p.pid == child.id() && p.command.contains("127.0.0.1")) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            l = list();
+        }
+        let found = l.processes.iter().find(|p| p.pid == child.id()).cloned();
+        let _ = child.kill();
+        let _ = child.wait();
+        let p = found.expect("our child is listed");
+        assert!(p.name.eq_ignore_ascii_case("ping.exe"), "{}", p.name);
+        assert!(p.command.ends_with("-n 30 127.0.0.1"), "{}", p.command);
+        assert_eq!(p.ppid, std::process::id());
+        assert!(p.started_at.is_some());
+        assert!(!l.processes.iter().any(|p| p.pid == std::process::id()), "Workbench itself is not offered");
+        assert_eq!(l.ptrace_scope, None);
+        assert_eq!(l.ptrace_hint, None);
     }
 }

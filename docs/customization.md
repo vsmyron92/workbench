@@ -25,12 +25,16 @@ Config files hold *references*, never values:
 gitlab    = { file = "~/.gitlab_token" }
 github    = { env = "GITHUB_TOKEN" }
 atlassian = { keyring = "workbench/atlassian" }
-db_url    = { dotenv = "app/.env", key = "DATABASE_URL" }
+db_url    = { dotenv = { path = "app/.env", key = "DATABASE_URL" } }
 staging   = { command = ["pass", "show", "shop/staging"] }
 ```
 
 Values are read by the server when needed. They never reach the browser, a command line
 or a log, and terminal output that contains one is masked.
+
+On Windows (experimental), `~` is your user folder (`%USERPROFILE%`), `config.toml` and the
+overlays are in `%APPDATA%\workbench`, and a `keyring` reference reads Windows Credential
+Manager: `workbench/atlassian` is the generic credential named `atlassian.workbench`.
 
 ## Configure a project
 
@@ -114,10 +118,32 @@ command = "/usr/bin/lldb-dap"
 [devcontainer]
 docker = "docker"                  # or podman's docker-compatible CLI
 cli = ""                           # devcontainer CLI, for configs with features
+
+[terminals]
+shell = ["/bin/zsh", "-l"]         # new shells (default: $SHELL -l; PowerShell on Windows)
 ```
 
 Language servers and debug adapters run project code, so they start only after you
 enable code intelligence for a project (its first source file offers it) or press Debug.
+
+On Windows (experimental) run commands go to PowerShell, and detected ones are
+written for it: `python` or `py -3` and the virtualenv's `Scripts\python.exe`,
+`.\gradlew.bat`, CMake's Debug folder (`.\build\Debug\app.exe`; with Ninja, set
+`CMAKE_GENERATOR` or configure once and detection follows), `curl.exe`, `$env:PORT`, no
+`&&` (Windows PowerShell 5.1 has none). Commands from a Procfile or a README that need a
+POSIX shell, `validate.sh` scripts, and scripts or tasks whose names hold `% ! ^ & | < > "`
+(batch files would misread them) are not offered: add them to `.workbench.toml` in
+PowerShell's syntax. Runs get Workbench's own `PATH`: start Workbench after installing a
+tool, or add the tool's folder to your `PATH`. Language servers installed with `npm install -g` are found in
+`%APPDATA%\npm` and run with Node directly. GDB reads only MinGW builds: to debug Rust
+built with the default MSVC toolchain, install lldb-dap or CodeLLDB and name the one you
+installed as Rust's adapter (CodeLLDB's `codelldb` has to be on `PATH`, or set
+`[debug.adapters.codelldb] command`):
+
+```toml
+[debug.default_adapter]
+rust = "lldb-dap"                  # or "codelldb"
+```
 
 ## Change with an agent
 

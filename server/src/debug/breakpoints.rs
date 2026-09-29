@@ -87,7 +87,7 @@ fn clean_text(s: Option<String>) -> Option<String> {
 /// no empty or `.` components, no NUL.
 pub fn normalize_path(p: &str) -> Result<String, ApiError> {
     let p = p.trim();
-    if p.is_empty() || p.contains('\0') || p.starts_with('/') {
+    if p.is_empty() || p.contains('\0') || crate::util::os::path::is_absolute_str(p) {
         return Err(ApiError::bad_request("breakpoints take a project-relative path"));
     }
     let mut parts = vec![];
@@ -95,7 +95,11 @@ pub fn normalize_path(p: &str) -> Result<String, ApiError> {
         match c {
             "" | "." => {}
             ".." => return Err(ApiError::bad_request("breakpoint paths cannot leave the project")),
-            c => parts.push(c),
+            c => {
+                // Windows: `..\x`, `C:x`, `a.rs:stream`, `NUL`.
+                crate::util::os::path::check_component(c).map_err(ApiError::bad_request)?;
+                parts.push(c)
+            }
         }
     }
     if parts.is_empty() {
@@ -306,9 +310,7 @@ mod tests {
         let again = Store::default().get(d.path(), "app");
         assert_eq!(again.breakpoints.len(), 2);
         assert_eq!(again.watches, vec!["total", "p.name"]);
-        let mode = std::fs::metadata(file_of(d.path(), "app")).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(mode.mode() & 0o777, 0o600);
+        crate::util::os::perm::assert_mode(&file_of(d.path(), "app"), 0o600);
         // Only enabled ones are sent.
         let files = again.by_file();
         assert_eq!(files["src/main.c"].iter().map(|b| b.line).collect::<Vec<_>>(), vec![12]);
@@ -317,6 +319,10 @@ mod tests {
         assert!(normalize_path("/etc/passwd").is_err());
         assert!(normalize_path("a/../../b").is_err());
         assert_eq!(normalize_path("a/./b").unwrap(), "a/b");
+        #[cfg(windows)]
+        for bad in [r"..\x.rs", r"src\..\..\x.rs", r"C:\x.rs", "C:x.rs", r"\x.rs", "src/a.rs:s", "src/NUL"] {
+            assert!(normalize_path(bad).is_err(), "{bad}");
+        }
         // Unknown projects start empty; a corrupt file does not break anything.
         std::fs::write(file_of(d.path(), "bad"), "{not json").unwrap();
         assert_eq!(Store::default().get(d.path(), "bad"), ProjectDebug::default());

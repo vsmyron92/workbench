@@ -5,9 +5,11 @@
 // panels 'jira' {key} and 'jira.board' {boardId}.
 
 import { BookOpen, FilePlus, FileSearch, FileText, Kanban, ListTodo, SquarePlus } from 'lucide-react'
+import { configFileHint } from '@/api/health'
 import { ConfluenceIcon, JiraIcon } from '@/ui'
 import { showToolWindow, toast } from '@/shell/actions'
 import type { FeatureModule } from '@/shell/types'
+import { useUi } from '@/state/store'
 import { promptOpenIssue, promptOpenPage } from './confluence/actions'
 import { MobileDocs } from './confluence/MobileDocs'
 import { ConfluencePanel } from './confluence/PagePanel'
@@ -15,18 +17,26 @@ import { ConfluenceToolWindow } from './confluence/ToolWindow'
 import { BoardPanel } from './jira/BoardPanel'
 import { JiraPanel } from './jira/IssuePanel'
 import { JiraToolWindow } from './jira/JiraToolWindow'
+import { confluenceApi } from './api'
+import { unavailableDetail } from './links'
 import { AtlassianProvider } from './Provider'
 import { confluenceAvailable, jiraAvailable, useAtlassianStatus, useAtlassianUi, usePrefs } from './state'
 
 /** Explain why Confluence commands cannot run yet. */
 function requireConfluence(): boolean {
   if (confluenceAvailable()) return true
-  const s = useAtlassianStatus.getState()
-  toast('warning', 'Confluence is not available', {
-    detail: s.errorMessage ?? s.status?.error ?? 'Set [atlassian] site, email and token in ~/.config/workbench/config.toml.',
-    timeout: 9000,
-  })
+  void explainUnavailable()
   return false
+}
+
+/**
+ * Toast why Confluence is not available. Where no project links Atlassian, nothing asked for
+ * its status yet: ask now, since the answer names the config.toml this server reads.
+ */
+async function explainUnavailable() {
+  const s = useAtlassianStatus.getState()
+  const status = s.status ?? (s.errorMessage ? null : await confluenceApi.status(useUi.getState().projectId).catch(() => null))
+  toast('warning', 'Confluence is not available', { detail: unavailableDetail(s.errorMessage, status, configFileHint()), timeout: 9000 })
 }
 
 const feature: FeatureModule = {

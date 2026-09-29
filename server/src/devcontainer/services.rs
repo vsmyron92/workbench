@@ -298,7 +298,7 @@ fn project_of_dir(state: &AppState, dir: &str) -> Option<String> {
         return None;
     }
     let p = PathBuf::from(dir);
-    let p = p.canonicalize().unwrap_or(p);
+    let p = crate::util::os::path::canonicalize(&p).unwrap_or(p);
     state.projects.find_by_path(&p).map(|p| p.id.clone())
 }
 
@@ -845,25 +845,31 @@ mod tests {
         }]);
         std::fs::write(dir.join("container.json"), inspect.to_string()).unwrap();
         std::fs::write(dir.join("images.txt"), "sha256:img1\tnginx\t1\t2026-09-20 10:00:00 +0100 IST\t190MB\nsha256:img2\t<none>\t<none>\t2026-09-19 10:00:00 +0100 IST\t12MB\n").unwrap();
-        let d = dir.display();
-        let script = format!(
-            r#"#!/bin/sh
-printf '%s\n' "$*" >> {d}/calls
-case "$1" in
-  ps) case "$*" in *--filter*) ;; *--quiet*) echo {id} ;; *) cat {d}/ps.txt ;; esac ;;
-  inspect) case "$*" in *--format*) printf 'sha256:img1\t/shop-web-1\n' ;; *"--type container"*) cat {d}/container.json ;; *) echo '[]'; echo 'Error: No such image' >&2; exit 1 ;; esac ;;
-  images) cat {d}/images.txt ;;
-  rm) case "$*" in *--force*) ;; *) echo 'Error response from daemon: cannot remove container "/shop-web-1": container is running: stop the container before removing or force remove' >&2; exit 1 ;; esac ;;
-  image) echo 'Total reclaimed space: 12MB' ;;
-esac
-"#,
-            id = "c".repeat(64),
-        );
-        let bin = dir.join("docker");
-        std::fs::write(&bin, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        bin
+        install_fake_docker(dir)
+    }
+
+    /// `testdata/fake_docker.py` in `dir`, as `[devcontainer] docker` names it. Unix: the
+    /// script itself, executable. Windows: an npm-style shim, `docker.cmd` (what the lists
+    /// and actions run, through cmd.exe) with the `docker.ps1` Workbench reads to start
+    /// Python on `docker.py` directly (the log and shell terminals).
+    fn install_fake_docker(dir: &FsPath) -> PathBuf {
+        let script = if cfg!(windows) { dir.join("docker.py") } else { dir.join("docker") };
+        std::fs::write(&script, include_str!("testdata/fake_docker.py")).unwrap();
+        #[cfg(unix)]
+        {
+            crate::util::os::perm::apply(&script, 0o755).unwrap();
+            script
+        }
+        #[cfg(windows)]
+        {
+            let python: Vec<String> = crate::util::os::exe::python().iter().map(|a| format!("\"{a}\"")).collect();
+            let python = python.join(" ");
+            let ps1 = format!("#!/usr/bin/env pwsh\n$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent\n\n& {python} \"$basedir/docker.py\" $args\nexit $LASTEXITCODE\n");
+            std::fs::write(dir.join("docker.ps1"), ps1).unwrap();
+            let cmd = dir.join("docker.cmd");
+            std::fs::write(&cmd, format!("@{python} \"%~dp0docker.py\" %*\r\n")).unwrap();
+            cmd
+        }
     }
 
     /// The list and details (masked), the actions' exact argv, terminals, and only the
@@ -973,7 +979,13 @@ esac
         let (s, _) = send("GET", "/api/docker/images/sha256:nope".into(), Value::Null).await;
         assert_eq!(s, 404);
 
-        // An agent reads, and nothing else.
+        // An agent reads, and nothing else. The log and shell terminals have run docker by
+        // then (a slow start must not look like a call of the agent's).
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !(calls().contains("logs --follow") && calls().contains("exec --interactive")) {
+            assert!(std::time::Instant::now() < deadline, "the terminals never ran docker: {}", calls());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         let before = calls();
         let agent = McpCtx { terminal_id: Some("t1".into()), project_id: Some(pid.clone()) };
         for (path, body) in [

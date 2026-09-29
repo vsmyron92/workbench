@@ -151,7 +151,7 @@ fn server_json(s: &ServerSpec, disabled_here: &[String], side: Option<&str>, mis
 
 /// A command as shown: `~/…` for paths under the home directory.
 fn display_command(c: &str) -> String {
-    if c.contains('/') { crate::config::contract_tilde(&crate::config::expand_tilde(c)) } else { c.to_string() }
+    if crate::util::os::exe::names_path(c) { crate::config::contract_tilde(&crate::config::expand_tilde(c)) } else { c.to_string() }
 }
 
 // ---------------------------------------------------------------- enable / settings
@@ -166,6 +166,9 @@ async fn enable(State(state): State<AppState>, caller: Option<Extension<Caller>>
     user_only(&caller)?;
     let p = state.projects.require(&pid)?;
     let mode = body.and_then(|b| b.0.mode);
+    if mode == Some(Mode::Container) {
+        crate::devcontainer::require_supported()?;
+    }
     let root = p.root.display().to_string();
     let st = state.clone();
     let id = p.id.clone();
@@ -212,6 +215,9 @@ struct SettingsBody {
 async fn settings(State(state): State<AppState>, caller: Option<Extension<Caller>>, Path(pid): Path<String>, Json(body): Json<SettingsBody>) -> ApiResult<Json<Value>> {
     user_only(&caller)?;
     let p = state.projects.require(&pid)?;
+    if body.mode == Some(Mode::Container) {
+        crate::devcontainer::require_supported()?;
+    }
     if let Some(list) = &body.disabled_servers {
         if list.len() > 100 || list.iter().any(|s| !super::config::valid_id(s)) {
             return Err(ApiError::bad_request("bad server ids"));
@@ -391,6 +397,6 @@ async fn source(State(state): State<AppState>, Path(pid): Path<String>, Query(q)
         }
     };
     let content = String::from_utf8(bytes).map_err(|_| ApiError::bad_request("not a UTF-8 text file"))?;
-    let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+    let name = crate::util::os::path::segments(&path).last().unwrap_or(&path).to_string();
     Ok(Json(json!({ "uri": q.uri, "path": path, "name": name, "content": content })))
 }

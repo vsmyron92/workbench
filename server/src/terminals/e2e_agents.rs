@@ -1,7 +1,7 @@
 //! End-to-end tests of the third phase's agent features through the real PTY path:
 //! permission requests answered from Workbench (the HTTP hook route and a device
-//! session, against a fake Claude Code that needs `curl`), and the Gemini CLI and Aider
-//! presets (fake CLIs in `testdata/`).
+//! session, against a fake Claude Code), and the Gemini CLI and Aider presets (the fake
+//! CLIs of `testdata/fake_cli.py`).
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -9,7 +9,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use super::AgentState;
-use super::e2e::{agent_of, log_lines, provider_state, script, wait_long};
+use super::e2e::{agent_of, fake_cli, log_lines, provider_state, wait_long};
 use crate::app::{self, AppState};
 
 /// A state served on a real loopback port (hooks posted by the session must reach it),
@@ -81,18 +81,10 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(ok, "git {args:?}");
 }
 
-fn has_curl() -> bool {
-    std::process::Command::new("curl").arg("--version").stdout(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn permission_requests_are_answered_from_a_device_or_the_terminal() {
-    if !has_curl() {
-        eprintln!("skipped: the fake Claude needs curl");
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
-    let fake = script(dir.path(), "claude", include_str!("testdata/fake-claude.sh"));
+    let fake = fake_cli(dir.path(), "claude");
     let log = dir.path().join("claude.log");
     let (state, addr, pid) = served_state(dir.path(), &fake, &log).await;
     let t = &state.terminals;
@@ -295,7 +287,7 @@ async fn permission_requests_are_answered_from_a_device_or_the_terminal() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gemini_sessions_start_under_their_id_ask_on_screen_and_resume() {
     let dir = tempfile::tempdir().unwrap();
-    let fake = script(dir.path(), "gemini", include_str!("testdata/fake-gemini.sh"));
+    let fake = fake_cli(dir.path(), "gemini");
     let home = dir.path().join("gemini-home");
     std::fs::create_dir_all(&home).unwrap();
     let log = dir.path().join("gemini.log");
@@ -378,7 +370,7 @@ async fn gemini_sessions_start_under_their_id_ask_on_screen_and_resume() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn aider_sessions_confirm_on_screen_and_restore_their_chat() {
     let dir = tempfile::tempdir().unwrap();
-    let fake = script(dir.path(), "aider", include_str!("testdata/fake-aider.sh"));
+    let fake = fake_cli(dir.path(), "aider");
     let log = dir.path().join("aider.log");
     let aider = crate::config::global::ProviderConfig {
         command: Some(fake.display().to_string()),
@@ -471,12 +463,8 @@ async fn permission_requests_reach_phones_as_pushes_that_answer_them() {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
     use std::sync::{Arc, Mutex};
 
-    if !has_curl() {
-        eprintln!("skipped: the fake Claude needs curl");
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
-    let fake = script(dir.path(), "claude", include_str!("testdata/fake-claude.sh"));
+    let fake = fake_cli(dir.path(), "claude");
     let log = dir.path().join("claude.log");
     let (state, addr, pid) = served_state(dir.path(), &fake, &log).await;
     crate::platform::start(&state).await;

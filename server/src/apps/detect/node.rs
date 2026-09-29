@@ -89,16 +89,16 @@ fn package_manager(cx: &Ctx, dir: &Path, pkg: &serde_json::Value) -> Pm {
     // Lockfile in the package dir or an ancestor (workspaces) up to the project root.
     let mut d = Some(dir);
     while let Some(x) = d {
-        if x.join("pnpm-lock.yaml").is_file() {
+        if cx.is_file(&x.join("pnpm-lock.yaml")) {
             return Pm::Pnpm;
         }
-        if x.join("yarn.lock").is_file() {
+        if cx.is_file(&x.join("yarn.lock")) {
             return Pm::Yarn;
         }
-        if x.join("bun.lockb").is_file() || x.join("bun.lock").is_file() {
+        if cx.is_file(&x.join("bun.lockb")) || cx.is_file(&x.join("bun.lock")) {
             return Pm::Bun;
         }
-        if x.join("package-lock.json").is_file() || x == cx.root {
+        if cx.is_file(&x.join("package-lock.json")) || x == cx.root {
             break;
         }
         d = x.parent();
@@ -238,7 +238,7 @@ pub fn detect(cx: &mut Ctx, f: &Path) {
     let vite_src = ["vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs"]
         .iter()
         .map(|n| dir.join(n))
-        .find(|p| p.is_file())
+        .find(|p| cx.is_file(p))
         .and_then(|p| cx.read(&p))
         .unwrap_or_default();
     let vite = parse_vite_config(&vite_src);
@@ -295,7 +295,7 @@ fn entry_port(cx: &mut Ctx, dir: &Path, cmd: &str, pkg: &serde_json::Value) -> O
         .find(|t| is_src(t))
         .map(|t| t.to_string())
         .or_else(|| pkg.get("main").and_then(|m| m.as_str()).map(str::to_string))?;
-    if entry.contains("..") || entry.starts_with('/') {
+    if entry.contains("..") || crate::util::os::path::is_absolute_str(&entry) || !crate::util::os::path::stays_inside(&entry) {
         return None;
     }
     let src = cx.read(&dir.join(entry.trim_start_matches("./")))?;
@@ -310,7 +310,7 @@ fn monorepo_tasks(cx: &mut Ctx, dir: &Path, cwd: &str, pm: Pm, scripts: &serde_j
     };
     for (file, tool) in [("turbo.json", "turbo"), ("nx.json", "nx")] {
         let path = dir.join(file);
-        if !path.is_file() {
+        if !cx.is_file(&path) {
             continue;
         }
         let Some(src) = cx.read(&path) else { continue };
@@ -349,7 +349,7 @@ pub fn detect_deno(cx: &mut Ctx, f: &Path) {
     cx.tag("deno");
     cx.pf.components.push(Component { name: scoped("deno", &cwd), path: cwd.clone(), kind: "deno".into(), version: None });
     let fresh = v.get("imports").and_then(|i| i.as_object()).is_some_and(|i| i.keys().any(|k| k.contains("fresh")))
-        || dir.join("fresh.gen.ts").is_file();
+        || cx.is_file(&dir.join("fresh.gen.ts"));
     let tasks = v.get("tasks").and_then(|t| t.as_object()).cloned().unwrap_or_default();
     // What each task runs: `deno task x` in its command and its `dependencies`.
     let mut graph = TaskGraph::default();

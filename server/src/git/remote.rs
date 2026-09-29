@@ -273,13 +273,11 @@ pub fn start(state: &AppState, repo: Arc<Repo>, spec: RemoteOpSpec, requested_id
 /// `run`), so its process group also holds the transport helper
 /// (`git-remote-https`, `ssh`) that inherited our pipes; killing only `git`
 /// would leave the op "running" until that helper gives up by itself.
-fn kill_group(child: &mut tokio::process::Child) {
-    if let Some(pid) = child.id() {
-        // SAFETY: plain syscall. The child is not reaped yet (`id()` is Some), so
-        // its pid, which is also its process-group id, cannot have been reused.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
+fn kill_group(child: &mut tokio::process::Child, group: &crate::util::os::proc::ProcGroup) {
+    if child.id().is_some() {
+        // The child is not reaped yet (`id()` is Some), so its pid, which is also its
+        // process-group id, cannot have been reused.
+        group.kill();
     }
     let _ = child.start_kill();
 }
@@ -310,30 +308,36 @@ async fn run(state: &AppState, repo: &Repo, spec: &RemoteOpSpec, op_id: &str, ca
     for (k, v) in &spec.env {
         g = g.env(k, v.clone());
     }
+    // GIT_ASKPASS (Windows: also ssh's SSH_ASKPASS); GIT_TERMINAL_PROMPT=0 comes with
+    // every git command (`Git::command`).
+    let root = project_root(state, repo);
     if let Some(askpass) = state.git.askpass.get() {
-        g = g.env("GIT_ASKPASS", askpass.to_string_lossy().to_string());
+        for (k, v) in askpass {
+            g = g.env(k, v.clone());
+        }
+        // Git's credential helpers are neither asked for the host askpass answers for nor
+        // handed its token to store (Git Credential Manager, `~/.git-credentials`…).
+        let cfg = state.config.read().clone();
+        if let Some(key) = super::askpass::reset_helpers_key(&state.paths, &cfg, Some((&root, &repo.project_id))) {
+            g = g.config(&key, "");
+        }
     }
     g = g
         .env("WORKBENCH_PROJECT_ID", repo.project_id.clone())
-        .env("WORKBENCH_PROJECT_ROOT", project_root(state, repo).to_string_lossy().to_string())
+        .env("WORKBENCH_PROJECT_ROOT", root.to_string_lossy().to_string())
         // Abort transfers that stall for a minute.
         .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
         .env("GIT_HTTP_LOW_SPEED_TIME", "60");
     let mut cmd = g.command();
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    // A new session has no controlling terminal, so ssh cannot open /dev/tty and
-    // block on a passphrase prompt nobody can answer.
-    // SAFETY: setsid is async-signal-safe and runs in the child before exec.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    // A new session has no controlling terminal (Windows: no console), so ssh cannot
+    // open /dev/tty and block on a passphrase prompt nobody can answer.
+    crate::util::os::proc::ProcGroup::prepare_session(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return OpResult::failed(format!("cannot run git: {e}")),
     };
+    let group = crate::util::os::proc::ProcGroup::attach(&child);
     let (tx, mut rx) = mpsc::channel::<(String, bool)>(256);
     let mut readers = vec![];
     for stream in [child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
@@ -399,12 +403,12 @@ async fn run(state: &AppState, repo: &Repo, spec: &RemoteOpSpec, op_id: &str, ca
                 None => break,
             },
             _ = cancel.cancelled(), if aborted.is_none() => {
-                kill_group(&mut child);
+                kill_group(&mut child, &group);
                 aborted = Some("cancelled");
                 grace.as_mut().reset(tokio::time::Instant::now() + KILL_GRACE);
             }
             _ = &mut deadline, if aborted.is_none() => {
-                kill_group(&mut child);
+                kill_group(&mut child, &group);
                 aborted = Some("timed out");
                 grace.as_mut().reset(tokio::time::Instant::now() + KILL_GRACE);
             }

@@ -1,6 +1,7 @@
 // Palette commands of the devcontainer feature.
 
 import { Container, FilePlus2, Hammer, Play, Square, SquareTerminal } from 'lucide-react'
+import { FEATURES, unsupportedReason } from '@/api/health'
 import { showToolWindow } from '@/shell/actions'
 import type { Command, CommandContext } from '@/shell/types'
 import { openContainerShell, openDevcontainerPanel, stopContainer } from './api'
@@ -18,7 +19,8 @@ export function devcontainerCommands(ctx: CommandContext): Command[] {
     run: () => showToolWindow('services', 'bottom'),
   }
   const pid = ctx.projectId
-  if (!pid) return [services]
+  // Where the server's OS leaves dev containers out (Windows), only Services remains.
+  if (!pid || unsupportedReason(FEATURES.devcontainer)) return [services]
   const s = ctx.project?.devcontainer ?? null
   const has = !!s && s.configs.length > 0
   const running = s?.state === 'running'

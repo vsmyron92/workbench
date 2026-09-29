@@ -172,19 +172,16 @@ pub struct DiscardResult {
     pub restored: usize,
     /// Untracked (or added) files moved to the trash.
     pub trashed: Vec<String>,
-    /// Where they went: "trash" (desktop trash via gio) or a Workbench folder.
+    /// Where they went: "trash" (desktop trash via gio, the Recycle Bin) or a Workbench folder.
     pub trash_location: Option<String>,
     /// Submodules whose changes inside them cannot be rolled back from here.
     pub skipped: Vec<String>,
 }
 
-/// Move a file to the desktop trash (`gio trash`), else into `fallback_dir`.
+/// Move a file to the desktop trash (`gio trash`, the Recycle Bin), else into `fallback_dir`.
 async fn trash(abs: &Path, fallback_dir: &Path, rel: &str) -> Result<String, ApiError> {
-    if crate::util::which("gio") {
-        let out = crate::util::proc::run("gio", &["trash", "--", &abs.to_string_lossy()], Path::new("/"), std::time::Duration::from_secs(30)).await?;
-        if out.ok() {
-            return Ok("trash".into());
-        }
+    if crate::util::os::fs::desktop_trash(abs).await? {
+        return Ok("trash".into());
     }
     let dest = fallback_dir.join(rel);
     let abs = abs.to_path_buf();

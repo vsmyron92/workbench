@@ -7,7 +7,6 @@
 //! reloaded. Settings that only take effect on restart are reported back.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -23,6 +22,7 @@ use crate::config::{GlobalConfig, ProjectFile, SecretRef, contract_tilde, expand
 use crate::error::{ApiError, ApiResult};
 use crate::secrets::SecretStatus;
 use crate::util;
+use crate::util::os::perm;
 
 use super::{config_edit, restart_required, sha256_hex};
 
@@ -357,7 +357,7 @@ pub async fn get_settings(State(state): State<AppState>) -> ApiResult<Json<Value
         "startedAt": state.started_at,
         "restartRequired": restart_required(&state.platform.boot(), &cfg.server),
         "tlsActive": state.platform.tls_active(),
-        "notifySend": util::which("notify-send"),
+        "notifySend": util::os::desktop::notify_send().is_some(),
         "mcpEndpoint": format!("{}/mcp", state.local_base_url()),
     })))
 }
@@ -458,12 +458,12 @@ pub async fn validate(Json(body): Json<ValidateBody>) -> Json<Diagnostic> {
 /// The config directory is watched, not the file: atomic saves replace the inode.
 /// The debouncer lives in the task, so it stops with the runtime.
 pub fn watch_config(state: &AppState) {
+    use notify_debouncer_full::DebounceEventResult;
     use notify_debouncer_full::notify::RecursiveMode;
-    use notify_debouncer_full::{DebounceEventResult, new_debouncer};
     let dir = state.paths.config_dir.clone();
     let name = state.paths.config_file().file_name().map(|n| n.to_os_string()).unwrap_or_default();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    let deb = new_debouncer(Duration::from_millis(400), None, move |res: DebounceEventResult| {
+    let deb = crate::util::os::watch::debouncer(Duration::from_millis(400), move |res: DebounceEventResult| {
         let Ok(events) = res else { return };
         if events.iter().any(|e| e.event.paths.iter().any(|p| p.file_name() == Some(name.as_os_str()))) {
             let _ = tx.send(());
@@ -604,9 +604,13 @@ fn project_secret_uses(p: &ProjectFile) -> Vec<(String, String)> {
     out
 }
 
-fn file_mode(r: &SecretRef) -> Option<u32> {
+/// A file reference's permissions as shown (`perm::describe`) and whether others can read it.
+fn file_mode(r: &SecretRef) -> Option<(String, bool)> {
     match r {
-        SecretRef::File(p) => std::fs::metadata(expand_tilde(p)).ok().map(|m| m.permissions().mode() & 0o777),
+        SecretRef::File(p) => {
+            let path = expand_tilde(p);
+            Some((perm::describe(&path).ok()?, perm::privacy(&path).ok()?.is_exposed()))
+        }
         _ => None,
     }
 }
@@ -646,8 +650,8 @@ async fn secret_row(state: &AppState, name: &str, r: &SecretRef, project_id: Opt
         status,
         scope: if project_id.is_some() { "project" } else { "global" },
         used_by,
-        fixable: mode.is_some_and(|m| m & 0o077 != 0),
-        mode: mode.map(|m| format!("{m:o}")),
+        fixable: mode.as_ref().is_some_and(|(_, exposed)| *exposed),
+        mode: mode.map(|(shown, _)| shown),
     }
 }
 
@@ -729,11 +733,10 @@ pub async fn chmod_secret(
     if !meta.is_file() {
         return Err(ApiError::bad_request(format!("{p} is not a regular file")));
     }
-    if meta.uid() != nix::unistd::getuid().as_raw() {
+    if !perm::owned_by_me(&path).map_err(|e| ApiError::not_found(format!("{p}: {e}")))? {
         return Err(ApiError::forbidden(format!("{p} belongs to another user")));
     }
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| ApiError::internal(format!("chmod {p}: {e}")))?;
+    perm::apply(&path, 0o600).map_err(|e| ApiError::internal(format!("{} {p}: {e}", perm::MAKING_PRIVATE)))?;
     tracing::info!("secret file {p} set to mode 600");
     Ok(Json(secret_row(&state, &name, &r, q.project_id.as_deref(), vec![]).await))
 }
@@ -783,7 +786,8 @@ pub async fn get_project(State(state): State<AppState>, UrlPath(pid): UrlPath<St
         .map_err(|e| ApiError::internal(format!("detection failed: {e}")))?;
     let repo_path = p.root.join(".workbench.toml");
     let overlay_path = state.paths.project_overlay(&pid);
-    let repo_file = read_optional(&repo_path)?;
+    // One that links to another computer is not read (the project's warnings say so).
+    let repo_file = if crate::config::project::repo_layer_linked_away(&p.root) { None } else { read_optional(&repo_path)? };
     let overlay_file = read_optional(&overlay_path)?;
     let hash = |t: &Option<String>| sha256_hex(t.as_deref().unwrap_or(""));
     Ok(Json(json!({
@@ -808,6 +812,9 @@ async fn put_layer(state: AppState, pid: String, layer: Layer, body: TextBody) -
     let _serial = state.platform.save_lock.lock().await;
     let p = state.projects.require(&pid)?;
     let path = match layer {
+        Layer::Repo if crate::config::project::repo_layer_linked_away(&p.root) => {
+            return Err(ApiError::forbidden(format!(".workbench.toml is {}", crate::config::project::REPO_LAYER_LINKED_AWAY)));
+        }
         Layer::Repo => p.root.join(".workbench.toml"),
         Layer::Overlay => state.paths.project_overlay(&pid),
     };
@@ -1147,7 +1154,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("tok");
         std::fs::write(&f, "supersecretvalue123").unwrap();
-        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o664)).unwrap();
+        perm::expose(&f, 0o664);
         let mut cfg = GlobalConfig::default();
         cfg.projects.roots.clear();
         cfg.notify.desktop = false;
@@ -1166,7 +1173,7 @@ mod tests {
         let gl = rows.iter().find(|r| r["name"] == "gitlab").unwrap();
         assert_eq!(gl["resolved"], true);
         assert_eq!(gl["fixable"], true);
-        assert_eq!(gl["mode"], "664");
+        assert_eq!(gl["mode"], if cfg!(unix) { "664" } else { "shared" });
         assert_eq!(gl["usedBy"], json!(["gitlab.token"]));
         let gh = rows.iter().find(|r| r["name"] == "github").unwrap();
         assert_eq!(gh["usedBy"], json!(["github.token"]));
@@ -1177,7 +1184,7 @@ mod tests {
         let (s, v) = call(&app, "POST", "/api/settings/secrets/gitlab/chmod", None).await;
         assert_eq!(s, StatusCode::OK, "{v}");
         assert_eq!(v["fixable"], false);
-        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        perm::assert_mode(&f, 0o600);
         let (s, _) = call(&app, "POST", "/api/settings/secrets/env-missing/chmod", None).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
     }

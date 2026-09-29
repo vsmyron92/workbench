@@ -191,7 +191,7 @@ impl PathMap {
     pub fn new(root: &Path, target: Option<&ExecTarget>) -> Self {
         Self {
             root: root.to_path_buf(),
-            canon_root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            canon_root: crate::util::os::path::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
             container: target.and_then(|t| t.map.clone()),
         }
     }
@@ -199,7 +199,7 @@ impl PathMap {
     pub fn to_adapter(&self, host: &Path) -> String {
         if let Some((src, dst)) = &self.container {
             if let Ok(rel) = host.strip_prefix(src) {
-                let rel = rel.to_string_lossy();
+                let rel = crate::util::os::path::to_slash(rel);
                 return if rel.is_empty() { dst.clone() } else { format!("{}/{rel}", dst.trim_end_matches('/')) };
             }
         }
@@ -221,7 +221,7 @@ impl PathMap {
         if let Some(r) = crate::util::paths::relative_to(&self.root, host) {
             return Some(r);
         }
-        let canon = host.canonicalize().ok()?;
+        let canon = crate::util::os::path::canonicalize(host).ok()?;
         crate::util::paths::relative_to(&self.canon_root, &canon)
     }
 
@@ -453,7 +453,7 @@ impl Session {
     /// Remember a file outside the project the adapter named (a frame's or an output
     /// line's source): the session's read-only source view may show it.
     pub fn note_source(&self, path: &str) {
-        if !path.starts_with('/') || path.len() > 4096 {
+        if !crate::util::os::path::is_absolute_str(path) || path.len() > 4096 {
             return;
         }
         let mut d = self.data.lock();
@@ -760,7 +760,14 @@ async fn startup(state: &AppState, project: &Arc<Project>, s: &Arc<Session>, pla
         let mut extra_args = vec![];
         if plan.adapter.kind == AdapterKind::Gdb && plan.request == DebugRequest::Launch && plan.raw_arguments.is_none() {
             if launch::language_of(&plan.launch, &project.root) == "rust" && target.is_none() {
-                extra_args.extend(rust_gdb_args(&project.root).await);
+                use crate::util::os::support::{Feature, unsupported};
+                let (args, note) = rust_gdb_args(&project.root).await;
+                // An MSVC toolchain's note says more than the platform's: gdb cannot read
+                // its debug information at all.
+                match note.or_else(|| unsupported(Feature::RustGdbPrettyPrinters).map(|why| format!("Note: {why}"))) {
+                    None => extra_args.extend(args),
+                    Some(n) => s.log("workbench", format!("{n}\n"), None),
+                }
             }
             // Load the program at once: breakpoints resolve when they are set instead of
             // staying pending until the launch (gdb reads the file only then).
@@ -902,20 +909,17 @@ async fn startup(state: &AppState, project: &Arc<Project>, s: &Arc<Session>, pla
 fn neutral_dir(state: &AppState) -> PathBuf {
     let dir = state.paths.data_dir.join("debug").join("adapter");
     if std::fs::create_dir_all(&dir).is_ok() {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        crate::util::fs::set_mode(&dir, 0o700);
         return dir;
     }
     PathBuf::from("/")
 }
 
-/// Whether some process traces `pid` (`TracerPid` in `/proc/<pid>/status`), waiting
-/// up to three seconds for the debugger to get there.
+/// Whether some process traces `pid` (`os::proc::debugger_attached`), waiting up to
+/// three seconds for the debugger to get there.
 async fn traced(pid: u32) -> bool {
     for _ in 0..15 {
-        let status = tokio::fs::read_to_string(format!("/proc/{pid}/status")).await.unwrap_or_default();
-        let tracer = status.lines().find_map(|l| l.strip_prefix("TracerPid:")).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
-        if tracer != 0 {
+        if crate::util::os::proc::debugger_attached(pid).await {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -927,18 +931,26 @@ async fn traced(pid: u32) -> bool {
 /// `Option`… shown as values). The sysroot is the default toolchain's (`rustc
 /// --print sysroot` outside the project, without rustup installing anything): a
 /// `rust-toolchain.toml` could name a toolchain inside the repository, whose scripts
-/// gdb would then load.
-async fn rust_gdb_args(root: &Path) -> Vec<String> {
+/// gdb would then load. A Windows MSVC toolchain ships no printers (and its PDB debug
+/// information is not something gdb reads): that is said in the console (the second
+/// value) instead.
+async fn rust_gdb_args(root: &Path) -> (Vec<String>, Option<String>) {
     let mut cmd = tokio::process::Command::new("rustc");
     cmd.args(["--print", "sysroot"]).current_dir("/").env("RUSTUP_AUTO_INSTALL", "0");
-    let Ok(out) = crate::util::proc::run_cmd(cmd, Duration::from_secs(10)).await else { return vec![] };
+    let Ok(out) = crate::util::proc::run_cmd(cmd, Duration::from_secs(10)).await else { return (vec![], None) };
     let sysroot = PathBuf::from(out.stdout.trim());
     let etc = sysroot.join("lib/rustlib/etc");
-    if !out.ok() || !sysroot.is_absolute() || !etc.join("gdb_load_rust_pretty_printers.py").is_file() || etc.starts_with(root) {
-        return vec![];
+    if out.ok() && sysroot.file_name().is_some_and(|n| n.to_string_lossy().ends_with("-windows-msvc")) {
+        return (
+            vec![],
+            Some("The Rust toolchain targets MSVC, whose debug information (PDB) gdb cannot read, and has no gdb pretty printers: debug Rust with lldb-dap or CodeLLDB ([debug] default_adapter.rust = \"lldb-dap\" or \"codelldb\", whichever is installed), or build with a windows-gnu toolchain.".into()),
+        );
+    }
+    if !out.ok() || !sysroot.is_absolute() || !etc.join("gdb_load_rust_pretty_printers.py").is_file() || crate::util::os::path::starts_with(&etc, root) {
+        return (vec![], None);
     }
     let etc = etc.display().to_string();
-    vec![format!("--directory={etc}"), "-iex".into(), format!("add-auto-load-safe-path {etc}")]
+    (vec![format!("--directory={etc}"), "-iex".into(), format!("add-auto-load-safe-path {etc}")], None)
 }
 
 /// A pre-launch run configuration: started through the apps slice (its terminal,
@@ -984,8 +996,8 @@ async fn run_prelaunch_config(state: &AppState, project: &Arc<Project>, s: &Arc<
     }
 }
 
-/// Run `command` (`bash -lc`) in a visible terminal of the project (in its dev
-/// container when the session uses it) and wait for it to succeed.
+/// Run `command` in the run shell (`bash -lc` on Unix) in a visible terminal of the
+/// project (in its dev container when the session uses it) and wait for it to succeed.
 async fn run_in_terminal(state: &AppState, s: &Arc<Session>, plan: &Plan, title: &str, command: &str) -> Result<String, String> {
     let mut meta = json!({ "debug": s.id, "debugPreLaunch": true });
     if plan.target.is_some() {
@@ -996,7 +1008,7 @@ async fn run_in_terminal(state: &AppState, s: &Arc<Session>, plan: &Plan, title:
         title: title.to_string(),
         project_id: Some(s.project_id.clone()),
         cwd: plan.cwd.clone(),
-        argv: vec!["bash".into(), "-lc".into(), command.to_string()],
+        argv: crate::util::os::shell::run_argv(command),
         env: vec![],
         cols: None,
         rows: None,
@@ -1042,9 +1054,9 @@ async fn cargo_build(state: &AppState, s: &Arc<Session>, plan: &Plan, t: &derive
     };
     let args: Vec<String> = t.build_args().iter().map(|a| q(a)).collect();
     // JSON messages go to the file; the human-readable diagnostics stay in the terminal.
-    let cmd = format!("cargo {} > {}", args.join(" "), q(&file_arg));
+    let cmd = crate::util::os::shell::redirect_stdout(&format!("cargo {}", args.join(" ")), &q(&file_arg));
     let mut root_plan = plan.clone();
-    root_plan.cwd = s.paths.root.join(&t.workspace);
+    root_plan.cwd = s.paths.root.join(crate::util::os::path::from_slash(&t.workspace));
     let title = format!("Build {}", t.config_name().trim_start_matches("Cargo: "));
     let result = run_in_terminal(state, s, &root_plan, &title, &cmd).await;
     let text = match (&host_file, &plan.target) {
@@ -1052,7 +1064,7 @@ async fn cargo_build(state: &AppState, s: &Arc<Session>, plan: &Plan, t: &derive
             let f = f.clone();
             tokio::task::spawn_blocking(move || {
                 let meta = std::fs::metadata(&f).ok()?;
-                (meta.len() < 64 * 1024 * 1024).then(|| std::fs::read_to_string(&f).ok()).flatten()
+                (meta.len() < 64 * 1024 * 1024).then(|| crate::util::os::shell::read_output(&f)).flatten()
             })
             .await
             .ok()
@@ -1110,7 +1122,7 @@ pub async fn sync_breakpoints(state: &AppState, s: &Arc<Session>, only: Option<&
                 sent_bps.push((String::new(), json!({ "line": line })));
             }
         }
-        let host = s.paths.root.join(&path);
+        let host = s.paths.root.join(crate::util::os::path::from_slash(&path));
         let name = host.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let body = json!({
             "source": { "path": s.paths.to_adapter(&host), "name": name },
@@ -1313,7 +1325,7 @@ async fn unexpected_end(s: &Arc<Session>) -> Option<String> {
     // Give the stderr reader a moment to catch the last lines.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let mut msg = match (&status, s.plan.connect.is_some()) {
-        (Some(st), _) => format!("{} exited unexpectedly ({})", s.adapter.label, describe_status(st)),
+        (Some(st), _) => format!("{} exited unexpectedly ({})", s.adapter.label, crate::util::os::proc::exit_text(st)),
         (None, true) => format!("the connection to {} closed unexpectedly", s.adapter.label),
         (None, false) => format!("{} exited unexpectedly", s.adapter.label),
     };
@@ -1323,18 +1335,6 @@ async fn unexpected_end(s: &Arc<Session>) -> Option<String> {
         msg.push_str(&tail.join(" / "));
     }
     Some(msg)
-}
-
-fn describe_status(st: &std::process::ExitStatus) -> String {
-    use std::os::unix::process::ExitStatusExt;
-    match (st.code(), st.signal()) {
-        (Some(c), _) => format!("exit code {c}"),
-        (None, Some(sig)) => match nix::sys::signal::Signal::try_from(sig) {
-            Ok(n) => format!("killed by {}", n.as_str()),
-            Err(_) => format!("killed by signal {sig}"),
-        },
-        _ => "no exit status".into(),
-    }
 }
 
 /// Apply one message; `true` when the adapter is gone.
@@ -1762,12 +1762,6 @@ fn stop_children(state: AppState, parent: String, terminate_debuggee: bool) -> f
     })
 }
 
-fn parent_of(pid: i32) -> Option<i32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = &stat[stat.rfind(')')? + 1..];
-    rest.split_whitespace().nth(1)?.parse().ok()
-}
-
 /// End the session (idempotent): the adapter, the debuggee Workbench launched, the
 /// debuggee's terminal, a pre-launch step still running.
 pub async fn finish(state: &AppState, s: &Arc<Session>) {
@@ -1790,8 +1784,8 @@ pub async fn finish(state: &AppState, s: &Arc<Session>) {
     if let Some(mut p) = s.proc_.lock().await.take() {
         // A debuggee we launched that is still the adapter's child: gone with it.
         if let (Some(dpid), Some(apid)) = (debuggee, p.child.id()) {
-            if parent_of(dpid) == Some(apid as i32) {
-                let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(dpid), nix::sys::signal::Signal::SIGKILL);
+            if crate::util::os::proc::parent_of(dpid) == Some(apid as i32) {
+                crate::util::os::proc::kill_pid(dpid);
             }
         }
         p.wait_exit(Duration::from_millis(500)).await;
@@ -1847,7 +1841,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let root = d.path().join("app");
         std::fs::create_dir_all(root.join("src")).unwrap();
-        let m = PathMap { root: root.clone(), canon_root: root.canonicalize().unwrap(), container: Some((root.clone(), "/workspaces/app".into())) };
+        let m = PathMap { root: root.clone(), canon_root: crate::util::os::path::canonicalize(&root).unwrap(), container: Some((root.clone(), "/workspaces/app".into())) };
         assert_eq!(m.to_adapter(&root.join("src/main.c")), "/workspaces/app/src/main.c");
         assert_eq!(m.to_adapter(Path::new("/usr/include/stdio.h")), "/usr/include/stdio.h");
         assert_eq!(m.host_of("/workspaces/app/src/main.c"), root.join("src/main.c"));
@@ -1858,11 +1852,17 @@ mod tests {
         assert_eq!(v["inProject"], false);
         let v = m.source_view(&json!({"name": "<generated>", "sourceReference": 7}));
         assert_eq!(v["sourceReference"], 7);
-        // A symlinked view of the project still maps into it.
+        // A symlinked view of the project still maps into it (Windows: a symlink needs
+        // Developer Mode or admin rights).
         let link = d.path().join("link");
-        std::os::unix::fs::symlink(&root, &link).unwrap();
-        let host = PathMap::new(&root, None);
-        assert_eq!(host.project_rel(&link.join("src")), Some("src".into()));
+        match crate::util::os::fs::symlink(&root, &link) {
+            Ok(()) => {
+                let host = PathMap::new(&root, None);
+                assert_eq!(host.project_rel(&link.join("src")), Some("src".into()));
+            }
+            Err(e) if cfg!(windows) => eprintln!("symlink part skipped: {e}"),
+            Err(e) => panic!("symlink: {e}"),
+        }
     }
 
     #[test]

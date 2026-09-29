@@ -3,63 +3,25 @@
 pub mod ansi;
 pub mod fs;
 pub mod git;
+pub mod os;
 pub mod paths;
 pub mod proc;
-
-/// Resolves on SIGINT or SIGTERM.
-pub async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    let term = async {
-        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            s.recv().await;
-        }
-    };
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = term => {},
-    }
-}
 
 /// Open `url` in an app-style browser window when a Chromium browser is
 /// installed (no tabs or address bar), otherwise in the default browser.
 pub fn open_in_browser(url: &str) {
-    for browser in ["google-chrome", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"] {
-        if which(browser) {
-            let ok = std::process::Command::new(browser)
-                .arg(format!("--app={url}"))
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .is_ok();
-            if ok {
-                return;
-            }
-        }
-    }
-    let _ = std::process::Command::new("xdg-open")
-        .arg(url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    os::desktop::open_url(url)
 }
 
-/// Whether `cmd` resolves on `PATH`.
+/// Whether `cmd` resolves on `PATH` (`os::exe::which`, which code in `util::os` calls
+/// itself).
 pub fn which(cmd: &str) -> bool {
     which_path(cmd).is_some()
 }
 
+/// The program file `cmd` names (`os::exe::which`).
 pub fn which_path(cmd: &str) -> Option<std::path::PathBuf> {
-    if cmd.contains('/') {
-        let p = crate::config::expand_tilde(cmd);
-        return p.is_file().then_some(p);
-    }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|d| d.join(cmd))
-        .find(|p| p.is_file())
+    os::exe::which(cmd)
 }
 
 /// Milliseconds since the Unix epoch.

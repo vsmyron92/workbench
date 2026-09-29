@@ -27,6 +27,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useInvalidateOn } from '@/api/events'
+import { FEATURES, useExperimental, useUnsupported } from '@/api/health'
 import { useProjects } from '@/api/queries'
 import type { ProjectSummary } from '@/api/types'
 import { confirmDialog, openPanel, toast } from '@/shell/actions'
@@ -152,6 +153,8 @@ export function ServicesToolWindow({ projectId }: { projectId: string | null }) 
 
   const error = containers.data?.error
   const current = projects?.find((p) => p.id === projectId) ?? null
+  // Untested on some OSes (Windows): marked, with the server's note as the tooltip.
+  const experimental = useExperimental(FEATURES.services)
 
   return (
     <div className="wb-fill wb-svc">
@@ -167,6 +170,11 @@ export function ServicesToolWindow({ projectId }: { projectId: string | null }) 
             onClick={() => setScope((s) => (s === 'all' ? 'project' : 'all'))}
           />
           <IconButton icon={RefreshCw} size="small" label="Refresh" onClick={() => void qc.invalidateQueries({ queryKey: dockerKeys.all })} />
+          {experimental && (
+            <Badge tone="warning" title={experimental}>
+              experimental
+            </Badge>
+          )}
         </div>
         {error ? (
           <EmptyState icon={Container} title="Docker is not available">
@@ -526,6 +534,7 @@ function ContainerDetail({ c, projectId, projects, onSelectImage }: { c: DockerC
     setBusy(null)
   }
   const owner = projects.find((p) => p.id === (d?.projectId ?? c.projectId))
+  const dcPanel = !useUnsupported(FEATURES.devcontainer)
   return (
     <div className="wb-fill wb-svc-pane">
       <div className="wb-svc-head-bar">
@@ -661,7 +670,7 @@ function ContainerDetail({ c, projectId, projects, onSelectImage }: { c: DockerC
           {d.devcontainer && (
             <KV k="Dev container">
               <code>{d.devcontainer}</code>
-              {owner && (
+              {owner && dcPanel && (
                 <Button size="small" icon={Container} onClick={() => openDevcontainerPanel(owner.id)}>
                   Dev container panel
                 </Button>

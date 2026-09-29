@@ -4,10 +4,7 @@
 //! create files exclusively, and deletes go to the trash. The project root and
 //! anything inside `.git` are off limits.
 
-use std::ffi::CString;
 use std::io::ErrorKind;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use axum::Json;
@@ -18,9 +15,11 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
-use super::{Resolved, basename, blocking, in_git_dir, join_rel, resolve, resolve_entry, trash, valid_name};
+use super::{Resolved, basename, blocking, in_git_dir, join_rel, resolve, resolve_entry, valid_name};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::util::os::fs::{copy_symlink, rename_noreplace, trash};
+use crate::util::os::{self, perm};
 
 /// Largest single upload.
 pub const MAX_UPLOAD_BYTES: u64 = 200 * 1024 * 1024;
@@ -44,7 +43,7 @@ pub struct OpResult {
     pub ok: bool,
     /// The resulting path (the new one for rename/copy).
     pub path: String,
-    /// For deletes: `gio` or `trash-spec`.
+    /// For deletes: `gio`, `trash-spec` or `recycle-bin`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trashed_with: Option<&'static str>,
 }
@@ -108,7 +107,7 @@ pub async fn op(
             let to = body.to.as_deref().ok_or_else(|| ApiError::bad_request("`to` is required"))?;
             let dst = resolve(&state, &pid, to)?;
             writable(&dst, "overwrite")?;
-            if dst.abs.starts_with(&src.abs) && dst.abs != src.abs {
+            if into_itself(&src.abs, &dst.abs) {
                 return Err(ApiError::bad_request("cannot move or copy a folder into itself"));
             }
             let is_rename = body.op == "rename";
@@ -149,11 +148,17 @@ pub async fn op(
             if std::fs::symlink_metadata(&src.abs).is_err() {
                 return Err(ApiError::not_found(format!("{} does not exist", src.rel)));
             }
-            let with = trash::trash(&src.abs).await?;
+            let with = trash(&src.abs).await?;
             Ok(Json(OpResult { ok: true, path: src.rel, trashed_with: Some(with) }))
         }
         other => Err(ApiError::bad_request(format!("unknown op {other:?}"))),
     }
+}
+
+/// Whether `dst` lies below `src`, as the file system compares names (`Foo` → `foo/Foo`
+/// on Windows). `src` itself does not: `a.txt` → `A.txt` only changes the case.
+fn into_itself(src: &Path, dst: &Path) -> bool {
+    os::path::strip_prefix(dst, src).is_some_and(|rest| !rest.as_os_str().is_empty())
 }
 
 fn map_exists(e: std::io::Error, rel: &str) -> ApiError {
@@ -161,29 +166,6 @@ fn map_exists(e: std::io::Error, rel: &str) -> ApiError {
         ApiError::conflict(format!("{rel} already exists"))
     } else {
         e.into()
-    }
-}
-
-/// `rename(2)` that fails with `AlreadyExists` instead of replacing the destination.
-pub fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
-    let f = CString::new(from.as_os_str().as_bytes())?;
-    let t = CString::new(to.as_os_str().as_bytes())?;
-    // SAFETY: both pointers are valid NUL-terminated strings for the call's duration.
-    let rc = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
-    if rc == 0 {
-        return Ok(());
-    }
-    let err = std::io::Error::last_os_error();
-    match err.raw_os_error() {
-        // Filesystems without RENAME_NOREPLACE: check, then rename (small race, still never silently).
-        Some(libc::EINVAL) | Some(libc::ENOSYS) => {
-            if std::fs::symlink_metadata(to).is_ok() {
-                return Err(ErrorKind::AlreadyExists.into());
-            }
-            std::fs::rename(from, to)
-        }
-        Some(libc::EXDEV) => Err(std::io::Error::other("cannot move across filesystems")),
-        _ => Err(err),
     }
 }
 
@@ -196,14 +178,17 @@ fn copy_recursive(from: &Path, to: &Path, budget: &mut usize) -> std::io::Result
     let md = std::fs::symlink_metadata(from)?;
     let ft = md.file_type();
     if ft.is_symlink() {
-        std::os::unix::fs::symlink(std::fs::read_link(from)?, to)?;
+        copy_symlink(from, to)?;
     } else if ft.is_dir() {
         std::fs::create_dir(to)?;
         for ent in std::fs::read_dir(from)? {
             let ent = ent?;
             copy_recursive(&ent.path(), &to.join(ent.file_name()), budget)?;
         }
-        std::fs::set_permissions(to, std::fs::Permissions::from_mode(md.permissions().mode() & 0o7777))?;
+        // Windows has no mode: copies inherit their folder's ACL, as `CopyFileW`'s do.
+        if let Some(mode) = perm::mode(&md) {
+            perm::apply(to, mode & 0o7777)?;
+        }
     } else {
         let mut src = std::fs::File::open(from)?;
         let mut dst = std::fs::OpenOptions::new().write(true).create_new(true).open(to)?;
@@ -212,7 +197,9 @@ fn copy_recursive(from: &Path, to: &Path, budget: &mut usize) -> std::io::Result
             let _ = std::fs::remove_file(to);
             return Err(e);
         }
-        dst.set_permissions(std::fs::Permissions::from_mode(md.permissions().mode() & 0o7777))?;
+        if let Some(mode) = perm::mode(&md) {
+            perm::apply_to(&dst, mode & 0o7777)?;
+        }
     }
     Ok(())
 }
@@ -329,36 +316,60 @@ mod tests {
     }
 
     #[test]
-    fn rename_never_replaces() {
-        let dir = tempfile::tempdir().unwrap();
-        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
-        std::fs::write(&a, "a").unwrap();
-        std::fs::write(&b, "b").unwrap();
-        assert_eq!(rename_noreplace(&a, &b).unwrap_err().kind(), ErrorKind::AlreadyExists);
-        assert_eq!(std::fs::read_to_string(&b).unwrap(), "b");
-        rename_noreplace(&a, &dir.path().join("c")).unwrap();
-        assert!(!a.exists());
-    }
-
-    #[test]
     fn copies_trees_without_overwriting() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         std::fs::create_dir_all(src.join("inner")).unwrap();
         std::fs::write(src.join("inner/x.sh"), "echo").unwrap();
-        std::fs::set_permissions(src.join("inner/x.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::os::unix::fs::symlink("inner/x.sh", src.join("link")).unwrap();
+        perm::apply(&src.join("inner/x.sh"), 0o755).unwrap();
+        let linked = super::super::symlink_or_skip("inner/x.sh", src.join("link"));
         let mut budget = 100;
         copy_recursive(&src, &dir.path().join("dst"), &mut budget).unwrap();
         let x = dir.path().join("dst/inner/x.sh");
         assert_eq!(std::fs::read_to_string(&x).unwrap(), "echo");
-        assert_eq!(std::fs::metadata(&x).unwrap().permissions().mode() & 0o777, 0o755);
-        assert!(std::fs::symlink_metadata(dir.path().join("dst/link")).unwrap().file_type().is_symlink());
+        perm::assert_mode(&x, 0o755);
+        if linked {
+            assert!(std::fs::symlink_metadata(dir.path().join("dst/link")).unwrap().file_type().is_symlink());
+        }
         // Copying onto an existing destination fails.
         let mut budget = 100;
         assert_eq!(copy_recursive(&src, &dir.path().join("dst"), &mut budget).unwrap_err().kind(), ErrorKind::AlreadyExists);
         // The budget caps huge trees.
         let mut budget = 2;
         assert!(copy_recursive(&src, &dir.path().join("dst2"), &mut budget).is_err());
+    }
+
+    #[test]
+    fn folders_do_not_move_into_themselves() {
+        let root = Path::new("/p");
+        assert!(into_itself(&root.join("a"), &root.join("a/b")));
+        assert!(into_itself(&root.join("a"), &root.join("a/b/c")));
+        assert!(!into_itself(&root.join("a"), &root.join("a")));
+        assert!(!into_itself(&root.join("a"), &root.join("ab")));
+        assert!(!into_itself(&root.join("a/b"), &root.join("a")));
+        // Windows compares names without regard to case: `Foo/x` is inside `foo`, and
+        // `a.txt` → `A.txt` renames the file itself.
+        assert_eq!(into_itself(&root.join("foo"), &root.join("Foo/x")), cfg!(windows));
+        assert!(!into_itself(&root.join("a.txt"), &root.join("A.txt")));
+    }
+
+    /// A name that differs only in case is the same file where names ignore case (NTFS):
+    /// creating it again is refused rather than overwriting, and renaming to it changes
+    /// only the case.
+    #[test]
+    fn names_differing_in_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let (lower, upper) = (dir.path().join("a.txt"), dir.path().join("A.txt"));
+        std::fs::write(&lower, "a").unwrap();
+        let insensitive = upper.exists();
+        let created = std::fs::OpenOptions::new().write(true).create_new(true).open(&upper);
+        assert_eq!(created.is_err(), insensitive);
+        if insensitive {
+            assert_eq!(created.unwrap_err().kind(), ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read_to_string(&lower).unwrap(), "a");
+            rename_noreplace(&lower, &upper).unwrap();
+            let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+            assert_eq!(names, ["A.txt"]);
+        }
     }
 }

@@ -243,12 +243,12 @@ pub fn restore(trash_root: &Path, scope: &Scope, item: &str) -> ApiResult<String
     };
     let dest = scope.dir.join(&target);
     if meta.moved {
-        match store::renameat2(&src, &dest, libc::RENAME_NOREPLACE) {
+        match util::os::fs::rename_noreplace_atomic(&src, &dest) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 return Err(ApiError::conflict(format!("{target} appeared in the workspace meanwhile; try again")));
             }
-            Err(e) if matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP)) => {
+            Err(e) if util::os::fs::rename_unsupported(&e) => {
                 if std::fs::symlink_metadata(&dest).is_ok() {
                     return Err(ApiError::conflict(format!("{target} appeared in the workspace meanwhile; try again")));
                 }
@@ -424,7 +424,7 @@ mod tests {
         std::fs::create_dir_all(&evil).unwrap();
         std::fs::write(evil.join(CARD_FILE), r#"{"id":"e","folder":"../../etc"}"#).unwrap();
         // A symlink is never an item.
-        std::os::unix::fs::symlink(tmp.path(), trash.join("p/link~20260903-120000")).unwrap();
+        util::os::fs::symlink(tmp.path(), trash.join("p/link~20260903-120000")).unwrap();
         let ts = TrashScope { id: "p".into(), name: "P".into(), scope: Some(scope(tmp.path())) };
         let items = list(&trash, &ts);
         assert_eq!(items.len(), 2, "{items:?}");

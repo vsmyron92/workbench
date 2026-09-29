@@ -5,6 +5,8 @@ use std::path::Path;
 
 use super::config::{self, Cmd, LocalEnv, Source};
 use super::plan::{self, Engine, Engines, Level};
+// Expected host paths are built the way the config's are: with this OS's separators.
+use crate::util::os::path::from_slash;
 
 fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
@@ -75,7 +77,7 @@ fn rust_template() {
     let wm = c.workspace_mount.as_ref().unwrap();
     assert_eq!((wm.kind.as_str(), wm.source.as_str()), ("bind", root.to_str().unwrap()));
     assert_eq!(c.mounts[0].kind, "volume");
-    let id = config::devcontainer_id(root.to_str().unwrap(), root.join(".devcontainer/devcontainer.json").to_str().unwrap());
+    let id = config::devcontainer_id(root.to_str().unwrap(), root.join(from_slash(".devcontainer/devcontainer.json")).to_str().unwrap());
     assert_eq!(c.mounts[0].source, format!("devcontainer-cargo-cache-{id}"));
     assert_eq!(c.forward_ports.iter().map(|p| p.port).collect::<Vec<_>>(), vec![8080, 5173]);
     assert_eq!(c.forward_ports[0].label.as_deref(), Some("api"));
@@ -153,7 +155,7 @@ fn python_dockerfile_template_with_variables() {
     let c = config::load(root, ".devcontainer/devcontainer.json", LocalEnv::Keep).unwrap();
     match &c.source {
         Source::Dockerfile { dockerfile, context, args, target, cache_from, .. } => {
-            assert_eq!(dockerfile, &root.join(".devcontainer/Dockerfile").display().to_string());
+            assert_eq!(dockerfile, &root.join(from_slash(".devcontainer/Dockerfile")).display().to_string());
             assert_eq!(context, &root.display().to_string());
             assert_eq!(args["VARIANT"], "3.12-bookworm");
             // Display values keep host variables as written.
@@ -233,7 +235,7 @@ fn compose_template_with_a_database() {
     match &c.source {
         Source::Compose { files, service, run_services } => {
             assert_eq!(files[0], root.join("docker-compose.yml").display().to_string());
-            assert_eq!(files[1], root.join(".devcontainer/docker-compose.extend.yml").display().to_string());
+            assert_eq!(files[1], root.join(from_slash(".devcontainer/docker-compose.extend.yml")).display().to_string());
             assert_eq!(service, "app");
             assert_eq!(run_services, &vec!["app".to_string(), "db".to_string()]);
         }
@@ -347,11 +349,12 @@ fn compose_references_are_graded_and_covered() {
         assert_ne!(build().hash, before, "{f}");
     }
 
-    // Files outside the project, and ones only known when compose runs, are dangers.
+    // Files outside the project, and ones only known when compose runs, are dangers. (The
+    // absolute paths are quoted: on Windows they are `C:\…`, backslashes and a colon.)
     std::fs::write(
         root.join(".devcontainer/docker-compose.yml"),
         format!(
-            "include: [{o}/evil.yml]\nservices:\n  app:\n    image: x\n    env_file: {o}/host.env\n  v:\n    extends: {{file: \"${{BASE}}.yml\", service: b}}\n  r:\n    extends: {{file: ~/base.yml, service: b}}\nsecrets:\n  s:\n    file: /etc/hostname\n"
+            "include: ['{o}/evil.yml']\nservices:\n  app:\n    image: x\n    env_file: '{o}/host.env'\n  v:\n    extends: {{file: \"${{BASE}}.yml\", service: b}}\n  r:\n    extends: {{file: ~/base.yml, service: b}}\nsecrets:\n  s:\n    file: /etc/hostname\n"
         ),
     )
     .unwrap();
@@ -411,6 +414,27 @@ fn hostile_config_is_flagged() {
     assert_eq!(p.risks[0].level, Level::Danger, "dangers first");
 }
 
+/// A bind source on another computer is flagged from its text alone: resolving it would make
+/// Windows sign in to that host.
+#[cfg(windows)]
+#[test]
+fn network_bind_sources_are_flagged_without_being_opened() {
+    let d = project(&[(
+        ".devcontainer/devcontainer.json",
+        r#"{"image": "alpine", "mounts": ["source=\\\\attacker.invalid\\share\\x,target=/x,type=bind", "source=//attacker.invalid/share,target=/y,type=bind"]}"#,
+    )]);
+    let root = d.path();
+    let c = config::load(root, ".devcontainer/devcontainer.json", LocalEnv::Keep).unwrap();
+    let p = plan::build(root, c, b"", &engines(true, false));
+    for target in ["/x", "/y"] {
+        assert!(
+            p.risks.iter().any(|r| r.level == Level::Danger && r.message.contains("network path or a device") && r.message.contains(target)),
+            "{target}: {:#?}",
+            p.risks
+        );
+    }
+}
+
 #[test]
 fn escapes_through_links_parents_and_features_are_flagged() {
     let d = project(&[
@@ -433,12 +457,20 @@ fn escapes_through_links_parents_and_features_are_flagged() {
     ]);
     let root = d.path();
     // A link inside the project to the host's root.
-    std::os::unix::fs::symlink("/", root.join("rootlink")).unwrap();
+    crate::util::os::fs::symlink("/", root.join("rootlink")).unwrap();
     let c = config::load(root, ".devcontainer/devcontainer.json", LocalEnv::Keep).unwrap();
     let p = plan::build(root, c.clone(), b"", &engines(true, false));
     let danger = |needle: &str| p.risks.iter().any(|r| r.level == Level::Danger && r.item.contains(needle));
     assert!(danger("workspaceMount"), "{:#?}", p.risks);
-    assert!(p.risks.iter().any(|r| r.item.contains("rootlink") && r.message.contains("whole host filesystem")), "{:#?}", p.risks);
+    // Unix follows the link to `/`. Windows does not follow a link to a rooted path without a
+    // drive (it cannot tell `\` from a device path such as `\Device\Mup\…`) and flags the
+    // mount all the same.
+    let through_rootlink = if cfg!(windows) { "network path or a device" } else { "whole host filesystem" };
+    assert!(
+        p.risks.iter().any(|r| r.level == Level::Danger && r.item.contains("rootlink") && r.message.contains(through_rootlink)),
+        "{:#?}",
+        p.risks
+    );
     assert!(danger("-v /:/h"), "{:#?}", p.risks);
     assert!(p.risks.iter().any(|r| r.item == "-p 8080:80" && r.level == Level::Warning));
     assert!(danger("feature ./local: privileged"), "{:#?}", p.risks);
@@ -451,11 +483,25 @@ fn escapes_through_links_parents_and_features_are_flagged() {
     assert_ne!(plan::build(root, c, b"", &engines(true, false)).hash, p.hash);
 }
 
+/// The paths a plan shows (covered files, risks' items) are project-relative and written
+/// with `/` on every OS, as repository paths are; paths elsewhere stay as they are.
+#[test]
+fn shown_paths_are_project_relative_with_slashes() {
+    let d = project(&[]);
+    let root = d.path();
+    let abs = |rel: &str| root.join(from_slash(rel)).display().to_string();
+    assert_eq!(super::rel_display(root, &abs(".devcontainer/deeper/b2.yml")), ".devcontainer/deeper/b2.yml");
+    assert_eq!(super::rel_display(root, &abs("tools/Dockerfile")), "tools/Dockerfile");
+    assert_eq!(super::rel_display(root, &root.display().to_string()), ".");
+    let elsewhere = root.parent().unwrap().join("elsewhere").join("x.yml").display().to_string();
+    assert_eq!(super::rel_display(root, &elsewhere), elsewhere);
+}
+
 #[test]
 fn discovery_ignores_escapes() {
     let outside = project(&[("devcontainer.json", "{\"image\":\"x\"}")]);
     let d = project(&[(".devcontainer/a/devcontainer.json", "{\"image\":\"a\"}"), (".devcontainer/b/devcontainer.json", "{\"image\":\"b\"}")]);
-    std::os::unix::fs::symlink(outside.path(), d.path().join(".devcontainer/zz")).unwrap();
+    crate::util::os::fs::symlink(outside.path(), d.path().join(".devcontainer/zz")).unwrap();
     assert_eq!(config::discover(d.path()), vec![".devcontainer/a/devcontainer.json", ".devcontainer/b/devcontainer.json"]);
     assert!(!config::is_config(d.path(), ".devcontainer/zz/devcontainer.json"));
     assert!(config::load(d.path(), "../x/devcontainer.json", LocalEnv::Keep).is_err());
@@ -464,6 +510,8 @@ fn discovery_ignores_escapes() {
 
 /// Starting needs the plan's hash; agents (in-process MCP calls) can never start, stop,
 /// rebuild, remove, write a config or change settings; they can read the status.
+/// (Windows has no dev containers: `windows_answers_unsupported_platform`.)
+#[cfg(unix)]
 #[tokio::test]
 async fn only_the_user_starts_and_only_the_approved_plan() {
     use crate::mcp::{McpCtx, call_api};
@@ -542,6 +590,69 @@ async fn only_the_user_starts_and_only_the_approved_plan() {
     let crate::mcp::ToolOutput::Json(v) = out else { panic!("json expected") };
     assert!(v["plan"].get("hash").is_none());
     assert_eq!(v["state"], "none");
+}
+
+/// Windows has no dev containers (`util::os::support`): every dev container route and the
+/// MCP tool answer 501 `unsupported_platform` before anything runs, projects have no
+/// summary and terminals get the reason; the Services routes still answer.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_answers_unsupported_platform() {
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    let repo = project(&[(".devcontainer/devcontainer.json", "{\"image\": \"debian:bookworm-slim\"}")]);
+    let mut cfg = crate::config::GlobalConfig::default();
+    cfg.projects.roots.clear();
+    cfg.projects.include = vec![repo.path().display().to_string()];
+    cfg.notify.desktop = false;
+    cfg.devcontainer.docker = "C:/nonexistent/docker.exe".into();
+    let t = crate::platform::testutil::app_with(cfg).await;
+    let p = t.state.projects.list()[0].clone();
+    let token = t.state.auth.master_token().to_string();
+    let send = |method: &'static str, path: String| {
+        let router = t.router.clone();
+        let token = token.clone();
+        async move {
+            let req = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "127.0.0.1:7999")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from("{}"))
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            let status = resp.status().as_u16();
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+            (status, serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default())
+        }
+    };
+    let base = format!("/api/projects/{}/devcontainer", p.id);
+    for (method, path) in [
+        ("GET", base.clone()),
+        ("POST", format!("{base}/start")),
+        ("POST", format!("{base}/rebuild")),
+        ("POST", format!("{base}/stop")),
+        ("POST", format!("{base}/remove")),
+        ("PUT", format!("{base}/settings")),
+        ("GET", format!("{base}/scaffold")),
+        ("POST", format!("{base}/scaffold")),
+    ] {
+        let (s, v) = send(method, path.clone()).await;
+        assert_eq!(s, 501, "{method} {path}: {v}");
+        assert_eq!((v["error"]["code"].as_str(), v["error"]["feature"].as_str()), (Some("unsupported_platform"), Some("devcontainer")), "{v}");
+    }
+    assert!(!repo.path().join(".devcontainer/x").exists());
+    let (s, _) = send("GET", "/api/docker/containers".into()).await;
+    assert_eq!(s, 200, "Services is experimental, not left out");
+
+    assert!(super::summary(&t.state, &p).is_none());
+    assert!(super::running_target(&t.state, &p.id).await.unwrap_err().contains("Windows"));
+    let agent = crate::mcp::McpCtx { terminal_id: Some("t1".into()), project_id: Some(p.id.clone()) };
+    let tool = super::mcp_tools().into_iter().find(|x| x.name == "devcontainer_status").unwrap();
+    let Err(e) = (tool.handler)(t.state.clone(), agent, json!({})).await else { panic!("the tool answered") };
+    assert_eq!((e.code, e.feature), ("unsupported_platform", Some("devcontainer")));
 }
 
 #[test]

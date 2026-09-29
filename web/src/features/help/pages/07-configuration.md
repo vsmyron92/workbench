@@ -1,6 +1,15 @@
 # Configuration
 
-Everything lives in `~/.config/workbench/config.toml`. Open it from **Settings → Raw config**, or press Ctrl+K and run *Edit config.toml*. Edits made by hand apply **without a restart**, except the settings listed under *Needs a restart* below.
+Everything lives in `~/.config/workbench/config.toml` (on Windows `%APPDATA%\workbench\config.toml`). Open it from **Settings → Raw config**, or press Ctrl+K and run *Edit config.toml*. Edits made by hand apply **without a restart**, except the settings listed under *Needs a restart* below.
+
+## Where files live
+
+- **`config.toml` and `projects/<id>.toml`:** `~/.config/workbench`. On Windows (experimental): `%APPDATA%\workbench`.
+- **Workbench's state** (token, sessions, Local History, Workspace cards): `~/.local/share/workbench`. On Windows: `%LOCALAPPDATA%\workbench`.
+- **The program**, installed from a release archive: `~/.local/bin/workbench`. On Windows: `%LOCALAPPDATA%\Programs\Workbench\workbench.exe`.
+- **`~`** in the config is your home folder. On Windows it is your user folder, `%USERPROFILE%`.
+
+The state folder is readable only by you (on Windows, by you and SYSTEM). `WORKBENCH_CONFIG_DIR` and `WORKBENCH_DATA_DIR` move the two folders, for example to run a second instance.
 
 ## Secrets
 
@@ -12,6 +21,8 @@ file = "~/.gitlab_token"
 ```
 
 **Settings → Secrets** shows the status of each one and can fix a file's permissions. Tokens never reach the browser, logs or command lines.
+
+Besides `file`, a secret can come from `env`, a `.env` file (`dotenv = { path = ".env", key = "NAME" }`), a `command`, or the system keyring: `keyring = "service/account"`, which on Windows is the Credential Manager's generic credential `account.service`.
 
 ## Reference
 
@@ -62,4 +73,4 @@ See [Projects and files](projects) for `~/.config/workbench/projects/<id>.toml` 
 | `workbench serve` | run the server (the default) |
 | `workbench open` | open the UI of the running server, signed in with a one-time code |
 | `workbench url` | print a login URL that carries the master token: keep it private |
-| `workbench service …` | install, check or remove the systemd user service |
+| `workbench service …` | install, check or remove the [service](service): a systemd user service on Linux; on Windows a sign-in entry and a Start Menu shortcut, and `stop` |

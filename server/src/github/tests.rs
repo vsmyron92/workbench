@@ -526,13 +526,18 @@ async fn setup_with(token: bool) -> Setup {
     std::fs::create_dir_all(paths.config_dir.join("projects")).unwrap();
     std::fs::create_dir_all(&paths.data_dir).unwrap();
     // Secret references live in the machine overlay; the committed file only names them.
-    std::fs::write(paths.project_overlay(PID), format!("[secrets]\nmock = {{ file = \"{}\" }}\n", token_file.display())).unwrap();
+    // The path goes in as a TOML string: a Windows path pasted into "…" is read as
+    // escapes (`\U` wants eight hex digits), and an overlay that does not parse
+    // vouches for nothing.
+    let token_ref = toml::Value::String(token_file.display().to_string());
+    std::fs::write(paths.project_overlay(PID), format!("[secrets]\nmock = {{ file = {token_ref} }}\n")).unwrap();
     let mut cfg = GlobalConfig::default();
     cfg.projects.roots = vec![];
     cfg.projects.include = vec![repo.display().to_string()];
     let state = AppState::new(paths, cfg, "127.0.0.1:0".parse().unwrap()).await.unwrap();
     let _router = crate::app::build_router(state.clone());
-    assert!(state.projects.get(PID).is_some(), "test project registered");
+    let project = state.projects.get(PID).expect("test project registered");
+    assert!(project.config.secrets.contains_key("mock"), "the machine overlay parses: {:?}", project.warnings);
     Setup { state, mock, _dir: dir }
 }
 

@@ -20,6 +20,9 @@ pub struct GlobalConfig {
     pub server: ServerConfig,
     pub projects: ProjectsConfig,
     pub agents: AgentsConfig,
+    /// Terminals: the shell new ones run.
+    #[serde(skip_serializing_if = "is_default")]
+    pub terminals: TerminalsConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gitlab: Option<GitlabConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -240,6 +243,16 @@ pub struct NotifyConfig {
     pub command: Option<String>,
 }
 
+/// `[terminals]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TerminalsConfig {
+    /// The shell of new terminals, program and arguments (`["pwsh.exe", "-NoLogo"]`,
+    /// `["/bin/zsh", "-l"]`). Empty: `$SHELL -l` (Unix), PowerShell (Windows).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shell: Vec<String>,
+}
+
 /// `[devcontainer]`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -287,7 +300,7 @@ impl GlobalConfig {
     /// A first-run config built from what exists on this machine.
     fn detect_default() -> Self {
         let mut cfg = Self::default();
-        cfg.extra_roots = vec![format!("/tmp/claude-{}", nix::unistd::getuid()), "~/.claude".into()];
+        cfg.extra_roots = vec![crate::util::os::path::claude_temp_dir(), "~/.claude".into()];
         if expand_tilde("~/.gitlab_token").exists() {
             cfg.secrets.insert("gitlab".into(), SecretRef::File("~/.gitlab_token".into()));
             cfg.gitlab = Some(GitlabConfig { host: gitlab_com(), token: "gitlab".into() });
@@ -313,6 +326,14 @@ impl GlobalConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_terminal_shell_is_written_only_when_set() {
+        let cfg: GlobalConfig = toml::from_str("[terminals]\nshell = [\"pwsh.exe\", \"-NoLogo\"]\n").unwrap();
+        assert_eq!(cfg.terminals.shell, ["pwsh.exe", "-NoLogo"]);
+        assert!(toml::to_string_pretty(&cfg).unwrap().contains("[terminals]"));
+        assert!(!toml::to_string_pretty(&GlobalConfig::default()).unwrap().contains("[terminals]"));
+    }
 
     #[test]
     fn agent_providers_parse_and_round_trip() {

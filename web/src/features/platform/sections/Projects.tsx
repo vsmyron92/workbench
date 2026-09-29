@@ -2,11 +2,13 @@ import { useMemo, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { RotateCcw, Save } from 'lucide-react'
 import { ApiError, api } from '@/api/client'
+import { useHealth } from '@/api/health'
 import { qk, useProjects } from '@/api/queries'
 import { confirmDialog, toast, toastError } from '@/shell/actions'
 import { useUi } from '@/state/store'
 import { Button, EmptyState, ErrorBox, Loading, Select, Tabs } from '@/ui'
 import { patchSettings, pk, reportApply, useProjectSettings, useSettings } from '../api'
+import { projectPathError } from '../lib'
 import { DiagnosticLine, Group, Note, Page, Row, StringList, TomlEditor, useDraft, useTomlDiagnostics } from '../common'
 import type { GlobalConfig, LayerSaveResult } from '../types'
 
@@ -26,6 +28,7 @@ function DiscoveryGroup() {
   )
   const { draft, setDraft, dirty, reset } = useDraft(saved)
   const [busy, setBusy] = useState(false)
+  const os = useHealth()?.os
   if (settings.error) return <ErrorBox error={settings.error} onRetry={() => void settings.refetch()} />
   if (!draft) return <Loading />
   const set = (p: Partial<Discovery>) => setDraft({ ...draft, ...p })
@@ -43,7 +46,7 @@ function DiscoveryGroup() {
       setBusy(false)
     }
   }
-  const pathError = (p: string) => (p.startsWith('/') || p.startsWith('~') ? null : 'Use an absolute path or ~/…')
+  const pathError = (p: string) => projectPathError(p, os)
   return (
     <Group
       title="Discovery"

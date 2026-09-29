@@ -241,7 +241,7 @@ impl ProjectLsp {
         Self {
             id: id.to_string(),
             root: root.to_path_buf(),
-            root_canon: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            root_canon: crate::util::os::path::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
             inner: Mutex::new(Inner::default()),
             allow: Mutex::new(AllowSet::default()),
             diag_scheduled: AtomicBool::new(false),

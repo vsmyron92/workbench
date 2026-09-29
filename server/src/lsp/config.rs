@@ -12,6 +12,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::util::os::exe;
+
 /// `[lsp]` in config.toml.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -494,16 +496,15 @@ pub async fn locate(command: &str, rustup_component: Option<&str>) -> Located {
         .ok()
         .flatten();
     let Some(path) = found else {
-        return Err(format!("{command} was not found on PATH"));
+        return Err(format!("{command} was not found on PATH{}", exe::INSTALLED_SINCE));
     };
-    if !is_executable(&path) {
+    if !exe::is_executable(&path) {
         return Err(format!("{} is not executable", path.display()));
     }
-    if !is_rustup_proxy(&path) {
+    let Some(rustup) = exe::rustup_proxy(&path) else {
         return Ok(path);
-    }
+    };
     let component = rustup_component.unwrap_or(command);
-    let rustup = path.canonicalize().unwrap_or(path.clone());
     let out = crate::util::proc::run(
         &rustup.to_string_lossy(),
         &["which", component],
@@ -514,7 +515,7 @@ pub async fn locate(command: &str, rustup_component: Option<&str>) -> Located {
     match out {
         Ok(o) if o.ok() => {
             let p = PathBuf::from(o.stdout.trim());
-            if p.is_file() && is_executable(&p) {
+            if p.is_file() && exe::is_executable(&p) {
                 Ok(p)
             } else {
                 Err(format!("rustup names {} for {component}, which is not an executable file", p.display()))
@@ -522,23 +523,6 @@ pub async fn locate(command: &str, rustup_component: Option<&str>) -> Located {
         }
         _ => Err(format!("{} is a rustup proxy, but the toolchain has no {component} component: rustup component add {component}", path.display())),
     }
-}
-
-fn is_executable(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
-/// A rustup proxy is a link to (or copy of) the `rustup` binary under another name.
-fn is_rustup_proxy(p: &Path) -> bool {
-    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    if name == "rustup" {
-        return false;
-    }
-    p.canonicalize()
-        .ok()
-        .and_then(|c| c.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .is_some_and(|n| n == "rustup" || n == "rustup-init")
 }
 
 #[cfg(test)]
@@ -637,6 +621,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)] // shell-script fakes; util::os::exe tests the Windows proxies
     async fn rustup_proxies_count_only_with_the_component() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path();
@@ -647,7 +632,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(bin.join(f), std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        std::os::unix::fs::symlink(bin.join("rustup"), bin.join("fake-analyzer")).unwrap();
+        crate::util::os::fs::symlink(bin.join("rustup"), bin.join("fake-analyzer")).unwrap();
         let proxy = bin.join("fake-analyzer").display().to_string();
         let err = locate(&proxy, Some("rust-analyzer")).await.unwrap_err();
         assert!(err.contains("rustup component add rust-analyzer"), "{err}");

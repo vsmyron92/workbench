@@ -239,32 +239,10 @@ pub fn user_defines_statusline(claude_dir: &Path, dirs: &[&Path]) -> bool {
     })
 }
 
-/// The Workbench executable for the `statusline` helper. After the binary was replaced
-/// on disk (an upgrade, a rebuild), Linux reports `… (deleted)`: use the new file at the
-/// same path, or else the running image through `/proc/<pid>/exe`.
+/// The Workbench executable for the `statusline` helper, also after the binary was
+/// replaced on disk (an upgrade, a rebuild).
 fn helper_exe() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    if exe.is_file() {
-        return Some(exe);
-    }
-    helper_fallback(&exe, std::process::id())
-}
-
-fn helper_fallback(exe: &Path, pid: u32) -> Option<PathBuf> {
-    let s = exe.to_string_lossy();
-    if let Some(p) = s.strip_suffix(" (deleted)").map(PathBuf::from).filter(|p| p.is_file()) {
-        return Some(p);
-    }
-    let proc_exe = PathBuf::from(format!("/proc/{pid}/exe"));
-    proc_exe.exists().then_some(proc_exe)
-}
-
-fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+".contains(c)) {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', r"'\''"))
-    }
+    crate::util::os::proc::runnable_exe()
 }
 
 /// Find the Claude Code executable: as configured, on PATH, or in the usual install spots
@@ -274,19 +252,19 @@ pub fn resolve_command(cmd: &str) -> Option<PathBuf> {
     if cmd.is_empty() {
         return None;
     }
-    if cmd.contains('/') || cmd.starts_with('~') {
-        let p = crate::config::expand_tilde(cmd);
-        return p.is_file().then_some(p);
+    if util::os::exe::names_path(cmd) || cmd.starts_with('~') {
+        return util::os::exe::program_file(crate::config::expand_tilde(cmd));
     }
-    if let Some(p) = util::which_path(cmd) {
+    if let Some(p) = util::os::exe::which_preferring_native(cmd) {
         return Some(p);
     }
     let home = dirs::home_dir()?;
-    [".local/bin", ".claude/local", ".npm-global/bin", "bin", ".bun/bin"]
+    let spots: Vec<PathBuf> = [".local/bin", ".claude/local", ".npm-global/bin", "bin", ".bun/bin"]
         .iter()
-        .map(|d| home.join(d).join(cmd))
-        .chain(std::iter::once(PathBuf::from("/usr/local/bin").join(cmd)))
-        .find(|p| p.is_file())
+        .map(|d| home.join(d))
+        .chain(std::iter::once(PathBuf::from("/usr/local/bin")))
+        .collect();
+    util::os::exe::find_in(&spots, cmd)
 }
 
 use providers::valid_model;
@@ -344,7 +322,7 @@ pub fn resolve_launch(provider: &Provider, cfg: &AgentsConfig, project: &Project
             if d.is_empty() {
                 continue;
             }
-            let p = if d.starts_with('/') || d.starts_with('~') { crate::config::expand_tilde(d) } else { project.root.join(d) };
+            let p = if util::os::path::is_absolute_str(d) || d.starts_with('~') { crate::config::expand_tilde(d) } else { project.root.join(d) };
             if !p.is_dir() {
                 return Err(ApiError::bad_request(format!("additional directory {} does not exist", p.display())));
             }
@@ -459,13 +437,26 @@ pub fn find_provider(cfg: &AgentsConfig, id: Option<&str>) -> Result<Provider, A
 fn missing_command(p: &Provider) -> ApiError {
     let key = if p.id == "claude" { "[agents].command".to_string() } else { format!("[agents.providers.{}].command", p.id) };
     let hint = if p.install_hint.is_empty() { String::new() } else { format!(" (`{}`)", p.install_hint) };
-    ApiError::not_configured(format!("{} ({:?}) was not found. Install it{hint}, or set {key} in config.toml", p.label, p.command))
+    ApiError::not_configured(format!(
+        "{} ({:?}) was not found. Install it{hint}, or set {key} in config.toml{}",
+        p.label,
+        p.command,
+        util::os::exe::INSTALLED_SINCE
+    ))
 }
 
-/// An initial prompt goes into argv unless it is huge or must not be submitted.
-fn split_prompt(prompt: Option<String>, submit: bool) -> (Option<String>, Option<String>) {
+/// Whether `command` runs through cmd.exe, which parses its arguments again: a batch file
+/// that is not an npm shim (Windows only; `util::os::exe::launch`).
+fn is_batch(command: &Path) -> bool {
+    util::os::exe::classify(command.to_path_buf()).kind == util::os::exe::Kind::Batch
+}
+
+/// An initial prompt goes into argv unless it is huge or must not be submitted, or the
+/// command is a batch file (`batch`) and cmd.exe could read the prompt as commands of its
+/// own (`util::os::exe::batch_args_safe`): it is pasted then.
+fn split_prompt(prompt: Option<String>, submit: bool, batch: bool) -> (Option<String>, Option<String>) {
     match prompt {
-        Some(p) if p.len() <= MAX_ARGV_PROMPT && submit => (Some(p), None),
+        Some(p) if p.len() <= MAX_ARGV_PROMPT && submit && (!batch || util::os::exe::batch_args_safe(&[&p])) => (Some(p), None),
         Some(p) => (None, Some(p)),
         None => (None, None),
     }
@@ -572,6 +563,7 @@ impl Terminals {
         let launch = resolve_launch(&provider, &cfg, &project, &req)?;
         // In the dev container, the CLI must exist there; on the host, here.
         let container = if req.in_container {
+            crate::devcontainer::require_supported()?;
             let (t, _) = crate::devcontainer::agent_command(state, &project.id, &provider.command).await.map_err(ApiError::conflict)?;
             Some(t)
         } else {
@@ -716,6 +708,7 @@ impl Terminals {
         // Records from before providers are Claude sessions, whatever the default is now.
         let provider = find_provider(&cfg, Some(launch.provider.as_deref().unwrap_or("claude")))?;
         let (command, container) = if in_container {
+            crate::devcontainer::require_supported()?;
             let pid = project_id.as_deref().ok_or_else(|| ApiError::conflict("a dev container session needs its project"))?;
             let (t, path) = crate::devcontainer::agent_command(state, pid, &provider.command).await.map_err(ApiError::conflict)?;
             (PathBuf::from(path), Some(t))
@@ -726,7 +719,7 @@ impl Terminals {
         // Environment: base, the provider's (config.toml), then the project overlay's.
         let mut env = base_env(state, &entry.id);
         for (k, v) in &provider.env {
-            let v = if v.starts_with("~/") { crate::config::expand_tilde(v).display().to_string() } else { v.clone() };
+            let v = if crate::util::os::path::home_relative(v).is_some() { crate::config::expand_tilde(v).display().to_string() } else { v.clone() };
             env.push((k.clone(), Some(v)));
         }
         let mut secrets = vec![];
@@ -818,7 +811,7 @@ impl Terminals {
         // Per-session files, 0600.
         let settings_path = dir.join("claude-settings.json");
         let mcp_path = dir.join("mcp.json");
-        let helper = helper_exe().map(|exe| format!("{} statusline", shell_quote(&exe.to_string_lossy())));
+        let helper = helper_exe().map(|exe| util::os::shell::helper_command(&exe, &["statusline"]));
         let statusline = cfg.statusline && {
             let mut dirs: Vec<&Path> = vec![&cwd];
             if let Some(p) = &project {
@@ -842,7 +835,7 @@ impl Terminals {
         }
         env.push(("WORKBENCH_AGENT_TOKEN".into(), Some(token)));
 
-        let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt);
+        let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt, is_batch(&command));
         let mut argv = build_argv(&command.to_string_lossy(), &session, &settings_path, &mcp_path, &launch, argv_prompt.as_deref());
         // Extra arguments from `[agents.providers.claude] args` go before the prompt.
         if !provider.args.is_empty() {
@@ -937,7 +930,8 @@ impl Terminals {
         crate::devcontainer::write_into(&t, &mcp_path, &serde_json::to_vec_pretty(&mcp)?).await.map_err(ApiError::conflict)?;
         env.push(("WORKBENCH_AGENT_TOKEN".into(), Some(token)));
 
-        let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt);
+        // The command runs in the container, through `docker exec`.
+        let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt, false);
         let mut argv = build_argv(&command.to_string_lossy(), &session, Path::new(&settings_path), Path::new(&mcp_path), &launch, argv_prompt.as_deref());
         if !provider.args.is_empty() {
             let at = argv.iter().position(|a| a == "--").unwrap_or(argv.len());
@@ -1011,7 +1005,7 @@ impl Terminals {
         // The MCP bearer token is read from this variable by Codex (`bearer_token_env_var`).
         env.push(("WORKBENCH_AGENT_TOKEN".into(), Some(token)));
         let mcp_url = format!("{}/mcp", state.local_base_url());
-        let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt);
+        let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt, is_batch(&command));
         let args = LaunchArgs {
             model: launch.model.as_deref(),
             effort: launch.effort.as_deref(),
@@ -1179,7 +1173,16 @@ impl Terminals {
             }
         }
         let cwd = std::env::temp_dir();
-        match util::proc::run(&command.to_string_lossy(), &["--help"], &cwd, Duration::from_secs(15)).await {
+        let help = match util::os::exe::resolve(&command.to_string_lossy()) {
+            // Windows: an npm shim runs as node and its script, not through cmd.exe.
+            Some(r) => {
+                let mut cmd = util::os::exe::command(&r);
+                cmd.arg("--help").current_dir(&cwd);
+                util::proc::run_cmd(cmd, Duration::from_secs(15)).await
+            }
+            None => util::proc::run(&command.to_string_lossy(), &["--help"], &cwd, Duration::from_secs(15)).await,
+        };
+        match help {
             Ok(out) if out.ok() => {
                 let f = providers::CodexFeatures::from_help(&out.stdout);
                 if let Some(t) = mtime {
@@ -1255,7 +1258,7 @@ impl Terminals {
         let (home, foreign) = (w.home.clone(), w.foreign.clone());
         let (found, not_ours) = tokio::task::spawn_blocking(move || {
             let mut candidates = codex::recent_candidates(&home, me.launched_at);
-            candidates.retain(|c| c.meta.cwd.trim_end_matches('/') == me.cwd.trim_end_matches('/') && !foreign.contains(&c.path));
+            candidates.retain(|c| util::os::path::same_dir(&c.meta.cwd, &me.cwd) && !foreign.contains(&c.path));
             if candidates.is_empty() {
                 return (None, None);
             }
@@ -1299,7 +1302,7 @@ impl Terminals {
         let cwd = waiting.iter().find(|(p, _, _)| p.terminal_id == entry.id)?.0.cwd.clone();
         let waiting: Vec<(String, Arc<HashSet<String>>, Arc<Entry>)> = waiting
             .into_iter()
-            .filter(|(p, _, _)| p.cwd.trim_end_matches('/') == cwd.trim_end_matches('/'))
+            .filter(|(p, _, _)| util::os::path::same_dir(&p.cwd, &cwd))
             .filter_map(|(p, _, e)| {
                 let known = e.rt.lock().kimi_known.clone()?;
                 Some((p.terminal_id, known, e))
@@ -2209,14 +2212,9 @@ impl Terminals {
             ProviderKind::Kimi => {
                 let home = kimi::kimi_home(env_dir("KIMI_CODE_HOME").as_deref());
                 tokio::task::spawn_blocking(move || {
-                    let root_s = root.to_string_lossy().trim_end_matches('/').to_string();
-                    let entries: Vec<kimi::IndexEntry> = kimi::load_index(&home)
-                        .into_iter()
-                        .filter(|e| {
-                            let w = e.work_dir.trim_end_matches('/');
-                            w == root_s || w.starts_with(&format!("{root_s}/"))
-                        })
-                        .collect();
+                    let root_s = root.to_string_lossy();
+                    let entries: Vec<kimi::IndexEntry> =
+                        kimi::load_index(&home).into_iter().filter(|e| util::os::path::dir_within(&e.work_dir, &root_s)).collect();
                     // Newest entries last in the index; read at most a few hundred.
                     let mut rows: Vec<HistoryEntry> = entries
                         .iter()
@@ -2297,7 +2295,7 @@ impl Terminals {
         };
         let dir = transcript::claude_dir(None);
         let mut list = tokio::task::spawn_blocking(move || transcript::read_live_sessions(&dir)).await.unwrap_or_default();
-        list.retain(|s| pty::pid_alive(s.pid) && !pids.contains(&s.pid) && !sessions.contains(&s.session_id));
+        list.retain(|s| crate::util::os::proc::pid_alive(s.pid) && !pids.contains(&s.pid) && !sessions.contains(&s.session_id));
         for s in &mut list {
             s.project_id = state.projects.find_by_path(Path::new(&s.cwd)).map(|p| p.id.clone());
         }
@@ -2310,7 +2308,7 @@ impl Terminals {
 /// container session's transcript is a path in the container, not here.
 fn note_transcript(rec: &mut store::Record, path: Option<String>) -> bool {
     let inside = super::in_container(&rec.info);
-    let Some(tp) = path.filter(|p| !inside && p.starts_with('/') && p.ends_with(".jsonl") && !p.contains("/../")) else {
+    let Some(tp) = path.filter(|p| !inside && util::os::path::is_absolute_str(p) && p.ends_with(".jsonl") && !util::os::path::segments(p).any(|s| s == "..")) else {
         return false;
     };
     if rec.transcript_path.as_deref() == Some(tp.as_str()) {
@@ -2364,8 +2362,8 @@ impl Drop for HeldPermission {
 /// Expand `~/` and `${secret:NAME}` in a project `[agent].env` value. The secrets used
 /// are added to `used` (for masking the session's output).
 fn expand_env_value(state: &AppState, project: &Project, v: &str, used: &mut Vec<Secret>) -> Result<String, ApiError> {
-    let v = if let Some(rest) = v.strip_prefix("~/") {
-        crate::config::expand_tilde(&format!("~/{rest}")).display().to_string()
+    let v = if crate::util::os::path::home_relative(v).is_some() {
+        crate::config::expand_tilde(v).display().to_string()
     } else {
         v.to_string()
     };
@@ -2823,24 +2821,6 @@ mod tests {
     }
 
     #[test]
-    fn quoting_for_the_status_line_command() {
-        assert_eq!(shell_quote("/home/u/.cache/wb/debug/workbench"), "/home/u/.cache/wb/debug/workbench");
-        assert_eq!(shell_quote("/opt/my apps/wb"), "'/opt/my apps/wb'");
-    }
-
-    #[test]
-    fn helper_survives_a_replaced_binary() {
-        let dir = tempfile::tempdir().unwrap();
-        let new_bin = dir.path().join("workbench");
-        std::fs::write(&new_bin, b"").unwrap();
-        let deleted = PathBuf::from(format!("{} (deleted)", new_bin.display()));
-        assert_eq!(helper_fallback(&deleted, std::process::id()), Some(new_bin.clone()));
-        std::fs::remove_file(&new_bin).unwrap();
-        let me = std::process::id();
-        assert_eq!(helper_fallback(&deleted, me), Some(PathBuf::from(format!("/proc/{me}/exe"))));
-    }
-
-    #[test]
     fn prompts_never_go_into_dialogs() {
         assert!(accepts_prompt(AgentState::Idle));
         assert!(accepts_prompt(AgentState::Working));
@@ -2926,12 +2906,13 @@ mod tests {
 
     #[test]
     fn workspace_folders_are_created_private() {
-        use std::os::unix::fs::PermissionsExt;
         let data = tempfile::tempdir().unwrap();
         let dirs = workspace_dirs(data.path(), Some("shop"));
-        assert_eq!(dirs, [data.path().join("workspace/shop").display().to_string(), data.path().join("workspace/home").display().to_string()]);
+        // Native separators (`join("workspace/shop")` would keep the `/` on Windows).
+        let root = data.path().join("workspace");
+        assert_eq!(dirs, [root.join("shop").display().to_string(), root.join("home").display().to_string()]);
         for d in &dirs {
-            assert_eq!(std::fs::metadata(d).unwrap().permissions().mode() & 0o777, 0o700);
+            crate::util::os::perm::assert_mode(Path::new(d), 0o700);
         }
         // Ids that are not plain names get only the home folder.
         assert_eq!(workspace_dirs(data.path(), Some("../etc")).len(), 1);

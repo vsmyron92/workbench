@@ -9,7 +9,8 @@
 //! * `content`   — read / stat / raw (Range) / write (sha256 etag, atomic, re-checked).
 //! * `ops`       — mkdir, create, rename, copy, delete (to the trash), uploads.
 //! * `abs`       — read-only access to absolute paths inside project and extra roots.
-//! * `watch`     — one inotify watcher per project (ignore-aware, capped).
+//! * `watch`     — one watcher per project (ignore-aware; inotify per directory, capped;
+//!   one recursive watch on Windows).
 //! * `search`    — find/replace in files with ripgrep's libraries.
 //! * `quickopen` + `fuzzy` — cached file list and fuzzy ranking for "Go to file".
 //! * `tools`     — MCP tools (`workbench_open_file`, `workbench_open_markdown`).
@@ -31,7 +32,6 @@ mod search;
 mod sensitive;
 mod todo;
 mod tools;
-mod trash;
 mod watch;
 
 use std::collections::HashMap;
@@ -173,9 +173,10 @@ pub(crate) fn resolve_entry(state: &AppState, pid: &str, rel: &str) -> ApiResult
     Ok(Resolved { project, abs, rel })
 }
 
-/// Whether a project-relative path lies inside a `.git` directory (read-only for us).
+/// Whether a project-relative path lies inside a `.git` directory (read-only for us;
+/// `.GIT` too where names ignore case).
 pub(crate) fn in_git_dir(rel: &str) -> bool {
-    Path::new(rel).components().any(|c| matches!(c, Component::Normal(n) if n == ".git"))
+    Path::new(rel).components().any(|c| matches!(c, Component::Normal(n) if util::os::path::same_name(n, ".git")))
 }
 
 /// Run blocking filesystem work off the async workers.
@@ -212,14 +213,30 @@ pub(crate) fn join_rel(dir: &str, name: &str) -> String {
     if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") }
 }
 
-/// A file or directory name a client may create: no separators, not `.`/`..`.
+/// A file or directory name a client may create: no separators, not `.`/`..`, and
+/// one Windows keeps as it is (`os::path::check_component`).
 pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 255
         && name != "."
         && name != ".."
-        && !name.contains('/')
+        && !util::os::path::has_separator(name)
         && !name.contains('\0')
+        && util::os::path::check_component(name).is_ok()
+}
+
+/// Tests: create the symlink `link`, or `false` where Windows does not let this user
+/// (no Developer Mode, not an administrator): the part of the test that needs it is skipped.
+#[cfg(test)]
+pub(crate) fn symlink_or_skip(target: impl AsRef<Path>, link: impl AsRef<Path>) -> bool {
+    match util::os::fs::symlink(target, &link) {
+        Ok(()) => true,
+        Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("skipped: {e}");
+            false
+        }
+        Err(e) => panic!("symlink {}: {e}", link.as_ref().display()),
+    }
 }
 
 #[cfg(test)]
@@ -246,6 +263,12 @@ mod tests {
         assert!(!valid_name("a/b"));
         assert!(!valid_name("a\0b"));
         assert!(!valid_name(&"x".repeat(256)));
+        #[cfg(windows)]
+        for bad in [r"a\b", "a:b", "CON", "nul.txt", "x.", "x "] {
+            assert!(!valid_name(bad), "{bad}");
+        }
+        #[cfg(windows)]
+        assert!(in_git_dir(".GIT/config"));
     }
 
     #[test]

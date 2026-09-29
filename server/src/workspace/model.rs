@@ -435,6 +435,7 @@ pub fn valid_folder(folder: &str) -> bool {
         && !folder.starts_with('.')
         && !folder.contains(['/', '\\', '\0'])
         && folder != "_shared"
+        && crate::util::os::path::check_component(folder).is_ok()
 }
 
 /// What a step shows, from its explicit viewer or its path.

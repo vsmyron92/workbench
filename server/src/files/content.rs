@@ -8,9 +8,7 @@
 //! before the rename, so an agent writing the same file at the same time is never
 //! silently overwritten.
 
-use std::fs::{OpenOptions, Permissions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use axum::Json;
@@ -24,6 +22,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use super::{MAX_TEXT_BYTES, Sensitive, blocking, in_git_dir, mtime_ms, resolve, sha256_hex};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::util::os::perm;
 
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
@@ -404,7 +403,7 @@ fn read_existing(path: &Path) -> ApiResult<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(b) => Ok(Some(b)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => Err(ApiError::bad_request("path is a directory")),
+        Err(e) if crate::util::os::fs::is_a_directory(&e, path) => Err(ApiError::bad_request("path is a directory")),
         Err(e) => Err(e.into()),
     }
 }
@@ -433,7 +432,7 @@ pub struct Written {
 pub fn write_file(path: &Path, mut data: Vec<u8>, expected: Option<&str>, force: bool) -> ApiResult<Written> {
     // Saving through a symlink updates its target; the link stays a link.
     let target = match std::fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path)?,
+        Ok(m) if m.file_type().is_symlink() => crate::util::os::path::canonicalize(path)?,
         _ => path.to_path_buf(),
     };
     let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -457,13 +456,9 @@ pub fn write_file(path: &Path, mut data: Vec<u8>, expected: Option<&str>, force:
     if current.is_none() {
         std::fs::create_dir_all(dir)?;
     }
-    let keep_mode = std::fs::metadata(&target).ok().map(|m| m.permissions().mode() & 0o7777);
     let tmp = dir.join(format!(".{name}.wb-tmp-{}", crate::util::random_token(6)));
     let result = (|| -> ApiResult<()> {
-        let mut f = OpenOptions::new().write(true).create_new(true).mode(0o666).open(&tmp)?;
-        if let Some(m) = keep_mode {
-            f.set_permissions(Permissions::from_mode(m))?;
-        }
+        let mut f = perm::create_replacement(&tmp, &target, None)?;
         f.write_all(&data)?;
         f.sync_all()?;
         drop(f);
@@ -474,7 +469,7 @@ pub fn write_file(path: &Path, mut data: Vec<u8>, expected: Option<&str>, force:
                 return Err(ApiError::conflict(format!("{name} changed on disk while saving")));
             }
         }
-        std::fs::rename(&tmp, &target)?;
+        perm::rename_into_place(&tmp, &target)?;
         Ok(())
     })();
     if result.is_err() {
@@ -554,6 +549,9 @@ mod tests {
         // No temp files left behind.
         let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("sub")).unwrap().flatten().collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+        // A folder is not a file to write, on every OS.
+        let err = write_checked(&dir.path().join("sub"), b"x".to_vec(), None, true).unwrap_err();
+        assert_eq!((err.code, err.message.as_str()), ("bad_request", "path is a directory"));
     }
 
     #[test]
@@ -561,14 +559,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("run.sh");
         std::fs::write(&p, b"\xEF\xBB\xBFecho hi\n").unwrap();
-        std::fs::set_permissions(&p, Permissions::from_mode(0o755)).unwrap();
+        perm::expose(&p, 0o755);
         let etag = sha256_hex(&std::fs::read(&p).unwrap());
         write_checked(&p, b"echo bye\n".to_vec(), Some(&etag), false).unwrap();
-        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o755);
+        perm::assert_mode(&p, 0o755);
+        assert!(perm::privacy(&p).unwrap().is_exposed(), "Windows: the DACL is kept");
         assert_eq!(std::fs::read(&p).unwrap(), b"\xEF\xBB\xBFecho bye\n");
 
         let link = dir.path().join("link.sh");
-        std::os::unix::fs::symlink(&p, &link).unwrap();
+        if !super::super::symlink_or_skip(&p, &link) {
+            return;
+        }
         let etag = sha256_hex(&std::fs::read(&p).unwrap());
         write_checked(&link, b"echo link\n".to_vec(), Some(&etag), false).unwrap();
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());

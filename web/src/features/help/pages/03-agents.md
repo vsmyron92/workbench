@@ -29,3 +29,5 @@ Claude Code's Remote Control can be switched on per session, or run as a server 
 ## Dev containers
 
 A project with a `devcontainer.json` gets a **Dev container** chip in the top bar. Nothing is built or started until you approve the exact plan it shows, dangerous items first. Once the container runs, new shells, run configurations and (if you tick *Run in dev container*) agent sessions run inside it, while the files stay on this computer.
+
+Workbench on Windows leaves dev containers out for now; the **Services** window (Alt+8) still lists Docker's containers there, marked *experimental*.

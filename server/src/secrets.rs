@@ -3,7 +3,6 @@
 //! the browser or put in a child's argv.
 
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,6 +12,7 @@ use serde::Serialize;
 
 use crate::config::{SecretRef, expand_tilde};
 use crate::error::ApiError;
+use crate::util::os::perm::{self, Privacy};
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -111,11 +111,10 @@ pub fn resolve(r: &SecretRef, warnings: &mut Vec<String>) -> anyhow::Result<Secr
     let v = match r {
         SecretRef::File(p) => {
             let path = expand_tilde(p);
-            let mode = std::fs::metadata(&path)?.permissions().mode();
-            if mode & 0o077 != 0 {
-                warnings.push(format!("{p} is readable by other users (mode {:o}); run chmod 600", mode & 0o777));
+            if let Privacy::Exposed(why) = perm::privacy(&path)? {
+                warnings.push(format!("{p} is readable by other users ({why}); {}", perm::MAKE_PRIVATE));
             }
-            std::fs::read_to_string(&path)?.trim().to_string()
+            crate::util::os::fs::read_text(&path)?.trim().to_string()
         }
         SecretRef::Env(k) => std::env::var(k).map_err(|_| anyhow::anyhow!("environment variable {k} is not set"))?,
         SecretRef::Keyring(sa) => {
@@ -124,7 +123,7 @@ pub fn resolve(r: &SecretRef, warnings: &mut Vec<String>) -> anyhow::Result<Secr
             keyring::Entry::new(service, account)?.get_password()?
         }
         SecretRef::Dotenv { path, key } => {
-            let text = std::fs::read_to_string(expand_tilde(path))?;
+            let text = crate::util::os::fs::read_text(&expand_tilde(path))?;
             text.lines()
                 .filter(|l| !l.trim_start().starts_with('#'))
                 .filter_map(|l| l.split_once('='))
@@ -134,7 +133,7 @@ pub fn resolve(r: &SecretRef, warnings: &mut Vec<String>) -> anyhow::Result<Secr
         }
         SecretRef::Command(argv) => {
             anyhow::ensure!(!argv.is_empty(), "empty command");
-            let out = std::process::Command::new(&argv[0]).args(&argv[1..]).output()?;
+            let out = crate::util::os::exe::configured(argv)?.output()?;
             anyhow::ensure!(out.status.success(), "secret command exited with {}", out.status);
             String::from_utf8(out.stdout)?.trim().to_string()
         }

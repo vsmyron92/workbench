@@ -1,5 +1,6 @@
 //! Unity projects: `ProjectSettings/ProjectVersion.txt` → the editor toolchain
-//! (`~/Unity/Hub/Editor/<ver>/Editor/Unity`) and an Editor run; every
+//! (`~/Unity/Hub/Editor/<ver>/Editor/Unity`, on Windows
+//! `%ProgramFiles%\Unity\Hub\Editor\<ver>\Editor\Unity.exe`) and an Editor run; every
 //! `[MenuItem("…")]` on a parameterless `public static void` in an `Editor/`
 //! script → a batch-mode `-executeMethod` run.
 
@@ -10,8 +11,11 @@ use regex::Regex;
 
 use super::{Ctx, rel, scoped, source, tilde, walk_filtered};
 use crate::config::project::{Component, RunConfig, RunKind};
+use crate::util::os::shell::Dialect;
 
-static VERSION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"m_EditorVersion:\s*(\S+)").unwrap());
+/// `m_EditorVersion: 6000.5.6f1`. Only a version's characters: it becomes part of the
+/// editor's path, which commands insert as it is (`{unity}`).
+static VERSION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)m_EditorVersion:\s*([0-9A-Za-z._-]+)[ \t\r]*$").unwrap());
 static MENU_ITEM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"\[(?:UnityEditor\.)?MenuItem\(\s*"([^"]+)"\s*(,[^\]]*)?\)\]\s*(?:\[[^\]]*\]\s*)*public\s+static\s+void\s+(\w+)\s*\(\s*\)"#,
@@ -41,19 +45,25 @@ pub fn detect(cx: &mut Ctx, version_file: &Path) {
     cx.pf.components.push(Component { name: scoped("unity", &cwd), path: cwd.clone(), kind: "unity".into(), version: Some(ver.clone()) });
 
     // One toolchain per editor version; the common single-version case is plain `{unity}`.
-    let editor = dirs::home_dir().unwrap_or_default().join(format!("Unity/Hub/Editor/{ver}/Editor/Unity"));
-    let editor = tilde(&editor);
+    let editor = tilde(&editor_path(&ver));
     let key = match cx.pf.toolchains.get("unity") {
         None => "unity".to_string(),
         Some(existing) if *existing == editor => "unity".to_string(),
         Some(_) => format!("unity-{ver}"),
     };
     cx.pf.toolchains.insert(key.clone(), editor);
+    // `"$PWD"` is the working directory in PowerShell too; there the editor's path (with
+    // a space: `Program Files`) is a quoted string started with the call operator (a
+    // toolchain path set by the user must not contain `'`).
+    let unity = match super::dialect() {
+        Dialect::Posix => format!("{{{key}}}"),
+        Dialect::PowerShell => format!("& '{{{key}}}'"),
+    };
 
     cx.add_run(RunConfig {
         name: scoped("Unity Editor", &cwd),
         kind: RunKind::Editor,
-        command: format!("{{{key}}} -projectPath \"$PWD\""),
+        command: format!("{unity} -projectPath \"$PWD\""),
         cwd: cwd.clone(),
         source: source(cx, version_file, ""),
         group: Some("unity".into()),
@@ -90,16 +100,25 @@ pub fn detect(cx: &mut Ctx, version_file: &Path) {
             cx.add_run(RunConfig {
                 name: scoped(&format!("Unity: {}", item.menu), &cwd),
                 kind,
-                command: format!(
-                    "{{{key}}} -batchmode -nographics{quit} -projectPath \"$PWD\" -executeMethod {} -logFile -",
-                    item.execute_method
-                ),
+                command: format!("{unity} -batchmode -nographics{quit} -projectPath \"$PWD\" -executeMethod {} -logFile -", item.execute_method),
                 cwd: cwd.clone(),
                 result_pattern,
                 source: Some(format!("detected:{script_rel} [MenuItem(\"{}\")]", item.menu)),
                 group: Some("unity".into()),
                 ..Default::default()
             });
+        }
+    }
+}
+
+/// Where Unity Hub installs editor `ver`: `~/Unity/Hub/Editor/<ver>/Editor/Unity`; on
+/// Windows (`super::dialect`) `%ProgramFiles%\Unity\Hub\Editor\<ver>\Editor\Unity.exe`.
+fn editor_path(ver: &str) -> std::path::PathBuf {
+    match super::dialect() {
+        Dialect::Posix => dirs::home_dir().unwrap_or_default().join(format!("Unity/Hub/Editor/{ver}/Editor/Unity")),
+        Dialect::PowerShell => {
+            let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
+            std::path::PathBuf::from(format!(r"{pf}\Unity\Hub\Editor\{ver}\Editor\Unity.exe"))
         }
     }
 }

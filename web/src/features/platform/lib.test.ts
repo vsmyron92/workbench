@@ -1,18 +1,31 @@
 import { describe, expect, it } from 'vitest'
 import {
+  desktopNotifiesHere,
   formatCountdown,
   formatMs,
   hostEntryError,
   hostOf,
+  inConfigDir,
   makeSecretRef,
   panelIdFor,
   prependCapped,
+  projectPathError,
   publicUrlError,
   restartText,
   secretRefFields,
   timeline,
 } from './lib'
 import type { ActivityEvent, McpCall } from './types'
+
+describe('desktopNotifiesHere', () => {
+  it('leaves notifying to the server on its own computer, unless its OS has no desktop notifications', () => {
+    for (const host of ['localhost', '127.0.0.1', '[::1]']) expect(desktopNotifiesHere(host, null)).toBe(true)
+    // A Windows server: the browser on its computer notifies instead.
+    expect(desktopNotifiesHere('127.0.0.1', 'Desktop notifications are not supported on Windows yet')).toBe(false)
+    // Phones and other computers never see the server's desktop.
+    expect(desktopNotifiesHere('workbench.example.ts.net', null)).toBe(false)
+  })
+})
 
 describe('panelIdFor', () => {
   it('follows the documented id conventions', () => {
@@ -80,6 +93,26 @@ describe('validation', () => {
     expect(publicUrlError('https://u:p@x')).not.toBeNull()
     expect(publicUrlError('nope')).not.toBeNull()
     expect(hostOf('https://box.ts.net:8443/x')).toBe('box.ts.net:8443')
+  })
+  it('checks project paths as the server OS reads them', () => {
+    for (const os of ['linux', undefined, 'windows']) {
+      expect(projectPathError('/srv/code', os)).toBeNull()
+      expect(projectPathError('~/workspace', os)).toBeNull()
+      expect(projectPathError('workspace', os)).not.toBeNull()
+    }
+    // Windows forms only for a Windows server.
+    for (const p of ['D:\\code', 'C:/Users/me/src', '~\\src', '\\\\server\\share']) {
+      expect(projectPathError(p, 'windows')).toBeNull()
+    }
+    expect(projectPathError('D:\\code', 'linux')).toBe('Use an absolute path or ~/…')
+    expect(projectPathError('D:code', 'windows')).not.toBeNull()
+    expect(projectPathError('code\\app', 'windows')).not.toBeNull()
+  })
+  it('suggests files in the config dir the server reports, with its separator', () => {
+    expect(inConfigDir('~/.config/workbench', 'tls', 'cert.pem')).toBe('~/.config/workbench/tls/cert.pem')
+    expect(inConfigDir('~\\AppData\\Roaming\\workbench', 'tls', 'key.pem')).toBe('~\\AppData\\Roaming\\workbench\\tls\\key.pem')
+    expect(inConfigDir('/srv/wb/config/', 'tls', 'cert.pem')).toBe('/srv/wb/config/tls/cert.pem')
+    expect(inConfigDir(undefined, 'tls', 'cert.pem')).toBe('~/.config/workbench/tls/cert.pem')
   })
 })
 

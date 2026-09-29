@@ -325,21 +325,20 @@ mod tests {
         assert_eq!(template(""), "''");
     }
 
+    /// Values travel in the docker CLI's environment, never in its argv, on every OS (host
+    /// paths in them: `wrapping_maps_host_paths`).
     #[test]
-    fn wrapping_maps_paths_and_keeps_values_out_of_argv() {
+    fn wrapping_keeps_values_out_of_argv() {
         let t = target();
         let env = vec![
             ("TERM".to_string(), Some("xterm-256color".to_string())),
             ("WORKBENCH_URL".to_string(), Some("http://127.0.0.1:7981".to_string())),
             ("API_TOKEN".to_string(), Some("s3cret-value-123".to_string())),
-            ("CARGO_TARGET_DIR".to_string(), Some("/home/u/app/target".to_string())),
-            ("OUTSIDE".to_string(), Some("/home/u/other".to_string())),
             ("TMUX".to_string(), None),
         ];
         let (argv, host_env) = t.wrap("abc123", &["bash".into(), "-lc".into(), "cargo run".into()], Path::new("/home/u/app/server"), &env);
         let joined = argv.join(" ");
         assert!(!joined.contains("s3cret"), "{joined}");
-        assert!(joined.contains("-w /workspaces/app/server"), "{joined}");
         assert!(joined.contains("-u vscode"));
         // A login shell applies the variables after its profile (which resets PATH).
         let n = argv.len();
@@ -347,8 +346,6 @@ mod tests {
         assert!(argv[n - 1].starts_with(APPLY) && argv[n - 1].ends_with("\ncargo run"), "{argv:?}");
         let get = |k: &str| host_env.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.clone());
         assert_eq!(get("WB_E_API_TOKEN").as_deref(), Some("s3cret-value-123"));
-        assert_eq!(get("WB_E_CARGO_TARGET_DIR").as_deref(), Some("/workspaces/app/target"));
-        assert_eq!(get("WB_E_OUTSIDE").as_deref(), Some("/home/u/other"));
         assert_eq!(get("WB_E_WORKBENCH_URL").as_deref(), Some("http://172.17.0.1:7981"));
         assert_eq!(get("WB_T_PATH").as_deref(), Some("\"${PATH}\"':/opt/x'"));
         assert_eq!(get("WB_UNSET_NAMES").as_deref(), Some("GONE"));
@@ -358,6 +355,24 @@ mod tests {
         assert!(login_rewrite(&["claude".into(), "--resume".into()]).is_none());
         assert!(login_rewrite(&["fish".into(), "-l".into()]).is_none());
         assert!(get("WB_ENV_NAMES").unwrap().split(' ').any(|n| n == "API_TOKEN"));
+    }
+
+    /// Host paths under the workspace mount (the cwd, values and `:`-separated lists of
+    /// them) become the container's. Unix host paths: dev containers are unsupported on
+    /// Windows (`util::os::support`, `Feature::Devcontainer`), whose paths are `C:\…`.
+    #[cfg(unix)]
+    #[test]
+    fn wrapping_maps_host_paths() {
+        let t = target();
+        let env = vec![
+            ("CARGO_TARGET_DIR".to_string(), Some("/home/u/app/target".to_string())),
+            ("OUTSIDE".to_string(), Some("/home/u/other".to_string())),
+        ];
+        let (argv, host_env) = t.wrap("abc123", &["bash".into(), "-lc".into(), "cargo run".into()], Path::new("/home/u/app/server"), &env);
+        assert!(argv.join(" ").contains("-w /workspaces/app/server"), "{argv:?}");
+        let get = |k: &str| host_env.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.clone());
+        assert_eq!(get("WB_E_CARGO_TARGET_DIR").as_deref(), Some("/workspaces/app/target"));
+        assert_eq!(get("WB_E_OUTSIDE").as_deref(), Some("/home/u/other"));
         // A cwd outside the mount opens the workspace folder.
         let (argv, _) = t.wrap("x", &["sh".into()], Path::new("/tmp"), &[]);
         assert!(argv.join(" ").contains("-w /workspaces/app "));

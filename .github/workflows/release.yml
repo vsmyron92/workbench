@@ -74,10 +74,174 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
 
+  windows:
+    name: Windows x86_64
+    # Experimental (docs/windows-port.md): run by hand it always builds the archive, but a tag
+    # builds and publishes it only when the repository variable RELEASE_WINDOWS is 'true'.
+    # Until then a tag releases Linux alone.
+    if: github.ref_type != 'tag' || vars.RELEASE_WINDOWS == 'true'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # The console host shipped next to workbench.exe (docs/windows-port.md, "Terminals
+      # (ConPTY)"): the Microsoft.Windows.Console.ConPTY package from nuget.org, and the
+      # SHA-256 of the two x64 files taken from it. Update the three together, with
+      # packaging/windows/CONPTY_NOTICE.md (NOTICE.md of the Windows Terminal release that
+      # published that package version) and THIRD_PARTY_NOTICES.md.
+      CONPTY_VERSION: 1.24.260710001
+      CONPTY_DLL_SHA256: 39fba2713e2495117b1591ae8c32a3b904bea7aa66069cf7815e2844c76d75d8
+      OPENCONSOLE_SHA256: b7fd936c2668b87b9ecf7b3366dc6568afc1c6f981874cba3e955a1c35cf8160
+    steps:
+      - uses: actions/checkout@v7
+      - name: Version
+        id: version
+        run: |
+          $m = Select-String -LiteralPath server/Cargo.toml -Pattern '^version = "(.*)"$' -CaseSensitive | Select-Object -First 1
+          $version = if ($m) { $m.Matches[0].Groups[1].Value } else { '' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            Write-Output "::error::tag $env:GITHUB_REF_NAME does not match server/Cargo.toml version $version"
+            exit 1
+          }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Web UI
+        working-directory: web
+        run: npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      # The release binary embeds web/dist; server/.cargo/config.toml links the C runtime
+      # statically (no Visual C++ Redistributable needed).
+      - name: Binary
+        working-directory: server
+        run: cargo build --release --locked
+      - name: ConPTY
+        run: |
+          $pkg = Join-Path $env:RUNNER_TEMP 'conpty.nupkg'
+          $out = (New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'conpty')).FullName
+          $id = 'microsoft.windows.console.conpty'
+          Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/$id/$env:CONPTY_VERSION/$id.$env:CONPTY_VERSION.nupkg" -OutFile $pkg
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($pkg)
+          try {
+            $files = @(
+              @{ Entry = 'runtimes/win-x64/native/conpty.dll'; Name = 'conpty.dll'; Sha256 = $env:CONPTY_DLL_SHA256 },
+              @{ Entry = 'build/native/runtimes/x64/OpenConsole.exe'; Name = 'OpenConsole.exe'; Sha256 = $env:OPENCONSOLE_SHA256 }
+            )
+            foreach ($f in $files) {
+              $entry = $zip.GetEntry($f.Entry)
+              if (-not $entry) { throw "the ConPTY package has no $($f.Entry)" }
+              $dest = Join-Path $out $f.Name
+              [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $dest, $true)
+              $hash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
+              if ($hash -ne $f.Sha256) { throw "$($f.Name) from the ConPTY package has SHA-256 $hash, expected $($f.Sha256)" }
+            }
+          } finally {
+            $zip.Dispose()
+          }
+      - name: Package
+        id: package
+        run: |
+          $name = "workbench-${{ steps.version.outputs.version }}-x86_64-pc-windows-msvc"
+          $dir = (New-Item -ItemType Directory -Force -Path "dist/$name").FullName
+          # workbenchw.exe: the service's launcher (docs/windows-port.md, "Service").
+          $files = @(
+            'server/target/release/workbench.exe', 'server/target/release/workbenchw.exe', 'packaging/windows/install.ps1',
+            (Join-Path $env:RUNNER_TEMP 'conpty/conpty.dll'), (Join-Path $env:RUNNER_TEMP 'conpty/OpenConsole.exe'),
+            'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_NOTICES.md', 'packaging/windows/CONPTY_NOTICE.md'
+          )
+          Copy-Item -LiteralPath $files -Destination $dir
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "name=$name"
+      # Installs the package as a user would, starts the installed server on scratch
+      # directories and checks that the embedded UI is served, then installs again over the
+      # running server: its workbench.exe is renamed aside and, still running, stays as *.old.
+      - name: Smoke test
+        run: |
+          $stage = (Resolve-Path "dist/${{ steps.package.outputs.name }}").Path
+          $installer = Join-Path $stage 'install.ps1'
+          $prefix = Join-Path $env:RUNNER_TEMP 'wb-install'
+          # Windows PowerShell 5.1, which stock Windows runs install.ps1 with.
+          powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Prefix $prefix
+          if ($LASTEXITCODE -ne 0) { Write-Output '::error::install.ps1 failed'; exit 1 }
+          $userPath = [string](Get-ItemProperty -LiteralPath HKCU:\Environment).Path
+          if ($userPath.Split(';') -notcontains $prefix) { Write-Output '::error::install.ps1 did not add its folder to the user PATH'; exit 1 }
+          if (-not (Test-Path -LiteralPath (Join-Path $prefix 'workbenchw.exe') -PathType Leaf)) {
+            Write-Output '::error::install.ps1 did not install workbenchw.exe'
+            exit 1
+          }
+          $bin = Join-Path $prefix 'workbench.exe'
+          & $bin --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # The DLLs it loads: not the Visual C++ runtime (server/.cargo/config.toml). The
+          # Universal C runtime (api-ms-win-crt-*, ucrtbase) is part of Windows 10 and 11.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem -Path "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          $imports = & $dumpbin.FullName /nologo /dependents $bin
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $imports
+          if ($imports -match 'vcruntime|msvcp') {
+            Write-Output '::error::workbench.exe needs the Visual C++ runtime (is crt-static missing?)'
+            exit 1
+          }
+          $scratch = (New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'wb-smoke')).FullName
+          $env:WORKBENCH_CONFIG_DIR = Join-Path $scratch 'config'
+          $env:WORKBENCH_DATA_DIR = Join-Path $scratch 'data'
+          $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $probe.Start(); $port = $probe.LocalEndpoint.Port; $probe.Stop()
+          $server = Start-Process -FilePath $bin -ArgumentList 'serve', '--bind', "127.0.0.1:$port" -NoNewWindow -PassThru `
+            -RedirectStandardOutput (Join-Path $scratch 'out.log') -RedirectStandardError (Join-Path $scratch 'err.log')
+          $page = ''
+          for ($i = 0; $i -lt 60 -and -not $server.HasExited; $i++) {
+            try { $page = [string](Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -TimeoutSec 5).Content; break }
+            catch { Start-Sleep -Milliseconds 500 }
+          }
+          powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Prefix $prefix
+          $reinstalled = $LASTEXITCODE
+          $running = -not $server.HasExited
+          if ($running) { Stop-Process -Id $server.Id -Force }
+          if (-not $page.Contains('<div id="root">') -or -not $running) {
+            Get-Content -LiteralPath (Join-Path $scratch 'out.log'), (Join-Path $scratch 'err.log')
+            if ($running) { Write-Output '::error::the embedded UI is missing' } else { Write-Output '::error::the server stopped' }
+            exit 1
+          }
+          if ($reinstalled -ne 0) { Write-Output '::error::install.ps1 failed over a running Workbench'; exit 1 }
+          if (-not @(Get-ChildItem -LiteralPath $prefix -Filter 'workbench.exe.*.old').Length) {
+            Write-Output '::error::install.ps1 did not rename the running workbench.exe aside'
+            exit 1
+          }
+          & $bin --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          exit 0
+      - name: Archive
+        run: |
+          $name = '${{ steps.package.outputs.name }}'
+          $dist = (Resolve-Path dist).Path
+          $zip = Join-Path $dist "$name.zip"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $dist $name), $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          # What sha256sum writes and checks.
+          [System.IO.File]::WriteAllText("$zip.sha256", "$hash  $name.zip`n")
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x86_64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
   publish:
     name: Publish
-    needs: [linux]
-    if: github.ref_type == 'tag'
+    needs: [linux, windows]
+    # Both archives, or Linux alone while the Windows job is skipped (above).
+    if: ${{ !cancelled() && github.ref_type == 'tag' && needs.linux.result == 'success' && (needs.windows.result == 'success' || needs.windows.result == 'skipped') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write

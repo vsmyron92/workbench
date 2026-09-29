@@ -13,7 +13,7 @@ use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
-use tokio_postgres::config::{Host, SslMode};
+use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{AsyncMessage, CancelToken, Client, Config, NoTls, Socket};
 use tokio_postgres_rustls::MakeRustlsConnect;
@@ -93,11 +93,7 @@ fn split_sslmode(url: &str) -> (String, Option<String>) {
 }
 
 fn host_string(c: &Config) -> String {
-    match c.get_hosts().first() {
-        Some(Host::Tcp(h)) => h.clone(),
-        Some(Host::Unix(p)) => p.display().to_string(),
-        None => String::new(),
-    }
+    c.get_hosts().first().map(crate::util::os::net::postgres_host).unwrap_or_default()
 }
 
 /// The OS user, libpq's default for `user` (and `dbname`).
@@ -157,8 +153,8 @@ pub fn resolve(state: &AppState, project: &Project, src: &DatabaseSource) -> Res
         config.password(pw.expose().as_bytes());
         secrets.push(pw);
     } else if config.get_password().is_none() {
-        if let Some(home) = dirs::home_dir() {
-            if let Some(pw) = pgpass(&home.join(".pgpass"), &host, port, &db, &user) {
+        if let Some(file) = crate::util::os::path::pgpass_file() {
+            if let Some(pw) = pgpass(&file, &host, port, &db, &user) {
                 let s = Secret::from_value(pw.clone());
                 config.password(pw.as_bytes());
                 secrets.push(s);
@@ -187,11 +183,10 @@ pub fn resolve(state: &AppState, project: &Project, src: &DatabaseSource) -> Res
 
 /// The password `~/.pgpass` gives (libpq's rules: `host:port:database:user:password`,
 /// `*` matches anything, `\:` and `\\` escape; the file must not be readable by
-/// others, or libpq ignores it and so do we).
+/// others, or libpq ignores it and so do we; libpq checks no permissions on Windows).
 pub fn pgpass(file: &Path, host: &str, port: u16, db: &str, user: &str) -> Option<String> {
-    use std::os::unix::fs::PermissionsExt;
     let meta = std::fs::metadata(file).ok()?;
-    if meta.permissions().mode() & 0o077 != 0 {
+    if crate::util::os::perm::mode(&meta).is_some_and(|m| m & 0o077 != 0) {
         return None;
     }
     let text = std::fs::read_to_string(file).ok()?;
@@ -370,17 +365,17 @@ mod tests {
 
     #[test]
     fn pgpass_follows_libpq() {
-        use std::os::unix::fs::PermissionsExt;
+        use crate::util::os::perm;
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("pgpass");
         std::fs::write(&f, "# comment\nother:5432:*:*:no\nlocalhost:5432:shop:app:s3cr\\:et\n*:*:*:admin:any\n").unwrap();
-        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        perm::apply(&f, 0o600).unwrap();
         assert_eq!(pgpass(&f, "localhost", 5432, "shop", "app").as_deref(), Some("s3cr:et"));
         assert_eq!(pgpass(&f, "/var/run/postgresql", 5432, "shop", "app").as_deref(), Some("s3cr:et"), "sockets count as localhost");
         assert_eq!(pgpass(&f, "db.example.com", 6543, "x", "admin").as_deref(), Some("any"));
         assert_eq!(pgpass(&f, "localhost", 5433, "shop", "app"), None);
-        // Readable by others: ignored, like libpq.
-        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(pgpass(&f, "localhost", 5432, "shop", "app"), None);
+        // Readable by others: ignored, like libpq (which does not check on Windows).
+        perm::expose(&f, 0o644);
+        assert_eq!(pgpass(&f, "localhost", 5432, "shop", "app").as_deref(), if cfg!(unix) { None } else { Some("s3cr:et") });
     }
 }

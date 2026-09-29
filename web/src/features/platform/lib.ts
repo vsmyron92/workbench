@@ -81,6 +81,28 @@ export function hostEntryError(h: string): string | null {
   return null
 }
 
+/**
+ * `null` when `p` can be a path in Settings › Projects, else the problem: absolute or under
+ * `~`, and on a Windows server also `C:\…`, `C:/…` and `\\server\share` (which the server
+ * then refuses with its own reason), as `util::os::path::is_absolute_str` reads them.
+ */
+export function projectPathError(p: string, os: string | null | undefined): string | null {
+  if (p.startsWith('/') || p.startsWith('~')) return null
+  if (os !== 'windows') return 'Use an absolute path or ~/…'
+  return /^([A-Za-z]:)?[\\/]/.test(p) ? null : 'Use an absolute path (C:\\…) or ~\\…'
+}
+
+/**
+ * `parts` under the config dir the server reports (`GET /api/settings` `paths.configDir`,
+ * `~`-contracted, with the server's separator): `~/.config/workbench/tls/cert.pem` on
+ * Linux, `~\AppData\Roaming\workbench\tls\cert.pem` on Windows.
+ */
+export function inConfigDir(configDir: string | undefined, ...parts: string[]): string {
+  const dir = configDir || '~/.config/workbench'
+  const sep = dir.includes('\\') ? '\\' : '/'
+  return [dir.replace(/[\\/]+$/, ''), ...parts].join(sep)
+}
+
 /** `null` when `u` can be the public URL, else the problem. */
 export function publicUrlError(u: string): string | null {
   const v = u.trim()
@@ -205,4 +227,13 @@ export function formatMs(ms: number): string {
 
 export function isLoopbackHost(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '::1' || hostname === '[::1]' || hostname.startsWith('127.')
+}
+
+/**
+ * Whether the server's desktop notifications reach whoever looks at this page: on its
+ * own computer (a loopback host), unless the server's OS has none (`desktopUnsupported`,
+ * the health report's reason: Windows). Then the browser notifies instead.
+ */
+export function desktopNotifiesHere(hostname: string, desktopUnsupported: string | null): boolean {
+  return isLoopbackHost(hostname) && !desktopUnsupported
 }

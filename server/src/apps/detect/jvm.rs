@@ -1,13 +1,14 @@
 //! JVM builds → runs.
 //!
 //! * **Gradle** (the shallowest `settings.gradle[.kts]` or `build.gradle[.kts]`,
-//!   through `./gradlew` when the wrapper exists): `build` and `test`; Spring Boot
-//!   `bootRun` (server, `server.port` or 8080), Quarkus `quarkusDev`, the
-//!   `application` plugin's `run`; Android apps `assembleDebug`. Subprojects
-//!   (`include("app")`) with those plugins get `:app:bootRun` & co.
-//! * **Maven** (the shallowest `pom.xml`, through `./mvnw` when the wrapper exists):
-//!   `test` and `package`; Spring Boot `spring-boot:run`, Quarkus `quarkus:dev`,
-//!   Micronaut `mn:run` (in the module that declares the plugin, `-pl <module>`).
+//!   through `./gradlew` when the wrapper exists, `.\gradlew.bat` on Windows): `build`
+//!   and `test`; Spring Boot `bootRun` (server, `server.port` or 8080), Quarkus
+//!   `quarkusDev`, the `application` plugin's `run`; Android apps `assembleDebug`.
+//!   Subprojects (`include("app")`) with those plugins get `:app:bootRun` & co.
+//! * **Maven** (the shallowest `pom.xml`, through `./mvnw` when the wrapper exists,
+//!   `.\mvnw.cmd` on Windows): `test` and `package`; Spring Boot `spring-boot:run`,
+//!   Quarkus `quarkus:dev`, Micronaut `mn:run` (in the module that declares the plugin,
+//!   `-pl <module>`).
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -16,6 +17,7 @@ use regex::Regex;
 
 use super::{Ctx, scoped, sh, source};
 use crate::config::project::{Component, Ready, RunConfig, RunKind};
+use crate::util::os::shell::Dialect;
 
 /// Spring Boot (`Started App in 2.3 seconds`, `Tomcat started on port 8080`), Quarkus
 /// (`Listening on: http://localhost:8080`) and Micronaut (`Server Running: http://…`).
@@ -28,6 +30,17 @@ static XML_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-
 static PLUGIN_MANAGEMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<pluginManagement>.*?</pluginManagement>").unwrap());
 static SERVER_PORT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^\s*(?:server\.port\s*[=:]\s*|port:\s*)\$?\{?(?:[A-Z_]+:)?(\d{2,5})\}?\s*$").unwrap());
+
+/// The project's build wrapper in `dir` as a command's first word: the script
+/// (`gradlew`, `./gradlew`), or on Windows (`super::dialect`) its batch file
+/// (`gradlew.bat`, `.\gradlew.bat`). `None` without one.
+fn wrapper(cx: &Ctx, dir: &Path, posix: (&str, &'static str), windows: (&str, &'static str)) -> Option<&'static str> {
+    let (file, command) = match super::dialect() {
+        Dialect::Posix => posix,
+        Dialect::PowerShell => windows,
+    };
+    cx.is_file(&dir.join(file)).then_some(command)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum App {
@@ -60,7 +73,7 @@ fn gradle_app(src: &str) -> Option<App> {
 fn spring_port(cx: &mut Ctx, module: &Path) -> u16 {
     for n in ["application.properties", "application.yml", "application.yaml"] {
         let p = module.join("src/main/resources").join(n);
-        if p.is_file() {
+        if cx.is_file(&p) {
             if let Some(port) = cx.read(&p).and_then(|t| {
                 // YAML: only a `port:` under a `server:` block counts.
                 if n.ends_with("properties") {
@@ -101,9 +114,9 @@ pub fn detect_gradle(cx: &mut Ctx, f: &Path) {
         return;
     }
     let cwd = cx.rel(dir);
-    let gradle = if dir.join("gradlew").is_file() { "./gradlew" } else { "gradle" };
-    let settings = ["settings.gradle.kts", "settings.gradle"].iter().map(|n| dir.join(n)).find(|p| p.is_file());
-    let build = ["build.gradle.kts", "build.gradle"].iter().map(|n| dir.join(n)).find(|p| p.is_file());
+    let gradle = wrapper(cx, dir, ("gradlew", "./gradlew"), ("gradlew.bat", r".\gradlew.bat")).unwrap_or("gradle");
+    let settings = ["settings.gradle.kts", "settings.gradle"].iter().map(|n| dir.join(n)).find(|p| cx.is_file(p));
+    let build = ["build.gradle.kts", "build.gradle"].iter().map(|n| dir.join(n)).find(|p| cx.is_file(p));
     let manifest = build.clone().or(settings.clone()).unwrap_or_else(|| f.to_path_buf());
     cx.tag("gradle");
     cx.tag("jvm");
@@ -126,8 +139,12 @@ pub fn detect_gradle(cx: &mut Ctx, f: &Path) {
             }
         }
         for n in names {
-            let mdir = dir.join(n.replace(':', "/"));
-            let Some(mb) = ["build.gradle.kts", "build.gradle"].iter().map(|x| mdir.join(x)).find(|p| p.is_file()) else { continue };
+            let rel = n.replace(':', "/");
+            if !crate::util::os::path::stays_inside(&rel) {
+                continue;
+            }
+            let mdir = dir.join(rel);
+            let Some(mb) = ["build.gradle.kts", "build.gradle"].iter().map(|x| mdir.join(x)).find(|p| cx.is_file(p)) else { continue };
             cx.mark(format!("gradle:{}", mdir.display()));
             modules.push((format!(":{n}:"), mdir, cx.read(&mb).unwrap_or_default()));
         }
@@ -158,7 +175,7 @@ pub fn detect_gradle(cx: &mut Ctx, f: &Path) {
         }
         let Some(app) = gradle_app(text) else { continue };
         let label = if prefix.is_empty() { String::new() } else { format!(" {}", prefix.trim_matches(':')) };
-        let src = source(cx, &mdir.join(if mdir.join("build.gradle.kts").is_file() { "build.gradle.kts" } else { "build.gradle" }), "");
+        let src = source(cx, &mdir.join(if cx.is_file(&mdir.join("build.gradle.kts")) { "build.gradle.kts" } else { "build.gradle" }), "");
         let run = match app {
             App::SpringBoot => {
                 let port = spring_port(cx, mdir);
@@ -201,7 +218,7 @@ pub fn detect_maven(cx: &mut Ctx, f: &Path) {
         return;
     }
     let cwd = cx.rel(dir);
-    let mvn = if dir.join("mvnw").is_file() { "./mvnw" } else { "mvn" };
+    let mvn = wrapper(cx, dir, ("mvnw", "./mvnw"), ("mvnw.cmd", r".\mvnw.cmd")).unwrap_or("mvn");
     cx.tag("maven");
     cx.tag("jvm");
     cx.pf.components.push(Component { name: scoped("maven", &cwd), path: cwd.clone(), kind: "maven".into(), version: None });
@@ -220,7 +237,7 @@ pub fn detect_maven(cx: &mut Ctx, f: &Path) {
     let mut modules: Vec<(Option<String>, PathBuf, PathBuf, String)> = vec![(None, dir.to_path_buf(), f.to_path_buf(), pom.clone())];
     for m in MODULE.captures_iter(&pom).take(20) {
         let name = m[1].trim_end_matches('/').to_string();
-        if name.contains("..") {
+        if name.contains("..") || !crate::util::os::path::stays_inside(&name) {
             continue;
         }
         let mdir = dir.join(&name);

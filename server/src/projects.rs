@@ -125,8 +125,9 @@ pub struct ProjectRegistry {
 const IDS_FILE: &str = "project-ids.json";
 
 /// Is `id` usable as a file name component (`projects/<id>.toml`, `workspace/<id>`)?
+/// On Windows not a device name (`nul`, `com1`), whose files would go to the device.
 fn valid_id(id: &str) -> bool {
-    !id.is_empty() && util::slug(id) == id
+    !id.is_empty() && util::slug(id) == id && util::os::path::check_component(id).is_ok()
 }
 
 /// Ids for `dirs` (canonical, scan order): the id `known` already gives a directory,
@@ -135,7 +136,7 @@ fn valid_id(id: &str) -> bool {
 /// other directory in `known` holds. New assignments are added to `known`.
 fn assign_ids(known: &mut BTreeMap<String, String>, dirs: &[PathBuf]) -> Vec<String> {
     // Workspace scope names (`home`, and the UI's `all` view) never become project
-    // ids: a directory called `home` is project `home-2`.
+    // ids: a directory called `home` is project `home-2` (on Windows so is `nul`).
     let mut taken: HashSet<String> = known.values().cloned().collect();
     taken.extend(RESERVED_IDS.iter().map(|s| s.to_string()));
     dirs.iter()
@@ -150,7 +151,7 @@ fn assign_ids(known: &mut BTreeMap<String, String>, dirs: &[PathBuf]) -> Vec<Str
             let stem = if stem.is_empty() { base.as_str() } else { stem };
             let mut id = base.clone();
             let mut n = 2;
-            while taken.contains(&id) {
+            while taken.contains(&id) || util::os::path::check_component(&id).is_err() {
                 id = format!("{stem}-{n}");
                 n += 1;
             }
@@ -203,9 +204,10 @@ impl ProjectRegistry {
         self.get(id).ok_or_else(|| ApiError::not_found(format!("no project {id:?}")))
     }
 
-    /// The project whose root contains `abs` (deepest root wins).
+    /// The project whose root contains `abs` (deepest root wins; on Windows without
+    /// regard to case).
     pub fn find_by_path(&self, abs: &Path) -> Option<Arc<Project>> {
-        self.list_with_scratches().into_iter().filter(|p| abs.starts_with(&p.root)).max_by_key(|p| p.root.as_os_str().len())
+        self.list_with_scratches().into_iter().filter(|p| util::os::path::starts_with(abs, &p.root)).max_by_key(|p| p.root.as_os_str().len())
     }
 
     /// Rescan roots and reload every project's config layers.
@@ -215,26 +217,50 @@ impl ProjectRegistry {
             let cfg = state.config.read();
             (cfg.projects.roots.clone(), cfg.projects.include.clone(), cfg.projects.exclude.clone())
         };
-        let canonical = |p: PathBuf| p.canonicalize().unwrap_or(p);
+        // Roots this OS does not serve (UNC and WSL paths on Windows) are skipped before
+        // anything opens them, which would connect to their server; so are directories
+        // reached through a link to one (`leaves_machine`) and those that resolve to one
+        // (a mapped network drive).
+        let served = |p: &Path| match util::os::path::unsupported_root(p) {
+            Some(why) => {
+                tracing::warn!("project {} skipped: {why}", p.display());
+                false
+            }
+            None if util::os::path::leaves_machine(p) => {
+                tracing::warn!("project {} skipped: it is reached through a link to a network path or a device", p.display());
+                false
+            }
+            None => true,
+        };
+        let canonical = |p: PathBuf| match util::os::path::unsupported_root(&p) {
+            Some(_) => p,
+            None => util::os::path::canonicalize(&p).unwrap_or(p),
+        };
         let exclude: HashSet<PathBuf> =
             exclude.iter().flat_map(|e| [expand_tilde(e), canonical(expand_tilde(e))]).collect();
         let mut dirs: Vec<PathBuf> = vec![];
         for root in &roots {
             let root = expand_tilde(root);
+            if !served(&root) {
+                continue;
+            }
             let Ok(rd) = std::fs::read_dir(&root) else { continue };
+            // An entry that links to another computer is not looked into (Windows), nor is
+            // a `.git` that does (the check reads every link on the way to it).
+            let local = |p: &Path| !util::os::path::leaves_machine_below(&root, &p.join(".git"));
             let mut found: Vec<PathBuf> =
-                rd.flatten().map(|e| e.path()).filter(|p| p.is_dir() && p.join(".git").exists()).collect();
+                rd.flatten().map(|e| e.path()).filter(|p| local(p) && p.is_dir() && p.join(".git").exists()).collect();
             found.sort();
             dirs.extend(found);
         }
-        dirs.extend(include.iter().map(|inc| expand_tilde(inc)).filter(|p| p.is_dir()));
+        dirs.extend(include.iter().map(|inc| expand_tilde(inc)).filter(|p| served(p) && p.is_dir()));
         // One project per directory, however it was reached (a root, an include, a symlink).
         let mut seen = HashSet::new();
         let dirs: Vec<PathBuf> = dirs
             .into_iter()
             .filter(|d| !exclude.contains(d))
             .map(canonical)
-            .filter(|d| !exclude.contains(d) && seen.insert(d.clone()))
+            .filter(|d| !exclude.contains(d) && served(d) && seen.insert(d.clone()))
             .collect();
 
         let ids_file = state.paths.data_dir.join(IDS_FILE);
@@ -264,11 +290,10 @@ impl ProjectRegistry {
 
 /// `data_dir/scratches` (created 0700) as the scratch files' project.
 fn scratch_project(state: &AppState) -> anyhow::Result<Project> {
-    use std::os::unix::fs::PermissionsExt;
     let dir = state.paths.data_dir.join("scratches");
     std::fs::create_dir_all(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    let root = dir.canonicalize()?;
+    util::os::perm::apply(&dir, 0o700)?;
+    let root = util::os::path::canonicalize(&dir)?;
     let mut config = ProjectFile::default();
     config.project.id = SCRATCH_ID.into();
     config.project.name = "Scratches".into();
@@ -451,9 +476,16 @@ async fn update_projects_config(state: &AppState, change: impl FnOnce(&mut Proje
 /// Add a directory as a project (persisted in `projects.include`).
 async fn add(State(state): State<AppState>, Json(body): Json<AddBody>) -> ApiResult<Json<serde_json::Value>> {
     let p = expand_tilde(body.path.trim());
+    // UNC and WSL paths on Windows, and links to them: refused before `is_dir` connects
+    // to their server.
+    util::os::support::require_local_root(&p)?;
     if !p.is_dir() {
         return Err(ApiError::bad_request(format!("{} is not a directory", p.display())));
     }
+    // A mapped network drive or a link to a share resolves to a UNC path: refused
+    // before config.toml names it.
+    let canon = util::os::path::canonicalize(&p).unwrap_or_else(|_| p.clone());
+    util::os::support::require_root(&canon).map_err(|e| ApiError { message: format!("{} is {}: {}", p.display(), canon.display(), e.message), ..e })?;
     update_projects_config(&state, |projects| {
         let s = contract_tilde(&p);
         if !projects.include.contains(&s) {
@@ -463,7 +495,7 @@ async fn add(State(state): State<AppState>, Json(body): Json<AddBody>) -> ApiRes
     })
     .await?;
     state.projects.reload(&state).await;
-    let id = state.projects.find_by_path(&p.canonicalize().unwrap_or(p)).map(|p| p.id.clone());
+    let id = state.projects.find_by_path(&canon).map(|p| p.id.clone());
     Ok(Json(json!({ "ok": true, "id": id })))
 }
 
@@ -501,13 +533,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("evil");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
-        let marker = dir.path().join("PWNED");
+        // A backslash in the marker's path on every OS: the fixture must quote it for TOML
+        // (Windows paths hold backslashes, and a basic string reads `\` as an escape: `\U…`).
+        let marker = dir.path().join(r"back\slash").join("PWNED");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        // What the repository's secret command does: leave `marker` behind, with a program
+        // every machine has, so the check at the end would see it run.
+        #[cfg(unix)]
+        let argv = ["sh".to_string(), "-c".into(), format!("touch '{}'; echo x", marker.display())];
+        #[cfg(windows)]
+        let argv = [
+            "powershell".to_string(),
+            "-NoProfile".into(),
+            "-Command".into(),
+            format!("New-Item -ItemType File -Path '{}' | Out-Null; 'x'", marker.display()),
+        ];
+        let command = argv.iter().map(|a| toml::Value::String(a.clone()).to_string()).collect::<Vec<_>>().join(", ");
         std::fs::write(
             repo.join(".workbench.toml"),
             format!(
                 r#"
                 [secrets]
-                pw = {{ command = ["sh", "-c", "touch {m}; echo x"] }}
+                pw = {{ command = [{command}] }}
                 [agent]
                 permission_mode = "bypassPermissions"
                 [[env]]
@@ -520,8 +567,7 @@ mod tests {
                 url = "http://127.0.0.1:9"
                 health = {{ url = "http://127.0.0.1:9/h", interval_s = 10 }}
                 auth = {{ user = "u", password = "gitlab" }}
-                "#,
-                m = marker.display()
+                "#
             ),
         )
         .unwrap();
@@ -598,6 +644,57 @@ mod tests {
         assert!(app.state.config.read().projects.exclude.len() == 1);
     }
 
+    /// Windows: WSL and network paths are refused as `unsupported_platform` before
+    /// anything opens them (which would connect to their server); config.toml is untouched.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_refuses_wsl_and_network_roots() {
+        use tower::ServiceExt;
+        let app = testutil::app().await;
+        let file = app.state.paths.config_file();
+        let before = std::fs::read_to_string(&file).unwrap();
+        for (path, says) in [
+            (r"\\wsl$\Ubuntu\home\u\proj", "WSL"),
+            ("//wsl.localhost/Debian/src", "WSL"),
+            (r"\\server.invalid\share\proj", "network"),
+            (r"\??\UNC\server.invalid\share\proj", "network"),
+        ] {
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("host", "127.0.0.1:7999")
+                .header("authorization", format!("Bearer {}", app.state.auth.master_token()))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(serde_json::json!({ "path": path }).to_string()))
+                .unwrap();
+            let resp = app.router.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status().as_u16(), 501, "{path}");
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!((v["error"]["code"].as_str(), v["error"]["feature"].as_str()), (Some("unsupported_platform"), Some("networkRoots")), "{v}");
+            assert!(v["error"]["message"].as_str().is_some_and(|m| m.contains(says)), "{v}");
+        }
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    /// Windows: WSL and network roots already in config.toml are skipped, not loaded;
+    /// local ones next to them still are.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_skips_wsl_and_network_roots_in_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("local");
+        std::fs::create_dir_all(local.join(".git")).unwrap();
+        let mut cfg = GlobalConfig::default();
+        cfg.projects.roots = vec![r"\\server.invalid\share".into(), r"\\wsl$\Ubuntu\home\u".into()];
+        cfg.projects.include =
+            vec![r"\\wsl$\Ubuntu\home\u\proj".into(), r"\??\UNC\server.invalid\share\proj".into(), local.display().to_string()];
+        cfg.notify.desktop = false;
+        let app = testutil::app_with(cfg).await;
+        let roots: Vec<std::path::PathBuf> = app.state.projects.list().iter().map(|p| p.root.clone()).collect();
+        assert_eq!(roots, [crate::util::os::path::canonicalize(&local).unwrap()]);
+    }
+
     #[test]
     fn strips_userinfo_from_remote_urls() {
         assert_eq!(super::strip_credentials("https://oauth2:tok@gitlab.com/a/b.git"), "https://gitlab.com/a/b.git");
@@ -643,6 +740,22 @@ mod tests {
         assert_eq!(known.get("/c/web").map(String::as_str), Some("web"));
     }
 
+    /// On Windows `projects/nul.toml` or `workspace/com1` would be the device.
+    #[cfg(windows)]
+    #[test]
+    fn windows_device_names_are_never_project_ids() {
+        use super::{assign_ids, read_ids};
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+        let mut known = BTreeMap::new();
+        let ids = assign_ids(&mut known, &[PathBuf::from(r"C:\a\nul_"), PathBuf::from(r"C:\b\COM1"), PathBuf::from(r"C:\c\aux-")]);
+        assert_eq!(ids, ["nul-2", "com-2", "aux-2"]);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("project-ids.json");
+        std::fs::write(&file, r#"{"C:\\a\\con":"con","C:\\c\\web":"web"}"#).unwrap();
+        assert_eq!(read_ids(&file).into_values().collect::<Vec<_>>(), ["web"]);
+    }
+
     fn git(dir: &std::path::Path, args: &[&str]) {
         let ok = std::process::Command::new("git").args(args).current_dir(dir).status().unwrap().success();
         assert!(ok, "git {args:?}");
@@ -678,7 +791,7 @@ mod tests {
         )
         .unwrap();
         let root_of = |id: &str| state.projects.get(id).map(|p| p.root.clone());
-        let own = own.canonicalize().unwrap();
+        let own = crate::util::os::path::canonicalize(&own).unwrap();
         state.projects.reload(state).await;
         assert_eq!(root_of("pyapi"), Some(own.clone()));
 
@@ -686,7 +799,7 @@ mod tests {
         state.config.write().projects.roots = vec![dir.path().join("root1").display().to_string()];
         state.projects.reload(state).await;
         assert_eq!(root_of("pyapi"), Some(own.clone()));
-        assert_eq!(root_of("pyapi-2"), Some(dir.path().join("root1/pyapi").canonicalize().unwrap()));
+        assert_eq!(root_of("pyapi-2"), Some(crate::util::os::path::canonicalize(dir.path().join("root1/pyapi")).unwrap()));
 
         // Another clone is added, then the owner's project is removed.
         state.config.write().projects.include.push(alt.display().to_string());
@@ -753,14 +866,13 @@ mod tests {
         use crate::mcp::{McpCtx, call_api};
         use axum::http::Method;
         use serde_json::json;
-        use std::os::unix::fs::PermissionsExt;
 
         let t = crate::platform::testutil::app().await;
         assert!(t.state.projects.list().iter().all(|p| p.id != SCRATCH_ID));
         let p = t.state.projects.require(SCRATCH_ID).unwrap();
         assert_eq!(p.name, "Scratches");
-        assert_eq!(p.root, t.state.paths.data_dir.join("scratches").canonicalize().unwrap());
-        assert_eq!(std::fs::metadata(&p.root).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(p.root, crate::util::os::path::canonicalize(t.state.paths.data_dir.join("scratches")).unwrap());
+        crate::util::os::perm::assert_mode(&p.root, 0o700);
         assert_eq!(t.state.projects.find_by_path(&p.root.join("a.md")).map(|x| x.id.clone()).as_deref(), Some(SCRATCH_ID));
 
         let ctx = McpCtx::default();
@@ -776,7 +888,7 @@ mod tests {
             let e = call_api(&t.state, Method::GET, &format!("{base}/read?path={bad}"), None, &ctx).await.unwrap_err();
             assert!(e.status.is_client_error(), "{bad}: {e:?}");
         }
-        std::os::unix::fs::symlink(t.state.paths.data_dir.join("token"), p.root.join("link")).unwrap();
+        crate::util::os::fs::symlink(t.state.paths.data_dir.join("token"), p.root.join("link")).unwrap();
         assert!(call_api(&t.state, Method::GET, &format!("{base}/read?path=link"), None, &ctx).await.is_err());
         // The list the UI shows never has it.
         let v = call_api(&t.state, Method::GET, "/api/projects", None, &ctx).await.unwrap();

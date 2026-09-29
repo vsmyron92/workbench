@@ -196,7 +196,7 @@ async fn on_branch(root: &std::path::Path, sha: &str, branch: &str) -> Option<bo
 
 pub async fn plan(state: &AppState, project: &Project, e: &Environment, rev: Option<&str>) -> Result<DeployPlan, ApiError> {
     let d = e.deploy.as_ref().ok_or_else(|| ApiError::not_configured(format!("{} has no [env.deploy] section", e.name)))?;
-    let target = remote::deploy_target(project, e, d.local)?;
+    let target = remote::deploy_target(&state.paths, project, e, d.local)?;
     let sha = resolve_sha(&project.root, rev).await?;
     let sha8: String = sha.chars().take(8).collect();
     let branch = crate::util::git::current_branch(&project.root).await;
@@ -304,7 +304,7 @@ pub async fn deploy(state: &AppState, project: &Project, e: &Environment, rev: O
     }
     check_confirmation(d.confirm, &e.name, confirmation)
         .map_err(|m| ApiError::new(axum::http::StatusCode::PRECONDITION_REQUIRED, "confirmation_required", m))?;
-    let target = remote::deploy_target(project, e, d.local)?;
+    let target = remote::deploy_target(&state.paths, project, e, d.local)?;
     let argv = remote::argv(&target, &p.command, false);
     let info = state
         .terminals

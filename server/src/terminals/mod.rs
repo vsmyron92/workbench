@@ -259,16 +259,27 @@ pub(crate) struct Entry {
     pub exit_tx: watch::Sender<Option<ExitInfo>>,
     pub meta_dirty: AtomicBool,
     screen_saved_at: Mutex<Option<Instant>>,
+    /// Held while its files are saved or removed; true once they are removed (it was
+    /// forgotten), so that no save already under way brings them back.
+    files_removed: Mutex<bool>,
     /// Serializes programmatic sends so pastes and their Enter never interleave.
     pub input_lock: tokio::sync::Mutex<()>,
     /// Serializes start/stop/restart.
     pub lifecycle: tokio::sync::Mutex<()>,
+    /// Held by `on_exit` from the moment it takes the exited process out of `pty` until the
+    /// exit is recorded, saved and announced, and by `launch` while it starts a process.
+    /// `on_exit` cannot take `lifecycle` (a stop holds it while it waits for the exit), and
+    /// once `pty` is empty a start or stop would otherwise not see the exit under way: a
+    /// start would then send `exit_tx` its `None` before the old exit's `Some`, and the new
+    /// process would read as exited. `stop_process` waits for it too.
+    exit_lock: tokio::sync::Mutex<()>,
     /// How a run/command terminal was started (in memory only: its env may hold secrets).
     pub spec: Mutex<Option<SpawnSpec>>,
     /// Secret values its processes may print (in memory only), masked in the output.
     pub redact: Mutex<Vec<Secret>>,
-    /// Sessions of exited processes that still have members: `(sid, members)`.
-    pub lingering: Mutex<Vec<(i32, u32)>>,
+    /// Sessions of exited processes that still have members, with how many. The handle
+    /// keeps the sid naming that session (Windows reuses pids).
+    pub lingering: Mutex<Vec<(util::os::session::Handle, u32)>>,
     pub rt: Mutex<hooks::AgentRt>,
     /// Signalled by the SessionStart hook (restores wait for it before starting the next).
     pub started: Notify,
@@ -396,6 +407,13 @@ pub struct Terminals {
 enum Write {
     Meta(store::Record),
     Screen(String, Vec<u8>),
+}
+
+/// Remove a forgotten terminal's files (blocking). No save brings them back afterwards.
+fn remove_files(root: &Path, entry: &Entry) {
+    let mut removed = entry.files_removed.lock();
+    *removed = true;
+    store::remove(root, &entry.id);
 }
 
 impl Terminals {
@@ -532,7 +550,9 @@ impl Terminals {
         self.get(id).map(|e| e.screen.out_tx.subscribe())
     }
 
-    /// Resolves to `Some(exit)` when the process has exited.
+    /// Resolves to `Some(exit)` when the process has exited, once `info` says so (Exited,
+    /// with `exit`) and that is saved, except while the server shuts down. It holds the
+    /// last exit until a restarted process is running (`info` says Starting meanwhile).
     pub fn exit_watch(&self, id: &str) -> Option<watch::Receiver<Option<ExitInfo>>> {
         self.get(id).map(|e| e.exit_tx.subscribe())
     }
@@ -593,8 +613,10 @@ impl Terminals {
             exit_tx,
             meta_dirty: AtomicBool::new(true),
             screen_saved_at: Mutex::new(None),
+            files_removed: Mutex::new(false),
             input_lock: tokio::sync::Mutex::new(()),
             lifecycle: tokio::sync::Mutex::new(()),
+            exit_lock: tokio::sync::Mutex::new(()),
             spec: Mutex::new(None),
             redact: Mutex::new(vec![]),
             lingering: Mutex::new(vec![]),
@@ -690,6 +712,9 @@ impl Terminals {
         mut spec: pty::LaunchSpec,
         fresh_screen: bool,
     ) -> Result<(), ApiError> {
+        // An exit still being recorded is announced before this start begins, and none is
+        // recorded while it runs (`Entry::exit_lock`).
+        let _exit = entry.exit_lock.lock().await;
         // A terminal forgotten while this start waited for the lifecycle lock stays dead.
         if !self.is_registered(entry) {
             return Err(ApiError::not_found(format!("no terminal {:?}", entry.id)));
@@ -720,6 +745,8 @@ impl Terminals {
                 Err(msg) => container_error = Some(msg),
             }
         }
+        // After a container's wrap: it is for the processes on this computer.
+        spec.env.extend(program_env(entry.kind()));
         if fresh_screen {
             entry.screen.reset();
         } else {
@@ -792,22 +819,26 @@ impl Terminals {
                 let msg = format!("cannot start {program}: {e:#}");
                 entry.screen.feed(format!("\r\n\x1b[31m{msg}\x1b[0m\r\n").as_bytes());
                 let exit = ExitInfo { code: None, signal: Some("failed to start".into()), at: util::now_ms() };
-                entry.exit_tx.send_replace(Some(exit.clone()));
+                // Recorded and saved before it is announced, as in `on_exit`.
                 self.update_as("terminal.exited", entry, |r| {
                     r.info.status = TerminalStatus::Exited;
-                    r.info.exit = Some(exit);
+                    r.info.exit = Some(exit.clone());
                     if let Some(a) = r.info.agent.as_mut() {
                         a.state = AgentState::Error;
                         a.attention = Some(msg.clone());
                     }
                     true
                 });
+                self.save_now(entry).await;
+                entry.exit_tx.send_replace(Some(exit));
                 Err(ApiError::internal(msg))
             }
         }
     }
 
     async fn on_exit(&self, state: &AppState, entry: &Arc<Entry>, pty: &Arc<pty::Pty>, info: ExitInfo) {
+        // Held until the exit is announced: no start slips in between (`Entry::exit_lock`).
+        let _exit = entry.exit_lock.lock().await;
         {
             let mut cur = entry.pty.lock();
             match &*cur {
@@ -816,10 +847,19 @@ impl Terminals {
                 _ => return,
             }
         }
-        entry.exit_tx.send_replace(Some(info.clone()));
+        // While the server shuts down, the record keeps saying it runs (it is restarted
+        // on the next start): only the watchers learn of the exit.
         if self.shutting_down.load(Ordering::Relaxed) {
+            entry.exit_tx.send_replace(Some(info));
             return;
         }
+        // Recorded and saved before `exit_tx` announces it, so whoever wakes on it (`kill`,
+        // `restart`, `close`, `exit_watch`) finds the exit in `info` and on disk, and this
+        // save is over before `close` removes the files of a terminal it forgets. On Windows
+        // `kill` is usually waiting by then (the output ends only once the pseudoconsole has
+        // closed, after the leader is gone), and woken by an earlier announcement it could
+        // read Running. A stop or start that finds `pty` empty meanwhile waits for
+        // `exit_lock`, so no restart's `None` comes before this `Some`.
         let is_agent = self.update_as("terminal.exited", entry, |r| {
             r.info.status = TerminalStatus::Exited;
             r.info.exit = Some(info.clone());
@@ -836,14 +876,16 @@ impl Terminals {
             state.auth.revoke_agent_tokens(&entry.id);
         }
         self.save_now(entry).await;
+        entry.exit_tx.send_replace(Some(info));
         // Background jobs the process left in its session keep running (a shell's
         // `npm run dev &` before `exit`): keep track of them so Kill and Close reach them.
-        tokio::spawn(watch_lingering(state.clone(), entry.clone(), pty.pid));
+        tokio::spawn(watch_lingering(state.clone(), entry.clone(), pty.session()));
         self.maybe_hibernate(entry);
     }
 
-    /// Kill the current process (if any) and wait until its exit is recorded; also end
-    /// whatever earlier processes left running in their sessions.
+    /// Kill the current process (if any) and wait until its exit is recorded and saved
+    /// (also that of one that exited by itself and is being recorded); also end whatever
+    /// earlier processes left running in their sessions.
     pub(crate) async fn stop_process(&self, entry: &Arc<Entry>) {
         if let Some(p) = entry.running_pty() {
             // Killing `docker exec` leaves its process running in the container: end
@@ -856,12 +898,15 @@ impl Terminals {
             let mut rx = entry.exit_tx.subscribe();
             let _ = tokio::time::timeout(Duration::from_secs(5), async move { rx.wait_for(|v| v.is_some()).await.map(|_| ()) }).await;
         }
-        let sids: Vec<i32> = entry.lingering.lock().iter().map(|(sid, _)| *sid).collect();
-        if sids.is_empty() {
+        // `on_exit` holds it from the moment `pty` is empty until the exit is announced.
+        let _ = tokio::time::timeout(Duration::from_secs(5), entry.exit_lock.lock()).await;
+        // The handles, held until the kills are over, keep each sid naming its session.
+        let held: Vec<util::os::session::Handle> = entry.lingering.lock().iter().map(|(s, _)| s.clone()).collect();
+        if held.is_empty() {
             return;
         }
-        futures::future::join_all(sids.iter().map(|sid| pty::kill_session(*sid, KILL_GRACE, || true))).await;
-        entry.lingering.lock().retain(|(sid, _)| !sids.contains(sid));
+        futures::future::join_all(held.iter().map(|s| util::os::session::kill(s.sid(), KILL_GRACE, || true))).await;
+        entry.lingering.lock().retain(|(s, _)| !held.iter().any(|h| h.sid() == s.sid()));
         self.note_lingering(entry);
     }
 
@@ -933,8 +978,8 @@ impl Terminals {
             self.entries.write().remove(id);
             state.auth.revoke_agent_tokens(id);
             if let Some(root) = self.root() {
-                let id = id.to_string();
-                let _ = tokio::task::spawn_blocking(move || store::remove(&root, &id)).await;
+                let e = entry.clone();
+                let _ = tokio::task::spawn_blocking(move || remove_files(&root, &e)).await;
             }
             if let Some(ctx) = self.ctx() {
                 let pid = entry.rec.lock().info.project_id.clone();
@@ -1006,26 +1051,30 @@ impl Terminals {
         if ids.is_empty() {
             return;
         }
-        let mut removed: Vec<(String, Option<String>)> = vec![];
+        let mut removed: Vec<Arc<Entry>> = vec![];
         {
             let mut map = self.entries.write();
             for id in ids {
                 let Some(e) = map.get(&id).cloned() else { continue };
-                let Ok(_l) = e.lifecycle.try_lock() else { continue };
+                let Ok(l) = e.lifecycle.try_lock() else { continue };
+                // An exit still being recorded counts as stopping.
+                let Ok(x) = e.exit_lock.try_lock() else { continue };
                 if e.running_pty().is_some() {
                     continue;
                 }
                 map.remove(&id);
-                removed.push((id, e.rec.lock().info.project_id.clone()));
+                drop((x, l));
+                removed.push(e);
             }
         }
         if let Some(ctx) = self.ctx() {
-            for (id, pid) in &removed {
-                ctx.events.emit("terminal.removed", pid.as_deref(), json!({ "id": id }));
+            for e in &removed {
+                let pid = e.rec.lock().info.project_id.clone();
+                ctx.events.emit("terminal.removed", pid.as_deref(), json!({ "id": e.id }));
             }
         }
         if let Some(root) = self.root() {
-            let _ = tokio::task::spawn_blocking(move || removed.iter().for_each(|(id, _)| store::remove(&root, id))).await;
+            let _ = tokio::task::spawn_blocking(move || removed.iter().for_each(|e| remove_files(&root, e))).await;
         }
     }
 
@@ -1133,7 +1182,7 @@ impl Terminals {
             (PathBuf::from(&r.info.cwd), r.info.argv.clone())
         };
         let cwd = if cwd.is_dir() { cwd } else { dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")) };
-        let argv = if argv.is_empty() { vec![login_shell(), "-l".into()] } else { argv };
+        let argv = if argv.is_empty() { shell_argv(state) } else { argv };
         pty::LaunchSpec { argv, cwd, env: base_env(state, &entry.id), cols: 0, rows: 0, redact: vec![] }
     }
 
@@ -1154,7 +1203,10 @@ impl Terminals {
         let cwd = resolve_cwd(&base, cwd.as_deref())?;
         // In the project's dev container: asked for, or the project's default.
         let target = match (&project_id, container) {
-            (Some(pid), Some(true)) => Some(crate::devcontainer::running_target(state, pid).await.map_err(ApiError::conflict)?),
+            (Some(pid), Some(true)) => {
+                crate::devcontainer::require_supported()?;
+                Some(crate::devcontainer::running_target(state, pid).await.map_err(ApiError::conflict)?)
+            }
             (Some(pid), None) => crate::devcontainer::exec_target(state, pid).await,
             (None, Some(true)) => return Err(ApiError::bad_request("a dev container shell needs a project")),
             _ => None,
@@ -1172,14 +1224,14 @@ impl Terminals {
         let (argv, meta) = match &target {
             // The container user's login shell.
             Some(t) => (vec![t.shell.clone(), "-l".into()], json!({ "inContainer": true, "container": t.describe() })),
-            None => (vec![login_shell(), "-l".into()], json!({})),
+            None => (shell_argv(state), json!({})),
         };
         self.spawn(state, SpawnSpec { kind: TerminalKind::Shell, title, project_id, cwd, argv, env: vec![], cols, rows, meta }).await
     }
 
     // ------------------------------------------------------------ persistence
 
-    fn collect_writes(&self, force: bool) -> Vec<Write> {
+    fn collect_writes(&self, force: bool) -> Vec<(Arc<Entry>, Write)> {
         let mut out = vec![];
         for e in self.all() {
             let screen_due = e.screen.dirty.load(Ordering::Relaxed)
@@ -1189,30 +1241,35 @@ impl Terminals {
             if screen_due {
                 e.screen.dirty.store(false, Ordering::Relaxed);
                 *e.screen_saved_at.lock() = Some(Instant::now());
-                out.push(Write::Screen(e.id.clone(), e.screen.snapshot()));
+                out.push((e.clone(), Write::Screen(e.id.clone(), e.screen.snapshot())));
             }
             if e.meta_dirty.swap(false, Ordering::Relaxed) || screen_due {
                 let mut rec = e.rec.lock().clone();
                 rec.info.last_output_at = rec.info.last_output_at.max(e.screen.last_output_at.load(Ordering::Relaxed));
-                out.push(Write::Meta(rec));
+                out.push((e.clone(), Write::Meta(rec)));
             }
         }
         out
     }
 
-    fn write_all(root: &Path, writes: Vec<Write>) {
-        for w in writes {
+    fn write_all(root: &Path, writes: Vec<(Arc<Entry>, Write)>) {
+        for (entry, w) in writes {
+            let removed = entry.files_removed.lock();
+            if *removed {
+                continue;
+            }
             let r = match &w {
                 Write::Meta(rec) => store::save_meta(root, rec),
                 Write::Screen(id, data) => store::save_screen(root, id, data),
             };
+            drop(removed);
             if let Err(e) = r {
                 tracing::warn!("cannot save terminal state: {e:#}");
             }
         }
     }
 
-    /// Save one terminal's record and screen now.
+    /// Save one terminal's record and screen now (not once it was forgotten).
     pub(crate) async fn save_now(&self, entry: &Arc<Entry>) {
         let Some(root) = self.root() else { return };
         let entry = entry.clone();
@@ -1220,37 +1277,44 @@ impl Terminals {
             let mut writes = vec![];
             if entry.screen.dirty.swap(false, Ordering::Relaxed) {
                 *entry.screen_saved_at.lock() = Some(Instant::now());
-                writes.push(Write::Screen(entry.id.clone(), entry.screen.snapshot()));
+                writes.push((entry.clone(), Write::Screen(entry.id.clone(), entry.screen.snapshot())));
             }
             entry.meta_dirty.store(false, Ordering::Relaxed);
             let mut rec = entry.rec.lock().clone();
             rec.info.last_output_at = rec.info.last_output_at.max(entry.screen.last_output_at.load(Ordering::Relaxed));
-            writes.push(Write::Meta(rec));
+            writes.push((entry.clone(), Write::Meta(rec)));
             Self::write_all(&root, writes);
         })
         .await;
     }
 }
 
-/// The user's login shell.
-fn login_shell() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty() && Path::new(s).is_file())
-        .unwrap_or_else(|| "/bin/bash".into())
-}
-
 /// Resolve a client-supplied working directory: project-relative, or absolute.
 pub(crate) fn resolve_cwd(base: &Path, cwd: Option<&str>) -> Result<PathBuf, ApiError> {
     let dir = match cwd.map(str::trim).filter(|c| !c.is_empty()) {
         None => base.to_path_buf(),
-        Some(c) if c.starts_with('/') || c.starts_with('~') => crate::config::expand_tilde(c),
+        Some(c) if util::os::path::is_absolute_str(c) || c.starts_with('~') => crate::config::expand_tilde(c),
         Some(c) => util::paths::resolve_in_root(base, c)?,
     };
     if !dir.is_dir() {
         return Err(ApiError::bad_request(format!("{} is not a directory", dir.display())));
     }
     Ok(dir)
+}
+
+/// The shell new terminals run: `[terminals] shell` (a leading `~` expanded), else the
+/// user's (`util::os::shell::interactive`).
+fn shell_argv(state: &AppState) -> Vec<String> {
+    let mut argv = state.config.read().terminals.shell.clone();
+    match argv.first_mut() {
+        Some(program) if !program.trim().is_empty() => {
+            if util::os::path::home_relative(program).is_some() {
+                *program = crate::config::expand_tilde(program).display().to_string();
+            }
+            argv
+        }
+        _ => util::os::shell::interactive(),
+    }
 }
 
 /// Variables describing whatever terminal Workbench itself was started from; wrong for ours.
@@ -1286,6 +1350,19 @@ const PARENT_AGENT_VARS: &[&str] = &[
     "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
 ];
 
+/// Set last on a terminal of `kind`, so nothing in its spec undoes it: for what Workbench
+/// starts (a run, a pre-launch step, a command, an agent CLI) `util::os::exe::child_env`,
+/// with which a cmd.exe among its processes never runs a program from the current
+/// directory, a repository (Windows). An interactive shell keeps the lookup its user types
+/// commands for: in cmd.exe `build` runs the `build.bat` there, as in any terminal
+/// (PowerShell and bash never take a program from the current directory by a bare name).
+fn program_env(kind: TerminalKind) -> Vec<(String, Option<String>)> {
+    if kind == TerminalKind::Shell {
+        return vec![];
+    }
+    util::os::exe::child_env().iter().map(|&(k, v)| (k.to_string(), Some(v.to_string()))).collect()
+}
+
 /// Environment every Workbench terminal gets (session hygiene is applied by `pty`).
 pub(crate) fn base_env(state: &AppState, id: &str) -> Vec<(String, Option<String>)> {
     let mut env: Vec<(String, Option<String>)> = vec![
@@ -1294,7 +1371,7 @@ pub(crate) fn base_env(state: &AppState, id: &str) -> Vec<(String, Option<String
         ("WORKBENCH_URL".into(), Some(state.local_base_url())),
         ("WORKBENCH_TERMINAL_ID".into(), Some(id.to_string())),
     ];
-    for k in PARENT_TERMINAL_VARS.iter().chain(PARENT_AGENT_VARS) {
+    for k in PARENT_TERMINAL_VARS.iter().chain(util::os::session::PARENT_TERMINAL_VARS).chain(PARENT_AGENT_VARS) {
         env.push((k.to_string(), None));
     }
     for (k, _) in std::env::vars_os() {
@@ -1397,8 +1474,9 @@ pub async fn shutdown(state: &AppState) {
     )
     .await;
     let kills = running.iter().map(|(_, p)| p.kill(Duration::from_secs(2)));
-    let lingering: Vec<i32> = t.all().iter().flat_map(|e| e.lingering.lock().iter().map(|(sid, _)| *sid).collect::<Vec<_>>()).collect();
-    let leftovers = lingering.iter().map(|sid| pty::kill_session(*sid, Duration::from_secs(2), || true));
+    let lingering: Vec<util::os::session::Handle> =
+        t.all().iter().flat_map(|e| e.lingering.lock().iter().map(|(s, _)| s.clone()).collect::<Vec<_>>()).collect();
+    let leftovers = lingering.iter().map(|s| util::os::session::kill(s.sid(), Duration::from_secs(2), || true));
     let _ = tokio::time::timeout(
         Duration::from_secs(4),
         futures::future::join(futures::future::join_all(kills), futures::future::join_all(leftovers)),
@@ -1452,23 +1530,25 @@ fn history_group(info: &TerminalInfo) -> Option<String> {
 }
 
 /// Follow the processes an exited process left in its session until they are gone, and
-/// publish how many there are (`TerminalInfo::lingering`).
-async fn watch_lingering(state: AppState, entry: Arc<Entry>, sid: i32) {
+/// publish how many there are (`TerminalInfo::lingering`). Holding `session` keeps its sid
+/// naming that session, never a later one with the same leader pid (Windows reuses pids).
+async fn watch_lingering(state: AppState, entry: Arc<Entry>, session: util::os::session::Handle) {
+    let sid = session.sid();
     if sid <= 1 {
         return;
     }
     // Children commonly need a moment to notice their parent is gone.
     tokio::time::sleep(Duration::from_secs(1)).await;
     loop {
-        let n = tokio::task::spawn_blocking(move || pty::session_members(sid).len()).await.unwrap_or(0) as u32;
+        let n = tokio::task::spawn_blocking(move || util::os::session::members(sid).len()).await.unwrap_or(0) as u32;
         let t = &state.terminals;
         let known = t.is_registered(&entry);
         {
             let mut l = entry.lingering.lock();
-            let at = l.iter().position(|(s, _)| *s == sid);
+            let at = l.iter().position(|(s, _)| s.sid() == sid);
             match (at, n > 0 && known) {
                 (Some(i), true) => l[i].1 = n,
-                (None, true) => l.push((sid, n)),
+                (None, true) => l.push((session.clone(), n)),
                 (Some(i), false) => {
                     l.remove(i);
                 }

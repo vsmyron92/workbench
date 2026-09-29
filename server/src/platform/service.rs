@@ -20,6 +20,10 @@ use clap::{Args, Subcommand};
 
 use crate::util;
 
+/// `workbench service`'s help line (`service_windows.rs` has the Windows one). clap prints it
+/// as is: no final period, like the lines it takes from doc comments.
+pub const ABOUT: &str = "Run Workbench as a systemd user service, with a desktop launcher";
+
 const MARKER: &str = "Written by `workbench service install`";
 const ICON_SVG: &str = include_str!("../../../web/public/icons/workbench.svg");
 /// Environment carried into the unit and the launcher when set.
@@ -279,7 +283,7 @@ fn systemctl(env: &Env, args: &[&str]) -> anyhow::Result<(bool, String)> {
 fn running_pid(env: &Env) -> Option<u32> {
     let rt: serde_json::Value = util::fs::read_json(&env.data_dir.as_ref()?.join("runtime.json")).ok()??;
     let pid = rt["pid"].as_u64()? as u32;
-    Path::new(&format!("/proc/{pid}")).exists().then_some(pid)
+    util::os::proc::own_pid_alive(pid).then_some(pid)
 }
 
 fn write_file(path: &Path, text: &str, mode: u32) -> anyhow::Result<()> {
@@ -481,7 +485,7 @@ pub fn cli(args: ServiceArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use crate::util::os::perm;
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -507,7 +511,7 @@ mod tests {
             if fail { "echo 'Failed to connect to bus' >&2; exit 1\n" } else { "exit 0\n" }
         );
         std::fs::write(&fake, script).unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        perm::apply(&fake, 0o755).unwrap();
         // Another test's child forked while the script was open for writing can hold it
         // until that child execs: running it then fails with ETXTBSY. Wait that out, then
         // start the log clean.
@@ -557,8 +561,7 @@ mod tests {
         assert!(desktop.contains(&format!("Icon={}\n", f.env.data_home.join("icons/hicolor/scalable/apps/workbench.svg").display())));
         let icon = std::fs::read_to_string(f.env.data_home.join("icons/hicolor/scalable/apps/workbench.svg")).unwrap();
         assert!(icon.contains("<svg"));
-        let mode = std::fs::metadata(f.env.config_home.join("systemd/user/workbench.service")).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o644);
+        perm::assert_mode(&f.env.config_home.join("systemd/user/workbench.service"), 0o644);
         assert!(calls(&f).is_empty(), "nothing is started without --enable");
         assert!(String::from_utf8(out).unwrap().contains("nothing was started"));
     }

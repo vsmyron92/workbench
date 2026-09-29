@@ -68,11 +68,17 @@ enum Command {
     /// Claude Code status line helper: reads the status JSON on stdin, reports it
     /// to the server and prints a compact line.
     Statusline,
-    /// Run Workbench as a systemd user service, with a desktop launcher.
+    // Linux: a systemd user service; Windows: a sign-in entry (platform::service).
+    #[command(about = platform::service::ABOUT)]
     Service(platform::service::ServiceArgs),
 }
 
 fn main() -> anyhow::Result<()> {
+    // Windows: git and ssh start this executable itself as their askpass program, with the
+    // prompt as the only argument (`util::os::helper`).
+    if let Some(prompt) = util::os::helper::askpass_prompt(is_command) {
+        return git::cli_askpass(&prompt);
+    }
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Serve { bind: None, open: false }) {
         Command::Serve { bind, open } => serve(bind, open),
@@ -92,6 +98,13 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Whether `word`, a single argument, is a command line of Workbench's own (a subcommand,
+/// `help`, an option) rather than a prompt.
+fn is_command(word: &str) -> bool {
+    use clap::CommandFactory;
+    word.starts_with('-') || word == "help" || Cli::command().find_subcommand(word).is_some()
+}
+
 fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -104,6 +117,10 @@ fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {
     // A Workbench started from inside a Claude Code session must not leak that
     // session's identity into the sessions it hosts.
     util::proc::scrub_own_env();
+    // Libraries loaded by name (conpty.dll) only from beside the executable or the system.
+    util::os::dll::restrict_search();
+    // Ctrl-C works in the terminals whoever started the server (Windows).
+    util::os::proc::enable_ctrl_c();
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
@@ -118,7 +135,7 @@ fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {
             None => None,
         };
 
-        let listener = tokio::net::TcpListener::bind(addr)
+        let listener = util::os::net::bind(addr)
             .await
             .with_context(|| format!("cannot bind {addr} (is another Workbench running?)"))?;
         let addr = listener.local_addr()?;
@@ -157,7 +174,7 @@ fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {
         {
             let (state, stop) = (state.clone(), stop.clone());
             tokio::spawn(async move {
-                util::shutdown_signal().await;
+                util::os::proc::shutdown_signal(&state.paths.data_dir).await;
                 tracing::info!("shutting down");
                 app::shutdown(&state).await;
                 stop.cancel();

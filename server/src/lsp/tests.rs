@@ -31,17 +31,19 @@ struct Env {
 
 async fn env_with(extra_env: &[(&str, &str)], repo_config: Option<&str>) -> Env {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("proj");
+    // The project's root as Workbench keeps it (Windows' temp dir may be spelled `RUNNER~1`).
+    let base = crate::util::os::path::canonicalize(dir.path()).unwrap();
+    let root = base.join("proj");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("a.fk"), "def alpha\nuse beta\nERROR here\n").unwrap();
     std::fs::write(root.join("b.fk"), "def beta\nalpha beta\n").unwrap();
     if let Some(c) = repo_config {
         std::fs::write(root.join(".workbench.toml"), c).unwrap();
     }
-    let external = dir.path().join("outside/lib.fk");
+    let external = base.join("outside").join("lib.fk");
     std::fs::create_dir_all(external.parent().unwrap()).unwrap();
     std::fs::write(&external, "def external\n").unwrap();
-    let paths = crate::config::Paths { config_dir: dir.path().join("config"), data_dir: dir.path().join("data") };
+    let paths = crate::config::Paths { config_dir: base.join("config"), data_dir: base.join("data") };
     std::fs::create_dir_all(&paths.config_dir).unwrap();
     std::fs::create_dir_all(&paths.data_dir).unwrap();
     let mut cfg = crate::config::GlobalConfig::default();
@@ -52,11 +54,13 @@ async fn env_with(extra_env: &[(&str, &str)], repo_config: Option<&str>) -> Env 
     for (k, v) in extra_env {
         env.insert(k.to_string(), v.to_string());
     }
+    // Python 3: `python3`; on Windows `python`, or `py` with its `-3`.
+    let python = crate::util::os::exe::python();
     cfg.lsp.servers.insert(
         "fake".into(),
         ServerConfig {
-            command: Some("python3".into()),
-            args: Some(vec![fake_ls().display().to_string()]),
+            command: Some(python[0].clone()),
+            args: Some(python[1..].iter().cloned().chain([fake_ls().display().to_string()]).collect()),
             extensions: Some(vec!["fk".into()]),
             env,
             initialization_options: Some(json!({ "x": 1 })),
@@ -171,7 +175,7 @@ async fn wait_for(mut f: impl FnMut() -> bool) {
 }
 
 fn alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    crate::util::os::proc::pid_alive(pid as i32)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -223,7 +227,12 @@ async fn repository_config_cannot_add_or_change_servers() {
     let ids: Vec<&str> = st["servers"].as_array().unwrap().iter().filter_map(|s| s["id"].as_str()).collect();
     assert!(!ids.contains(&"evil"), "{ids:?}");
     let fake = st["servers"].as_array().unwrap().iter().find(|s| s["id"] == "fake").unwrap();
-    assert!(fake["command"].as_str().unwrap().starts_with("python3 "), "{fake}");
+    let command = fake["command"].as_str().unwrap();
+    // The configured interpreter (`python3`; on Windows its path, shown with `~`).
+    let python = crate::util::os::exe::python();
+    let program = if crate::util::os::exe::names_path(&python[0]) { crate::config::contract_tilde(Path::new(&python[0])) } else { python[0].clone() };
+    let expected = format!("{} ", std::iter::once(program).chain(python[1..].iter().cloned()).collect::<Vec<_>>().join(" "));
+    assert!(command.starts_with(&expected) && command.ends_with("fake_ls.py"), "{fake}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -299,7 +308,7 @@ async fn editor_features_through_the_socket() {
     let o = until(&mut ws, &mut seen, |v| v["t"] == "opened" && v["uri"] == src.as_str()).await;
     assert_eq!(o["server"], "fake", "{o}");
     // Anything else is refused.
-    let forged = format!("lsp-src://{}/etc/passwd", e.pid);
+    let forged = super::uri::source_uri(&e.pid, if cfg!(windows) { r"C:\Windows\win.ini" } else { "/etc/passwd" });
     let (code, _) = e.get(&format!("/api/projects/{}/lsp/source?uri={}", e.pid, urlencoding::encode(&forged))).await;
     assert_eq!(code, 403);
 
@@ -542,7 +551,7 @@ async fn uri_like_text_stays_text_and_opens_nothing() {
     let mut ws = e.connect().await.unwrap();
     let mut seen = vec![];
     let a = e.uri("a.fk");
-    let lit = format!("file://{}", e.external.display());
+    let lit = super::uri::file_uri(&e.external.to_string_lossy());
     let src = super::uri::source_uri(&e.pid, &e.external.to_string_lossy());
     send(&mut ws, json!({ "t": "open", "uri": a, "text": "def alpha\n\n" })).await;
     until(&mut ws, &mut seen, |v| v["t"] == "caps").await;

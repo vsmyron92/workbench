@@ -22,7 +22,13 @@
 //!
 //! CONTRACT (other slices): `summary` (projects), `running_target` / `exec_target` /
 //! `kill_inside` (terminals), `run_inside` / `port_route` (apps), `agent_command`
-//! (terminals, agents in containers), `router`, `start`, `shutdown`, `mcp_tools`.
+//! (terminals, agents in containers), `require_supported`, `router`, `start`,
+//! `shutdown`, `mcp_tools`.
+//!
+//! Where dev containers do not work (`util::os::support`: Windows) none of this is
+//! offered: no summary, no container is ever found, and the routes, the MCP tool and
+//! whatever asks for a container explicitly (`require_supported`) answer
+//! `unsupported_platform`. The Services tool window (`services`) still works.
 
 mod bridge;
 pub(crate) mod config;
@@ -63,25 +69,23 @@ use plan::Engines;
 
 // ---------------------------------------------------------------- shared helpers
 
-/// A shell word: bare when safe, else single-quoted.
+/// A shell word: bare when safe, else single-quoted (`util::os::shell::posix_quote`).
 pub fn sh_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c)) {
-        s.to_string()
-    } else {
-        sh_quote_always(s)
-    }
+    crate::util::os::shell::posix_quote(s)
 }
 
 pub fn sh_quote_always(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// A path for display: project-relative when inside `root`.
+/// A path for display: project-relative with `/` (as repository paths are written, on
+/// Windows too) when inside `root`.
 pub fn rel_display(root: &Path, abs: &str) -> String {
-    match Path::new(abs).strip_prefix(root) {
-        Ok(r) if r.as_os_str().is_empty() => ".".into(),
-        Ok(r) => r.display().to_string(),
-        Err(_) => abs.to_string(),
+    use crate::util::os::path;
+    match path::strip_prefix(Path::new(abs), root) {
+        Some(r) if r.as_os_str().is_empty() => ".".into(),
+        Some(r) => path::to_slash(r),
+        None => abs.to_string(),
     }
 }
 
@@ -182,18 +186,19 @@ pub(crate) fn docker_path(state: &AppState) -> String {
 
 /// How to run the devcontainer CLI, if it is installed or configured.
 pub(crate) fn cli_command(state: &AppState) -> Option<Vec<String>> {
+    use crate::util::os::exe;
     let c = settings(state).cli.trim().to_string();
     if c == "npx" {
-        return crate::util::which_path("npx").map(|p| vec![p.display().to_string(), "-y".into(), "@devcontainers/cli".into()]);
+        return exe::resolve("npx").map(|r| r.argv(&["-y", "@devcontainers/cli"]));
     }
     if c.is_empty() {
-        return crate::util::which_path("devcontainer").map(|p| vec![p.display().to_string()]);
+        return exe::resolve("devcontainer").map(|r| r.argv(&[]));
     }
     let p = crate::config::expand_tilde(&c);
     if p.is_file() {
-        return Some(vec![p.display().to_string()]);
+        return Some(exe::classify(p).argv(&[]));
     }
-    crate::util::which_path(&c).map(|p| vec![p.display().to_string()])
+    exe::resolve(&c).map(|r| r.argv(&[]))
 }
 
 /// What is installed (cached for 30 s).
@@ -234,8 +239,23 @@ fn use_container_of(saved: &store::Saved) -> bool {
     saved.use_container.unwrap_or(saved.attached)
 }
 
-/// `ProjectSummary.devcontainer`: `None` for a project without configs or containers.
+/// Why dev containers do not work on this OS (`None` where they do).
+fn unsupported() -> Option<&'static str> {
+    crate::util::os::support::unsupported(crate::util::os::support::Feature::Devcontainer)
+}
+
+/// `Err(unsupported_platform)` where dev containers do not work: what the routes answer,
+/// for callers that would put a terminal, an agent or a language server inside.
+pub fn require_supported() -> crate::error::ApiResult<()> {
+    crate::util::os::support::require(crate::util::os::support::Feature::Devcontainer)
+}
+
+/// `ProjectSummary.devcontainer`: `None` for a project without configs or containers,
+/// and where dev containers do not work.
 pub fn summary(state: &AppState, p: &Project) -> Option<Summary> {
+    if unsupported().is_some() {
+        return None;
+    }
     let configs = config::discover(&p.root);
     let saved = state.devcontainer.saved(state, &p.id);
     let rt = state.devcontainer.rt.lock();
@@ -251,7 +271,7 @@ pub fn summary(state: &AppState, p: &Project) -> Option<Summary> {
 /// The container's labels name this project folder.
 fn folder_matches(p: &Project, folder: &str) -> bool {
     let root = p.root.display().to_string();
-    folder == root || std::fs::canonicalize(folder).is_ok_and(|c| c == p.root)
+    folder == root || crate::util::os::path::canonicalize(folder).is_ok_and(|c| c == p.root)
 }
 
 fn config_abs(p: &Project, rel: &str) -> String {
@@ -277,8 +297,12 @@ fn pick(p: &Project, all: &[ContainerInfo], selected: Option<&str>) -> Option<Co
 }
 
 /// Refresh every project's container from Docker (one `ps`, one `inspect`) and emit
-/// `devcontainer.state` for changes. Serialized; cheap when nothing is labelled.
+/// `devcontainer.state` for changes. Serialized; cheap when nothing is labelled. Where
+/// dev containers do not work, no container is ever known (and no bridge listens).
 pub async fn refresh(state: &AppState) {
+    if unsupported().is_some() {
+        return;
+    }
     let _serial = state.devcontainer.refresh_lock.lock().await;
     let docker = docker_path(state);
     let listed = match docker::list_devcontainers(&docker).await {
@@ -404,7 +428,7 @@ fn remote_user_of(c: &ContainerInfo, saved: &store::Saved) -> Option<String> {
 /// Host folder ↔ container folder of the project: the bind mount whose source is the
 /// project root or one of its parents (the CLI mounts the git root).
 fn mapping_of(p: &Project, c: &ContainerInfo) -> Option<(std::path::PathBuf, String)> {
-    let canon = |s: &str| std::fs::canonicalize(s).unwrap_or_else(|_| s.into());
+    let canon = |s: &str| crate::util::os::path::canonicalize(s).unwrap_or_else(|_| s.into());
     c.mounts
         .iter()
         .filter(|m| m.kind == "bind" && !m.source.is_empty())
@@ -487,6 +511,9 @@ for c in "$@"; do echo "cmd:$c=$(command -v "$c" 2>/dev/null)"; done"#;
 /// The project's running container as terminals use it, whatever "use the container"
 /// says (a terminal that chose the container keeps it). `Err` explains why not.
 pub async fn running_target(state: &AppState, pid: &str) -> Result<ExecTarget, String> {
+    if let Some(why) = unsupported() {
+        return Err(why.to_string());
+    }
     let p = state.projects.get(pid).ok_or_else(|| format!("no project {pid:?}"))?;
     let mut c = container_of(state, pid);
     if c.as_ref().is_none_or(|c| !c.running) {

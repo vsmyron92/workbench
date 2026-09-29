@@ -262,8 +262,8 @@ async fn imports_never_write_through_a_planted_symlink() {
     let folder = std::path::PathBuf::from(created["folder"].as_str().unwrap());
     let outside = env._dir.path().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
-    std::os::unix::fs::symlink(outside.join("notes.md"), folder.join("notes.md")).unwrap();
-    std::os::unix::fs::symlink(outside.join("newdir"), folder.join("docs")).unwrap();
+    crate::util::os::fs::symlink(outside.join("notes.md"), folder.join("notes.md")).unwrap();
+    crate::util::os::fs::symlink(outside.join("newdir"), folder.join("docs")).unwrap();
 
     let notes = env.project.join("docs/notes.md").display().to_string();
     let step = env.tool("workspace_add_step", &session(), json!({ "cardId": "planted", "name": "Notes", "path": notes })).await.unwrap();
@@ -427,10 +427,23 @@ async fn view_serves_sandboxed_content_inside_the_grant_only() {
         assert_eq!(s, want, "{path}");
         assert_eq!(h["content-security-policy"], super::view::CSP, "{path}");
     }
-    // A symlink out of the card folder is not followed.
-    std::os::unix::fs::symlink("/etc", env.project.join("workspace/2026-09-15_my-dream-game/etc")).unwrap();
-    let (s, _, _) = env.call(Method::GET, &format!("{base}etc/hostname"), None).await;
+    // A symlink out of the card folder is not followed. Its target is a folder of the
+    // test's own that exists on every OS (`/etc` does not on Windows, where the link led
+    // nowhere and the request was only not found).
+    let outside = env.project.with_file_name("etc");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("hostname"), "outside-the-card").unwrap();
+    let card = env.project.join("workspace/2026-09-15_my-dream-game");
+    crate::util::os::fs::symlink(&outside, card.join("etc")).unwrap();
+    assert_eq!(std::fs::read_to_string(card.join("etc").join("hostname")).unwrap(), "outside-the-card");
+    let (s, h, body) = env.call(Method::GET, &format!("{base}etc/hostname"), None).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(h["content-security-policy"], super::view::CSP);
+    assert!(!String::from_utf8_lossy(&body).contains("outside-the-card"));
+    // A link that leads nowhere serves nothing either.
+    crate::util::os::fs::symlink(env.project.with_file_name("missing"), card.join("gone")).unwrap();
+    let (s, _, _) = env.call(Method::GET, &format!("{base}gone/hostname"), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
 /// Delete a card, find it in the trash, restore it (files and steps back), then

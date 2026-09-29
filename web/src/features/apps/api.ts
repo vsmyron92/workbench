@@ -2,6 +2,7 @@
 
 import { useQuery, type QueryClient } from '@tanstack/react-query'
 import { api, ApiError } from '@/api/client'
+import { getHealth } from '@/api/health'
 import type { TerminalInfo } from '@/api/types'
 import { confirmDialog, openPanel, toast, toastError } from '@/shell/actions'
 import { appPanelId, runUrl } from './logic'
@@ -50,10 +51,17 @@ export function useEnvs(pid: string | null) {
 
 // ---------------------------------------------------------------- runs
 
+/** How the server frees a port that another process holds (`util::os::net::kill_port_holders`). */
+function portHolders(): string {
+  return getHealth()?.os === 'windows'
+    ? 'or the process listening on the port and the ones it started, when they run as you'
+    : 'or fuser -k <port>/tcp for another process'
+}
+
 function confirmFreePort(name: string, why: string) {
   return confirmDialog({
     title: 'Port in use',
-    message: `${why}.\n\nWorkbench will stop it (its own run, or fuser -k <port>/tcp for another process) and then start “${name}”.`,
+    message: `${why}.\n\nWorkbench will stop it (its own run, ${portHolders()}) and then start “${name}”.`,
     confirmLabel: 'Free port and start',
     danger: true,
   })

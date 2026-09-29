@@ -13,7 +13,8 @@
 //!   synced) first, and only swapped in while the registry still holds what was read
 //!   (`renameat2(RENAME_EXCHANGE)`, checked after the swap and undone on a mismatch),
 //!   else the update starts over on the newer file. An agent that replaces the file
-//!   meanwhile never loses its change.
+//!   meanwhile never loses its change. (Windows has no exchange: there the check
+//!   right before a plain rename is the last one.)
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -285,18 +286,30 @@ pub fn update_registry<R>(path: &Path, create: bool, mut f: impl FnMut(&mut Doc)
     Err(ApiError::conflict("the workspace registry is being changed by someone else right now; try again"))
 }
 
-/// Write `bytes` to a synced temp file beside `path` (the registry's mode, else 0600).
+/// Write `bytes` to a synced temp file beside `path` (the registry's mode, else 0600;
+/// Windows: the registry's DACL, else private).
 fn stage_registry(path: &Path, bytes: &[u8]) -> ApiResult<PathBuf> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use util::os::perm;
     let dir = path.parent().ok_or_else(|| ApiError::internal("registry path without a directory"))?;
     std::fs::create_dir_all(dir)?;
-    let mode = std::fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+    // `None` when the registry exists on Windows, which has no mode.
+    let mode = match std::fs::metadata(path) {
+        Ok(m) => perm::mode(&m).map(|m| m & 0o777),
+        Err(_) => Some(0o600),
+    };
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "workspace.json".into());
     let tmp = dir.join(format!(".{name}.wb-tmp-{}", util::random_token(6)));
     let written = (|| -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(mode).open(&tmp)?;
-        f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        let mut f = match mode {
+            Some(mode) => {
+                let f = perm::open_new(&tmp, mode, true)?;
+                perm::apply_to(&f, mode)?;
+                f
+            }
+            // A repository's registry keeps its DACL.
+            None => perm::create_replacement(&tmp, path, Some(0o600))?,
+        };
         f.write_all(bytes)?;
         f.sync_all()
     })();
@@ -326,10 +339,10 @@ fn commit_registry(tmp: &Path, path: &Path, source: &[u8], ours: &[u8]) -> ApiRe
         }
         if source.is_empty() {
             // Create only if it still does not exist.
-            return match renameat2(tmp, path, libc::RENAME_NOREPLACE) {
+            return match util::os::fs::rename_noreplace_atomic(tmp, path) {
                 Ok(()) => Ok(true),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-                Err(e) if unsupported(&e) => std::fs::rename(tmp, path).map(|_| true),
+                Err(e) if util::os::fs::rename_unsupported(&e) => std::fs::rename(tmp, path).map(|_| true),
                 Err(e) => Err(e),
             };
         }
@@ -357,12 +370,12 @@ fn commit_registry(tmp: &Path, path: &Path, source: &[u8], ours: &[u8]) -> ApiRe
 /// that what came out is `source`. If a write landed after the last check, swap it
 /// back (keeping whatever is newest) and report `false`.
 fn swap_if_unchanged(tmp: &Path, path: &Path, source: &[u8], ours: &[u8]) -> std::io::Result<bool> {
-    match renameat2(tmp, path, libc::RENAME_EXCHANGE) {
+    match util::os::fs::rename_exchange(tmp, path) {
         Ok(()) => {}
         // Deleted meanwhile: let the caller reread (and report it missing).
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        // A filesystem without RENAME_EXCHANGE: the check above was the last one.
-        Err(e) if unsupported(&e) => return std::fs::rename(tmp, path).map(|_| true),
+        // A filesystem (or Windows) without RENAME_EXCHANGE: the check above was the last one.
+        Err(e) if util::os::fs::rename_unsupported(&e) => return std::fs::rename(tmp, path).map(|_| true),
         Err(e) => return Err(e),
     }
     // `tmp` now names the file we replaced.
@@ -371,26 +384,13 @@ fn swap_if_unchanged(tmp: &Path, path: &Path, source: &[u8], ours: &[u8]) -> std
         return Ok(true);
     }
     // Not what we read (or unreadable): put it back.
-    renameat2(tmp, path, libc::RENAME_EXCHANGE)?;
+    util::os::fs::rename_exchange(tmp, path)?;
     replaced?;
     if read_or_empty(tmp)? != ours {
         // Yet another write replaced ours in that instant: it is the newest, keep it.
-        renameat2(tmp, path, libc::RENAME_EXCHANGE)?;
+        util::os::fs::rename_exchange(tmp, path)?;
     }
     Ok(false)
-}
-
-fn unsupported(e: &std::io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP))
-}
-
-pub(super) fn renameat2(from: &Path, to: &Path, flags: libc::c_uint) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let f = std::ffi::CString::new(from.as_os_str().as_bytes())?;
-    let t = std::ffi::CString::new(to.as_os_str().as_bytes())?;
-    // SAFETY: both pointers are valid NUL-terminated strings for the call's duration.
-    let rc = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), flags) };
-    if rc == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
 /// Test-only injection point: run code between staging and committing a registry.
@@ -834,7 +834,7 @@ pub fn check_rel(rel: &str) -> ApiResult<String> {
     if rel.contains('\0') || rel.contains('\\') {
         return Err(ApiError::bad_request("unusable characters in the path"));
     }
-    if rel.starts_with('/') || rel.starts_with('~') {
+    if util::os::path::is_absolute_str(rel) || rel.starts_with('~') {
         return Err(ApiError::bad_request("expected a path relative to the card folder"));
     }
     let mut parts = vec![];
@@ -843,7 +843,10 @@ pub fn check_rel(rel: &str) -> ApiResult<String> {
             "" | "." => {}
             ".." => return Err(ApiError::forbidden("the path leaves the card folder")),
             s if is_private_name(s) => return Err(ApiError::forbidden(format!("{s:?} is private: dotfiles and credential files are not served"))),
-            s => parts.push(s),
+            s => {
+                util::os::path::check_component(s).map_err(ApiError::bad_request)?;
+                parts.push(s)
+            }
         }
     }
     Ok(parts.join("/"))
@@ -871,20 +874,20 @@ pub fn classify_step_path(card_dir: &Path, input: &str, import_roots: &[PathBuf]
     if input.is_empty() {
         return Err(ApiError::bad_request("a step needs a path"));
     }
-    if !(input.starts_with('/') || input.starts_with("~/")) {
+    if !(util::os::path::is_absolute_str(input) || util::os::path::home_relative(input).is_some()) {
         return Ok(StepSource::Inside(check_rel(input)?));
     }
     let abs = crate::config::expand_tilde(input);
-    let canon = abs.canonicalize().map_err(|_| ApiError::not_found(format!("{input} does not exist")))?;
-    if let Ok(dir) = card_dir.canonicalize() {
-        if let Ok(rest) = canon.strip_prefix(&dir) {
-            return Ok(StepSource::Inside(check_rel(&rest.to_string_lossy())?));
+    let canon = util::os::path::canonicalize(&abs).map_err(|_| ApiError::not_found(format!("{input} does not exist")))?;
+    if let Ok(dir) = util::os::path::canonicalize(card_dir) {
+        if let Some(rest) = util::os::path::strip_prefix(&canon, &dir) {
+            return Ok(StepSource::Inside(check_rel(&util::os::path::to_slash(rest))?));
         }
     }
     for root in import_roots {
-        let Ok(root) = root.canonicalize() else { continue };
-        if let Ok(rest) = canon.strip_prefix(&root) {
-            check_rel(&rest.to_string_lossy())?;
+        let Ok(root) = util::os::path::canonicalize(root) else { continue };
+        if let Some(rest) = util::os::path::strip_prefix(&canon, &root) {
+            check_rel(&util::os::path::to_slash(rest))?;
             if rest.as_os_str().is_empty() {
                 return Err(ApiError::bad_request("cannot add a whole project as a step"));
             }
@@ -919,11 +922,12 @@ fn free_name(dir: &Path, wanted: &str) -> String {
 /// existing entry (a symlink planted in the card folder, a file that appeared
 /// meanwhile: `AlreadyExists`). Keeps the permission bits, like `fs::copy`.
 fn copy_new_file(src: &Path, dest: &Path) -> std::io::Result<u64> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use util::os::perm;
     let mut from = std::fs::File::open(src)?;
-    let mode = from.metadata()?.permissions().mode() & 0o777;
-    let mut to = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(0o600).open(dest)?;
-    let copied = std::io::copy(&mut from, &mut to).and_then(|n| to.set_permissions(std::fs::Permissions::from_mode(mode)).map(|_| n));
+    let mode = perm::mode(&from.metadata()?).map(|m| m & 0o777);
+    let mut to = perm::open_new(dest, 0o600, true)?;
+    // Windows has no mode: the copy stays private.
+    let copied = std::io::copy(&mut from, &mut to).and_then(|n| mode.map_or(Ok(()), |m| perm::apply_to(&to, m)).map(|_| n));
     if copied.is_err() {
         let _ = std::fs::remove_file(dest);
     }
@@ -933,7 +937,7 @@ fn copy_new_file(src: &Path, dest: &Path) -> std::io::Result<u64> {
 /// A file name a client may give an upload: one component, not private.
 pub fn check_file_name(name: &str) -> ApiResult<String> {
     let name = name.trim();
-    if name.is_empty() || name.len() > 200 || name.contains(['/', '\\', '\0']) || name == "." || name == ".." {
+    if name.is_empty() || name.len() > 200 || name.contains(['/', '\\', '\0']) || name == "." || name == ".." || util::os::path::check_component(name).is_err() {
         return Err(ApiError::bad_request("unusable file name"));
     }
     if is_private_name(name) {
@@ -1536,7 +1540,9 @@ mod tests {
         assert_eq!(names, ["workspace.json"], "no temp files left");
     }
 
-    /// The swap itself: a write that slipped in after the last check is put back.
+    /// The swap itself: a write that slipped in after the last check is put back
+    /// (`RENAME_EXCHANGE`; Windows has none, its last check is the one before).
+    #[cfg(unix)]
     #[test]
     fn swap_puts_back_a_registry_it_displaced() {
         let dir = tempfile::tempdir().unwrap();
@@ -1551,7 +1557,11 @@ mod tests {
         // Based on what is there: swapped in, and the old file is what `tmp` names.
         assert!(swap_if_unchanged(&tmp, &reg, b"theirs", b"ours").unwrap());
         assert_eq!(std::fs::read_to_string(&reg).unwrap(), "ours");
-        // A registry that appeared meanwhile is never replaced by a create.
+    }
+
+    #[test]
+    fn a_create_never_replaces_a_registry_that_appeared() {
+        let dir = tempfile::tempdir().unwrap();
         let fresh = dir.path().join("new.json");
         std::fs::write(&fresh, "someone's").unwrap();
         let staged = stage_registry(&fresh, b"mine").unwrap();
@@ -1669,7 +1679,7 @@ mod tests {
         let abs_inside = card.join("sub/x.md").display().to_string();
         assert_eq!(classify_step_path(&card, &abs_inside, &roots).unwrap(), StepSource::Inside("sub/x.md".into()));
         let from_project = project.join("docs/r.md");
-        assert_eq!(classify_step_path(&card, &from_project.display().to_string(), &roots).unwrap(), StepSource::Import(from_project.canonicalize().unwrap()));
+        assert_eq!(classify_step_path(&card, &from_project.display().to_string(), &roots).unwrap(), StepSource::Import(crate::util::os::path::canonicalize(&from_project).unwrap()));
         assert!(classify_step_path(&card, &project.join(".env").display().to_string(), &roots).is_err());
         assert!(classify_step_path(&card, "/etc/hostname", &roots).is_err());
         assert!(classify_step_path(&card, &project.display().to_string(), &roots).is_err());
@@ -1682,7 +1692,7 @@ mod tests {
         assert!(!card.join("shots/.env").exists());
 
         // Symlinks out of the card are neither listed nor resolved.
-        std::os::unix::fs::symlink(&project, card.join("escape")).unwrap();
+        util::os::fs::symlink(&project, card.join("escape")).unwrap();
         assert!(resolve_in_card(&card, "escape/docs/r.md").is_err());
         let (list, _) = list_files(&card, "").unwrap();
         let names: Vec<_> = list.iter().map(|f| f.name.as_str()).collect();

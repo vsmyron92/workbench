@@ -1588,6 +1588,8 @@ async fn status_endpoint_answers_not_configured_as_data() {
     assert_eq!(v["configured"], false);
     assert_eq!((v["confluence"].as_bool(), v["jira"].as_bool(), v["authFailed"].as_bool()), (Some(false), Some(false), Some(false)));
     assert!(v["error"].as_str().unwrap().contains("[atlassian]"), "{v}");
+    // The help names config.toml where this server reads it.
+    assert_eq!(v["configFile"].as_str(), Some(crate::config::contract_tilde(&state.paths.config_file()).as_str()), "{v}");
 
     // Other routes still answer 412 not_configured (the UI shows setup help from it).
     let (code, v) = get(app, "/api/confluence/spaces").await;
@@ -2024,8 +2026,8 @@ async fn new_mcp_tools_against_the_mock() {
     std::fs::write(project.join(".workbench.toml"), "[project]\nsensitive = [\"secrets/\"]\n").unwrap();
     std::fs::create_dir_all(project.join("config/secrets")).unwrap();
     std::fs::write(project.join("config/secrets/db.txt"), "pw").unwrap();
-    std::os::unix::fs::symlink("../.env", project.join("docs/notes.txt")).unwrap();
-    std::os::unix::fs::symlink("../config/secrets", project.join("docs/cfg")).unwrap();
+    crate::util::os::fs::symlink("../.env", project.join("docs/notes.txt")).unwrap();
+    crate::util::os::fs::symlink("../config/secrets", project.join("docs/cfg")).unwrap();
     let (base, mock) = start_mock("127.0.0.1:0").await;
     let state = state_with_project(&base, &dir, &project).await;
     assert!(state.projects.get("proj").is_some());

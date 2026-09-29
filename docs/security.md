@@ -7,7 +7,8 @@ model is in [the architecture](ARCHITECTURE.md#security-model).
 ## Who can use it
 
 - **Only signed-in browsers.** A browser signs in with a one-time code (`workbench open`,
-  a pairing QR code) or the master token in `~/.local/share/workbench/token`, and gets a
+  a pairing QR code) or the master token in `~/.local/share/workbench/token`
+  (`%LOCALAPPDATA%\workbench\token` on Windows), and gets a
   session cookie plus a device key. Anything that changes something needs both, so another
   local web page cannot act on your session.
 - **Only expected hosts.** Requests for any host name other than loopback, your bind
@@ -51,6 +52,7 @@ may come from someone else's branch or a clone, so they are untrusted:
 
 ## Your data
 
-Workbench keeps its state on your machine in `~/.local/share/workbench` (mode 0600) and
+Workbench keeps its state on your machine in `~/.local/share/workbench` (mode 0600; on
+Windows `%LOCALAPPDATA%\workbench`, whose access list admits only you and SYSTEM) and
 talks only to the services you configure. Push notifications go through the browsers' own
 push services, encrypted, with titles and short summaries only. There is no telemetry.

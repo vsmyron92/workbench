@@ -19,7 +19,7 @@ use crate::devcontainer::ExecTarget;
 
 pub struct AdapterProc {
     pub child: Child,
-    pid: Option<i32>,
+    group: crate::util::os::proc::ProcGroup,
     /// `(docker, container)` when it runs in a dev container.
     inside: Option<(String, String)>,
     session_id: String,
@@ -148,6 +148,8 @@ pub async fn spawn(adapter: &Adapter, session_id: &str, dir: AdapterDir<'_>, tar
         None => adapter.args.clone(),
     };
     args.extend(extra_args.iter().cloned());
+    // The Python launcher's `-3` (debugpy through `py` on Windows) goes before them all.
+    args.splice(0..0, super::adapters::launcher_args(adapter));
     let mut cmd;
     let mut inside = None;
     match target {
@@ -178,8 +180,19 @@ pub async fn spawn(adapter: &Adapter, session_id: &str, dir: AdapterDir<'_>, tar
             inside = Some((t.docker.clone(), t.container_id.clone()));
         }
         None => {
-            let path = crate::util::which_path(&adapter.command).ok_or_else(|| format!("`{}` was not found on PATH. {}", adapter.command, adapter.install_hint))?;
-            cmd = Command::new(path);
+            use crate::util::os::exe;
+            let r = exe::resolve(&adapter.command).ok_or_else(|| format!("`{}` was not found on PATH. {}", adapter.command, adapter.install_hint))?;
+            // A batch file (Windows) gets its arguments through cmd.exe, which would
+            // reparse paths and names that hold its metacharacters.
+            if r.kind == exe::Kind::Batch && !exe::batch_args_safe(&args) {
+                return Err(format!(
+                    "{} is a batch file ({}), and cmd.exe would misread an argument with % ! ^ & | < > \" or a line break: point [debug.adapters.{}] command at the program itself",
+                    adapter.label,
+                    r.program.display(),
+                    adapter.id
+                ));
+            }
+            cmd = exe::command(&r);
             cmd.args(&args);
             for (k, v) in &adapter.env {
                 cmd.env(k, v);
@@ -193,12 +206,12 @@ pub async fn spawn(adapter: &Adapter, session_id: &str, dir: AdapterDir<'_>, tar
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
         .kill_on_drop(true);
+    crate::util::os::proc::ProcGroup::prepare(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", adapter.label))?;
-    let pid = child.id().map(|p| p as i32);
+    let group = crate::util::os::proc::ProcGroup::attach(&child);
     let stderr = child.stderr.take();
-    let proc_ = |child| AdapterProc { child, pid, inside: inside.clone(), session_id: session_id.to_string() };
+    let proc_ = |child| AdapterProc { child, group: group.clone(), inside: inside.clone(), session_id: session_id.to_string() };
     match port {
         None => {
             let stdin = child.stdin.take().ok_or("no stdin")?;
@@ -237,28 +250,20 @@ impl AdapterProc {
     /// End the adapter and its process group: SIGTERM, then SIGKILL after a grace
     /// period; in a container, the process group inside too.
     pub async fn kill(&mut self) {
-        use nix::sys::signal::{Signal, killpg};
-        use nix::unistd::Pid;
         if let Some((docker, container)) = self.inside.take() {
             crate::devcontainer::kill_inside(&docker, &container, &self.session_id).await;
         }
         if let Ok(Some(_)) = self.child.try_wait() {
-            if let Some(pid) = self.pid {
-                // The leader is gone; children in its group may not be.
-                let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
-            }
+            // The leader is gone; children in its group may not be.
+            self.group.kill();
             return;
         }
-        if let Some(pid) = self.pid {
-            let _ = killpg(Pid::from_raw(pid), Signal::SIGTERM);
-        }
+        self.group.terminate();
         if tokio::time::timeout(Duration::from_millis(1500), self.child.wait()).await.is_err() {
-            if let Some(pid) = self.pid {
-                let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
-            }
+            self.group.kill();
             let _ = self.child.kill().await;
-        } else if let Some(pid) = self.pid {
-            let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+        } else {
+            self.group.kill();
         }
     }
 

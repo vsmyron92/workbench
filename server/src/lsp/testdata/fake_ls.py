@@ -18,6 +18,7 @@ import re
 import sys
 import threading
 import time
+from pathlib import Path
 
 out_lock = threading.Lock()
 docs = {}  # uri -> {"text", "version"}
@@ -30,6 +31,11 @@ if os.environ.get("FAKE_LS_CRASH_ON_START"):
     sys.stderr.write("crashing on start as asked\n")
     sys.stderr.flush()
     sys.exit(7)
+
+
+def file_uri(path):
+    """The file URI of an absolute path (file:///C:/... on Windows)."""
+    return Path(path).as_uri()
 
 
 def send(msg):
@@ -120,7 +126,7 @@ def publish(uri):
                 # A message that is a file URI (text), related information that points
                 # outside the project (a location), and data the server wants back as is.
                 c = line.index("LINK")
-                lit = "file://" + os.environ["FAKE_LS_EXTERNAL"]
+                lit = file_uri(os.environ["FAKE_LS_EXTERNAL"])
                 diags.append({"range": rng(i, c, c + 4), "severity": 3, "source": "fake", "message": lit,
                               "relatedInformation": [{"location": {"uri": lit, "range": rng(0, 4, 12)}, "message": lit}],
                               "data": {"uri": uri}})
@@ -212,7 +218,7 @@ def handle(msg):
         w = word_at(params["textDocument"]["uri"], params["position"])
         ext = os.environ.get("FAKE_LS_EXTERNAL")
         if w == "external" and ext:
-            respond(id_, [{"uri": "file://" + ext, "range": rng(0, 4, 12)}])
+            respond(id_, [{"uri": file_uri(ext), "range": rng(0, 4, 12)}])
             return
         locs = []
         for uri, d in docs.items():
@@ -239,7 +245,7 @@ def handle(msg):
         if ext:
             # A string literal that happens to be a file URI (TypeScript offers these for
             # literal union types): text, not a location.
-            lit = "file://" + ext
+            lit = file_uri(ext)
             p = params["position"]
             items.append({"label": lit, "kind": 21, "detail": lit, "filterText": lit, "sortText": lit,
                           "textEdit": {"range": rng(p["line"], p["character"], p["character"]), "newText": lit},

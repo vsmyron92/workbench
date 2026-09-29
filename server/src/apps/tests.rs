@@ -200,6 +200,39 @@ async fn planning_orders_dependencies_and_rejects_cycles() {
     assert_eq!(e.status, StatusCode::NOT_FOUND);
 }
 
+/// Setup help names the project's machine overlay where this Workbench reads it: under its
+/// config dir (`$WORKBENCH_CONFIG_DIR` here, `%APPDATA%\workbench` on Windows), not a fixed
+/// `~/.config/workbench` that only a default Linux install reads.
+#[tokio::test]
+async fn setup_messages_name_the_overlay_workbench_reads() {
+    let f = fixture().await;
+    let overlay_path = f.state.paths.project_overlay("demo");
+    let overlay = crate::config::contract_tilde(&overlay_path);
+    assert!(!overlay.contains(".config/workbench"), "the fixture's config dir is a scratch one: {overlay}");
+    let p = project(&f);
+    let e = runs::start(&f.state, &p, "needs-unity", false).await.unwrap_err();
+    assert_eq!(e.code, "not_configured");
+    assert!(e.message.ends_with(&format!("unknown placeholder {{unity}}; add it under [toolchains] in {overlay}")), "{}", e.message);
+    let remote = envs::find(&p, "remote").unwrap().clone();
+    let e = deploy::plan(&f.state, &p, &remote, None).await.unwrap_err();
+    assert_eq!(e.code, "not_configured");
+    assert!(e.message.ends_with(&format!("which is not defined; add [hosts.box] to {overlay}")), "{}", e.message);
+
+    // A toolchain the overlay names but this machine lacks.
+    let text = std::fs::read_to_string(&overlay_path).unwrap();
+    let missing = f.state.paths.data_dir.join("no-such-toolchain");
+    std::fs::write(
+        &overlay_path,
+        format!("[toolchains]\nghost = {:?}\n\n{text}\n[[run]]\nname = \"needs-ghost\"\ncommand = \"{{ghost}} build\"\n", missing.to_string_lossy()),
+    )
+    .unwrap();
+    f.state.projects.reload(&f.state).await;
+    let p = project(&f);
+    let e = runs::start(&f.state, &p, "needs-ghost", false).await.unwrap_err();
+    assert_eq!(e.code, "not_configured");
+    assert!(e.message.ends_with(&format!("install it or set [toolchains] ghost = \"…\" in {overlay}")), "{}", e.message);
+}
+
 #[tokio::test]
 async fn health_checks_use_pointer_auth_and_notify_on_transitions() {
     let f = fixture().await;
@@ -476,15 +509,21 @@ async fn wait_run(state: &AppState, name: &str, what: &str, ok: impl Fn(&runs::R
 /// on the screen does not make the new one "ready".
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn runs_reuse_their_terminal_across_starts() {
-    let l = live_fixture(
+    // In the run shell: bash, or PowerShell on Windows.
+    let command = if cfg!(windows) {
+        "if (Test-Path .started) { echo second-start; sleep 30 } else { New-Item .started | Out-Null; echo READY-LINE; sleep 30 }"
+    } else {
+        "if [ -f .started ]; then echo second-start; sleep 30; else touch .started; echo READY-LINE; sleep 30; fi"
+    };
+    let l = live_fixture(&format!(
         r#"
 [[run]]
 name = "srv"
 kind = "server"
-command = "if [ -f .started ]; then echo second-start; sleep 30; else touch .started; echo READY-LINE; sleep 30; fi"
-ready = { log = "READY-LINE", timeout_s = 60 }
-"#,
-    )
+command = "{command}"
+ready = {{ log = "READY-LINE", timeout_s = 60 }}
+"#
+    ))
     .await;
     let p = l.state.projects.require("live").unwrap();
     runs::start(&l.state, &p, "srv", false).await.unwrap();
@@ -514,13 +553,16 @@ ready = { log = "READY-LINE", timeout_s = 60 }
 /// answering `port_in_use`. Without it, a busy port is still refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn free_port_config_is_honoured() {
-    if !crate::util::which("fuser") || !crate::util::which("python3") {
-        eprintln!("skip: fuser or python3 missing");
+    // Linux frees ports with fuser; Windows asks the TCP table (`os::net`).
+    let py = crate::util::os::exe::python();
+    if (cfg!(unix) && !crate::util::which("fuser")) || !crate::util::which(&py[0]) {
+        eprintln!("skip: fuser or Python 3 missing");
         return;
     }
     // A foreign process (a child, never this test process) holding a port.
     let hold = |port: u16| {
-        std::process::Command::new("python3")
+        std::process::Command::new(&py[0])
+            .args(&py[1..])
             .args(["-c", &format!("import socket,time\ns=socket.socket()\ns.bind(('127.0.0.1',{port}))\ns.listen()\ntime.sleep(60)")])
             .spawn()
             .unwrap()
@@ -620,7 +662,8 @@ command = "true"
 
 /// A run whose program is not installed (a detected `go run ./cmd/api` without Go)
 /// says so before it starts, as a problem, and after it fails, instead of only
-/// "exited with code 127".
+/// "exited with code 127". (POSIX command lines: `bash -lc` runs them.)
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_programs_are_named() {
     let l = live_fixture(
@@ -641,7 +684,7 @@ command = "cd . && sh -c true"
     let p = l.state.projects.require("live").unwrap();
     let views = runs::list(&l.state, &p).await;
     let by: std::collections::HashMap<&str, &runs::RunView> = views.iter().map(|v| (v.name.as_str(), v)).collect();
-    assert_eq!(by["api"].problems, vec!["`wb-no-such-tool-4242` is not installed (not found on PATH)".to_string()]);
+    assert_eq!(by["api"].problems, vec![format!("`wb-no-such-tool-4242` is not installed (not found on PATH){}", crate::util::os::exe::INSTALLED_SINCE)]);
     assert!(by["inner"].problems.is_empty() && by["fine"].problems.is_empty(), "{:?} {:?}", by["inner"].problems, by["fine"].problems);
 
     runs::start(&l.state, &p, "api", false).await.unwrap();
@@ -650,7 +693,12 @@ command = "cd . && sh -c true"
     runs::start(&l.state, &p, "inner", false).await.unwrap();
     let live = wait_run(&l.state, "inner", "failed", |x| x.state == runs::RunState::Failed).await;
     assert_eq!(live.error.as_deref(), Some("exited with code 127 (command not found)"));
+}
 
+/// The program a command line starts, in each run shell's language.
+#[test]
+fn programs_of_command_lines() {
+    use crate::util::os::shell::Dialect;
     for (cmd, prog) in [
         ("go run ./cmd/api", Some("go")),
         ("PORT=3000 npm start", Some("npm")),
@@ -662,12 +710,29 @@ command = "cd . && sh -c true"
         ("echo hi", None),
         (". ./env.sh", None),
     ] {
-        assert_eq!(runs::command_program(cmd).as_deref(), prog, "{cmd}");
+        assert_eq!(runs::command_program_in(Dialect::Posix, cmd).as_deref(), prog, "{cmd}");
+    }
+    // The run shell on Windows: PowerShell answers its keywords, aliases and cmdlets.
+    for (cmd, prog) in [
+        ("npm run dev", Some("npm")),
+        ("$env:PORT=3000; npm start", Some("npm")),
+        ("cd server; cargo build", Some("cargo")),
+        ("golangci-lint run", Some("golangci-lint")),
+        (r".\build\Debug\app.exe", None),
+        (r"& '.venv\Scripts\my tool.exe'", None),
+        ("Remove-Item -Recurse dist", None),
+        ("get-childitem", None),
+        ("ls", None),
+        ("if ($x) { make }", None),
+    ] {
+        assert_eq!(runs::command_program_in(Dialect::PowerShell, cmd).as_deref(), prog, "{cmd}");
     }
 }
 
 /// Two deploy requests racing through the (slow) planning phase: only one runs. A
 /// branch name is never spliced into a deploy command when it could inject shell code.
+/// (The commands are bash and PowerShell alike: PowerShell's `echo` writes each of its
+/// arguments on a line of its own, so the deploy writes one quoted string.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_deploys_run_once_and_branch_names_cannot_inject() {
     let l = live_fixture(
@@ -675,7 +740,7 @@ async fn concurrent_deploys_run_once_and_branch_names_cannot_inject() {
 [[env]]
 name = "sandbox"
 url = "http://127.0.0.1:9"
-deploy = { command = "echo DEPLOYED {sha8} >> deploys.log; sleep 1", local = true, confirm = "click" }
+deploy = { command = 'echo "DEPLOYED {sha8}" >> deploys.log; sleep 1', local = true, confirm = "click" }
 
 [[env]]
 name = "branchy"
@@ -698,8 +763,9 @@ deploy = { command = "echo SANDBOX {sha8} on {branch} >> deploys.log", local = t
     assert_eq!(plan.deploying.as_deref(), Some(tid.as_str()));
     let mut rx = l.state.terminals.exit_watch(&tid).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), rx.wait_for(|x| x.is_some())).await.unwrap().unwrap();
-    let log = std::fs::read_to_string(l.root.join("deploys.log")).unwrap();
-    assert_eq!(log.lines().count(), 1, "{log}");
+    // (Windows PowerShell 5.1 appends UTF-16.)
+    let log = crate::util::os::shell::read_output(&l.root.join("deploys.log")).unwrap();
+    assert_eq!(log.lines().collect::<Vec<_>>(), [format!("DEPLOYED {}", plan.sha8)], "{log}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while deploy::deploying_terminal(&l.state, "live", "sandbox").is_some() {
         assert!(std::time::Instant::now() < deadline);
@@ -710,7 +776,10 @@ deploy = { command = "echo SANDBOX {sha8} on {branch} >> deploys.log", local = t
     assert_eq!(e.code, "bad_request");
     assert!(l.state.apps.envs.deploys.lock().is_empty(), "no reservation is left behind");
 
-    scratch_git(&l.root, &["checkout", "-q", "-b", "fix;touch${IFS}INJECTED"]);
+    // A branch name that would create `INJECTED` if the run shell read it: bash's, or
+    // PowerShell's (git forbids spaces in branch names).
+    let injecting = if cfg!(windows) { "fix;mkdir('INJECTED')" } else { "fix;touch${IFS}INJECTED" };
+    scratch_git(&l.root, &["checkout", "-q", "-b", injecting]);
     let branchy = envs::find(&p, "branchy").unwrap().clone();
     let e = deploy::deploy(&l.state, &p, &branchy, None, &json!(true)).await.unwrap_err();
     assert_eq!(e.code, "bad_request");

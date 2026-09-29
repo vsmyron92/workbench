@@ -244,7 +244,15 @@ pub fn problems(project: &Project, c: &RunConfig, vars: &Vars, inside: bool) -> 
         }
     }
     for (name, path) in &project.config.toolchains {
-        if c.command.contains(&format!("{{{name}}}")) && !crate::config::expand_tilde(path).exists() {
+        if !c.command.contains(&format!("{{{name}}}")) {
+            continue;
+        }
+        // A repository's `.workbench.toml` may name any path: one on another computer, or
+        // behind a link to one (Windows), is not looked at while listing runs.
+        let p = crate::config::expand_tilde(path);
+        if crate::util::os::path::leaves_machine(&p) {
+            v.push(format!("toolchain {{{name}}} is on a network path or a device ({path}): not checked"));
+        } else if !p.exists() {
             v.push(format!("toolchain {{{name}}} not found at {path}"));
         }
     }
@@ -259,6 +267,9 @@ pub fn problems(project: &Project, c: &RunConfig, vars: &Vars, inside: bool) -> 
         }
     }
     match resolve_cwd(project, &c.cwd) {
+        Ok(p) if crate::util::os::path::leaves_machine(&p) => {
+            v.push(format!("working directory {} is on a network path or a device: not checked", c.cwd));
+        }
         Ok(p) if !p.is_dir() => v.push(format!("working directory {} does not exist", c.cwd)),
         Err(e) => v.push(e.message),
         _ => {}
@@ -269,7 +280,7 @@ pub fn problems(project: &Project, c: &RunConfig, vars: &Vars, inside: bool) -> 
         }
     }
     if let Some(prog) = command_program(&c.command).filter(|p| !inside && !program_available(p)) {
-        v.push(format!("`{prog}` is not installed (not found on PATH)"));
+        v.push(format!("`{prog}` is not installed (not found on PATH){}", crate::util::os::exe::INSTALLED_SINCE));
     }
     v
 }
@@ -314,11 +325,48 @@ const SHELL_BUILTINS: &[&str] = &[
     "local", "exit", "return", "shift", "kill", "let", "readonly", "shopt", "hash", "builtin", "caller", "jobs",
 ];
 
+/// PowerShell's keywords and the aliases every PowerShell has (lowercase): never looked
+/// up on `PATH` either.
+const POWERSHELL_BUILTINS: &[&str] = &[
+    "if", "elseif", "else", "foreach", "for", "while", "do", "switch", "function", "filter", "param", "try", "trap", "throw",
+    "return", "exit", "break", "continue", "begin", "process", "end", "class", "enum", "using", "data", "cd", "chdir", "ls",
+    "dir", "gci", "cat", "gc", "type", "echo", "write", "rm", "del", "erase", "rd", "rmdir", "ri", "cp", "copy", "cpi", "mv",
+    "move", "mi", "ren", "rni", "md", "mkdir", "ni", "pwd", "gl", "sl", "sleep", "start", "saps", "ps", "gps", "kill", "spps",
+    "cls", "clear", "iwr", "irm", "iex", "icm", "ii", "sc", "select", "where", "sort", "measure", "tee", "foreach-object",
+    "%", "?", "set", "sv", "gv", "man", "help", "history", "h", "r", "pushd", "popd", "curl", "wget",
+];
+
+/// PowerShell's approved verbs (`Get-Verb`, lowercase): a `Verb-Noun` word is a cmdlet.
+const POWERSHELL_VERBS: &[&str] = &[
+    "add", "clear", "close", "copy", "enter", "exit", "find", "format", "get", "hide", "join", "lock", "move", "new", "open",
+    "optimize", "pop", "push", "redo", "remove", "rename", "reset", "resize", "search", "select", "set", "show", "skip",
+    "split", "step", "switch", "undo", "unlock", "watch", "connect", "disconnect", "read", "receive", "send", "write",
+    "backup", "checkpoint", "compare", "compress", "convert", "convertfrom", "convertto", "dismount", "edit", "expand",
+    "export", "group", "import", "initialize", "limit", "merge", "mount", "out", "publish", "restore", "save", "sync",
+    "unpublish", "update", "debug", "measure", "ping", "repair", "resolve", "test", "trace", "approve", "assert", "build",
+    "complete", "confirm", "deny", "deploy", "disable", "enable", "install", "invoke", "register", "request", "restart",
+    "resume", "start", "stop", "submit", "suspend", "uninstall", "unregister", "wait", "block", "grant", "protect", "revoke",
+    "unblock", "unprotect", "use", "where", "foreach", "sort", "tee",
+];
+
+/// Whether `w` is a word PowerShell answers itself: a keyword, an alias, a cmdlet.
+fn powershell_builtin(w: &str) -> bool {
+    let w = w.to_ascii_lowercase();
+    POWERSHELL_BUILTINS.contains(&w.as_str()) || w.split_once('-').is_some_and(|(verb, noun)| !noun.is_empty() && POWERSHELL_VERBS.contains(&verb))
+}
+
 /// The program a command line starts when the shell looks it up on `PATH`: `go` for
 /// `go run ./cmd/api`, `npm` for `PORT=3000 npm start`, `cargo` for `cd server &&
 /// cargo build`. `None` for a path (`./gradlew`), a `{toolchain}`, shell syntax and
-/// builtins, which a `PATH` lookup cannot judge.
+/// builtins, which a `PATH` lookup cannot judge. The command is in the run shell's
+/// language (`Dialect::HOST`).
 pub(crate) fn command_program(cmd: &str) -> Option<String> {
+    command_program_in(crate::util::os::shell::Dialect::HOST, cmd)
+}
+
+/// `command_program` for a command line in `dialect`: PowerShell's keywords, aliases
+/// and cmdlets (`Remove-Item`) are its own.
+pub(crate) fn command_program_in(dialect: crate::util::os::shell::Dialect, cmd: &str) -> Option<String> {
     let mut words = cmd.split_whitespace();
     loop {
         let w = words.next()?;
@@ -340,35 +388,18 @@ pub(crate) fn command_program(cmd: &str) -> Option<String> {
             _ => {}
         }
         let plain = w.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'));
-        return (plain && !w.starts_with(['-', '.']) && !SHELL_BUILTINS.contains(&w)).then(|| w.to_string());
+        let builtin = match dialect {
+            crate::util::os::shell::Dialect::Posix => SHELL_BUILTINS.contains(&w),
+            crate::util::os::shell::Dialect::PowerShell => powershell_builtin(w),
+        };
+        return (plain && !w.starts_with(['-', '.']) && !builtin).then(|| w.to_string());
     }
-}
-
-/// Where tools often live when the Workbench process (started from a desktop
-/// launcher or a service) has a shorter `PATH` than the login shell runs get.
-fn user_bin_dirs() -> Vec<std::path::PathBuf> {
-    let Some(home) = dirs::home_dir() else { return vec![] };
-    let mut out: Vec<std::path::PathBuf> = [
-        ".local/bin", "bin", ".cargo/bin", "go/bin", ".bun/bin", ".deno/bin", ".dotnet", ".dotnet/tools", ".volta/bin",
-        ".asdf/shims", ".local/share/mise/shims", ".pyenv/shims", ".rbenv/shims", ".nodenv/shims", ".local/share/pnpm",
-        ".yarn/bin", ".npm-global/bin", ".juliaup/bin", ".ghcup/bin", ".elan/bin", ".mix/escripts", ".composer/vendor/bin",
-        ".config/composer/vendor/bin",
-    ]
-    .iter()
-    .map(|d| home.join(d))
-    .collect();
-    out.extend(["/usr/local/go/bin", "/usr/local/bin", "/snap/bin", "/opt/homebrew/bin", "/home/linuxbrew/.linuxbrew/bin"].map(Into::into));
-    // Version managers with one directory per installed version.
-    for (base, sub) in [(".nvm/versions/node", "bin"), (".sdkman/candidates", "current/bin"), (".rustup/toolchains", "bin")] {
-        if let Ok(rd) = std::fs::read_dir(home.join(base)) {
-            out.extend(rd.flatten().take(20).map(|e| e.path().join(sub)));
-        }
-    }
-    out
 }
 
 /// Whether `prog` can be found: on this process's `PATH` or in a usual user tool
-/// directory. Answers are remembered for a few seconds (run lists poll).
+/// directory (`os::exe::user_tool_dirs`: the Workbench process, started from a desktop
+/// launcher or a service, may have a shorter `PATH` than the login shell runs get).
+/// Answers are remembered for a few seconds (run lists poll).
 fn program_available(prog: &str) -> bool {
     static CACHE: std::sync::LazyLock<Mutex<HashMap<String, (bool, Instant)>>> = std::sync::LazyLock::new(Default::default);
     if let Some((ok, at)) = CACHE.lock().get(prog) {
@@ -376,7 +407,7 @@ fn program_available(prog: &str) -> bool {
             return *ok;
         }
     }
-    let ok = crate::util::which(prog) || user_bin_dirs().iter().any(|d| d.join(prog).is_file());
+    let ok = crate::util::which(prog) || crate::util::os::exe::find_in(&crate::util::os::exe::user_tool_dirs(), prog).is_some();
     let mut cache = CACHE.lock();
     if cache.len() > 512 {
         cache.clear();
@@ -385,12 +416,14 @@ fn program_available(prog: &str) -> bool {
     ok
 }
 
-/// A run's cwd: project-relative (contained), or absolute / `~/` from user config.
+/// A run's cwd: project-relative (contained), or absolute / `~/` from user config. On
+/// Windows a relative one may be written with `\` too (`web\app`).
 pub fn resolve_cwd(project: &Project, cwd: &str) -> Result<std::path::PathBuf, ApiError> {
-    if cwd.starts_with('/') || cwd.starts_with("~/") {
+    if crate::util::os::path::is_absolute_str(cwd) || crate::util::os::path::home_relative(cwd).is_some() {
         return Ok(crate::config::expand_tilde(cwd));
     }
-    crate::util::paths::resolve_in_root(&project.root, cwd)
+    let rel = crate::util::os::path::segments(cwd).collect::<Vec<_>>().join("/");
+    crate::util::paths::resolve_in_root(&project.root, &rel)
 }
 
 /// Whether a start of `c` would run in the project's dev container: the project uses
@@ -477,14 +510,10 @@ pub async fn port_open(port: u16, timeout: Duration) -> bool {
     matches!(a, Ok(Ok(_))) || matches!(b, Ok(Ok(_)))
 }
 
-/// `fuser -k PORT/tcp`, then wait up to 5 s for the port to close.
+/// `fuser -k PORT/tcp` (`util::os::net::kill_port_holders`), then wait up to 5 s for
+/// the port to close.
 async fn free_port(port: u16) -> Result<(), String> {
-    if !crate::util::which("fuser") {
-        return Err("fuser is not installed (package psmisc); free the port yourself".into());
-    }
-    let out = crate::util::proc::run("fuser", &["-k", &format!("{port}/tcp")], std::path::Path::new("/"), Duration::from_secs(10))
-        .await
-        .map_err(|e| e.message)?;
+    let done = crate::util::os::net::kill_port_holders(port).await?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if !port_open(port, Duration::from_millis(200)).await {
@@ -492,7 +521,7 @@ async fn free_port(port: u16) -> Result<(), String> {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    Err(format!("port {port} is still in use after fuser -k ({})", out.message()))
+    Err(format!("port {port} is still in use after {done}"))
 }
 
 // ---------------------------------------------------------------- start
@@ -674,19 +703,23 @@ struct Prepared {
 }
 
 fn prepare(state: &AppState, project: &Project, c: &RunConfig, vars: &Vars) -> Result<Prepared, ApiError> {
+    // Where this project's machine overlay really is (`~/.config/workbench/projects/<id>.toml`
+    // by default on Linux, under `%APPDATA%` on Windows, or `$WORKBENCH_CONFIG_DIR`).
+    let overlay = || crate::config::contract_tilde(&state.paths.project_overlay(&project.id));
     for (name, path) in &project.config.toolchains {
         if c.command.contains(&format!("{{{name}}}")) && !crate::config::expand_tilde(path).exists() {
             return Err(ApiError::not_configured(format!(
-                "toolchain {{{name}}} not found at {path}; install it or set [toolchains] {name} = \"…\" in ~/.config/workbench/projects/{}.toml",
-                project.id
+                "toolchain {{{name}}} not found at {path}; install it or set [toolchains] {name} = \"…\" in {}",
+                overlay()
             )));
         }
     }
     let unknown: Vec<String> = expand::unknown_placeholders(&c.command, vars);
     if let Some(u) = unknown.first() {
         return Err(ApiError::not_configured(format!(
-            "{}: unknown placeholder {{{u}}}; add it under [toolchains] in ~/.config/workbench/projects/{}.toml",
-            c.name, project.id
+            "{}: unknown placeholder {{{u}}}; add it under [toolchains] in {}",
+            c.name,
+            overlay()
         )));
     }
     let cwd = resolve_cwd(project, &c.cwd)?;
@@ -795,7 +828,7 @@ async fn supervise(
         title: name.clone(),
         project_id: Some(pid.clone()),
         cwd: p.cwd.clone(),
-        argv: vec!["bash".into(), "-lc".into(), p.command.clone()],
+        argv: crate::util::os::shell::run_argv(&p.command),
         env: p.env.clone(),
         cols: None,
         rows: None,
@@ -1215,8 +1248,8 @@ async fn finish(state: &AppState, pid: &str, name: &str, epoch: u64, p: &Prepare
 
 /// Run a short command (service status/stop) with the run's cwd and env; `Some(success)`.
 async fn run_quiet(cmd: &str, p: &Prepared, timeout: Duration) -> Option<bool> {
-    let mut c = tokio::process::Command::new("bash");
-    c.arg("-lc").arg(cmd).current_dir(&p.cwd);
+    let mut c = crate::util::os::shell::run_command(cmd);
+    c.current_dir(&p.cwd);
     for (k, v) in &p.env {
         match v {
             Some(v) => c.env(k, v),
@@ -1245,8 +1278,8 @@ pub async fn stop(state: &AppState, project: &Project, name: &str) -> Result<Run
         if let Some(stop_cmd) = &c.stop {
             let vars = expand::base_vars(project);
             let cwd = resolve_cwd(project, &c.cwd)?;
-            let mut cmd = tokio::process::Command::new("bash");
-            cmd.arg("-lc").arg(expand::placeholders(stop_cmd, &vars)).current_dir(&cwd);
+            let mut cmd = crate::util::os::shell::run_command(&expand::placeholders(stop_cmd, &vars));
+            cmd.current_dir(&cwd);
             match crate::util::proc::run_cmd(cmd, Duration::from_secs(60)).await {
                 Ok(o) if !o.ok() => {
                     error = Some(format!("stop command failed: {}", crate::apps::detect::text::ellipsize(&o.message(), 300)))
@@ -1345,8 +1378,8 @@ fn refresh_services(state: &AppState, project: &Project) {
         let cwd = resolve_cwd(project, &c.cwd).unwrap_or(root);
         tokio::spawn(async move {
             let Some(status) = c.status.as_deref() else { return };
-            let mut cmd = tokio::process::Command::new("bash");
-            cmd.arg("-lc").arg(expand::placeholders(status, &vars)).current_dir(&cwd);
+            let mut cmd = crate::util::os::shell::run_command(&expand::placeholders(status, &vars));
+            cmd.current_dir(&cwd);
             let Ok(out) = crate::util::proc::run_cmd(cmd, Duration::from_secs(3)).await else { return };
             let up = out.ok();
             let live = {
@@ -1411,6 +1444,30 @@ mod tests {
         assert_eq!(since_restart("a\nb\n"), "a\nb\n");
         assert_eq!(since_restart("READY\n── restarted ──\nnew\n"), "new\n");
         assert_eq!(since_restart("x\n── restarted ──\nREADY\n── restarted ──\n"), "");
+    }
+
+    /// A working directory or a toolchain on another computer, which a repository's
+    /// `.workbench.toml` may name, is not looked at while runs are listed (Windows): looking
+    /// would connect to that computer.
+    #[cfg(windows)]
+    #[test]
+    fn network_paths_in_run_configs_are_not_looked_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::ProjectFile::default();
+        config.toolchains.insert("tool".into(), r"\\server\share\tool.exe".into());
+        let project = Project {
+            id: "p".into(),
+            name: "p".into(),
+            root: dir.path().to_path_buf(),
+            config,
+            remote: None,
+            warnings: vec![],
+            repo_secret_names: Default::default(),
+        };
+        let run = RunConfig { name: "x".into(), command: "{tool} go".into(), cwd: r"\\server\share\src".into(), ..Default::default() };
+        let found = problems(&project, &run, &expand::base_vars(&project), false);
+        assert!(found.iter().any(|p| p.starts_with("toolchain {tool} is on a network path")), "{found:?}");
+        assert!(found.iter().any(|p| p.contains(r"working directory \\server\share\src is on a network path")), "{found:?}");
     }
 
     #[test]

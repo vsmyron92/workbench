@@ -145,12 +145,19 @@ impl AppState {
     }
 }
 
+/// `GET /api/health` (public): the version, the OS, and what this OS leaves out
+/// (`unsupported`, `{feature: reason}`) or has only as `experimental` (`{feature: note}`);
+/// both are empty on Linux. See `util::os::support`.
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    use util::os::support;
     Json(json!({
         "ok": true,
         "service": "workbench",
         "version": env!("CARGO_PKG_VERSION"),
         "startedAt": state.started_at,
+        "os": support::os(),
+        "unsupported": support::unsupported_all(),
+        "experimental": support::experimental_all(),
     }))
 }
 
@@ -161,11 +168,8 @@ pub fn loopback_listen_addr(bind: SocketAddr) -> Option<SocketAddr> {
     use std::net::{IpAddr, Ipv4Addr};
     let covered = match bind.ip() {
         IpAddr::V4(v4) => v4.is_unspecified() || v4 == Ipv4Addr::LOCALHOST,
-        // [::] also takes IPv4 unless the kernel is set to v6-only sockets.
-        IpAddr::V6(v6) => {
-            v6.is_unspecified()
-                && std::fs::read_to_string("/proc/sys/net/ipv6/bindv6only").map(|s| s.trim() != "1").unwrap_or(true)
-        }
+        // [::] also takes IPv4 unless the system makes it v6-only (`util::os::net::bind`).
+        IpAddr::V6(v6) => v6.is_unspecified() && util::os::net::v6_any_takes_v4(),
     };
     (!covered).then(|| SocketAddr::from((Ipv4Addr::LOCALHOST, bind.port())))
 }
@@ -263,6 +267,28 @@ mod tests {
         assert_eq!(extra("192.168.1.5:7777").as_deref(), Some("127.0.0.1:7777"));
         assert_eq!(extra("127.0.0.2:7868").as_deref(), Some("127.0.0.1:7868"));
         assert_eq!(extra("[::1]:7777").as_deref(), Some("127.0.0.1:7777"));
+    }
+
+    /// Public, and names the OS and what it leaves out: nothing on Linux.
+    #[tokio::test]
+    async fn health_reports_the_os_and_what_it_leaves_out() {
+        use tower::ServiceExt;
+        let t = crate::platform::testutil::app().await;
+        let req = axum::http::Request::builder().uri("/api/health").header("host", "127.0.0.1:7999").body(axum::body::Body::empty()).unwrap();
+        let resp = t.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["os"], std::env::consts::OS);
+        if cfg!(target_os = "linux") {
+            assert_eq!((&v["unsupported"], &v["experimental"]), (&serde_json::json!({}), &serde_json::json!({})), "{v}");
+        }
+        if cfg!(windows) {
+            for key in ["devcontainer", "desktopNotifications", "gdbAttach", "rustGdbPrettyPrinters", "networkRoots"] {
+                assert!(v["unsupported"][key].as_str().is_some_and(|why| why.contains("Windows")), "{key}: {v}");
+            }
+            assert!(v["experimental"]["services"].is_string(), "{v}");
+        }
     }
 }
 

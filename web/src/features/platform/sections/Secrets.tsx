@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { KeyRound, Lock, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '@/api/client'
+import { useHealth } from '@/api/health'
 import { useProjects } from '@/api/queries'
 import { confirmDialog, toast, toastError } from '@/shell/actions'
 import { Badge, Button, EmptyState, ErrorBox, IconButton, Input, Loading, Modal, Select, StatusDot } from '@/ui'
@@ -10,10 +11,23 @@ import { Group, Note, Page } from '../common'
 import { makeSecretRef, SECRET_NAME_RE, secretRefFields, type SecretSource } from '../lib'
 import type { SecretRef, SecretRow } from '../types'
 
-const SOURCES: { value: SecretSource; label: string; placeholder: string; hint: string }[] = [
-  { value: 'file', label: 'File', placeholder: '~/.gitlab_token', hint: 'A file containing only the value. Keep it private (chmod 600).' },
+/** `windowsHint` replaces `hint` when the server runs on Windows. */
+const SOURCES: { value: SecretSource; label: string; placeholder: string; hint: string; windowsHint?: string }[] = [
+  {
+    value: 'file',
+    label: 'File',
+    placeholder: '~/.gitlab_token',
+    hint: 'A file containing only the value. Keep it private (chmod 600).',
+    windowsHint: 'A file containing only the value. Keep it private: Make private lets only you (and SYSTEM) read it.',
+  },
   { value: 'env', label: 'Environment variable', placeholder: 'GITLAB_TOKEN', hint: "Read from Workbench's own environment." },
-  { value: 'keyring', label: 'Keyring', placeholder: 'workbench/gitlab', hint: 'service/account in the desktop keyring (Secret Service).' },
+  {
+    value: 'keyring',
+    label: 'Keyring',
+    placeholder: 'workbench/gitlab',
+    hint: 'service/account in the desktop keyring (Secret Service).',
+    windowsHint: 'service/account in Windows Credential Manager (the generic credential account.service).',
+  },
   { value: 'dotenv', label: '.env file', placeholder: '~/project/.env', hint: 'KEY=value file; enter the path and the key.' },
   { value: 'command', label: 'Command', placeholder: 'pass show gitlab', hint: 'Runs without a shell; its output is the value.' },
 ]
@@ -38,6 +52,7 @@ function SecretEditor({
   const [location, setLocation] = useState(fields.location)
   const [key, setKey] = useState(fields.key)
   const [busy, setBusy] = useState(false)
+  const windows = useHealth()?.os === 'windows'
   const src = SOURCES.find((s) => s.value === source)!
   const ref = makeSecretRef(source, location, key)
   const nameError = !name.trim()
@@ -90,7 +105,7 @@ function SecretEditor({
           <Input className="mono" value={key} placeholder="GITLAB_TOKEN" onChange={(e) => setKey(e.target.value)} />
         </>
       )}
-      <div className="wb-small wb-muted">{src.hint}</div>
+      <div className="wb-small wb-muted">{(windows && src.windowsHint) || src.hint}</div>
       {error && (location || name) && <div className="wb-field-error">{error}</div>}
     </Modal>
   )
@@ -121,6 +136,8 @@ export function SecretsSection() {
   const { data: projects } = useProjects()
   const [editor, setEditor] = useState<{ name: string; ref: SecretRef | null } | null>(null)
   const [fixing, setFixing] = useState<string | null>(null)
+  // The endpoint applies Windows' private access list there: no chmod to name.
+  const makePrivate = useHealth()?.os === 'windows' ? 'Make private' : 'chmod 600'
 
   const globalRefs = settings.data?.config.secrets ?? {}
   const projectName = (id?: string) => projects?.find((p) => p.id === id)?.name ?? id ?? ''
@@ -140,7 +157,7 @@ export function SecretsSection() {
     setFixing(key)
     try {
       await api.post(`/api/settings/secrets/${encodeURIComponent(row.name)}/chmod`, {}, { projectId: row.projectId })
-      toast('success', `${row.location} is now private (600)`)
+      toast('success', `${row.location} is now private${makePrivate === 'chmod 600' ? ' (600)' : ''}`)
       await qc.invalidateQueries({ queryKey: pk.secrets })
     } catch (e) {
       toastError(e, 'Could not change permissions')
@@ -185,7 +202,7 @@ export function SecretsSection() {
         <div style={{ marginTop: 12 }}>
           <Note tone="warning">
             {fixable === 1 ? 'One secret file is' : `${fixable} secret files are`} readable by other users on this machine. Use{' '}
-            <b>chmod 600</b> to make {fixable === 1 ? 'it' : 'them'} private.
+            <b>{makePrivate}</b> to make {fixable === 1 ? 'it' : 'them'} private.
           </Note>
         </div>
       )}
@@ -270,7 +287,7 @@ export function SecretsSection() {
                           loading={fixing === `${r.projectId ?? ''}/${r.name}`}
                           onClick={() => void chmod(r)}
                         >
-                          chmod 600
+                          {makePrivate}
                         </Button>
                       )}
                       {r.scope === 'global' ? (

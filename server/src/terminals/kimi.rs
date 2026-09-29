@@ -97,10 +97,6 @@ pub fn load_index(home: &Path) -> Vec<IndexEntry> {
     }
 }
 
-fn same_dir(a: &str, b: &str) -> bool {
-    a.trim_end_matches('/') == b.trim_end_matches('/')
-}
-
 /// A hosted Kimi session waiting for its id (all of one cwd and Kimi home).
 #[derive(Debug, Clone)]
 pub struct Waiting {
@@ -132,7 +128,7 @@ pub enum Evidence {
 pub fn assign(cwd: &str, entries: &[IndexEntry], waiting: &[Waiting], claimed: &HashSet<String>) -> HashMap<String, (String, Evidence)> {
     let fresh: Vec<&str> = entries
         .iter()
-        .filter(|e| same_dir(&e.work_dir, cwd) && !claimed.contains(&e.session_id))
+        .filter(|e| crate::util::os::path::same_dir(&e.work_dir, cwd) && !claimed.contains(&e.session_id))
         .map(|e| e.session_id.as_str())
         .collect();
     let mut possible: HashMap<&str, Vec<&str>> =
@@ -199,8 +195,8 @@ fn ts(v: Option<&Value>) -> Option<i64> {
 pub fn summarize(home: &Path, e: &IndexEntry) -> Summary {
     let mut s = Summary { id: e.session_id.clone(), ..Default::default() };
     let sessions = home.join("sessions");
-    let Ok(dir) = std::fs::canonicalize(&e.session_dir) else { return s };
-    let inside = std::fs::canonicalize(&sessions).is_ok_and(|root| dir.starts_with(root));
+    let Ok(dir) = crate::util::os::path::canonicalize(&e.session_dir) else { return s };
+    let inside = crate::util::os::path::canonicalize(&sessions).is_ok_and(|root| crate::util::os::path::starts_with(&dir, &root));
     if !inside {
         return s;
     }

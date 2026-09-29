@@ -30,6 +30,7 @@ use crate::config::project::{EnvKind, Environment};
 use crate::error::ApiError;
 use crate::projects::Project;
 use crate::terminals::{SpawnSpec, TerminalInfo, TerminalKind};
+use crate::util::os::shell::Dialect;
 
 pub const HISTORY: usize = 60;
 const MAX_BODY: usize = 256 * 1024;
@@ -137,8 +138,8 @@ pub struct EnvView {
 }
 
 /// The env config as the UI sees it: no secret values (only secret *names*).
-pub fn config_view(project: &Project, e: &Environment) -> Value {
-    let target = remote::env_target(project, e).map(|t| t.label()).ok();
+pub fn config_view(state: &AppState, project: &Project, e: &Environment) -> Value {
+    let target = remote::env_target(&state.paths, project, e).map(|t| t.label()).ok();
     json!({
         "host": e.host,
         "target": target,
@@ -183,7 +184,7 @@ pub fn list(state: &AppState, project: &Project) -> Vec<EnvView> {
                 name: e.name.clone(),
                 kind: e.kind,
                 url: e.url.clone(),
-                config: config_view(project, e),
+                config: config_view(state, project, e),
                 health,
                 version,
                 preview: preview_info(state, &project.id, e),
@@ -248,7 +249,7 @@ pub async fn check(state: &AppState, project: &Project, e: &Environment) -> Heal
     let _guard = lock.lock().await;
     let outcome = match &e.health {
         None => CheckOutcome { status: HealthStatus::Unknown, http_status: None, latency_ms: None, error: Some("no health probe configured".into()) },
-        Some(h) if h.via_host => check_via_host(project, e, h).await,
+        Some(h) if h.via_host => check_via_host(state, project, e, h).await,
         Some(h) => {
             let first = check_http(state, project, e, h).await;
             if first.status == HealthStatus::Down {
@@ -390,8 +391,19 @@ pub fn describe(err: &reqwest::Error, timeout: Duration) -> String {
 /// The probe run on the host for `health.via_host`: prints `<http_code> <seconds>`.
 /// Auth is never passed: a host-local port is not behind the site's basic auth, and a
 /// password must not appear in a remote argv.
-pub fn via_host_command(url: &str, secs: u64) -> String {
-    format!("curl -sS -o /dev/null -w '%{{http_code}} %{{time_total}}' --max-time {secs} {}", super::expand::shell_quote(url))
+pub fn via_host_command(target: &remote::Target, url: &str, secs: u64) -> String {
+    via_host_command_in(remote::dialect(target), url, secs)
+}
+
+/// `via_host_command` for a shell of `dialect`. PowerShell's `curl` is `Invoke-WebRequest`
+/// in Windows PowerShell 5.1: there it is `curl.exe` (part of Windows since 10 1803),
+/// which writes to `NUL`.
+fn via_host_command_in(dialect: Dialect, url: &str, secs: u64) -> String {
+    let (curl, null) = match dialect {
+        Dialect::Posix => ("curl", "/dev/null"),
+        Dialect::PowerShell => ("curl.exe", "NUL"),
+    };
+    format!("{curl} -sS -o {null} -w '%{{http_code}} %{{time_total}}' --max-time {secs} {}", dialect.quote(url))
 }
 
 /// Parse `via_host_command` output: `(status, latency_ms)`; status 0 means no response.
@@ -402,15 +414,15 @@ pub fn parse_via_host(stdout: &str) -> (Option<u16>, Option<u64>) {
     (code, ms)
 }
 
-async fn check_via_host(project: &Project, e: &Environment, h: &crate::config::project::Health) -> CheckOutcome {
-    let target = match remote::env_target(project, e) {
+async fn check_via_host(state: &AppState, project: &Project, e: &Environment, h: &crate::config::project::Health) -> CheckOutcome {
+    let target = match remote::env_target(&state.paths, project, e) {
         Ok(t) => t,
         Err(err) => return CheckOutcome { status: HealthStatus::Unknown, http_status: None, latency_ms: None, error: Some(err.message) },
     };
     let secs = (u64::from(h.timeout_ms) / 1000).clamp(1, 60);
-    let argv = remote::argv(&target, &via_host_command(&h.url, secs), false);
-    let mut c = tokio::process::Command::new(&argv[0]);
-    c.args(&argv[1..]).current_dir(&project.root);
+    let argv = remote::argv(&target, &via_host_command(&target, &h.url, secs), false);
+    let mut c = crate::util::os::shell::command(&argv);
+    c.current_dir(&project.root);
     match crate::util::proc::run_cmd(c, Duration::from_secs(secs + 20)).await {
         Ok(out) => {
             let (code, ms) = parse_via_host(&out.stdout);
@@ -465,10 +477,10 @@ pub async fn probe_version(state: &AppState, project: &Project, e: &Environment)
     let info = if v.http.is_some() {
         probe_version_http(state, project, e).await?
     } else if let Some(cmd) = &v.command {
-        let target = remote::env_target(project, e)?;
+        let target = remote::env_target(&state.paths, project, e)?;
         let argv = remote::argv(&target, cmd, false);
-        let mut c = tokio::process::Command::new(&argv[0]);
-        c.args(&argv[1..]).current_dir(&project.root);
+        let mut c = crate::util::os::shell::command(&argv);
+        c.current_dir(&project.root);
         let out = crate::util::proc::run_cmd(c, Duration::from_secs(40)).await?;
         let info = if out.ok() {
             let raw = out.stdout.trim().to_string();
@@ -590,7 +602,7 @@ pub async fn open_logs(state: &AppState, project: &Project, e: &Environment, whi
         Some(n) => e.logs.iter().find(|l| l.name == n).ok_or_else(|| ApiError::not_found(format!("{} has no log {n:?}", e.name)))?,
         None => e.logs.first().ok_or_else(|| ApiError::not_configured(format!("{} has no [[env.logs]] commands", e.name)))?,
     };
-    let target = remote::env_target(project, e)?;
+    let target = remote::env_target(&state.paths, project, e)?;
     let argv = remote::argv(&target, &log.command, true);
     state
         .terminals
@@ -617,7 +629,7 @@ pub async fn run_command(state: &AppState, project: &Project, e: &Environment, n
     if c.confirm && !confirmed {
         return Err(ApiError::new(axum::http::StatusCode::PRECONDITION_REQUIRED, "confirmation_required", format!("{name} on {} needs confirmation", e.name)));
     }
-    let target = remote::env_target(project, e)?;
+    let target = remote::env_target(&state.paths, project, e)?;
     let argv = remote::argv(&target, &c.command, false);
     state
         .terminals
@@ -660,9 +672,18 @@ mod tests {
 
     #[test]
     fn via_host_probe_command_and_output() {
-        let c = via_host_command("http://127.0.0.1:8081/api/health", 5);
+        let ssh = remote::Target::Ssh(crate::config::project::SshHost { host: "203.0.113.10".into(), ..Default::default() });
+        let c = via_host_command(&ssh, "http://127.0.0.1:8081/api/health", 5);
         assert_eq!(c, "curl -sS -o /dev/null -w '%{http_code} %{time_total}' --max-time 5 http://127.0.0.1:8081/api/health");
-        assert!(via_host_command("http://x/a b", 5).ends_with("'http://x/a b'"));
+        // POSIX quoting on the ssh host, on every OS.
+        assert!(via_host_command(&ssh, "http://x/it's", 5).ends_with(r"'http://x/it'\''s'"));
+        assert!(via_host_command(&remote::Target::Local, "http://x/a b", 5).ends_with("'http://x/a b'"));
+        // This computer's PowerShell (Windows): curl.exe, never 5.1's `curl` alias.
+        assert_eq!(
+            via_host_command_in(Dialect::PowerShell, "http://127.0.0.1:8081/it's", 5),
+            "curl.exe -sS -o NUL -w '%{http_code} %{time_total}' --max-time 5 'http://127.0.0.1:8081/it''s'"
+        );
+        assert_eq!(via_host_command(&remote::Target::Local, "http://x/", 5), via_host_command_in(Dialect::HOST, "http://x/", 5));
         assert_eq!(parse_via_host("200 0.0123"), (Some(200), Some(12)));
         assert_eq!(parse_via_host("000 5.001"), (None, Some(5001)));
         assert_eq!(parse_via_host(""), (None, None));

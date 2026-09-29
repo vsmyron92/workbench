@@ -173,11 +173,16 @@ pub fn language_of(l: &DebugLaunch, root: &Path) -> String {
         };
     }
     let program = l.program.as_deref().unwrap_or("");
+    // Never through a link to another computer (Windows): configurations are listed unasked.
+    let has = |name: &str| {
+        let p = root.join(name);
+        !crate::util::os::path::leaves_machine_below(root, &p) && p.is_file()
+    };
     if l.module.is_some() || program.ends_with(".py") {
         "python".into()
-    } else if program.ends_with(".go") || (root.join("go.mod").is_file() && !root.join("Cargo.toml").is_file() && (program.starts_with("./") || program == ".")) {
+    } else if program.ends_with(".go") || (has("go.mod") && !has("Cargo.toml") && (program.starts_with("./") || program == ".")) {
         "go".into()
-    } else if root.join("Cargo.toml").is_file() {
+    } else if has("Cargo.toml") {
         "rust".into()
     } else {
         "cpp".into()
@@ -185,16 +190,24 @@ pub fn language_of(l: &DebugLaunch, root: &Path) -> String {
 }
 
 /// The adapter a launch configuration uses: the one it names, or the one for its
-/// language. Errors name what to install or configure.
+/// language. Errors name what to install or configure. Where gdb cannot attach to a
+/// process (`util::os::support`: Windows), an attach picks another adapter for the
+/// language and one that ends up with gdb is refused (a gdbserver `target` still goes).
 pub async fn adapter_for(state: &AppState, l: &DebugLaunch, language: &str) -> Result<Adapter, ApiError> {
+    use crate::util::os::support::{Feature, unsupported};
     let cfg = state.config.read().debug.clone();
-    match l.adapter.as_deref().filter(|a| !a.trim().is_empty()) {
+    let gdb_attach = if l.request == DebugRequest::Attach && !l.extra.contains_key("target") { unsupported(Feature::GdbAttach) } else { None };
+    let adapter = match l.adapter.as_deref().filter(|a| !a.trim().is_empty()) {
         Some(id) => adapters::find(&cfg, id.trim()).ok_or_else(|| {
             ApiError::not_configured(format!("launch configuration {:?} names adapter {id:?}, which is not a preset: define [debug.adapters.{id}] in config.toml", l.name))
-        }),
-        None => adapters::for_language(state, language).await.ok_or_else(|| {
+        })?,
+        None => adapters::for_language(state, language, gdb_attach.is_none()).await.ok_or_else(|| {
             ApiError::not_configured(format!("no debug adapter knows {language}: add one under [debug.adapters.<id>] in config.toml with languages = [\"{language}\"]"))
-        }),
+        })?,
+    };
+    match gdb_attach {
+        Some(why) if adapter.kind == AdapterKind::Gdb => Err(ApiError::unsupported(Feature::GdbAttach.key(), why)),
+        _ => Ok(adapter),
     }
 }
 
@@ -204,14 +217,15 @@ fn run_named<'a>(project: &'a Project, name: &str) -> Option<&'a crate::config::
 
 /// A program path of a launch configuration on the host: placeholders
 /// (`{root}`, `${workspaceFolder}`, toolchains) expanded; relative ones resolved in
-/// the project (and kept inside it).
+/// the project (and kept inside it), on Windows also written with `\` (`build\app.exe`).
 pub fn host_program(project: &Project, program: &str) -> Result<PathBuf, ApiError> {
     let vars = crate::apps::expand::base_vars(project);
     let p = crate::apps::expand::placeholders(program, &vars).replace("${workspaceFolder}", &project.root.display().to_string());
-    if p.starts_with('/') || p.starts_with("~/") {
+    if crate::util::os::path::is_absolute_str(&p) || crate::util::os::path::home_relative(&p).is_some() {
         return Ok(crate::config::expand_tilde(&p));
     }
-    crate::util::paths::resolve_in_root(&project.root, &p)
+    let rel = crate::util::os::path::segments(&p).collect::<Vec<_>>().join("/");
+    crate::util::paths::resolve_in_root(&project.root, &rel)
 }
 
 /// Views for the UI, with problems found without running anything.
@@ -251,7 +265,7 @@ pub async fn views(state: &AppState, project: &Project) -> Vec<LaunchConfigView>
         if l.request == DebugRequest::Launch && d.build.is_none() {
             match (&l.program, &l.module) {
                 (None, None) => problems.push("no `program` to launch".into()),
-                (Some(p), _) if l.pre_launch.is_none() && d.origin == "config" && !p.starts_with('/') && !p.contains('{') => {
+                (Some(p), _) if l.pre_launch.is_none() && d.origin == "config" && !crate::util::os::path::is_absolute_str(p) && !p.contains('{') => {
                     if let Ok(path) = host_program(project, p) {
                         if !path.exists() {
                             problems.push(format!("{p} does not exist yet: build it first, or set pre_launch"));
@@ -429,7 +443,7 @@ pub async fn plan_config(state: &AppState, project: &Project, name: &str, stop_o
     };
     // A relative interpreter (`.venv/bin/python`) is the run's or the project's.
     if let Some(py) = l.extra.get("python").and_then(Value::as_str).map(str::to_string) {
-        if py.contains('/') && !py.starts_with('/') {
+        if crate::util::os::path::has_separator(&py) && !crate::util::os::path::is_absolute_str(&py) {
             let in_cwd = cwd.join(&py);
             let abs = if in_cwd.exists() { in_cwd } else { project.root.join(&py) };
             l.extra.insert("python".into(), json!(abs.display().to_string()));
@@ -606,7 +620,7 @@ pub fn arguments(plan: &Plan, program: Option<&str>, terminal: bool) -> Value {
                         m.insert("subProcess".into(), json!(false));
                     }
                     if let Some(py) = l.extra.get("python").and_then(Value::as_str) {
-                        let py = if py.starts_with('/') { adapter_path(target, Path::new(py)) } else { py.to_string() };
+                        let py = if crate::util::os::path::is_absolute_str(py) { adapter_path(target, Path::new(py)) } else { py.to_string() };
                         m.insert("python".into(), json!(py));
                     }
                 }
@@ -766,5 +780,38 @@ mod tests {
         let mut with_pid = attach(&[], None);
         with_pid.pid = Some(42);
         assert!(attach_target_known(AdapterKind::Gdb, &with_pid));
+    }
+
+    /// gdb attaches to a process only where the OS allows it (`util::os::support`): on
+    /// Windows an attach by language passes over gdb and one that names it is refused;
+    /// launches and gdbserver targets keep gdb everywhere.
+    #[tokio::test]
+    async fn gdb_attaches_only_where_the_os_allows_it() {
+        use crate::util::os::support::{Feature, unsupported};
+        let t = crate::platform::testutil::app().await;
+        let launch = |adapter: Option<&str>, request: DebugRequest, extra: &[(&str, Value)]| DebugLaunch {
+            name: "x".into(),
+            adapter: adapter.map(str::to_string),
+            request,
+            extra: extra.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+            ..Default::default()
+        };
+        let kind = |r: Result<Adapter, ApiError>| r.map(|a| a.kind).map_err(|e| (e.code, e.feature));
+        let named = kind(adapter_for(&t.state, &launch(Some("gdb"), DebugRequest::Attach, &[]), "cpp").await);
+        match unsupported(Feature::GdbAttach) {
+            None => assert_eq!(named, Ok(AdapterKind::Gdb)),
+            Some(_) => {
+                assert_eq!(named, Err(("unsupported_platform", Some("gdbAttach"))));
+                let by_language = kind(adapter_for(&t.state, &launch(None, DebugRequest::Attach, &[]), "cpp").await);
+                assert!(by_language.is_ok_and(|k| k != AdapterKind::Gdb), "an attach by language picked gdb");
+                // A language only gdb knows: the reason, not "no debug adapter knows fortran".
+                let only_gdb = kind(adapter_for(&t.state, &launch(None, DebugRequest::Attach, &[]), "fortran").await);
+                assert_eq!(only_gdb, Err(("unsupported_platform", Some("gdbAttach"))));
+            }
+        }
+        let gdb_launch = kind(adapter_for(&t.state, &launch(Some("gdb"), DebugRequest::Launch, &[]), "cpp").await);
+        assert_eq!(gdb_launch, Ok(AdapterKind::Gdb));
+        let gdbserver = kind(adapter_for(&t.state, &launch(Some("gdb"), DebugRequest::Attach, &[("target", json!("localhost:1234"))]), "cpp").await);
+        assert_eq!(gdbserver, Ok(AdapterKind::Gdb));
     }
 }

@@ -47,3 +47,38 @@ jobs:
           workspaces: server
       - run: cargo build --locked
       - run: cargo test --locked
+
+  server-windows:
+    name: Server · Windows (build, test)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - name: Keep LF line endings
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          # A cold Windows build takes ~25 minutes: keep the cache when tests fail.
+          cache-on-failure: true
+      - id: build
+        run: cargo build --locked
+      - run: cargo test --locked --no-fail-fast
+      # The release archive's installer under Windows PowerShell 5.1, as users run it (the
+      # release job also installs over a running server); it runs when tests fail too.
+      - name: install.ps1
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          $stage = (New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'wb-stage')).FullName
+          Copy-Item -LiteralPath ../packaging/windows/install.ps1, target/debug/workbench.exe, target/debug/workbenchw.exe -Destination $stage
+          $prefix = Join-Path $env:RUNNER_TEMP 'wb-install'
+          powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stage 'install.ps1') -Prefix $prefix
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & (Join-Path $prefix 'workbench.exe') --version

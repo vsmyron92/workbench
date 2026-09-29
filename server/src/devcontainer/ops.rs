@@ -153,8 +153,8 @@ async fn launch(state: &AppState, p: &Arc<Project>, rel: &str, plan: &Plan, engi
             (port, if replaced.contains(&wanted) || port_free(wanted) { wanted } else { 0 })
         })
         .collect();
-    let uid = nix::unistd::getuid().as_raw();
-    let gid = nix::unistd::getgid().as_raw();
+    // No uid on Windows: 0 leaves the container's user as it is.
+    let (uid, gid) = crate::util::os::perm::user_ids().unwrap_or((0, 0));
     let input = engine::UpInput {
         project_id: &pid,
         root: &p.root,
@@ -190,7 +190,7 @@ async fn launch(state: &AppState, p: &Arc<Project>, rel: &str, plan: &Plan, engi
         title,
         project_id: Some(pid.clone()),
         cwd: p.root.clone(),
-        argv: vec!["bash".into(), script_path.display().to_string()],
+        argv: crate::util::os::shell::script_argv(&script_path)?,
         env,
         cols: None,
         rows: None,

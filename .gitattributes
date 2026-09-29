@@ -1,0 +1,6 @@
+# LF in the repository and in working trees on every OS (the git slice's diffs and line
+# staging compare the index with the working tree byte for byte).
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf

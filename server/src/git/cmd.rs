@@ -93,6 +93,8 @@ pub struct Git {
     timeout: Duration,
     max_stdout: usize,
     env: Vec<(String, String)>,
+    /// `-c key=value` before the subcommand, after Workbench's own.
+    config: Vec<(String, String)>,
 }
 
 impl Git {
@@ -106,6 +108,7 @@ impl Git {
             timeout: READ_TIMEOUT,
             max_stdout: DEFAULT_MAX_STDOUT,
             env: vec![],
+            config: vec![],
         }
     }
 
@@ -143,10 +146,21 @@ impl Git {
         self
     }
 
+    /// Set config `key` for this command only (`-c key=value`, which git reads after every
+    /// config file and passes on to the git commands it starts). An empty value resets a
+    /// list such as `credential.<url>.helper`.
+    pub fn config(mut self, key: &str, value: impl Into<String>) -> Self {
+        self.config.push((key.to_string(), value.into()));
+        self
+    }
+
     /// The prepared `tokio::process::Command` (also used for streamed remote ops).
     pub fn command(&self) -> Command {
         let mut cmd = Command::new("git");
         cmd.args(["-c", "core.quotepath=false", "-c", "color.ui=false", "-c", "core.pager=cat"]);
+        for (k, v) in &self.config {
+            cmd.arg("-c").arg(format!("{k}={v}"));
+        }
         cmd.args(&self.args);
         cmd.current_dir(&self.cwd)
             .env("LC_ALL", "C")
@@ -184,7 +198,7 @@ impl Git {
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                ApiError::not_configured("git is not installed (no `git` on PATH)")
+                ApiError::not_configured(format!("git is not installed (no `git` on PATH){}", crate::util::os::exe::INSTALLED_SINCE))
             } else {
                 ApiError::internal(format!("cannot run git: {e}"))
             }
@@ -286,6 +300,9 @@ fn is_lock_error(stderr: &str) -> bool {
 /// A failed git command as an API error. Recognizes the common cases so the UI
 /// can react (offer a smart checkout, a force delete…).
 pub fn git_error(out: &GitOutput) -> ApiError {
+    if let Some(e) = unsafe_repository(out) {
+        return e;
+    }
     let raw = format!("{}\n{}", out.stderr, out.text());
     let msg = out.message();
     if is_lock_error(&raw) {
@@ -319,6 +336,22 @@ pub fn git_error(out: &GitOutput) -> ApiError {
         return ApiError::new(StatusCode::NOT_FOUND, "not_a_repo", msg);
     }
     ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "git_error", if msg.is_empty() { "git failed".into() } else { msg })
+}
+
+/// Git refusing a repository that another user owns (the `safe.directory` check: "detected
+/// dubious ownership", "unsafe repository" in older gits; common on Windows for folders an
+/// administrator created and on drives without owners): 403 `unsafe_repository` with git's
+/// message verbatim, which names the owners and the command that trusts the folder. Only
+/// where such folders are common (`os::fs::FOREIGN_OWNERS`, Windows); elsewhere the refusal
+/// reads as it always did (reporting it there too would be a Linux change for the owner to
+/// decide).
+pub fn unsafe_repository(out: &GitOutput) -> Option<ApiError> {
+    if !crate::util::os::fs::FOREIGN_OWNERS {
+        return None;
+    }
+    let text = out.stderr.trim();
+    (text.contains("detected dubious ownership") || text.contains("fatal: unsafe repository"))
+        .then(|| ApiError::new(StatusCode::FORBIDDEN, "unsafe_repository", text.to_string()))
 }
 
 /// Files listed after "Your local changes to the following files would be overwritten by …:".
@@ -424,6 +457,14 @@ mod tests {
         for k in ["GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"] {
             assert!(envs.iter().any(|(n, v)| *n == k && v.is_none()), "{k} must be removed");
         }
+    }
+
+    #[test]
+    fn config_goes_before_the_subcommand() {
+        let cmd = Git::write(Path::new("/")).args(["fetch", "origin"]).config("credential.https://gitlab.com.helper", "").command();
+        let args: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let i = args.iter().position(|a| a == "fetch").unwrap();
+        assert_eq!(args[i - 2..], ["-c", "credential.https://gitlab.com.helper=", "fetch", "origin"]);
     }
 
     #[test]

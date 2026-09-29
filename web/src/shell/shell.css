@@ -405,7 +405,8 @@ button.wb-status-item:hover {
 .wb-toast.info .icon {
   color: var(--info);
 }
-.wb-toast .msg {
+.wb-toast .msg,
+.wb-toast-detail {
   overflow-wrap: anywhere;
 }
 .wb-toast-code {

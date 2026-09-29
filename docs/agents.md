@@ -82,3 +82,25 @@ sessions get the MCP tools and their state from Codex's own session log; Kimi Co
 CLI, Aider and custom CLIs run without the MCP tools (their MCP settings live in files
 Workbench does not change) and show activity from their output. Permission requests
 answered from Workbench and Review Changes are Claude Code's.
+
+## On Windows
+
+Windows support is in progress ([windows-port.md](windows-port.md)); this is how agents and
+terminals behave there.
+
+- Terminals run PowerShell 7 (`pwsh`) when it is installed, else Windows PowerShell. Set
+  `[terminals] shell` in `config.toml` for another shell, such as Git Bash's `bash.exe`.
+- Claude Code's native `claude.exe` in `%USERPROFILE%\.local\bin` (where its installer puts
+  it) is used before the npm package's `claude.cmd`. CLIs installed with npm (Codex, Gemini
+  CLI and others) start as `node` and their script, never through cmd.exe.
+- A CLI that is a batch file of its own (`.bat` or `.cmd`, not an npm shim) gets its first
+  prompt pasted instead of passed on the command line when the prompt holds
+  `% ! ^ & | < > "` or a line break, which cmd.exe would read as its own. It does not start
+  when another of its arguments or its own path holds one.
+- A cmd.exe among an agent's processes (a batch-file CLI's own, or one the agent starts)
+  never runs a program from the project folder by a bare name
+  (`NoDefaultCurrentDirectoryInExePath`). A terminal's shell keeps Windows' usual lookup,
+  since you type its commands.
+- Killing or closing a terminal ends every process started in it, programs with windows
+  included. Only a program that asks to leave the terminal's job keeps running, as the
+  service that `workbench service install --enable` starts does.

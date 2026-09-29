@@ -89,8 +89,19 @@ impl Locations {
             }
             None => (home.join(".claude"), home.join(".claude.json")),
         };
-        Self { claude_json, claude_dir, managed_dir: PathBuf::from("/etc/claude-code") }
+        Self { claude_json, claude_dir, managed_dir: crate::util::os::path::claude_managed_dir() }
     }
+}
+
+/// [`read_json`] for a file of the project at `root` (repository content): never through a
+/// link to another computer (Windows, `os::path::leaves_machine_below`), which reading
+/// would connect to.
+fn read_project_json(root: &Path, path: &Path, files: &mut Vec<FileNote>) -> Option<Value> {
+    if crate::util::os::path::leaves_machine_below(root, path) {
+        files.push(FileNote { path: contract_tilde(path), status: "error", error: Some("a link to a network path or a device: not read".into()) });
+        return None;
+    }
+    read_json(path, files)
 }
 
 fn read_json(path: &Path, files: &mut Vec<FileNote>) -> Option<Value> {
@@ -267,7 +278,8 @@ fn plugin_servers(install: &Path, files: &mut Vec<FileNote>) -> Vec<(String, Val
         Some(Value::String(rel)) => {
             let p = install.join(rel.trim_start_matches("./"));
             // Stay inside the plugin directory.
-            let inside = p.canonicalize().ok().zip(install.canonicalize().ok()).is_some_and(|(p, root)| p.starts_with(root));
+            use crate::util::os::path::{canonicalize, starts_with};
+            let inside = canonicalize(&p).ok().zip(canonicalize(install).ok()).is_some_and(|(p, root)| starts_with(&p, &root));
             if !inside {
                 return vec![];
             }
@@ -295,24 +307,30 @@ pub fn scan(loc: &Locations, root: Option<&Path>) -> Overview {
     ov.account_connectors_used = claude_json.get("claudeAiMcpEverConnected").and_then(Value::as_bool).unwrap_or(false);
     let project_entry = root.and_then(|r| {
         let projects = claude_json.get("projects")?.as_object()?;
-        let key = r.to_string_lossy();
-        let canon = r.canonicalize().ok().map(|c| c.to_string_lossy().into_owned());
+        // Claude Code writes Windows keys with `/` (`C:/Users/me/proj`).
+        let key = crate::util::os::path::to_slash(r);
+        let canon = crate::util::os::path::canonicalize(r).ok().map(|c| crate::util::os::path::to_slash(&c));
         projects
-            .get(key.as_ref())
+            .get(key.as_str())
             .or_else(|| canon.as_deref().and_then(|c| projects.get(c)))
             .or_else(|| projects.get(format!("{}/", key.trim_end_matches('/')).as_str()))
             .cloned()
     });
 
     let mut settings = McpSettings::default();
-    let mut setting_files = vec![loc.claude_dir.join("settings.json")];
+    // (file, the project it belongs to)
+    let mut setting_files = vec![(loc.claude_dir.join("settings.json"), None)];
     if let Some(r) = root {
-        setting_files.push(r.join(".claude").join("settings.json"));
-        setting_files.push(r.join(".claude").join("settings.local.json"));
+        setting_files.push((r.join(".claude").join("settings.json"), Some(r)));
+        setting_files.push((r.join(".claude").join("settings.local.json"), Some(r)));
     }
-    setting_files.push(loc.managed_dir.join("managed-settings.json"));
-    for f in &setting_files {
-        if let Some(v) = read_json(f, files) {
+    setting_files.push((loc.managed_dir.join("managed-settings.json"), None));
+    for (f, project) in &setting_files {
+        let v = match project {
+            Some(r) => read_project_json(r, f, files),
+            None => read_json(f, files),
+        };
+        if let Some(v) = v {
             settings.absorb(&v);
         }
     }
@@ -333,7 +351,7 @@ pub fn scan(loc: &Locations, root: Option<&Path>) -> Overview {
     }
     if let Some(r) = root {
         let path = r.join(".mcp.json");
-        if let Some(v) = read_json(&path, files) {
+        if let Some(v) = read_project_json(r, &path, files) {
             for (n, d) in server_map(v.get("mcpServers")) {
                 raw.push((describe(&n, &d, "project", &path, None), d));
             }
@@ -350,7 +368,7 @@ pub fn scan(loc: &Locations, root: Option<&Path>) -> Overview {
 
     // Plugins.
     let installed = read_json(&loc.claude_dir.join("plugins").join("installed_plugins.json"), files).unwrap_or(Value::Null);
-    let plugins_root = loc.claude_dir.join("plugins").canonicalize().ok();
+    let plugins_root = crate::util::os::path::canonicalize(loc.claude_dir.join("plugins")).ok();
     if let Some(plugins) = installed.get("plugins").and_then(Value::as_object) {
         for (id, entries) in plugins {
             let Some(entries) = entries.as_array() else { continue };
@@ -363,7 +381,7 @@ pub fn scan(loc: &Locations, root: Option<&Path>) -> Overview {
             let Some(install) = entry.and_then(|e| e.get("installPath")).and_then(Value::as_str) else { continue };
             let install = PathBuf::from(install);
             // Only read plugins installed under Claude's own plugin directory.
-            let inside = install.canonicalize().ok().zip(plugins_root.clone()).is_some_and(|(p, r)| p.starts_with(r));
+            let inside = crate::util::os::path::canonicalize(&install).ok().zip(plugins_root.clone()).is_some_and(|(p, r)| crate::util::os::path::starts_with(&p, &r));
             if !inside {
                 continue;
             }
@@ -452,7 +470,7 @@ mod tests {
     fn scans_all_scopes_without_leaking_values() {
         let home = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
-        let root = repo.path().canonicalize().unwrap();
+        let root = crate::util::os::path::canonicalize(repo.path()).unwrap();
         let claude_dir = home.path().join(".claude");
         let loc = Locations {
             claude_json: home.path().join(".claude.json"),
@@ -466,7 +484,7 @@ mod tests {
                     "unity-mcp": { "command": "/opt/unity/bin/unity-mcp", "args": ["--token", "SECRETARG"], "env": { "UNITY_KEY": "SECRETENV" } },
                     "clion": { "type": "http", "url": "http://127.0.0.1:64342/sse?token=SECRETQ", "headers": { "Authorization": "Bearer SECRETH" } }
                 },
-                "projects": { root.to_string_lossy(): {
+                "projects": { crate::util::os::path::to_slash(&root): {
                     "mcpServers": { "local-one": { "type": "sse", "url": "https://user:pw@mcp.example.com/x" } },
                     "enabledMcpjsonServers": ["blender"],
                     "disabledMcpjsonServers": ["clion-proj"]

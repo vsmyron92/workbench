@@ -4,7 +4,11 @@
 //! (production/staging health, version, preview, logs, deploy), and project
 //! auto-detection. Routes: `/api/projects/{pid}/runs/**`, `/api/projects/{pid}/envs/**`.
 //!
-//! CONTRACT: `detect` (called by the project registry on every reload), `shutdown`.
+//! CONTRACT: `detect` (called by the project registry on every reload), `shutdown`;
+//! for debug: `runs::{start, needs_confirmation, resolve_cwd, RunState}`,
+//! `expand::{run_env, base_vars, placeholders, shell_quote}` (launch configurations: their
+//! `pre_launch` run, variables and build commands) and `detect::venv_python` (a derived
+//! Python launch's interpreter).
 //!
 //! Modules: `detect` (zero-config proposal), `runs` (run manager), `envs` (health
 //! pollers, versions, logs, commands), `deploy` (gates + deploy terminal), `proxy`

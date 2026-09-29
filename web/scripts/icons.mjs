@@ -1,8 +1,10 @@
 // Generates Workbench's app icons into public/icons/ from one geometry (the
 // favicon's, on a 512 grid): the SVG (manifest, desktop launcher), PNGs for the
-// web app manifest (192/512, maskable), the iOS home screen icon and the
-// monochrome notification badge. No dependencies: shapes are rasterized with 8×8
-// supersampling and written as PNG with node:zlib.
+// web app manifest (192/512, maskable), the iOS home screen icon, the
+// monochrome notification badge; and the Windows icon of workbench.exe and
+// workbenchw.exe into packaging/windows/ (server/build.rs embeds it; kept out of the
+// web bundle). No dependencies: shapes are rasterized with 8×8 supersampling and
+// written as PNG with node:zlib.
 //
 //   node scripts/icons.mjs
 //
@@ -14,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { deflateSync } from 'node:zlib'
 
 const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'public', 'icons')
+const OUT_ICO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'packaging', 'windows')
 
 const BG = '#2b2d30' // --bg-panel (dark)
 const ACCENT = '#548af7' // --accent (dark)
@@ -146,6 +149,26 @@ function png(pixels, size) {
   ])
 }
 
+/** An .ico of PNG images (read by Windows Vista and later), one per `[size, png]`. */
+function ico(images) {
+  const header = Buffer.alloc(6)
+  header.writeUInt16LE(1, 2) // type: icon
+  header.writeUInt16LE(images.length, 4)
+  let offset = header.length + 16 * images.length
+  const entries = images.map(([size, data]) => {
+    const e = Buffer.alloc(16)
+    e[0] = size % 256 // width; 0 means 256
+    e[1] = size % 256 // height
+    e.writeUInt16LE(1, 4) // colour planes
+    e.writeUInt16LE(32, 6) // bits per pixel
+    e.writeUInt32LE(data.length, 8)
+    e.writeUInt32LE(offset, 12)
+    offset += data.length
+    return e
+  })
+  return Buffer.concat([header, ...entries, ...images.map(([, data]) => data)])
+}
+
 const icon = shapes({ background: true, rounded: true })
 // Maskable: full bleed, the glyph inside the 80% safe circle.
 const maskable = shapes({ background: true, rounded: false, scale: 0.78 })
@@ -165,4 +188,8 @@ const files = [
   ['badge-96.png', badge, 96],
 ]
 for (const [name, list, size] of files) writeFileSync(join(OUT, name), png(raster(list, size), size))
-console.log(`wrote workbench.svg and ${files.length} PNGs to ${OUT}`)
+// Windows: small icons at 100–250 % scaling, the Start Menu's and Explorer's larger ones.
+const icoSizes = [16, 20, 24, 32, 40, 48, 64, 256]
+mkdirSync(OUT_ICO, { recursive: true })
+writeFileSync(join(OUT_ICO, 'workbench.ico'), ico(icoSizes.map((s) => [s, png(raster(icon, s), s)])))
+console.log(`wrote workbench.svg and ${files.length} PNGs to ${OUT}, workbench.ico to ${OUT_ICO}`)

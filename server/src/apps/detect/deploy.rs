@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::{Ctx, docs, sh};
+use super::{Ctx, docs};
 use crate::config::project::{
     BasicAuth, Confirm, Deploy, EnvKind, Environment, Health, NamedCommand, SshHost, VersionProbe,
 };
@@ -294,7 +294,8 @@ pub fn detect(cx: &mut Ctx) {
             if let Some(dir) = &s.dir {
                 let tag = if short_sha { "{sha8}" } else { "{sha}" };
                 env.deploy = Some(Deploy {
-                    command: format!("cd {dir} && {} {tag}", sh(&format!("./{}", s.file))),
+                    // It runs on the ssh host (`local: false`): POSIX quoting on every OS.
+                    command: format!("cd {dir} && {} {tag}", crate::util::os::shell::posix_quote(&format!("./{}", s.file))),
                     local: false,
                     confirm: if kind == EnvKind::Production { Confirm::Typed } else { Confirm::Click },
                     require_green_pipeline: has_ci,

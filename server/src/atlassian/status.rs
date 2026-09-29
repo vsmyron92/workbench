@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use super::client::{Api, Product, resolve_site};
 use crate::app::AppState;
+use crate::config::contract_tilde;
 use crate::error::{ApiError, ApiResult};
 
 const TTL: Duration = Duration::from_secs(600);
@@ -44,6 +45,8 @@ pub struct StatusOut {
     pub auth_failed: bool,
     pub error: Option<String>,
     pub checked_at: i64,
+    /// Where this server's config.toml is (`~`-contracted), for the setup help.
+    pub config_file: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -100,6 +103,7 @@ pub async fn check(state: &AppState, project_id: Option<&str>, refresh: bool) ->
         auth_failed: false,
         error: None,
         checked_at: crate::util::now_ms(),
+        config_file: contract_tilde(&state.paths.config_file()),
     };
     let mut transient = false;
     match me {
@@ -173,7 +177,7 @@ pub struct StatusQuery {
 
 impl StatusOut {
     /// The answer when Atlassian is not set up (`message` is the setup help).
-    fn unconfigured(message: String) -> Self {
+    fn unconfigured(state: &AppState, message: String) -> Self {
         StatusOut {
             configured: false,
             site: String::new(),
@@ -184,6 +188,7 @@ impl StatusOut {
             auth_failed: false,
             error: Some(message),
             checked_at: crate::util::now_ms(),
+            config_file: contract_tilde(&state.paths.config_file()),
         }
     }
 }
@@ -192,7 +197,7 @@ pub async fn handler(State(state): State<AppState>, Query(q): Query<StatusQuery>
     let refresh = q.refresh.as_deref().is_some_and(|v| v == "1" || v == "true");
     match check(&state, q.project_id.as_deref(), refresh).await {
         Ok(s) => Ok(Json(s)),
-        Err(e) if e.code == "not_configured" => Ok(Json(StatusOut::unconfigured(e.message))),
+        Err(e) if e.code == "not_configured" => Ok(Json(StatusOut::unconfigured(&state, e.message))),
         Err(e) => Err(e),
     }
 }

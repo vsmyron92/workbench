@@ -10,7 +10,9 @@
 //! * Remote access — bind/LAN addresses, allowed hosts, pairing codes with QR,
 //!   devices (`remote.rs`, `netif.rs`), and optional TLS serving (`tls.rs`).
 //! * Web Push to phones and other devices (`push/`), and `workbench service`:
-//!   a systemd user unit and a desktop launcher (`service.rs`).
+//!   a systemd user unit and a desktop launcher (`service.rs`); on Windows a sign-in
+//!   entry and a Start Menu shortcut starting `workbenchw.exe`, and the supervisor it
+//!   runs (`service_windows.rs`).
 //! * A read-only overview of the Claude Code MCP servers configured on disk
 //!   (`claude_mcp.rs`).
 //!
@@ -24,6 +26,7 @@ pub mod netif;
 pub mod notify;
 pub mod push;
 pub mod remote;
+#[cfg_attr(windows, path = "service_windows.rs")]
 pub mod service;
 pub mod settings;
 pub mod tls;

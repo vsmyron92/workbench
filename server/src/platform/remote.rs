@@ -31,7 +31,7 @@ use crate::auth::{host_accepted, host_name, is_loopback_name};
 fn listens_on(bind: IpAddr, addr: &IpAddr) -> bool {
     match bind {
         IpAddr::V4(v4) if v4.is_unspecified() => addr.is_ipv4(),
-        // Linux dual-stack: [::] also accepts IPv4 unless bindv6only is set.
+        // Dual-stack: [::] also accepts IPv4 (on Linux unless bindv6only is set; see `util::os::net::bind`).
         IpAddr::V6(v6) if v6.is_unspecified() => true,
         b => b == *addr,
     }

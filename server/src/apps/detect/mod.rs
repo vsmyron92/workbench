@@ -63,6 +63,7 @@ pub(crate) use {
     cargo::CARGO_TEST_RESULT, cmake::CTEST_RESULT, dotnet::DOTNET_TEST_RESULT, go::GO_TEST_RESULT, node::VITEST_RESULT,
     python::PYTEST_RESULT,
 };
+pub(crate) use python::venv_python;
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -71,6 +72,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ProjectFile;
 use crate::config::project::{RunConfig, RunKind};
+use crate::util::os::shell::Dialect;
 
 /// Directories never descended into by the project walk. `.claude` holds Claude
 /// Code's settings and its agent worktrees (full copies of the repository); the
@@ -132,6 +134,7 @@ pub fn detect(root: &Path) -> ProjectFile {
 }
 
 fn detect_inner(root: &Path) -> ProjectFile {
+    PYTHON_WORDS.with(|p| p.borrow_mut().take());
     let mut cx = Ctx::new(root);
     cx.pf.schema = 1;
     git::detect(&mut cx);
@@ -270,9 +273,40 @@ impl<'a> Ctx<'a> {
         false
     }
 
+    /// Whether looking at `p` (below the root) follows no link to another computer. The
+    /// walk follows no link at all, but detectors also look up files by name
+    /// (`README.md`, `pytest.ini`, `.venv/…`), and those may be links: on Windows one to
+    /// `\\host\share\x` connects to that host as soon as it is opened, even for a
+    /// `metadata` (`os::path::leaves_machine_below`; never on Linux). Every look by name
+    /// goes through here: [`Ctx::read`], [`Ctx::is_file`], [`Ctx::is_dir`],
+    /// [`Ctx::exists`], [`Ctx::read_dir`].
+    fn local(&self, p: &Path) -> bool {
+        !crate::util::os::path::leaves_machine_below(self.root, p)
+    }
+
+    /// `p.is_file()` for a file detection looks up by name ([`Ctx::local`]).
+    pub fn is_file(&self, p: &Path) -> bool {
+        self.local(p) && p.is_file()
+    }
+
+    /// `p.is_dir()` for a folder detection looks up by name ([`Ctx::local`]).
+    pub fn is_dir(&self, p: &Path) -> bool {
+        self.local(p) && p.is_dir()
+    }
+
+    /// `p.exists()` for a path detection looks up by name ([`Ctx::local`]).
+    pub fn exists(&self, p: &Path) -> bool {
+        self.local(p) && p.exists()
+    }
+
+    /// The entries of a folder detection looks up by name ([`Ctx::local`]).
+    pub fn read_dir(&self, p: &Path) -> Option<std::fs::ReadDir> {
+        if self.local(p) { std::fs::read_dir(p).ok() } else { None }
+    }
+
     /// Read a text file (lossy UTF-8, at most `MAX_FILE` bytes, within the budget).
     pub fn read(&mut self, p: &Path) -> Option<String> {
-        if self.budget == 0 {
+        if self.budget == 0 || !self.local(p) {
             return None;
         }
         let cap = MAX_FILE.min(self.budget);
@@ -311,6 +345,12 @@ impl<'a> Ctx<'a> {
         if run.name.chars().any(char::is_control) {
             return None;
         }
+        // On Windows a detected tool is often a batch file (`composer.bat`, `mvn.cmd`,
+        // `.\gradlew.bat`), whose arguments cmd.exe reads again: a quoted name with `&` or
+        // `%` from a repository file would start a command of its own there.
+        if dialect() == Dialect::PowerShell && !batch_safe(&run.command) {
+            return None;
+        }
         // `npm run deploy`, `release`, a `deploy` binary…: kept apart from everyday tasks
         // (starting them always asks first, and agents cannot start them).
         if run.group.as_deref() != Some("suggested")
@@ -345,7 +385,7 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn has_file(&self, rel_path: &str) -> bool {
-        self.root.join(rel_path).is_file()
+        self.is_file(&self.root.join(rel_path))
     }
 
     fn finish(mut self) -> ProjectFile {
@@ -397,10 +437,18 @@ pub(crate) fn scoped(name: &str, cwd: &str) -> String {
 }
 
 /// The program a command line starts, past `VAR=value` assignments: `uv` for
-/// `uv run serve`, `make` for `make test`, `phpunit` for `vendor/bin/phpunit`.
+/// `uv run serve`, `make` for `make test`, `phpunit` for `vendor/bin/phpunit` (and in
+/// PowerShell `python` for `.venv\Scripts\python.exe`).
 pub(crate) fn command_tool(cmd: &str) -> String {
     let first = cmd.split_whitespace().find(|t| !(t.contains('=') && !t.starts_with('-'))).unwrap_or("");
-    first.rsplit('/').next().unwrap_or("").trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').to_string()
+    let base = match dialect() {
+        Dialect::Posix => first.rsplit('/').next().unwrap_or(""),
+        Dialect::PowerShell => {
+            let b = first.rsplit(['/', '\\']).next().unwrap_or("");
+            b.strip_suffix(".exe").unwrap_or(b)
+        }
+    };
+    base.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').to_string()
 }
 
 /// What tells a run apart from another of the same name in the same directory:
@@ -695,12 +743,157 @@ pub(crate) fn npm_graph(scripts: &serde_json::Map<String, serde_json::Value>) ->
     g
 }
 
+/// The language detected commands are written in: the local run shell's
+/// (`Dialect::HOST`: POSIX for `bash -lc` on Unix, PowerShell on Windows). Every Windows
+/// form of a detected command is decided here and in the helpers below (`python` or
+/// `py -3` for `python3`, `.venv\Scripts\python.exe`, `.\build\Debug\app.exe`,
+/// `.\gradlew.bat`, no `&&`), so detection on Unix writes exactly what it always did.
+/// Commands bound for an ssh host or a container stay POSIX (`posix_quote`).
+pub(crate) fn dialect() -> Dialect {
+    #[cfg(test)]
+    if let Some(d) = TEST_DIALECT.with(std::cell::Cell::get) {
+        return d;
+    }
+    Dialect::HOST
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DIALECT: std::cell::Cell<Option<Dialect>> = const { std::cell::Cell::new(None) };
+}
+
+/// `detect` as it runs where the run shell speaks `d`: the tests check the POSIX and the
+/// Windows forms on every OS.
+#[cfg(test)]
+pub(crate) fn detect_as(root: &Path, d: Dialect) -> ProjectFile {
+    TEST_DIALECT.with(|c| c.set(Some(d)));
+    let pf = detect(root);
+    TEST_DIALECT.with(|c| c.set(None));
+    pf
+}
+
 /// `s` as one shell word: unchanged when it is plain (`build`, `db:migrate`,
-/// `./cmd/api`), single-quoted otherwise. Detected commands run with `bash -lc`, and
-/// names from repository files (Make targets, Taskfile keys, script names, directory
-/// names) must never add a command of their own.
+/// `./cmd/api`), single-quoted otherwise (`dialect`'s rules). Names from repository
+/// files (Make targets, Taskfile keys, script names, directory names) must never add a
+/// command of their own (in PowerShell, `Ctx::add_run` also refuses a quoted word a batch
+/// file would misread: `batch_safe`).
 pub(crate) fn sh(s: &str) -> String {
-    crate::apps::expand::shell_quote(s)
+    dialect().quote(s)
+}
+
+/// Whether the single-quoted strings of a PowerShell command line (`sh`'s quoting of names
+/// from repository files) reach a batch file as they are (`os::exe::batch_args_safe`).
+/// PowerShell passes such a string to a program without quotes when it has no space, and
+/// cmd.exe, which runs `.bat` and `.cmd` files, reads it again: `composer run-script
+/// 't&calc'` would start `calc` too.
+fn batch_safe(cmd: &str) -> bool {
+    const QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
+    let (mut quoted, mut single, mut double) = (String::new(), false, false);
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        if single {
+            // A doubled quote is a quote.
+            if !QUOTES.contains(&c) || chars.next_if(|n| QUOTES.contains(n)).is_some() {
+                quoted.push(c);
+            } else {
+                single = false;
+            }
+        } else if c == '`' {
+            chars.next();
+        } else if c == '"' {
+            double = !double;
+        } else if !double && QUOTES.contains(&c) {
+            single = true;
+        }
+    }
+    crate::util::os::exe::batch_args_safe(&[quoted])
+}
+
+/// `first`, then `then` when it succeeded (`Dialect::and_then`: `&&`, which Windows
+/// PowerShell 5.1 does not have).
+pub(crate) fn and_then(first: &str, then: &str) -> String {
+    dialect().and_then(first, then)
+}
+
+/// A program the project builds, at `rel` (`/` separators) below the run's directory,
+/// as a command's first word: `./build/app`; on Windows `.\build\app.exe`.
+pub(crate) fn local_program(rel: &str) -> String {
+    match dialect() {
+        Dialect::Posix => sh(&format!("./{rel}")),
+        Dialect::PowerShell => Dialect::PowerShell.program(&format!(".\\{}.exe", rel.replace('/', "\\"))),
+    }
+}
+
+/// Python 3 at the start of a command line: `python3`; on Windows `python`, or the
+/// launcher's `py -3` (`os::exe::python_words`, looked up once per detection).
+pub(crate) fn python_words() -> String {
+    match dialect() {
+        Dialect::Posix => "python3".into(),
+        Dialect::PowerShell => PYTHON_WORDS.with(|p| p.borrow_mut().get_or_insert_with(crate::util::os::exe::python_words).clone()),
+    }
+}
+
+thread_local! {
+    /// `os::exe::python_words` for the detection running on this thread (it searches `PATH`).
+    static PYTHON_WORDS: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+static ENV_PREFIX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^\s*[A-Za-z_][A-Za-z0-9_]*=").unwrap());
+
+/// Whether a command from a repository file (a Procfile line, a documented command) needs
+/// a POSIX shell: `$VAR` or `$(…)`, backquotes, `VAR=value cmd`, `&&` or `||`, `<`,
+/// `~/`, `/dev/…`, `export`/`source`, a `.sh` script. Where the run shell is PowerShell
+/// such a command is not offered.
+pub(crate) fn posix_only(cmd: &str) -> bool {
+    let first = cmd.split_whitespace().next().unwrap_or("");
+    cmd.contains(['$', '`', '<'])
+        || ["&&", "||", "~/", "/dev/"].iter().any(|s| cmd.contains(s))
+        || ENV_PREFIX.is_match(cmd)
+        || matches!(first, "export" | "source" | "." | "unset" | "alias")
+        || cmd.split_whitespace().any(|w| w.trim_matches(['"', '\'']).ends_with(".sh"))
+}
+
+static PORT_VAR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"\$(?:\{PORT\}|PORT\b)").unwrap());
+
+/// A command line from a repository file (a Procfile line, a documented command), which is
+/// POSIX shell, as the run shell reads it in `cwd` (project-relative): unchanged on Unix.
+/// Where the run shell is PowerShell, `None` when it needs a POSIX shell (`posix_only`)
+/// or starts what PowerShell does not run as a program there (`wget`, a script by its
+/// path); `$PORT` becomes `$env:PORT`, `python3` `python_words`, and `curl`, which Windows
+/// PowerShell 5.1 takes for `Invoke-WebRequest`, `curl.exe`.
+pub(crate) fn repository_command(cx: &Ctx, cmd: &str, cwd: &str) -> Option<String> {
+    if dialect() == Dialect::Posix {
+        return Some(cmd.to_string());
+    }
+    if posix_only(&PORT_VAR.replace_all(cmd, "")) {
+        return None;
+    }
+    let cmd = PORT_VAR.replace_all(cmd.trim(), "$$env:PORT");
+    let (first, rest) = cmd.split_at(cmd.find(char::is_whitespace).unwrap_or(cmd.len()));
+    let first = match first {
+        "python3" => python_words(),
+        "curl" => "curl.exe".into(),
+        "wget" => return None,
+        f if f.contains(['/', '\\']) && !f.starts_with(['/', '\\']) && !f.contains(':') && !runs_as_program(cx, &cx.root.join(cwd), f) => return None,
+        f => f.to_string(),
+    };
+    Some(format!("{first}{rest}"))
+}
+
+/// Whether PowerShell runs the file a command names by a relative path (`./gradlew`,
+/// `bin/rails`) as a program: a Windows program (`.exe`, `.bat`, `.cmd`, `.com`, `.ps1`),
+/// or an extensionless name with one beside it (`gradlew.bat`) or with nothing there yet
+/// (a build's output: `./target/release/app` finds `app.exe`). Any other file PowerShell
+/// hands to its file association, which opens it in a window of its own or asks which
+/// program should.
+fn runs_as_program(cx: &Ctx, dir: &Path, rel: &str) -> bool {
+    const PROGRAMS: [&str; 5] = ["exe", "bat", "cmd", "com", "ps1"];
+    let p = rel.split(['/', '\\']).filter(|s| !s.is_empty() && *s != ".").fold(dir.to_path_buf(), |p, s| p.join(s));
+    match p.extension().and_then(|e| e.to_str()) {
+        Some(e) => PROGRAMS.iter().any(|x| e.eq_ignore_ascii_case(x)),
+        // A link to another computer is something there, not a program (`Ctx::local`).
+        None => PROGRAMS.iter().any(|x| cx.is_file(&p.with_extension(x))) || (cx.local(&p) && !p.exists()),
+    }
 }
 
 static BODY_PORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {

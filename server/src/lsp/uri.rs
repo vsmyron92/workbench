@@ -5,7 +5,8 @@
 //!   pointed to (the Rust standard library, `~/.cargo/registry`, `node_modules`,
 //!   site-packages) is `lsp-src://<projectId>/<absolute path on the server's side>`
 //!   and is shown by the lsp slice's own read-only panel;
-//! * **the host**: absolute paths;
+//! * **the host**: absolute paths (on Windows `C:\…`, which is `file:///C:/…` in a URI and
+//!   `lsp-src://<projectId>/C:/…` in the browser);
 //! * **the language server**: `file://` URIs of absolute paths on its side, which in a
 //!   dev container are container paths (the workspace mount maps the project root).
 //!
@@ -18,6 +19,8 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Map, Value};
+
+use crate::util::os;
 
 pub const SOURCE_SCHEME: &str = "lsp-src";
 
@@ -43,12 +46,21 @@ pub fn decode(s: &str) -> Option<String> {
     percent_encoding::percent_decode_str(s).decode_utf8().ok().map(|c| c.into_owned())
 }
 
-/// `file://` URI of an absolute path.
-pub fn file_uri(path: &str) -> String {
-    format!("file://{}", encode_path(path))
+/// The path of a URI for an absolute path: a Windows drive stays as it is
+/// (`/C:/x`, not `/C%3A/x`), the rest is percent-encoded.
+fn uri_path(path: &str) -> String {
+    let (verbatim, rest) = os::path::uri_path(path);
+    format!("{verbatim}{}", encode_path(&rest))
 }
 
-/// The absolute path of a `file://` URI (empty or `localhost` authority).
+/// `file://` URI of an absolute path.
+pub fn file_uri(path: &str) -> String {
+    format!("file://{}", uri_path(path))
+}
+
+/// The absolute path of a `file://` URI (empty or `localhost` authority). On Windows
+/// the drive may be written `/c:/`, `/C:/` or `/c%3A/` (servers differ); the path
+/// comes back as `C:\…`, and one without a drive is `None`.
 pub fn parse_file_uri(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
@@ -57,16 +69,20 @@ pub fn parse_file_uri(uri: &str) -> Option<String> {
     }
     let rest = rest.split(['?', '#']).next().unwrap_or(rest);
     let p = decode(rest)?;
-    // Windows drive letters (`/c:/…`) never reach us on Linux; anything else absolute is fine.
-    (!p.contains('\0')).then_some(p)
+    (!p.contains('\0')).then_some(p).and_then(os::path::from_uri_path)
 }
 
-/// Lexically normalize a relative path: no `..` above the start, no absolute parts.
+/// Lexically normalize a relative path: no `..` above the start, no absolute parts
+/// (on Windows also no drive, stream or device names: `os::path::check_component`).
 pub fn clean_rel(rel: &str) -> Option<String> {
     let mut parts: Vec<&str> = vec![];
     for c in Path::new(rel).components() {
         match c {
-            Component::Normal(s) => parts.push(s.to_str()?),
+            Component::Normal(s) => {
+                let s = s.to_str()?;
+                os::path::check_component(s).ok()?;
+                parts.push(s)
+            }
             Component::CurDir => {}
             Component::ParentDir => {
                 parts.pop()?;
@@ -102,7 +118,7 @@ pub fn parse_client_uri(uri: &str) -> Option<ClientUri> {
     if pid.is_empty() || path.contains('\0') {
         return None;
     }
-    Some(ClientUri::Source { pid: pid.to_string(), path })
+    Some(ClientUri::Source { pid: pid.to_string(), path: os::path::from_uri_path(path)? })
 }
 
 pub fn project_uri(pid: &str, rel: &str) -> String {
@@ -110,7 +126,7 @@ pub fn project_uri(pid: &str, rel: &str) -> String {
 }
 
 pub fn source_uri(pid: &str, path: &str) -> String {
-    format!("{SOURCE_SCHEME}://{}{}", encode_path(pid), encode_path(path))
+    format!("{SOURCE_SCHEME}://{}{}", encode_path(pid), uri_path(path))
 }
 
 /// Where the language server runs, for path mapping.
@@ -144,7 +160,7 @@ impl PathMap {
         match &self.side {
             Side::Host => Some(host.to_string_lossy().into_owned()),
             Side::Container { host: src, container } => {
-                let rel = host.strip_prefix(src).ok()?.to_string_lossy().into_owned();
+                let rel = os::path::to_slash(host.strip_prefix(src).ok()?);
                 Some(if rel.is_empty() { container.clone() } else { format!("{}/{rel}", container.trim_end_matches('/')) })
             }
         }
@@ -229,11 +245,13 @@ impl Translator<'_> {
     }
 
     /// Server URI → browser URI. Paths outside the project are recorded in `allow`.
+    /// On Windows the root matches without regard to case (servers often lowercase
+    /// the drive letter).
     pub fn to_client(&self, uri: &str, allow: &mut AllowSet) -> Option<String> {
         let server_path = parse_file_uri(uri)?;
         if let Some(host) = self.map.to_host(&server_path) {
             for root in [self.root, self.root_canon] {
-                if let Ok(rel) = host.strip_prefix(root) {
+                if let Some(rel) = os::path::strip_prefix(&host, root) {
                     let rel = rel.to_string_lossy();
                     if let Some(rel) = clean_rel(&rel) {
                         return Some(project_uri(self.pid, &rel));
@@ -301,12 +319,16 @@ mod tests {
 
     #[test]
     fn file_uris_encode_and_decode() {
-        assert_eq!(file_uri("/home/u/my proj/a#b.rs"), "file:///home/u/my%20proj/a%23b.rs");
-        assert_eq!(parse_file_uri("file:///home/u/my%20proj/a%23b.rs").unwrap(), "/home/u/my proj/a#b.rs");
-        assert_eq!(parse_file_uri("file://localhost/x/y").unwrap(), "/x/y");
-        assert_eq!(parse_file_uri("file:///x/%C3%A9.rs").unwrap(), "/x/é.rs");
-        assert_eq!(parse_file_uri("file:///x/%3A.rs").unwrap(), "/x/:.rs");
-        assert_eq!(parse_file_uri("file:///x/y?q=1").unwrap(), "/x/y");
+        // Unix paths (on Windows a path without a drive names nothing: see the Windows test).
+        #[cfg(unix)]
+        {
+            assert_eq!(file_uri("/home/u/my proj/a#b.rs"), "file:///home/u/my%20proj/a%23b.rs");
+            assert_eq!(parse_file_uri("file:///home/u/my%20proj/a%23b.rs").unwrap(), "/home/u/my proj/a#b.rs");
+            assert_eq!(parse_file_uri("file://localhost/x/y").unwrap(), "/x/y");
+            assert_eq!(parse_file_uri("file:///x/%C3%A9.rs").unwrap(), "/x/é.rs");
+            assert_eq!(parse_file_uri("file:///x/%3A.rs").unwrap(), "/x/:.rs");
+            assert_eq!(parse_file_uri("file:///x/y?q=1").unwrap(), "/x/y");
+        }
         assert!(parse_file_uri("file://server/share").is_none());
         assert!(parse_file_uri("https://x/y").is_none());
         assert!(parse_file_uri("file:///x/%00").is_none());
@@ -326,6 +348,7 @@ mod tests {
         assert_eq!(parse_client_uri("file:///api/a/../b.rs"), Some(ClientUri::Project { pid: "api".into(), rel: "b.rs".into() }));
         assert_eq!(parse_client_uri("file:///api/../etc/passwd"), None);
         assert_eq!(parse_client_uri("file:///~abs/etc/passwd"), None);
+        #[cfg(unix)]
         assert_eq!(
             parse_client_uri("lsp-src://api/home/u/.cargo/registry/x.rs"),
             Some(ClientUri::Source { pid: "api".into(), path: "/home/u/.cargo/registry/x.rs".into() })
@@ -339,6 +362,41 @@ mod tests {
         Translator { pid: "api", root, root_canon: root, map, origin: &Origin::Host }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_uris_carry_drive_letters() {
+        assert_eq!(file_uri(r"C:\Users\me\my proj\a.rs"), "file:///C:/Users/me/my%20proj/a.rs");
+        assert_eq!(file_uri(r"c:\x"), "file:///C:/x");
+        for u in ["file:///c:/Users/me/x.rs", "file:///C:/Users/me/x.rs", "file:///c%3A/Users/me/x.rs", "file:///C%3a/Users/me/x.rs"] {
+            assert_eq!(parse_file_uri(u).as_deref(), Some(r"C:\Users\me\x.rs"), "{u}");
+        }
+        assert_eq!(parse_file_uri("file:///usr/lib/x.rs"), None);
+        assert_eq!(source_uri("api", r"C:\Users\me\.cargo\registry\x y.rs"), "lsp-src://api/C:/Users/me/.cargo/registry/x%20y.rs");
+        for u in ["lsp-src://api/C:/x/y.rs", "lsp-src://api/c%3A/x/y.rs"] {
+            assert_eq!(parse_client_uri(u), Some(ClientUri::Source { pid: "api".into(), path: r"C:\x\y.rs".into() }), "{u}");
+        }
+        // No escape through `\`, a drive or a stream in a project URI.
+        for u in ["file:///api/a%5C..%5C..%5Cx", "file:///api/C:/x", "file:///api/a.rs:stream", "file:///api/NUL"] {
+            assert_eq!(parse_client_uri(u), None, "{u}");
+        }
+        // The project root matches with any drive-letter case.
+        let root = PathBuf::from(r"C:\Users\me\ws\api");
+        let map = PathMap::host();
+        let tr = host_tr(&root, &map);
+        let mut allow = AllowSet::default();
+        let none = |_: &str| false;
+        assert_eq!(tr.to_server("file:///api/src/main.rs", &none).unwrap(), "file:///C:/Users/me/ws/api/src/main.rs");
+        assert_eq!(tr.to_client("file:///c%3A/users/me/ws/api/src/lib.rs", &mut allow).unwrap(), "file:///api/src/lib.rs");
+        let c = tr.to_client("file:///c:/Users/me/.rustup/lib/core/src/option.rs", &mut allow).unwrap();
+        assert_eq!(c, "lsp-src://api/C:/Users/me/.rustup/lib/core/src/option.rs");
+        assert!(allow.get(r"C:\Users\me\.rustup\lib\core\src\option.rs").is_some());
+        let allowed = |p: &str| allow.get(p).is_some();
+        assert_eq!(tr.to_server(&c, &allowed).unwrap(), "file:///C:/Users/me/.rustup/lib/core/src/option.rs");
+        assert!(tr.to_client("file:///C:/Users/me/ws/api-2/x.rs", &mut allow).unwrap().starts_with("lsp-src://"));
+    }
+
+    /// Unix host paths (the Windows counterpart is `windows_uris_carry_drive_letters`).
+    #[cfg(unix)]
     #[test]
     fn host_servers_see_host_paths() {
         let root = PathBuf::from("/home/u/ws/api");
@@ -364,6 +422,9 @@ mod tests {
         assert!(tr.to_client("file:///home/u/ws/api-2/x.rs", &mut allow).unwrap().starts_with("lsp-src://"));
     }
 
+    /// Dev containers: a Unix host (Windows hosts run no language server in one yet, and
+    /// there a path without a drive names nothing).
+    #[cfg(unix)]
     #[test]
     fn container_servers_see_container_paths_both_ways() {
         let root = PathBuf::from("/home/u/ws/api");
@@ -465,18 +526,24 @@ mod tests {
 
     #[test]
     fn only_uri_fields_enter_the_allow_set() {
-        let root = PathBuf::from("/home/u/ws/api");
+        // A host path and its URI on this OS.
+        #[cfg(unix)]
+        let (root, dir, dir_uri) = ("/home/u/ws/api", "/etc/", "file:///etc/");
+        #[cfg(windows)]
+        let (root, dir, dir_uri) = (r"C:\Users\u\ws\api", r"C:\Windows\", "file:///C:/Windows/");
+        let root = PathBuf::from(root);
         let map = PathMap::host();
         let tr = host_tr(&root, &map);
         let mut allow = AllowSet::default();
-        let mut v = json!({ "items": [{ "label": "file:///etc/hostname", "textEdit": { "newText": "file:///etc/hostname" }, "data": { "uri": "file:///etc/passwd" } }] });
+        let text = format!("{dir_uri}hostname");
+        let mut v = json!({ "items": [{ "label": text, "textEdit": { "newText": text }, "data": { "uri": format!("{dir_uri}passwd") } }] });
         rewrite(&mut v, &["file://"], &mut |s| tr.to_client(s, &mut allow));
-        assert_eq!(v["items"][0]["label"], "file:///etc/hostname");
-        assert!(allow.get("/etc/hostname").is_none() && allow.get("/etc/passwd").is_none());
-        let mut v = json!([{ "uri": "file:///usr/lib/x.rs", "range": {} }]);
+        assert_eq!(v["items"][0]["label"], text);
+        assert!(allow.get(&format!("{dir}hostname")).is_none() && allow.get(&format!("{dir}passwd")).is_none());
+        let mut v = json!([{ "uri": format!("{dir_uri}x.rs"), "range": {} }]);
         rewrite(&mut v, &["file://"], &mut |s| tr.to_client(s, &mut allow));
-        assert_eq!(v[0]["uri"], "lsp-src://api/usr/lib/x.rs");
-        assert!(allow.get("/usr/lib/x.rs").is_some());
+        assert_eq!(v[0]["uri"], format!("lsp-src://api{}x.rs", dir_uri.trim_start_matches("file://")));
+        assert!(allow.get(&format!("{dir}x.rs")).is_some());
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::util;
 pub fn allowed_roots(state: &AppState) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = state.projects.list().iter().map(|p| p.root.clone()).collect();
     roots.extend(state.config.read().extra_roots.iter().map(|r| expand_tilde(r)));
-    let canon: Vec<PathBuf> = roots.iter().filter_map(|r| r.canonicalize().ok()).collect();
+    let canon: Vec<PathBuf> = roots.iter().filter_map(|r| util::os::path::canonicalize(r).ok()).collect();
     roots.extend(canon);
     roots.sort();
     roots.dedup();
@@ -38,7 +38,7 @@ fn resolve_abs(state: &AppState, abs: &str) -> ApiResult<(PathBuf, bool)> {
             Sensitive::new(&p.config.project.sensitive).matches(&rel)
         }
         None => {
-            let root = roots.iter().filter(|r| path.starts_with(r)).max_by_key(|r| r.as_os_str().len());
+            let root = roots.iter().filter(|r| util::os::path::starts_with(&path, r)).max_by_key(|r| r.as_os_str().len());
             let rel = root.and_then(|r| util::paths::relative_to(r, &path)).unwrap_or_default();
             Sensitive::defaults().matches(&rel)
         }

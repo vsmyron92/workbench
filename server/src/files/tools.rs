@@ -54,9 +54,7 @@ pub fn resolve_target(state: &AppState, ctx: &McpCtx, path: &str) -> ApiResult<(
     }
     let expanded = crate::config::expand_tilde(path);
     if expanded.is_absolute() {
-        let abs = expanded
-            .canonicalize()
-            .map_err(|_| ApiError::not_found(format!("{} does not exist", expanded.display())))?;
+        let abs = util::os::path::canonicalize(&expanded).map_err(|_| ApiError::not_found(format!("{} does not exist", expanded.display())))?;
         if let Some(p) = state.projects.find_by_path(&abs) {
             let rel = util::paths::relative_to(&p.root, &abs).unwrap_or_default();
             util::paths::resolve_in_root(&p.root, &rel)?;
@@ -140,7 +138,7 @@ mod tests {
         std::fs::write(extra.path().join("shot.md"), "# Notes\n").unwrap();
         let mut config = GlobalConfig::default();
         config.projects.roots = vec![];
-        config.projects.include = vec![proj.path().canonicalize().unwrap().display().to_string()];
+        config.projects.include = vec![crate::util::os::path::canonicalize(proj.path()).unwrap().display().to_string()];
         config.extra_roots = vec![extra.path().display().to_string()];
         let paths = Paths { config_dir: cfg.path().to_path_buf(), data_dir: data.path().to_path_buf() };
         let state = AppState::new(paths, config, "127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -176,7 +174,7 @@ mod tests {
         assert_eq!(d["params"]["line"], 1);
 
         // Absolute path inside the project resolves to the project.
-        let abs = dirs[2].path().canonicalize().unwrap().join("PLAN.md");
+        let abs = crate::util::os::path::canonicalize(dirs[2].path()).unwrap().join("PLAN.md");
         (open_md.handler)(state.clone(), McpCtx::default(), json!({ "path": abs.display().to_string() })).await.unwrap();
         let d = next_ui_open(&mut rx).await;
         assert_eq!(d["panel"], "markdown");
@@ -188,8 +186,17 @@ mod tests {
         let d = next_ui_open(&mut rx).await;
         assert!(d["params"]["projectId"].is_null());
 
+        // An absolute path in a folder of the project: project-relative, with `/` on every OS.
+        let nested = crate::util::os::path::canonicalize(dirs[2].path()).unwrap().join("src").join("main.rs");
+        (open_file.handler)(state.clone(), McpCtx::default(), json!({ "path": nested.display().to_string() })).await.unwrap();
+        assert_eq!(next_ui_open(&mut rx).await["params"]["path"], "src/main.rs");
+
         // Refusals.
         assert!((open_file.handler)(state.clone(), McpCtx::default(), json!({ "path": "/etc/hostname" })).await.is_err());
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(elsewhere.path().join("x.md"), "x").unwrap();
+        let outside = elsewhere.path().join("x.md").display().to_string();
+        assert!((open_file.handler)(state.clone(), McpCtx::default(), json!({ "path": outside })).await.is_err());
         assert!((open_file.handler)(state.clone(), McpCtx::default(), json!({ "path": "src/main.rs" })).await.is_err());
         assert!((open_file.handler)(state.clone(), ctx.clone(), json!({ "path": "../outside.rs" })).await.is_err());
         assert!((open_file.handler)(state.clone(), ctx.clone(), json!({ "path": "missing.rs" })).await.is_err());
@@ -225,7 +232,9 @@ mod tests {
     async fn outside_symlinks_are_moved_as_links() {
         let (state, dirs, pid) = app().await;
         let (proj, outside) = (dirs[2].path(), dirs[3].path());
-        std::os::unix::fs::symlink(outside, proj.join("out-link")).unwrap();
+        if !crate::files::symlink_or_skip(outside, proj.join("out-link")) {
+            return;
+        }
         let ctx = McpCtx::default();
         let op_url = format!("/api/projects/{pid}/files/op");
         let op = |body: serde_json::Value| call_api(&state, Method::POST, &op_url, Some(body), &ctx);

@@ -4,12 +4,13 @@
 //! * `env.host` names a `[hosts.<name>]` entry → `ssh -o BatchMode=yes [-i key] [-p port] user@host '<cmd>'`.
 //!   BatchMode means ssh never prompts (no password or host-key questions in a PTY
 //!   nobody watches); the command is one argv element, so no local shell sees it.
-//! * No `env.host` (or `host = "local"` without such a `[hosts]` entry) → `bash -lc '<cmd>'`
-//!   in the project root. Deploys additionally require `deploy.local = true` to run
-//!   locally, so a missing host can never turn a remote deploy into a local one.
+//! * No `env.host` (or `host = "local"` without such a `[hosts]` entry) → the run shell
+//!   (`bash -lc '<cmd>'`; PowerShell on Windows) in the project root. Deploys additionally
+//!   require `deploy.local = true` to run locally, so a missing host can never turn a
+//!   remote deploy into a local one.
 
-use crate::config::expand_tilde;
 use crate::config::project::{Environment, SshHost};
+use crate::config::{Paths, contract_tilde, expand_tilde};
 use crate::error::ApiError;
 use crate::projects::Project;
 
@@ -30,8 +31,9 @@ impl Target {
     }
 }
 
-/// The target of an env's logs / commands / version probe.
-pub fn env_target(project: &Project, env: &Environment) -> Result<Target, ApiError> {
+/// The target of an env's logs / commands / version probe. `paths` locates the project's
+/// machine overlay, which the message about an undefined host names.
+pub fn env_target(paths: &Paths, project: &Project, env: &Environment) -> Result<Target, ApiError> {
     match env.host.as_deref() {
         None => Ok(Target::Local),
         Some(name) => match project.config.hosts.get(name) {
@@ -41,19 +43,20 @@ pub fn env_target(project: &Project, env: &Environment) -> Result<Target, ApiErr
             }
             None if name == "local" || name == "localhost" => Ok(Target::Local),
             None => Err(ApiError::not_configured(format!(
-                "environment {:?} uses host {name:?}, which is not defined; add [hosts.{name}] to ~/.config/workbench/projects/{}.toml",
-                env.name, project.id
+                "environment {:?} uses host {name:?}, which is not defined; add [hosts.{name}] to {}",
+                env.name,
+                contract_tilde(&paths.project_overlay(&project.id))
             ))),
         },
     }
 }
 
 /// The target of a deploy: local only when `deploy.local = true`.
-pub fn deploy_target(project: &Project, env: &Environment, local: bool) -> Result<Target, ApiError> {
+pub fn deploy_target(paths: &Paths, project: &Project, env: &Environment, local: bool) -> Result<Target, ApiError> {
     if local {
         return Ok(Target::Local);
     }
-    match env_target(project, env)? {
+    match env_target(paths, project, env)? {
         Target::Local => Err(ApiError::not_configured(format!(
             "environment {:?} has no ssh host for its deploy; set `host` (a [hosts] entry) or `deploy.local = true`",
             env.name
@@ -99,8 +102,17 @@ pub fn ssh_argv(h: &SshHost, cmd: &str, tty: bool) -> Vec<String> {
 /// argv for running `cmd` on `target`.
 pub fn argv(target: &Target, cmd: &str, tty: bool) -> Vec<String> {
     match target {
-        Target::Local => vec!["bash".into(), "-lc".into(), cmd.to_string()],
+        Target::Local => crate::util::os::shell::run_argv(cmd),
         Target::Ssh(h) => ssh_argv(h, cmd, tty),
+    }
+}
+
+/// The language of the shell `argv` gives a command on `target`: the local run shell's
+/// (`Dialect::HOST`), or POSIX on an ssh host whatever OS Workbench runs on.
+pub fn dialect(target: &Target) -> crate::util::os::shell::Dialect {
+    match target {
+        Target::Local => crate::util::os::shell::Dialect::HOST,
+        Target::Ssh(_) => crate::util::os::shell::Dialect::Posix,
     }
 }
 
@@ -133,8 +145,12 @@ mod tests {
 
     #[test]
     fn local_commands_run_through_bash() {
+        assert_eq!(argv(&Target::Local, "echo hi", true), crate::util::os::shell::run_argv("echo hi"));
+        #[cfg(unix)]
         assert_eq!(argv(&Target::Local, "echo hi", true), vec!["bash", "-lc", "echo hi"]);
         assert_eq!(Target::Ssh(host()).label(), "root@203.0.113.10");
+        assert_eq!(dialect(&Target::Local), crate::util::os::shell::Dialect::HOST);
+        assert_eq!(dialect(&Target::Ssh(host())), crate::util::os::shell::Dialect::Posix);
     }
 
     #[test]
