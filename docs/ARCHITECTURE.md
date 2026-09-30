@@ -1120,9 +1120,11 @@ and `devcontainer_status` answer 501 `unsupported_platform`, `summary` is `None`
 gives the reason and no container is polled. What asks for the container explicitly (a container
 terminal or agent session, language servers' `container` mode) checks `require_supported` and
 answers the same. Services works there and is marked experimental. The reason, getting-started
-and Help point Windows users to the Linux build inside WSL 2 with Docker Engine in the same
-distribution, where the gateway is a local address; with Docker Desktop's WSL integration it
-may not be, and the bridge fails as on Windows (docs/windows-port.md §5; neither is tested).
+and Help point Windows users to the Linux build inside a WSL 2 distribution with Docker Engine
+installed in it, where the gateway is a local address (a browser on Windows then opens only
+published ports: `container-ip` links stay inside the distribution); with Docker Desktop's WSL
+integration it may not be, and the bridge fails as on Windows (docs/windows-port.md §5;
+neither is tested).
 
 ## Third phase (2026-09-27): code intelligence, debugger, CLion VCS, Confluence authoring, push, approvals, local history
 

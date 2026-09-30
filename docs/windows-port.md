@@ -706,17 +706,26 @@ distribution's own folders, which the Windows build refuses as `\\wsl$` and
 `gateway:<port>`, then `gateway:0`.
 
 - Docker Engine installed in the same distribution creates its bridges (`docker0`,
-  compose's `br-…`) there, so the gateway is a local address and this is the Linux case.
+  compose's `br-…`) there, so the gateway is a local address and this is the Linux case,
+  except for a browser on Windows. `devcontainer::port_route` gives a port the container
+  does not publish `via: container-ip`, and `apps::runs::container_url` turns a run's
+  `localhost:<port>` URL into `http://<container ip>:<port>` (the run's shown URL, the
+  panel's port links in `ops.rs`). That address is on the distribution's bridge, which
+  WSL 2's localhost forwarding does not carry to Windows; the readiness probe runs in the
+  distribution and still reaches it. Published ports (`127.0.0.1:<hostPort>`: `forwardPorts`
+  and `appPort` under the built-in engine) listen in the distribution and should be
+  forwarded like Workbench's own port, so the docs tell users to publish.
 - With Docker Desktop's WSL integration the engine and its networks are in Docker Desktop's
-  own VM, so the gateway need not be an address of the user's distribution. The bind then
-  fails as on Windows: `Bridge::ensure` logs `dev containers: cannot listen on {gateway}`
-  (again at every refresh while the container is in use) and returns `None`, so
-  `ExecTarget::workbench_url` is `None`; shells and runs inside still start, without
-  `WORKBENCH_URL`, and a Claude Code session inside answers 409 ("Workbench cannot listen on
-  the container network's gateway…", `terminals/agent.rs` `launch_claude_in_container`).
-  The container's own address (`ContainerInfo::ip`), which readiness probes of runs inside
-  (`apps::runs::run_port_open`) and unpublished ports (`via: container-ip`) use, is hidden
-  in that VM too (ARCHITECTURE.md, Dev containers, Limits).
+  own WSL distribution (`docker-desktop`), apart from the user's, so the gateway need not be
+  an address of the user's distribution. The bind then fails as on Windows: `Bridge::ensure`
+  logs `dev containers: cannot listen on {gateway}` (again at every refresh while the
+  container is in use) and returns `None`, so `ExecTarget::workbench_url` is `None`; shells
+  and runs inside still start, without `WORKBENCH_URL`, and a Claude Code session inside
+  answers 409 ("Workbench cannot listen on the container network's gateway…",
+  `terminals/agent.rs` `launch_claude_in_container`). The container's own address
+  (`ContainerInfo::ip`), which readiness probes of runs inside (`apps::runs::run_port_open`)
+  and unpublished ports (`via: container-ip`) use, is then most likely out of reach too
+  (ARCHITECTURE.md, Dev containers, Limits: Docker Desktop hides container addresses).
 
 None of this has been tried: no test or CI job runs under WSL, with either engine.
 
