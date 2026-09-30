@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-09-30
 
 - **Sandbox:** the Workspace has a Sandbox scope (`wb-sandbox`) for throwaway documents,
   reports and agent experiments. It has its own tab in the Workspace tool window, the phone
