@@ -880,7 +880,7 @@ pub struct LaunchSpec {
 
 /// A running PTY child.
 pub struct Pty {
-    pub pid: i32,
+    pub pid: u32,
     /// Its session (`pid` names it while this lives).
     session: session::Handle,
     /// The PTY's master side. Windows: its session also holds it, to close the
@@ -935,7 +935,7 @@ impl Pty {
         let mut child = pair.slave.spawn_command(cmd)?;
         // The parent must not keep the slave open, or the reader never sees EOF.
         drop(pair.slave);
-        let pid = child.process_id().map(|p| p as i32).unwrap_or(0);
+        let pid = child.process_id().unwrap_or(0);
         let reader = pair.master.try_clone_reader()?;
         // Dropping the writer writes "\n" + VEOF into the PTY: keep it for the session.
         let mut writer = pair.master.take_writer()?;
@@ -1114,7 +1114,7 @@ fn runs_cli(cmdline: &[u8], name: &str, package: &str) -> bool {
 /// path `package`) with `cwd` as its working directory (blocking; reads `/proc`, on
 /// Windows this user's processes). Used to tell a session file of that CLI running
 /// outside Workbench from a hosted session's own.
-pub fn cli_running_in(cwd: &Path, name: &str, package: &str, ours: &std::collections::HashSet<i32>) -> bool {
+pub fn cli_running_in(cwd: &Path, name: &str, package: &str, ours: &std::collections::HashSet<u32>) -> bool {
     session::runs_outside(cwd, ours, |cmdline| runs_cli(cmdline, name, package))
 }
 
@@ -1430,7 +1430,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let groups: std::collections::HashSet<i32> = session::members(sid).into_iter().map(|(_, g)| g).collect();
+        let groups: std::collections::HashSet<u32> = session::members(sid).into_iter().map(|(_, g)| g).collect();
         assert!(groups.len() >= 2, "expected several process groups, got {groups:?}");
         let started = std::time::Instant::now();
         pty.kill(Duration::from_millis(600)).await;
@@ -1506,7 +1506,7 @@ mod tests {
         let mut child = None;
         for _ in 0..400 {
             let text = screen_text(&mut screen.mirror(), 10);
-            child = text.lines().find_map(|l| l.trim().strip_prefix("child ")).and_then(|p| p.trim().parse::<i32>().ok());
+            child = text.lines().find_map(|l| l.trim().strip_prefix("child ")).and_then(|p| p.trim().parse::<u32>().ok());
             if child.is_some_and(|c| session::members(sid).iter().any(|(p, _)| *p == c)) {
                 break;
             }

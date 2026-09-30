@@ -52,10 +52,12 @@ impl ProcGroup {
     /// job when it asks to (`CREATE_BREAKAWAY_FROM_JOB`, allowed by
     /// `JOB_OBJECT_LIMIT_BREAKAWAY_OK`), as a Unix daemon leaves its terminal's session. The
     /// service `workbench service install --enable` starts from a Workbench terminal then
-    /// outlives that terminal.
+    /// outlives that terminal. With `reports` (a completion port and a key), the job reports
+    /// its events there, `JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO` once no process of it runs;
+    /// the port is associated before the process joins, so no report is missed.
     #[cfg(windows)]
-    pub fn attach_terminal(pid: u32) -> ProcGroup {
-        ProcGroup(imp::Group::attach_job(pid, true))
+    pub fn attach_terminal(pid: u32, reports: Option<(windows_sys::Win32::Foundation::HANDLE, usize)>) -> ProcGroup {
+        ProcGroup(imp::Group::attach_job(pid, true, reports))
     }
 
     /// `attach_pid` for a child spawned without `prepare`, which stays in Workbench's group:
@@ -95,8 +97,8 @@ impl ProcGroup {
 
 // ---------------------------------------------------------------- single processes
 
-/// Whether a pid is alive, including processes of other users.
-pub fn pid_alive(pid: i32) -> bool {
+/// Whether a pid is alive, including processes of other users. Pid 0 is none.
+pub fn pid_alive(pid: u32) -> bool {
     imp::pid_alive(pid)
 }
 
@@ -110,18 +112,19 @@ pub fn own_pid_alive(pid: u32) -> bool {
 /// Whether process `pid` still runs: alive and, on Unix, not a zombie its parent has yet
 /// to reap (Windows has none: an ended process is gone for all but its handles' holders).
 #[cfg(test)]
-pub fn pid_running(pid: i32) -> bool {
+pub fn pid_running(pid: u32) -> bool {
     imp::pid_running(pid)
 }
 
 /// End process `pid` at once (SIGKILL). The caller makes sure the pid is still the one
-/// it means (a child not yet reaped). Pids below 1 are ignored.
-pub fn kill_pid(pid: i32) {
+/// it means (a child not yet reaped). Pid 0 is ignored, and on Unix so is a pid above
+/// `i32::MAX`, which `kill` would read as a process group or as every process (-1).
+pub fn kill_pid(pid: u32) {
     imp::kill_pid(pid);
 }
 
 /// The parent of process `pid`, if it runs.
-pub fn parent_of(pid: i32) -> Option<i32> {
+pub fn parent_of(pid: u32) -> Option<u32> {
     imp::parent_of(pid)
 }
 
@@ -297,11 +300,15 @@ mod imp {
         }
     }
 
+    /// `pid` as libc's `pid_t` for a single process: `None` for 0 (the caller's own
+    /// group) and above `i32::MAX` (negative: a group, or with -1 every process).
+    pub(super) fn pid_t(pid: u32) -> Option<i32> {
+        i32::try_from(pid).ok().filter(|p| *p > 0)
+    }
+
     /// Whether a pid is alive (signal 0 probe).
-    pub fn pid_alive(pid: i32) -> bool {
-        if pid <= 0 {
-            return false;
-        }
+    pub fn pid_alive(pid: u32) -> bool {
+        let Some(pid) = pid_t(pid) else { return false };
         // SAFETY: signal 0 only checks existence and permission.
         let r = unsafe { libc::kill(pid, 0) };
         r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
@@ -312,20 +319,18 @@ mod imp {
     }
 
     #[cfg(test)]
-    pub fn pid_running(pid: i32) -> bool {
+    pub fn pid_running(pid: u32) -> bool {
         // The state follows the command name's last `)`.
         std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.rsplit_once(')').is_some_and(|(_, rest)| rest.split_whitespace().next() != Some("Z")))
     }
 
-    pub fn kill_pid(pid: i32) {
-        if pid <= 0 {
-            return;
-        }
+    pub fn kill_pid(pid: u32) {
+        let Some(pid) = pid_t(pid) else { return };
         // SAFETY: plain syscall; the caller vouches for the pid.
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
 
-    pub fn parent_of(pid: i32) -> Option<i32> {
+    pub fn parent_of(pid: u32) -> Option<u32> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let rest = &stat[stat.rfind(')')? + 1..];
         rest.split_whitespace().nth(1)?.parse().ok()
@@ -454,16 +459,17 @@ mod imp {
 
     use tokio::process::Command;
     use windows_sys::Win32::Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE, ERROR_MORE_DATA, GetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE, ERROR_MORE_DATA, GetLastError, HANDLE, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::System::Diagnostics::Debug::CheckRemoteDebuggerPresent;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_PROCESS_ID_LIST,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
-        SetInformationJobObject, TerminateJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+        JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectAssociateCompletionPortInformation, JobObjectBasicProcessIdList,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
         CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateEventW, DETACHED_PROCESS, EVENT_MODIFY_STATE, OpenEventW, OpenProcess, PROCESS_QUERY_INFORMATION,
@@ -527,15 +533,36 @@ mod imp {
         (ok != 0).then_some(job)
     }
 
+    /// Makes `job` report its events to the completion port `port`, with `key`. Delivery is
+    /// not guaranteed (Microsoft's documentation): whoever waits for a report also looks
+    /// for itself now and then.
+    fn report_to(job: &Handle, port: HANDLE, key: usize) {
+        let info = JOBOBJECT_ASSOCIATE_COMPLETION_PORT { CompletionKey: key as *mut std::ffi::c_void, CompletionPort: port };
+        // SAFETY: a job handle with all access rights; `info` is the structure of this
+        // information class, with its own size; the key is only handed back, never read.
+        unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectAssociateCompletionPortInformation,
+                std::ptr::from_ref(&info).cast(),
+                size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
+            )
+        };
+    }
+
     impl Group {
         pub fn attach(pid: u32) -> Group {
-            Group::attach_job(pid, false)
+            Group::attach_job(pid, false, None)
         }
 
-        pub fn attach_job(pid: u32, breakaway_ok: bool) -> Group {
+        pub fn attach_job(pid: u32, breakaway_ok: bool, reports: Option<(HANDLE, usize)>) -> Group {
             let access = PROCESS_TERMINATE | PROCESS_SET_QUOTA | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
             let Some(leader) = open_process(access, pid) else { return Group(None) };
             let job = kill_on_close_job(breakaway_ok).filter(|job| {
+                // While the job is still empty: it has no event to miss yet.
+                if let Some((port, key)) = reports {
+                    report_to(job, port, key);
+                }
                 // SAFETY: both handles are valid; the process handle has PROCESS_SET_QUOTA
                 // and PROCESS_TERMINATE.
                 unsafe { AssignProcessToJobObject(job.0, leader.0) != 0 }
@@ -623,8 +650,10 @@ mod imp {
         }
     }
 
-    pub fn pid_alive(pid: i32) -> bool {
-        let Some(pid) = u32::try_from(pid).ok().filter(|p| *p > 0) else { return false };
+    pub fn pid_alive(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
         match open_process(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, pid) {
             Some(h) => running(&h),
             // It exists but is not ours to open (EPERM on Unix).
@@ -637,18 +666,17 @@ mod imp {
     }
 
     #[cfg(test)]
-    pub fn pid_running(pid: i32) -> bool {
+    pub fn pid_running(pid: u32) -> bool {
         pid_alive(pid)
     }
 
-    pub fn kill_pid(pid: i32) {
-        let Some(h) = u32::try_from(pid).ok().filter(|p| *p > 0).and_then(|p| open_process(PROCESS_TERMINATE, p)) else { return };
+    pub fn kill_pid(pid: u32) {
+        let Some(h) = Some(pid).filter(|p| *p > 0).and_then(|p| open_process(PROCESS_TERMINATE, p)) else { return };
         // SAFETY: a process handle with PROCESS_TERMINATE.
         unsafe { TerminateProcess(h.0, KILLED) };
     }
 
-    pub fn parent_of(pid: i32) -> Option<i32> {
-        let pid = u32::try_from(pid).ok()?;
+    pub fn parent_of(pid: u32) -> Option<u32> {
         // SAFETY: plain call; `Handle` owns the snapshot.
         let snap = Handle::new(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) })?;
         let mut e = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
@@ -656,7 +684,7 @@ mod imp {
         let mut more = unsafe { Process32FirstW(snap.0, &mut e) } != 0;
         while more {
             if e.th32ProcessID == pid {
-                return i32::try_from(e.th32ParentProcessID).ok();
+                return Some(e.th32ParentProcessID);
             }
             // SAFETY: as above.
             more = unsafe { Process32NextW(snap.0, &mut e) } != 0;
@@ -1008,7 +1036,7 @@ mod tests {
         group.kill();
         let status = tokio::time::timeout(Duration::from_secs(10), child.wait()).await.unwrap().unwrap();
         assert!(!status.success());
-        assert!(eventually(|| members.iter().all(|p| !pid_alive(*p as i32))).await, "{members:?} outlived the group");
+        assert!(eventually(|| members.iter().all(|p| !pid_alive(*p))).await, "{members:?} outlived the group");
         assert!(group.members().is_empty());
         // An empty group (the child was gone) does nothing.
         ProcGroup::default().kill();
@@ -1018,19 +1046,32 @@ mod tests {
     #[tokio::test]
     async fn one_process() {
         let mut child = sleeper().spawn().unwrap();
-        let pid = child.id() as i32;
+        let pid = child.id();
         assert!(pid_alive(pid));
-        assert!(own_pid_alive(pid as u32) && own_pid_alive(std::process::id()));
-        assert_eq!(parent_of(pid), Some(std::process::id() as i32));
-        assert!(!debugger_attached(pid as u32).await);
+        assert!(own_pid_alive(pid) && own_pid_alive(std::process::id()));
+        assert_eq!(parent_of(pid), Some(std::process::id()));
+        assert!(!debugger_attached(pid).await);
         assert!(pid_running(pid));
         kill_pid(pid);
         let status = child.wait().unwrap();
         assert!(!status.success());
         assert!(!pid_alive(pid) && !pid_running(pid));
-        assert!(!own_pid_alive(pid as u32));
-        assert!(!pid_alive(0) && !pid_alive(-1));
+        assert!(!own_pid_alive(pid));
+        assert!(!pid_alive(0));
         kill_pid(0); // ignored, not Workbench's own group
+    }
+
+    /// Unix: a pid above `i32::MAX` is none, and never reaches `kill` (which would read it
+    /// as a process group, or as every process for `u32::MAX`, -1). Checked without calling
+    /// `kill_pid` with one: a mistake would signal every process of this user.
+    #[cfg(unix)]
+    #[test]
+    fn pids_kill_would_misread_are_none() {
+        assert_eq!(imp::pid_t(u32::MAX), None);
+        assert_eq!(imp::pid_t(1 << 31), None);
+        assert_eq!(imp::pid_t(0), None);
+        assert_eq!(imp::pid_t(42), Some(42));
+        assert!(!pid_alive(u32::MAX) && !pid_alive(1 << 31));
     }
 
     /// A process started in a new process group ignores Ctrl-C (and would hand that down to
@@ -1092,12 +1133,54 @@ mod tests {
     fn only_a_terminals_job_lets_processes_leave() {
         use windows_sys::Win32::System::JobObjects::{JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
         let (mut a, mut b) = (sleeper().spawn().unwrap(), sleeper().spawn().unwrap());
-        let (plain, terminal) = (ProcGroup::attach_pid(a.id()), ProcGroup::attach_terminal(b.id()));
+        let (plain, terminal) = (ProcGroup::attach_pid(a.id()), ProcGroup::attach_terminal(b.id(), None));
         assert_eq!(plain.0.limit_flags(), Some(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE));
         assert_eq!(terminal.0.limit_flags(), Some(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK));
         plain.kill();
         terminal.kill();
         assert!(!a.wait().unwrap().success() && !b.wait().unwrap().success());
+    }
+
+    /// Windows: a terminal's job reports to the completion port it was given, with its key,
+    /// once no process of it runs (what `os::session` closes the pseudoconsole on).
+    #[cfg(windows)]
+    #[test]
+    fn a_terminals_job_reports_that_it_is_empty() {
+        use std::time::Instant;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED};
+        use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO, JOB_OBJECT_MSG_NEW_PROCESS};
+        // SAFETY: a new completion port, tied to no file; `Handle` closes it.
+        let port = crate::util::os::win32::Handle::new(unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, std::ptr::null_mut(), 0, 1) }).unwrap();
+        // The next report within `timeout`: `(message, key)`.
+        let next = |timeout: Duration| {
+            let (mut message, mut key, mut overlapped) = (0u32, 0usize, std::ptr::null_mut::<OVERLAPPED>());
+            let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
+            // SAFETY: a completion port `port` keeps open; the out-values are valid for the call.
+            let got = unsafe { GetQueuedCompletionStatus(port.0, &mut message, &mut key, &mut overlapped, ms) } != 0;
+            got.then_some((message, key))
+        };
+        let mut child = sleeper().spawn().unwrap();
+        let group = ProcGroup::attach_terminal(child.id(), Some((port.0, 42)));
+        // While it runs, the job reports its process joining (and maybe a console host):
+        // never that it is empty.
+        let mut seen = vec![];
+        while let Some((message, key)) = next(Duration::from_millis(500)) {
+            assert_eq!(key, 42);
+            seen.push(message);
+        }
+        assert!(seen.contains(&JOB_OBJECT_MSG_NEW_PROCESS) && !seen.contains(&JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO), "{seen:?}");
+        group.kill();
+        assert!(!child.wait().unwrap().success());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while let Some((message, key)) = next(deadline.saturating_duration_since(Instant::now())) {
+            assert_eq!(key, 42);
+            seen.push(message);
+            if message == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO {
+                return;
+            }
+        }
+        panic!("no report that the job is empty: {seen:?}");
     }
 
     #[tokio::test]

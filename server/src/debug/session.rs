@@ -267,7 +267,7 @@ struct Data {
     temp_bp: Option<(String, i64)>,
     debuggee_terminals: Vec<String>,
     prelaunch_terminal: Option<String>,
-    debuggee_pid: Option<i32>,
+    debuggee_pid: Option<u32>,
     temp_files: Vec<PathBuf>,
     ended_at: Option<i64>,
     /// The adapter's last lines of stderr / non-DAP output.
@@ -1505,7 +1505,7 @@ fn on_event(state: &AppState, s: &Arc<Session>, e: Value) {
             s.update(|d| {
                 d.process = Some(ProcessView { pid, name: truncate(name, 300) });
                 if ours {
-                    d.debuggee_pid = pid.and_then(|p| i32::try_from(p).ok()).filter(|p| *p > 1);
+                    d.debuggee_pid = pid.and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 1);
                 }
             });
         }
@@ -1787,7 +1787,7 @@ pub async fn finish(state: &AppState, s: &Arc<Session>) {
     if let Some(mut p) = s.proc_.lock().await.take() {
         // A debuggee we launched that is still the adapter's child: gone with it.
         if let (Some(dpid), Some(apid)) = (debuggee, p.child.id()) {
-            if crate::util::os::proc::parent_of(dpid) == Some(apid as i32) {
+            if crate::util::os::proc::parent_of(dpid) == Some(apid) {
                 crate::util::os::proc::kill_pid(dpid);
             }
         }

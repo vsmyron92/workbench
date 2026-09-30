@@ -924,8 +924,9 @@ console = "console"
     let c = env.wait_session(&cid, "the child's end", |v| v["state"] == "terminated").await;
     assert!(c.get("error").is_none(), "{c}");
     if let Some(p) = child_pid {
+        let p = u32::try_from(p).expect("a pid");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while crate::util::os::proc::pid_running(p as i32) {
+        while crate::util::os::proc::pid_running(p) {
             assert!(tokio::time::Instant::now() < deadline, "the subprocess {p} outlived the stop");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

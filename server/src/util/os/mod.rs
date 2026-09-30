@@ -15,6 +15,8 @@ pub mod net;
 pub mod path;
 pub mod perm;
 pub mod proc;
+#[cfg(windows)]
+mod recycle;
 pub mod session;
 pub mod shell;
 pub mod support;

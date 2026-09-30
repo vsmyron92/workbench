@@ -363,7 +363,7 @@ pub fn choose<'a>(me: &Pending, pending: &[Pending], candidates: &'a [Candidate]
 /// reads every readable `/proc/<pid>/fd`, on Windows asks the Restart Manager). A rollout
 /// another Codex keeps open (one in a terminal outside Workbench, an editor extension) is
 /// that session's, never ours.
-pub fn held_elsewhere(path: &Path, ours: &HashSet<i32>) -> bool {
+pub fn held_elsewhere(path: &Path, ours: &HashSet<u32>) -> bool {
     crate::util::os::session::held_outside(path, ours)
 }
 
@@ -439,8 +439,8 @@ pub fn recent_candidates(home: &Path, since_ms: i64) -> Vec<Candidate> {
 /// Which of `paths` the processes of each session (`(terminal, session id = leader
 /// pid)`) hold open (blocking; reads `/proc/<pid>/fd` of our own children, on Windows asks
 /// the Restart Manager). Keys are the given paths.
-pub fn holders(sessions: &[(String, i32)], paths: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
-    let sids: Vec<i32> = sessions.iter().map(|(_, sid)| *sid).collect();
+pub fn holders(sessions: &[(String, u32)], paths: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
+    let sids: Vec<u32> = sessions.iter().map(|(_, sid)| *sid).collect();
     let held = crate::util::os::session::holders(&sids, paths);
     let mut out: HashMap<PathBuf, Vec<String>> = HashMap::new();
     for (path, by) in held {
@@ -890,7 +890,7 @@ mod tests {
         std::fs::write(&file, "x\n").unwrap();
         let held = std::fs::File::open(&file).unwrap();
         // This test process stands in for a session leader.
-        let sid = nix::unistd::getsid(None).unwrap().as_raw();
+        let sid = u32::try_from(nix::unistd::getsid(None).unwrap().as_raw()).unwrap();
         let found = holders(&[("me".into(), sid)], std::slice::from_ref(&file));
         assert_eq!(found.get(&file).map(|v| v.as_slice()), Some(&["me".to_string()][..]));
         let other = dir.path().join("rollout-free.jsonl");
