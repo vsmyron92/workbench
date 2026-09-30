@@ -42,6 +42,17 @@
   failure into `upstream`. The `workbench_notify` tool's description says what it does
   everywhere: a toast in Workbench, and a desktop notification, your notify command and a
   push to your devices where you set them up (Windows has no desktop notifications yet).
+- **Line endings:** Workbench follows git's line-ending conversions on Linux too, as it
+  already did on Windows. This affects a file that git checks out with CRLF over LF in the
+  repository, through an `eol=crlf` attribute in `.gitattributes` or `core.autocrlf=true`.
+  Its diff shows the working tree as git reads it, so once every change is staged the diff
+  says "Nothing unstaged in this file." instead of showing two identical sides. A conflict
+  in it is shown with LF, like both sides, and text you resolve it with is written back
+  with CRLF. Local History keeps its "Last commit (HEAD)" with CRLF, as the checkout wrote
+  it. Comparing that entry with the first change now shows the edited lines, not every
+  line, and a file that only went through the checkout no longer gets one. Files git does
+  not convert keep their bytes as before: LF files, `-text` files and CRLF committed as is.
+  LF files cost no extra git call.
 - **On Windows:** a repository git refuses because another user owns the folder
   (`safe.directory`) no longer just loses its branch. The project shows a warning that
   names the folder and the command that trusts it. The status bar reads "Untrusted

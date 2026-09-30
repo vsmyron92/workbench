@@ -284,6 +284,10 @@ async fn first_change_of_a_committed_file_keeps_head() {
     // CRLF on disk, LF in the repository: what `core.autocrlf` (Git for Windows' default) leaves.
     std::fs::write(root.join("src/crlf.rs"), "pub fn x() {}\r\npub fn y() {}\r\n").unwrap();
     std::fs::write(root.join("src/same.rs"), "pub fn s() {}\r\n").unwrap();
+    // CRLF on disk, LF in the repository, by an attribute (on every OS).
+    std::fs::write(root.join(".gitattributes"), "*.ps1 text eol=crlf\n").unwrap();
+    std::fs::write(root.join("src/tool.ps1"), "first\r\nsecond\r\n").unwrap();
+    std::fs::write(root.join("src/keep.ps1"), "keep\r\n").unwrap();
     let git = |args: &[&str]| {
         let ok = std::process::Command::new("git")
             .arg("-C")
@@ -334,9 +338,23 @@ async fn first_change_of_a_committed_file_keeps_head() {
     let base = env.api(Method::GET, &format!("/files/history/revision?id={}", h[1]["id"]), None).await.unwrap();
     assert_eq!(base["content"], "pub fn u() {}\n");
 
-    // A CRLF checkout keeps HEAD with its line ends on Windows: the diff shows the line
-    // added… Elsewhere HEAD is kept as committed, as it always was.
-    let crlf = crate::util::os::fs::NATIVE_CRLF;
+    // An `eol=crlf` attribute checks out CRLF whatever the settings: HEAD is kept with its
+    // line ends, so the diff shows the line added…
+    std::fs::write(root.join("src/tool.ps1"), "first\r\nsecond\r\nthird\r\n").unwrap();
+    let h = env.wait_for("src/tool.ps1", 2).await;
+    assert_eq!(kinds(&h), ["disk", "base"]);
+    let base = env.api(Method::GET, &format!("/files/history/revision?id={}", h[1]["id"]), None).await.unwrap();
+    assert_eq!(base["content"], "first\r\nsecond\r\n");
+    let d = env.api(Method::GET, &format!("/files/history/diff?id={}", h[0]["id"]), None).await.unwrap();
+    let diff = d["diff"].as_str().unwrap();
+    assert!(diff.contains("+third\r\n") && !diff.contains("-first") && !diff.contains("-second"), "{diff}");
+    // …and a file that only went through the checkout has no older version to keep.
+    std::fs::write(root.join("src/keep.ps1"), "keep\r\n").unwrap();
+    env.wait_for("src/keep.ps1", 1).await;
+    env.settle().await;
+    assert_eq!(kinds(&env.history("src/keep.ps1").await), ["disk"]);
+
+    // So does `core.autocrlf` (Git for Windows' default).
     git(&["config", "core.autocrlf", "true"]);
     std::fs::write(root.join("src/crlf.rs"), "pub fn x() {}\r\npub fn y() {}\r\npub fn z() {}\r\n").unwrap();
     let hook = json!({ "hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": { "file_path": root.join("src").join("crlf.rs").display().to_string() } });
@@ -344,15 +362,28 @@ async fn first_change_of_a_committed_file_keeps_head() {
     let h = env.wait_for("src/crlf.rs", 2).await;
     assert_eq!(kinds(&h), ["agent", "base"]);
     let base = env.api(Method::GET, &format!("/files/history/revision?id={}", h[1]["id"]), None).await.unwrap();
-    assert_eq!(base["content"], if crlf { "pub fn x() {}\r\npub fn y() {}\r\n" } else { "pub fn x() {}\npub fn y() {}\n" });
+    assert_eq!(base["content"], "pub fn x() {}\r\npub fn y() {}\r\n");
     let d = env.api(Method::GET, &format!("/files/history/diff?id={}", h[0]["id"]), None).await.unwrap();
     let diff = d["diff"].as_str().unwrap();
-    assert!(diff.contains("+pub fn z() {}\r\n") && diff.contains("-pub fn x() {}") != crlf, "{diff}");
-    // …and a file that only went through the checkout has no older version to keep.
+    assert!(diff.contains("+pub fn z() {}\r\n") && !diff.contains("-pub fn x() {}"), "{diff}");
     std::fs::write(root.join("src/same.rs"), "pub fn s() {}\r\n").unwrap();
     env.wait_for("src/same.rs", 1).await;
     env.settle().await;
-    assert_eq!(kinds(&env.history("src/same.rs").await), if crlf { &["disk"][..] } else { &["disk", "base"][..] });
+    assert_eq!(kinds(&env.history("src/same.rs").await), ["disk"]);
+}
+
+/// Only a file with CRLFs on disk and a lone LF in HEAD can be one a checkout converted: no
+/// other asks git (an LF repository pays no git call).
+#[test]
+fn only_crlf_files_ask_git_how_they_are_checked_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut checkout = super::Checkout::new(dir.path());
+    // LF on disk, or no lone LF in HEAD: HEAD as committed.
+    assert_eq!(&*checkout.as_checked_out("a.rs", b"x\ny\n", b"x\nz\n"), b"x\ny\n");
+    assert_eq!(&*checkout.as_checked_out("a.rs", b"x\r\ny\r\n", b"x\r\nz\r\n"), b"x\r\ny\r\n");
+    assert!(checkout.config.is_none(), "no git call");
+    checkout.as_checked_out("a.rs", b"x\ny\n", b"x\r\nz\r\n");
+    assert!(checkout.config.is_some(), "a CRLF file over LF in HEAD asks git");
 }
 
 /// Git's rules for the line ends of a checkout (`convert.c`), from its settings and the

@@ -456,8 +456,8 @@ interface GitStatus {
 // git — GET /api/projects/{pid}/git/diff?path=&mode=working|staged|commit|compare&sha=&base=&head=
 interface GitFileDiff {
   path: string; oldPath?: string
-  original: string; modified: string          // full texts ('' when absent); on Windows the working tree as git
-                                               // reads it (LF where git turns its CRLFs into LFs, like the hunks)
+  original: string; modified: string          // full texts ('' when absent); the working tree as git reads it
+                                               // (LF where git turns its CRLFs into LFs, like the hunks)
   binary: boolean; tooLarge: boolean
   hunks: { header: string; oldStart: number; oldLines: number; newStart: number; newLines: number }[]
   fingerprint: string                          // pass back when staging hunks or lines
@@ -1729,11 +1729,12 @@ context would put lines after it, the change is kept and a copy with a newline i
 emitted (the smallest valid patch). Lines are raw bytes (CRLF and any encoding
 round-trip). A working tree git checks out with CRLF over an LF index (`core.autocrlf`,
 `text`/`eol=crlf` attributes): git's diffs already show it with LF, so the staging patches
-are LF and `git apply` writes CRLF back when rolling back. On Windows (`eol::FOLLOWS_GIT`;
-`eol.rs` reads `git ls-files --eol` and `core.autocrlf`) Workbench also shows the
-working-tree side (`modified`, a conflict's `merged`) with LF and writes a conflict resolved
-with edited text back with CRLF; files git does not convert keep their bytes, and on Linux
-every file does. Part of an untracked file becomes a `new file` patch; an intent-to-add
+are LF and `git apply` writes CRLF back when rolling back. On every OS Workbench also shows
+the working-tree side (`modified`, a conflict's `merged`) with LF and writes a conflict
+resolved with edited text back with CRLF (`eol.rs` reads `git ls-files --eol` and
+`core.autocrlf`, only for a file with a CRLF in it: an LF file costs no git call); files git
+does not convert (`-text`, CRLF committed as is, no conversion configured) keep their
+bytes. Part of an untracked file becomes a `new file` patch; an intent-to-add
 entry gets a modification patch; renames patch the new path; every line of a new/deleted
 file becomes the file-level operation; partial roll back of a deleted file and partial
 unstage of a staged deletion are refused. Binary, LFS, symlink, submodule and conflicted diffs offer no lines.
@@ -2617,9 +2618,9 @@ sees, per project in `data_dir/local-history/<pid>/`.
   an agent's shell commands carry no path and stay "Changed on disk" (no guessing).
   `base` "Opened in Workbench" (the first version the editor read) and "Last commit
   (HEAD)" (before the first recorded change of a git-tracked file with no history, its
-  committed version from a bounded `git cat-file`; on Windows, for a file with CRLFs on
-  disk, with the line ends a checkout writes by git's rules (`core.autocrlf`, `core.eol`,
-  the `text`/`eol`/`crlf` attributes, read with bounded `git config`/`git check-attr`);
+  committed version from a bounded `git cat-file`; for a file with CRLFs on disk, with the
+  line ends a checkout writes by git's rules on every OS (`core.autocrlf`, `core.eol`, the
+  `text`/`eol`/`crlf` attributes, read with bounded `git config`/`git check-attr`);
   watcher batches of up to 20 files and hooks only). `deleted` (a tracked path, or
   everything tracked below a folder, is gone), `label` (Put Label…) and `auto` ("Before
   git pull": the first `git.op` line of any op but fetch, push and remote-branch deletion).
