@@ -2,7 +2,7 @@
 // with a bottom tool-window area, and the status bar.
 
 import { Suspense, useEffect, useRef, useState } from 'react'
-import { ChevronDown, Command as CommandIcon, FolderGit2, FolderPlus, Minus, Plug, Settings, Unplug } from 'lucide-react'
+import { ChevronDown, Command as CommandIcon, FolderGit2, FolderPlus, Minus, PanelLeftClose, PanelLeftOpen, Plug, Settings, Unplug } from 'lucide-react'
 import { isEventsConnected, onEventsConnection } from '@/api/events'
 import { useProjects } from '@/api/queries'
 import type { ProjectSummary } from '@/api/types'
@@ -14,19 +14,21 @@ import { SearchEverywhere } from './SearchEverywhere'
 import { Dock } from './Dock'
 import { NoProjectsBanner } from './NoProjects'
 import { Dialogs, Toasts } from './Overlays'
-import { statusbarWidgets, toolWindows, topbarWidgets } from './registry'
+import { column as AgentsColumn, columnbarWidgets, statusbarWidgets, toolWindows, topbarWidgets } from './registry'
 import type { Side, ToolWindowDef } from './types'
 import { visibleFor } from './visibility'
+import { fitWindowToWorkWindow } from './windowFit'
 
 function visibleToolWindows(side: Side, project: ProjectSummary | null): ToolWindowDef[] {
   return visibleFor(toolWindows, project).filter((t) => t.side === side)
 }
 
-function Stripe({ sides, project }: { sides: Side[]; project: ProjectSummary | null }) {
+/** `settings`: the Settings button at the bottom (the left stripe). */
+function Stripe({ sides, project, settings }: { sides: Side[]; project: ProjectSummary | null; settings?: boolean }) {
   const state = useUi((s) => s.sides)
   const toggle = useUi((s) => s.toggleToolWindow)
   return (
-    <div className="wb-stripe">
+    <div className={settings ? 'wb-stripe left' : 'wb-stripe right'}>
       {sides.map((side, i) => (
         <div key={side} className="wb-stripe-group" style={i > 0 ? { marginTop: 'auto' } : undefined}>
           {visibleToolWindows(side, project).map((t) => (
@@ -41,7 +43,25 @@ function Stripe({ sides, project }: { sides: Side[]; project: ProjectSummary | n
           ))}
         </div>
       ))}
+      {settings && (
+        <div className="wb-stripe-group wb-stripe-foot" style={sides.length > 1 ? undefined : { marginTop: 'auto' }}>
+          <IconButton icon={Settings} label="Settings (Ctrl+,)" onClick={() => openSettings()} />
+        </div>
+      )}
     </div>
+  )
+}
+
+/** The agents window's drag handle: between 320 px and 70% of the window. */
+function ColumnResizer() {
+  const setColumn = useUi((s) => s.setColumn)
+  const start = useRef(0)
+  return (
+    <Splitter
+      direction="v"
+      onResizeStart={() => (start.current = useUi.getState().column.size)}
+      onResize={(d) => setColumn({ size: Math.max(320, Math.min(Math.max(360, window.innerWidth * 0.7), start.current + d)) })}
+    />
   )
 }
 
@@ -122,6 +142,9 @@ export function DesktopShell() {
   const projectId = useUi((s) => s.projectId)
   const setProject = useUi((s) => s.setProject)
   const sides = useUi((s) => s.sides)
+  const column = useUi((s) => s.column)
+  const workOpen = useUi((s) => s.workOpen)
+  const setWorkOpen = useUi((s) => s.setWorkOpen)
   const project = projects?.find((p) => p.id === projectId) ?? null
 
   // A project id the list does not have is stale, or just added (Add project…): fetch the list
@@ -138,58 +161,99 @@ export function DesktopShell() {
     }
   }, [projects, projectId, setProject, refetch])
 
+  // The browser window follows the workspace window: shrunk to the agents window while it is collapsed.
+  const fitted = useRef(workOpen)
+  useEffect(() => {
+    if (fitted.current === workOpen) return
+    fitted.current = workOpen
+    fitWindowToWorkWindow(workOpen, useUi.getState().column.size)
+  }, [workOpen])
+
   const pid = project?.id ?? null
   const hasLeft = !!visibleToolWindows('left', project).find((t) => t.id === sides.left.active)
   const hasRight = !!visibleToolWindows('right', project).find((t) => t.id === sides.right.active)
   const hasBottom = !!visibleToolWindows('bottom', project).find((t) => t.id === sides.bottom.active)
 
-  return (
-    <div className="wb-shell">
+  const agentsWindow = AgentsColumn && (
+    <section className="wb-agentwin" style={workOpen ? { width: column.size } : { flex: 1, maxWidth: 'none' }}>
       <header className="wb-topbar">
-        <IconButton icon={Settings} label="Settings (Ctrl+,)" onClick={() => openSettings()} />
         <img src="/favicon.svg" alt="" width={20} height={20} className="wb-logo" />
         <ProjectSwitcher projects={projects ?? []} current={project} />
-        {topbarWidgets.map((W, i) => (
+        <span style={{ flex: 1 }} />
+        {columnbarWidgets.map((W, i) => (
           <W key={i} projectId={pid} />
         ))}
-        <span style={{ flex: 1 }} />
-        <button className="wb-search-button" onClick={() => openPalette()}>
-          <CommandIcon size={13} /> Commands <kbd className="wb-kbd">Ctrl+K</kbd>
-        </button>
+        <IconButton
+          icon={workOpen ? PanelLeftClose : PanelLeftOpen}
+          label={workOpen ? 'Collapse the workspace window (Alt+F12)' : 'Expand the workspace window (Alt+F12)'}
+          active={!workOpen}
+          onClick={() => setWorkOpen(!workOpen)}
+        />
       </header>
-      <div className="wb-main">
-        <Stripe sides={['left', 'bottom']} project={project} />
-        {hasLeft && (
-          <>
-            <div style={{ width: sides.left.size }} className="wb-side">
-              <ToolWindowArea side="left" project={project} />
-            </div>
-            <SideResizer side="left" />
-          </>
-        )}
-        <div className="wb-center">
-          <NoProjectsBanner />
-          <div className="wb-dock-area">
-            <Dock />
-          </div>
-          {hasBottom && (
-            <>
-              <SideResizer side="bottom" />
-              <div style={{ height: sides.bottom.size }} className="wb-bottom">
-                <ToolWindowArea side="bottom" project={project} />
+      <div className="wb-agentwin-body">
+        <Suspense fallback={<Loading />}>
+          <AgentsColumn projectId={pid} />
+        </Suspense>
+      </div>
+    </section>
+  )
+  return (
+    <div className="wb-shell">
+      <div className="wb-windows">
+        {agentsWindow}
+        {workOpen && AgentsColumn && <ColumnResizer />}
+        {/* Mounted while collapsed too, so the dock keeps its tabs. */}
+        <section className="wb-workwin" style={workOpen ? undefined : { display: 'none' }}>
+          <header className="wb-topbar">
+            {/* The widgets that sat beside the project switcher: the branch, runs, environments, CI, debug. */}
+            {!AgentsColumn && <ProjectSwitcher projects={projects ?? []} current={project} />}
+            {!AgentsColumn &&
+              columnbarWidgets.map((W, i) => (
+                <W key={`c${i}`} projectId={pid} />
+              ))}
+            {topbarWidgets.map((W, i) => (
+              <W key={i} projectId={pid} />
+            ))}
+            <span style={{ flex: 1 }} />
+            <button className="wb-search-button" onClick={() => openPalette()}>
+              <CommandIcon size={13} /> Commands <kbd className="wb-kbd">Ctrl+K</kbd>
+            </button>
+          </header>
+          <div className="wb-main">
+            <Stripe sides={['left', 'bottom']} project={project} settings />
+            {hasLeft && (
+              <>
+                <div style={{ width: sides.left.size }} className="wb-side">
+                  <ToolWindowArea side="left" project={project} />
+                </div>
+                <SideResizer side="left" />
+              </>
+            )}
+            <div className="wb-center">
+              <NoProjectsBanner />
+              <div className="wb-dock-area">
+                <Dock />
               </div>
-            </>
-          )}
-        </div>
-        {hasRight && (
-          <>
-            <SideResizer side="right" />
-            <div style={{ width: sides.right.size }} className="wb-side">
-              <ToolWindowArea side="right" project={project} />
+              {hasBottom && (
+                <>
+                  <SideResizer side="bottom" />
+                  <div style={{ height: sides.bottom.size }} className="wb-bottom">
+                    <ToolWindowArea side="bottom" project={project} />
+                  </div>
+                </>
+              )}
             </div>
-          </>
-        )}
-        <Stripe sides={['right']} project={project} />
+            {hasRight && (
+              <>
+                <SideResizer side="right" />
+                <div style={{ width: sides.right.size }} className="wb-side">
+                  <ToolWindowArea side="right" project={project} />
+                </div>
+              </>
+            )}
+            <Stripe sides={['right']} project={project} />
+          </div>
+        </section>
       </div>
       <footer className="wb-statusbar">
         {statusbarWidgets.map((W, i) => (

@@ -9,7 +9,7 @@ import { useProjects } from '@/api/queries'
 import type { PanelProps } from '@/shell/types'
 import { useUi } from '@/state/store'
 import { Button, EmptyState, ErrorBox, IconButton, Loading, showMenu } from '@/ui'
-import { type WorkspaceCard, useCards, useTrash } from './api'
+import { type WorkspaceCard, useCards, useScopes, useTrash } from './api'
 import { cardMenu, dragHasPayload, dropOnCard, openCard, resetSandbox } from './actions'
 import { ALL, categoryLabel, groupCards, HOME, isProjectless, relativeDay, SANDBOX, visibleCards } from './logic'
 import { CardThumb, CategoryIcon, KindIcon } from './parts'
@@ -171,6 +171,9 @@ export function HomePanel({ params, setParams, setTitle, active }: PanelProps<Ho
   const activeCount = cards.filter((c) => !c.archived).length
   const categories = new Set(cards.map((c) => c.category || 'other')).size
   const newCard = () => useWsUi.getState().openNewCard(scope === ALL ? projectId ?? HOME : scope)
+  // A project without cards of its own: Home's (the examples, cards tied to no project) are one click away.
+  const scopes = useScopes()
+  const homeCards = !isProjectless(scope) && scope !== ALL ? (scopes.data?.find((s) => s.id === HOME)?.active ?? 0) : 0
 
   return (
     <div className="wb-fill ws-home" ref={rootRef}>
@@ -274,9 +277,16 @@ export function HomePanel({ params, setParams, setTitle, active }: PanelProps<Ho
                   icon={LayoutGrid}
                   title="No cards yet"
                   action={
-                    <Button size="small" variant="primary" icon={Plus} onClick={newCard}>
-                      New card
-                    </Button>
+                    <>
+                      <Button size="small" variant="primary" icon={Plus} onClick={newCard}>
+                        New card
+                      </Button>
+                      {homeCards > 0 && (
+                        <Button size="small" icon={LayoutGrid} onClick={() => setParams({ ...params, scope: HOME })}>
+                          Show Home’s {homeCards} card{homeCards === 1 ? '' : 's'}
+                        </Button>
+                      )}
+                    </>
                   }
                 >
                   Cards collect deliverables: reports, documents, image sets, 3D comparisons. Agents add them with the

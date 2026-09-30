@@ -1,6 +1,6 @@
 [package]
 name = "workbench"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 description = "AI-centric developer workspace: Claude Code sessions, editor, git, GitLab, Atlassian and deployed apps in one window"
 license = "MIT"

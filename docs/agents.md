@@ -5,8 +5,13 @@ own accounts and your own settings. What it adds is everything around them.
 
 ## Start a session
 
-Open **Agents** from the left stripe, or press Ctrl+Shift+A. Pick a provider, type a task
-(or nothing, for an interactive session) and start. Options: a name, the model, the
+The **Agents** column on the left opens on a prompt (Ctrl+Shift+A shows it as a dialog
+from anywhere). Pick a provider, type a task (or nothing, for an interactive session) and
+start. Sessions, shells and run output are tabs of that column; they follow the
+**Agents** button left to right and wrap onto as many rows as they need. **+**, after the
+last tab, starts another session or a shell, and closing a tab stops what runs in it (a
+session stays in the history and can be resumed). The top bar of the agents window says
+how many sessions are working or need you; click it to go to the next one that waits. Options: a name, the model, the
 effort, the permission mode, Claude Code's Remote Control, and, when the project has a
 running dev container, **Run in dev container**.
 

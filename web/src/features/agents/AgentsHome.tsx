@@ -1,6 +1,7 @@
-// 'agents.home' — the landing panel: the project's sessions (attention first), a
-// composer for new ones, the session history (resume / fork), sessions running
-// elsewhere on this machine, and Remote Control servers.
+// 'agents.home' — the first tab of the agents column: a composer for a new session (and
+// a button for a shell), the project's sessions (attention first), the ones closed
+// lately, the session history (resume / fork), sessions running elsewhere on this
+// machine, and Remote Control servers.
 
 import { useMemo, useState } from 'react'
 import {
@@ -22,14 +23,15 @@ import {
 import { useProjects, useTerminals } from '@/api/queries'
 import type { TerminalInfo } from '@/api/types'
 import { useUi } from '@/state/store'
-import { Badge, Button, Checkbox, EmptyState, ErrorBox, IconButton, Input, Loading, showMenu, showMenuAt, Spinner, Tabs, TimeAgo, formatBytes } from '@/ui'
+import { Badge, Button, Checkbox, EmptyState, ErrorBox, IconButton, Input, Loading, Section, showMenu, showMenuAt, Spinner, Tabs, TimeAgo, formatBytes } from '@/ui'
 import { copyText, killTerminal, openRemote, restartTerminal, terminalMenu } from './actions'
 import { openTerminal, startAgent, useAgentDefaults, useAgentHistory, useExternalSessions, type HistoryEntry, type ProviderInfo } from './api'
 import { pendingOf } from './lib/permission'
 import { dialogSeenOnScreen, historyProviders, providerKindOf, reportsAnswers, resumes, SEEN_ON_SCREEN } from './lib/providers'
-import { agentMeta, agentSessions, counts, isRunning, sortSessions, tone } from './lib/sessions'
+import { newShell } from './commands'
+import { agentMeta, agentSessions, colorCss, counts, isRunning, lastActivity, sortSessions, tone } from './lib/sessions'
 import { NewSessionForm } from './NewSession'
-import { ColorBar, ContainerBadge, ProviderBadge, ProviderIcon, RemoteLink, StateChip } from './parts'
+import { ColorBar, ContainerBadge, ProviderBadge, ProviderIcon, RemoteLink, StateChip, StateDot } from './parts'
 import { PermissionRequest } from './Permission'
 import { useAgentsUi } from './store'
 
@@ -125,6 +127,36 @@ export function SessionCard({ t, showProject }: { t: TerminalInfo; showProject?:
             {resumes(t) ? 'Resume' : 'Start again'}
           </Button>
         )}
+      </div>
+    </div>
+  )
+}
+
+/** A session as one line (the ones closed lately). */
+function SessionRow({ t, showProject }: { t: TerminalInfo; showProject: boolean }) {
+  const a = t.agent
+  const sub = isRunning(t) ? (a?.attention ?? a?.lastMessage ?? (a?.state === 'working' ? 'Working…' : '')) : 'Stopped'
+  const color = colorCss(t.color)
+  return (
+    <div
+      className="wb-list-row wb-ag-row"
+      onClick={() => openTerminal(t)}
+      onContextMenu={(e) => showMenu(e, terminalMenu(t))}
+      title={t.title}
+      style={color ? { boxShadow: `inset 3px 0 0 ${color}` } : undefined}
+    >
+      <StateDot t={t} />
+      <div className="wb-grow">
+        <div className="wb-ag-row-title">
+          <ProviderBadge t={t} compact />
+          <ContainerBadge t={t} compact />
+          <span className="wb-ellipsis">{t.title}</span>
+          <span className="wb-subtle wb-xs" style={{ marginLeft: 'auto', flex: 'none' }}>
+            {showProject && t.projectId ? `${t.projectId} · ` : ''}
+            <TimeAgo time={lastActivity(t)} />
+          </span>
+        </div>
+        {sub && <div className="wb-ag-row-sub wb-ellipsis">{sub}</div>}
       </div>
     </div>
   )
@@ -247,9 +279,9 @@ function ProviderHistory({ projectId, provider, onDone, limit }: { projectId: st
   )
 }
 
-/** Claude sessions running in other terminals on this machine. */
-function ExternalList({ projectId, all }: { projectId: string | null; all: boolean }) {
-  const { data, isLoading } = useExternalSessions()
+/** Claude sessions running in other terminals on this machine. `enabled`: on screen (it polls). */
+function ExternalList({ projectId, all, enabled }: { projectId: string | null; all: boolean; enabled: boolean }) {
+  const { data, isLoading } = useExternalSessions(enabled)
   const list = (data ?? []).filter((s) => all || !projectId || s.projectId === projectId)
   if (isLoading) return <Loading />
   if (!list.length) return <div className="wb-muted wb-small wb-pad">No other Claude sessions are running{all ? '' : ' in this project'}.</div>
@@ -317,7 +349,8 @@ function RemoteServers({ list }: { list: TerminalInfo[] }) {
   )
 }
 
-export function AgentsHome() {
+/** `visible`: on screen (the column is open and this is its tab). */
+export function AgentsHome({ visible = true }: { visible?: boolean }) {
   const projectId = useUi((s) => s.projectId)
   const { data: projects } = useProjects()
   const project = projects?.find((p) => p.id === projectId) ?? null
@@ -325,8 +358,14 @@ export function AgentsHome() {
   const all = useAgentsUi((s) => s.allProjects)
   const setAll = useAgentsUi((s) => s.setAllProjects)
   const openDialog = useAgentsUi((s) => s.openDialog)
-  const sessions = sortSessions(agentSessions(terminals, projectId, all).filter((t) => t.open))
-  const c = counts(agentSessions(terminals, projectId, all))
+  const mine = agentSessions(terminals, projectId, all)
+  const sessions = sortSessions(mine.filter((t) => t.open))
+  const closed = mine
+    .filter((t) => !t.open)
+    .sort((a, b) => lastActivity(b) - lastActivity(a))
+    .slice(0, 30)
+  const c = counts(mine)
+  const composerFocus = useAgentsUi((s) => s.composerFocus)
   const servers = (terminals ?? []).filter((t) => t.meta?.remoteControlServer && t.open && (all || t.projectId === projectId))
 
   return (
@@ -350,12 +389,15 @@ export function AgentsHome() {
           <Checkbox checked={all} onChange={setAll}>
             All projects
           </Checkbox>
+          <Button size="small" icon={SquareTerminal} onClick={() => void newShell(projectId)} title="A shell in this project, as a tab of this column">
+            New shell
+          </Button>
           <Button size="small" icon={History} onClick={() => openDialog({ kind: 'resume' })} disabled={!projectId}>
             Resume…
           </Button>
         </div>
 
-        <NewSessionForm projectId={projectId} />
+        <NewSessionForm projectId={projectId} focusToken={composerFocus} />
 
         <div className="wb-ag-section-title">
           Sessions <span className="wb-subtle">{sessions.length}</span>
@@ -376,6 +418,13 @@ export function AgentsHome() {
             <span>No open sessions{all ? '' : ' in this project'}. Start one above, or resume one from the history.</span>
           </div>
         )}
+        {closed.length > 0 && (
+          <Section title="Recently closed" count={closed.length} defaultOpen={false}>
+            {closed.map((t) => (
+              <SessionRow key={t.id} t={t} showProject={all} />
+            ))}
+          </Section>
+        )}
 
         <div className="wb-ag-home-cols">
           <div className="wb-ag-box">
@@ -392,7 +441,7 @@ export function AgentsHome() {
             <div className="wb-ag-section-title">
               <ExternalLink size={13} /> Claude Code running elsewhere on this machine
             </div>
-            <ExternalList projectId={projectId} all={all} />
+            <ExternalList projectId={projectId} all={all} enabled={visible} />
           </div>
         </div>
       </div>

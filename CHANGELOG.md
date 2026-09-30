@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0 - 2026-09-30
+
+- **Layout:** agents and terminals are a column on the left of the window, no longer tabs
+  of the centre. Its first tab has the prompt for a new session, **New shell** and the
+  project's sessions; every agent session, shell and run output is a tab next to it, and
+  **+** starts a session or a shell. Closing a tab stops what runs in it (a session stays in
+  the history). 
+- **Two windows:** the agents window (with the project switcher on top) and, beside it, the workspace window with everything else; the branch, run configurations, environments, CI and Commands moved into the workspace window's top bar. The button at the top of the agents window (Alt+F12) collapses the workspace window, so the agents have the whole width; in an app window the browser window shrinks to the agents window at the same position, and grows back when you expand it. A session's header wraps onto two rows in the narrow agents window instead of cutting its title. The session tabs follow the Agents button left to right and take as many rows as they need, under that button too, instead of scrolling out of sight in one row; and the "2 working" / "1 needs you" pill sits at the right end of the agents window's top bar.
+- **Tool windows:** the icon stripe sits right of that column. **Workspace** is its first
+  button, above Files, and a project opens on its Workspace cards. **Settings** moved to the
+  foot of the stripe. The Agents and Terminal tool windows are gone: the column replaces
+  them. Layouts saved by earlier versions are carried over (their agent and terminal tabs
+  leave the centre).
+
 ## 0.4.1 - 2026-09-30
 
 - **Add project** has a **Browse…** button: a folder picker on the Workbench computer (subfolders only, hidden ones on request) that fills the path field.

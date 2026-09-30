@@ -26,7 +26,39 @@ export function setDockApi(api: DockviewApi | null) {
 /** The phone layout is mounted: `openPanel` goes to its tabs instead of a dock. */
 export function setMobileRouter(router: MobileRouter | null) {
   mobileRouter = router
-  if (router) pending.length = 0
+  if (router) {
+    pending.length = 0
+    columnPending.length = 0
+  }
+}
+
+/**
+ * Panel kinds the agents column shows (desktop): agent sessions and terminals live in a
+ * column of their own, left of the workspace area, not in the dock.
+ */
+const COLUMN_KINDS = new Set(['terminal', 'agents.home'])
+
+export function isColumnKind(kind: string): boolean {
+  return COLUMN_KINDS.has(kind)
+}
+
+/** What the column does for `openPanel`, `closePanel`, `focusPanel` and `isPanelOpen`. */
+export interface ColumnHost {
+  /** Show the panel as a tab of the column; `focus: false` adds it without selecting it. */
+  open: (panel: { kind: string; id: string; title?: string; params: Record<string, unknown>; focus: boolean }) => void
+  /** Remove the tab (the terminal itself is not stopped). */
+  close: (id: string) => void
+  isOpen: (id: string) => boolean
+}
+
+let columnHost: ColumnHost | null = null
+/** Column panels requested before the column is mounted (startup), replayed once it is. */
+const columnPending: Parameters<ColumnHost['open']>[0][] = []
+
+/** The agents column is mounted (desktop): its panels go there. */
+export function setColumnHost(host: ColumnHost | null) {
+  columnHost = host
+  if (host) columnPending.splice(0).forEach((p) => host.open(p))
 }
 
 export function isMobileShell() {
@@ -37,9 +69,6 @@ export function getDockApi() {
   return dockApi
 }
 
-/** Panel kinds that belong to the "agents" column (left of documents by default). */
-const TERMINAL_KINDS = new Set(['terminal', 'agents.home'])
-
 export interface OpenPanelOptions {
   /** Panel kind registered by a feature (see docs/ARCHITECTURE.md#panels). */
   kind: string
@@ -48,9 +77,9 @@ export interface OpenPanelOptions {
   title?: string
   params?: Record<string, unknown>
   /**
-   * 'auto' (default): terminals go to the agents column, everything else to the
-   * documents column (created to the right of the agents on first use).
-   * 'active': the active group. 'right' | 'below': split the active group.
+   * 'auto' (default): the group used last (terminals and the agents home go to the
+   * agents column whatever this says). 'active': the active group.
+   * 'right' | 'below': split the active group.
    */
   position?: 'auto' | 'active' | 'right' | 'below'
   /** Focus the panel (default true). */
@@ -61,17 +90,10 @@ function defaultId(kind: string, params?: Record<string, unknown>) {
   return params && Object.keys(params).length ? `${kind}:${JSON.stringify(params)}` : kind
 }
 
-function groupHasTerminals(g: DockviewGroupPanel) {
-  return g.panels.some((p) => TERMINAL_KINDS.has(p.view.contentComponent))
-}
-
-let lastDocGroup: string | null = null
-let lastTermGroup: string | null = null
+let lastGroup: string | null = null
 
 export function noteActiveGroup(g: DockviewGroupPanel | undefined) {
-  if (!g) return
-  if (groupHasTerminals(g)) lastTermGroup = g.id
-  else if (g.panels.length) lastDocGroup = g.id
+  if (g?.panels.length) lastGroup = g.id
 }
 
 /**
@@ -81,13 +103,24 @@ export function noteActiveGroup(g: DockviewGroupPanel | undefined) {
 export function openPanel(o: OpenPanelOptions): string {
   const id = o.id ?? defaultId(o.kind, o.params)
   const api = dockApi
-  if (!api) {
-    if (mobileRouter) {
-      if (!mobileRouter({ kind: o.kind, id, title: o.title, params: o.params ?? {} }) && o.focus !== false) {
-        toast('info', `${o.title ?? o.kind} opens on the desktop`)
-      }
-      return id
+  if (mobileRouter) {
+    if (!mobileRouter({ kind: o.kind, id, title: o.title, params: o.params ?? {} }) && o.focus !== false) {
+      toast('info', `${o.title ?? o.kind} opens on the desktop`)
     }
+    return id
+  }
+  if (COLUMN_KINDS.has(o.kind)) {
+    const panel = { kind: o.kind, id, title: o.title, params: o.params ?? {}, focus: o.focus !== false }
+    if (columnHost) columnHost.open(panel)
+    else {
+      if (columnPending.length >= MAX_PENDING) columnPending.shift()
+      columnPending.push(panel)
+    }
+    return id
+  }
+  // A panel of the dock needs the workspace window to be seen.
+  if (o.focus !== false) useUi.getState().setWorkOpen(true)
+  if (!api) {
     if (pending.length >= MAX_PENDING) pending.shift()
     pending.push({ ...o, id })
     return id
@@ -107,29 +140,15 @@ export function openPanel(o: OpenPanelOptions): string {
   } else if (pos === 'active' || api.groups.length === 0) {
     api.addPanel(base)
   } else {
-    const isTerm = TERMINAL_KINDS.has(o.kind)
-    const byId = (gid: string | null) => (gid ? api.groups.find((g) => g.id === gid) : undefined)
-    if (isTerm) {
-      const g = byId(lastTermGroup) ?? api.groups.find(groupHasTerminals) ?? api.groups[0]
-      api.addPanel({ ...base, position: { referenceGroup: g } })
-      lastTermGroup = g.id
-    } else {
-      const g =
-        byId(lastDocGroup) ?? api.groups.find((x) => !groupHasTerminals(x) && x.panels.length > 0) ?? api.groups.find((x) => x.panels.length === 0)
-      if (g) {
-        api.addPanel({ ...base, position: { referenceGroup: g } })
-        lastDocGroup = g.id
-      } else {
-        const termGroup = api.groups.find(groupHasTerminals) ?? api.groups[0]
-        const panel = api.addPanel({ ...base, position: { referenceGroup: termGroup, direction: 'right' } })
-        lastDocGroup = panel.group.id
-      }
-    }
+    const g = api.groups.find((x) => x.id === lastGroup) ?? api.activeGroup ?? api.groups[0]
+    api.addPanel({ ...base, position: { referenceGroup: g } })
+    lastGroup = g.id
   }
   return id
 }
 
 export function closePanel(id: string) {
+  columnHost?.close(id)
   const p = dockApi?.getPanel(id)
   if (p) dockApi!.removePanel(p)
 }
@@ -141,7 +160,7 @@ export function focusPanel(id: string): boolean {
 }
 
 export function isPanelOpen(id: string): boolean {
-  return !!dockApi?.getPanel(id)
+  return !!dockApi?.getPanel(id) || !!columnHost?.isOpen(id)
 }
 
 // ---------------------------------------------------------------- tool windows

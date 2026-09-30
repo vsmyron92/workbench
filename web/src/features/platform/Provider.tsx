@@ -84,7 +84,13 @@ function PushBridge() {
     void registerWorker()
     const stop = listenToWorker(projects.current)
     const { tab, open } = takeLaunch()
-    if (tab) window.setTimeout(() => getDockApi() && showToolWindow(tab === 'agents' ? 'agents' : 'files'), 300)
+    if (tab) {
+      window.setTimeout(() => {
+        if (!getDockApi()) return
+        if (tab === 'agents') openPanel({ kind: 'agents.home', id: 'agents.home', title: 'Agents' })
+        else showToolWindow('files')
+      }, 300)
+    }
     if (open) openTarget(open, projects.current)
     return stop
   }, [])

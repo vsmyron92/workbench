@@ -126,9 +126,18 @@ export interface FeatureModule {
   /** Center-area panel kinds this feature renders, keyed by kind (see docs/ARCHITECTURE.md#panels). */
   panels?: Record<string, PanelDef>
   toolWindows?: ToolWindowDef[]
+  /**
+   * Desktop: the column left of the workspace area (the agents slice's sessions and
+   * terminals). It stays mounted while collapsed. One feature provides it.
+   */
+  column?: ComponentType<{ projectId: string | null }>
+  /** Desktop: the panel a project's dock opens while it has no tabs of its own (the Workspace cards). */
+  startPanel?: { kind: string; id: string; title: string }
   commands?: (ctx: CommandContext) => Command[]
-  /** Widgets in the top bar (right of the project switcher), in order. */
+  /** Widgets in the workspace window's top bar, in order. */
   topbar?: ComponentType<{ projectId: string | null }>[]
+  /** Desktop: widgets in the agents window's top bar, at its right end before the collapse button (the workspace window's without a column). */
+  columnbar?: ComponentType<{ projectId: string | null }>[]
   /** Widgets in the status bar. */
   statusbar?: ComponentType<{ projectId: string | null }>[]
   mobileTabs?: MobileTabDef[]

@@ -1,6 +1,5 @@
 // Invisible providers: keep the ['terminals'] cache fresh from terminal.* events, turn
-// agent.attention into notifications, open the agents home on first run, and host the
-// feature's dialogs.
+// agent.attention into notifications, and host the feature's dialogs.
 
 import { useEffect, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -8,7 +7,7 @@ import { Radio } from 'lucide-react'
 import { subscribe } from '@/api/events'
 import { qk } from '@/api/queries'
 import type { AgentState, PendingPermission, TerminalInfo } from '@/api/types'
-import { openPanel, showToolWindow, toast, toastError } from '@/shell/actions'
+import { toast, toastError } from '@/shell/actions'
 import { useUi } from '@/state/store'
 import { Button, Field, Input, Modal, Select } from '@/ui'
 import { openTerminal, terminalsApi } from './api'
@@ -116,32 +115,16 @@ export function AttentionNotifier({ children }: { children?: ReactNode }) {
   return <>{children}</>
 }
 
-/** First visit (no saved layout): land on the agents home. */
-export function FirstRunHome({ children }: { children?: ReactNode }) {
-  useEffect(() => {
-    let saved: string | null = null
-    try {
-      saved = localStorage.getItem('wb.layout.v1')
-    } catch {
-      /* storage blocked */
-    }
-    if (!saved) openPanel({ kind: 'agents.home', id: 'agents.home', title: 'Agents' })
-  }, [])
-  return <>{children}</>
-}
-
 function RemoteControlDialog({ projectId, onClose }: { projectId: string; onClose: () => void }) {
   const [spawn, setSpawn] = useState('same-dir')
   const [name, setName] = useState('')
   const [mode, setMode] = useState('')
   const [busy, setBusy] = useState(false)
-  const setBottomTab = useAgentsUi((s) => s.setBottomTab)
   const start = async () => {
     setBusy(true)
     try {
       const t = await terminalsApi.remoteControl({ projectId, spawn, name: name.trim() || undefined, permissionMode: mode || undefined })
-      setBottomTab(projectId, t.id)
-      showToolWindow('terminal')
+      openTerminal(t)
       toast('success', 'Remote Control server started', { detail: 'Its claude.ai link appears on the Agents home once it is up.' })
       onClose()
     } catch (e) {

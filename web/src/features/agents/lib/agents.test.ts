@@ -5,6 +5,7 @@ import {
   agentMeta,
   canKill,
   colorCss,
+  columnTabs,
   counts,
   formatCost,
   lingering,
@@ -15,6 +16,7 @@ import {
   restartMode,
   sortSessions,
   stateLabel,
+  tabAfterClose,
   tone,
   upsertTerminal,
 } from './sessions'
@@ -137,6 +139,40 @@ describe('session state', () => {
     expect(colorCss('nope')).toBeUndefined()
     expect(quotePath('/tmp/a.png')).toBe('/tmp/a.png')
     expect(quotePath("/tmp/it's here")).toBe(`'/tmp/it'\\''s here'`)
+  })
+})
+
+describe('agents column tabs', () => {
+  const ids = (l: TerminalInfo[]) => l.map((t) => t.id)
+  const list = [
+    term('run', { kind: 'run', projectId: 'shop', order: 3, createdAt: 30 }, null),
+    term('a2', { projectId: 'shop', order: 2, createdAt: 20 }),
+    term('sh', { kind: 'shell', projectId: 'shop', order: 1, createdAt: 10 }, null),
+    term('pin', { projectId: 'shop', order: 9, createdAt: 90, pinned: true }),
+    term('closed', { projectId: 'shop', open: false, order: 4 }),
+    term('other', { projectId: 'docs', order: 5 }),
+    term('free', { kind: 'shell', projectId: null, order: 6 }, null),
+  ]
+
+  it("lists the project's open terminals of every kind, pinned first, in a stable order", () => {
+    expect(ids(columnTabs(list, 'shop'))).toEqual(['pin', 'sh', 'a2', 'run'])
+    expect(ids(columnTabs(list, 'docs'))).toEqual(['other'])
+    // Without a project: the terminals that belong to none.
+    expect(ids(columnTabs(list, null))).toEqual(['free'])
+    expect(columnTabs(undefined, 'shop')).toEqual([])
+  })
+
+  it('adds the terminals opened on request after them, once each, and only while they exist', () => {
+    // A closed session's saved screen, another project's session, one that is gone, and one that is a tab anyway.
+    expect(ids(columnTabs(list, 'shop', ['other', 'closed', 'gone', 'a2', 'other']))).toEqual(['pin', 'sh', 'a2', 'run', 'other', 'closed'])
+  })
+
+  it('shows the neighbour of a tab that closes, the home tab after the last one', () => {
+    const tabs = columnTabs(list, 'shop')
+    expect(tabAfterClose(tabs, 'sh')).toBe('a2')
+    expect(tabAfterClose(tabs, 'run')).toBe('a2')
+    expect(tabAfterClose(columnTabs(list, 'docs'), 'other')).toBeNull()
+    expect(tabAfterClose(tabs, 'nope')).toBeNull()
   })
 })
 

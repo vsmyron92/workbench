@@ -5,6 +5,7 @@ import { installResync, startEvents } from '@/api/events'
 import { loadHealth } from '@/api/health'
 import { installProjectsSync } from '@/api/queries'
 import { Login } from '@/shell/Login'
+import { desktopHeld, subscribeDesktopHold } from '@/shell/windowFit'
 import { providers } from '@/shell/registry'
 import '@/state/store' // applies the theme preference to <html> before the first paint
 import { ErrorBoundary, ErrorBox, Loading } from '@/ui'
@@ -25,9 +26,18 @@ function useIsMobile() {
     (cb) => {
       const m = matchMedia(mobileQuery)
       m.addEventListener('change', cb)
-      return () => m.removeEventListener('change', cb)
+      const off = subscribeDesktopHold(cb)
+      return () => {
+        m.removeEventListener('change', cb)
+        off()
+      }
     },
-    () => matchMedia(mobileQuery).matches || new URLSearchParams(location.search).has('mobile'),
+    () => {
+      if (new URLSearchParams(location.search).has('mobile')) return true
+      if (!matchMedia(mobileQuery).matches) return false
+      // A desktop window narrowed by collapsing the workspace window stays the desktop layout.
+      return !(desktopHeld() && !matchMedia('(pointer: coarse)').matches)
+    },
   )
 }
 

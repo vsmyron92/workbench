@@ -6,6 +6,7 @@ import { qk } from '@/api/queries'
 import type { AgentProvider, TerminalInfo } from '@/api/types'
 import { openPanel, toastError } from '@/shell/actions'
 import { terminalPanelId } from './lib/sessions'
+import { updateCachedTerminal } from './queryAccess'
 
 /** GET /api/agents/history?projectId=&provider= */
 export interface HistoryEntry {
@@ -151,7 +152,7 @@ export function useExternalSessions(enabled = true) {
     queryKey: agentKeys.external,
     queryFn: () => api.get<ExternalSession[]>('/api/agents/external'),
     enabled,
-    refetchInterval: 15_000,
+    refetchInterval: enabled ? 15_000 : false,
     staleTime: 10_000,
   })
 }
@@ -164,7 +165,7 @@ export function useAgentDefaults(projectId: string | null) {
   })
 }
 
-/** Open a terminal in the center area (agents column). */
+/** Show a terminal as a tab of the agents column (on a phone: full screen in the Agents tab). */
 export function openTerminal(t: Pick<TerminalInfo, 'id' | 'title'>, focus = true) {
   openPanel({ kind: 'terminal', id: terminalPanelId(t.id), title: t.title, params: { terminalId: t.id }, focus })
 }
@@ -198,6 +199,7 @@ export function openAgentsHome() {
 export async function startAgent(req: NewAgentRequest): Promise<TerminalInfo | null> {
   try {
     const t = await terminalsApi.createAgent(req)
+    updateCachedTerminal(t)
     openTerminal(t)
     return t
   } catch (e) {

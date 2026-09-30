@@ -1,20 +1,24 @@
 // Palette commands of the agents feature.
 
 import { BellRing, Bot, History, LayoutGrid, Radio, SquareTerminal } from 'lucide-react'
-import { showToolWindow, toast, toastError } from '@/shell/actions'
+import { toast, toastError } from '@/shell/actions'
 import type { TerminalInfo } from '@/api/types'
 import type { Command, CommandContext } from '@/shell/types'
+import { useUi } from '@/state/store'
 import { openAgentsHome, openTerminal, terminalsApi } from './api'
 import { nextAttention } from './lib/sessions'
-import { cachedTerminals } from './queryAccess'
+import { cachedTerminals, updateCachedTerminal } from './queryAccess'
 import { useAgentsUi } from './store'
 
-/** Start a login shell in the project and show it in the Terminal tool window. */
-export async function newShell(projectId: string | null): Promise<TerminalInfo | null> {
+/**
+ * Start a login shell in the project and show it as a tab of the agents column.
+ * `container`: in the project's dev container (true) or on the host (false); omitted: the project's default.
+ */
+export async function newShell(projectId: string | null, container?: boolean): Promise<TerminalInfo | null> {
   try {
-    const t = await terminalsApi.createShell(projectId)
-    if (projectId) useAgentsUi.getState().setBottomTab(projectId, t.id)
-    showToolWindow('terminal')
+    const t = await terminalsApi.createShell(projectId, undefined, container)
+    updateCachedTerminal(t)
+    openTerminal(t)
     return t
   } catch (e) {
     toastError(e, 'Could not start a shell')
@@ -27,13 +31,16 @@ export function agentCommands(ctx: CommandContext): Command[] {
   const open = useAgentsUi.getState().openDialog
   return [
     {
-      id: 'agents.showTerminal',
-      title: 'Show Terminal',
+      id: 'agents.toggleWorkspaceWindow',
+      title: 'Collapse or expand the workspace window',
       group: 'Tool windows',
       shortcut: 'alt+f12',
-      keywords: ['shell', 'console'],
+      keywords: ['shell', 'console', 'terminal', 'sessions', 'agents', 'full width', 'hide', 'sidebar'],
       icon: SquareTerminal,
-      run: () => showToolWindow('terminal', 'bottom'),
+      run: () => {
+        const ui = useUi.getState()
+        ui.setWorkOpen(!ui.workOpen)
+      },
     },
     {
       id: 'agents.new',
