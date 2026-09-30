@@ -184,7 +184,9 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
 - Windows: sysinfo for the process list, cwd, cmdline, parent and start time; the Restart
   Manager (`RmGetList`) for "who holds this rollout file open"; `CheckRemoteDebuggerPresent`
   for `TracerPid`; `ptrace_scope` is `None`. No " (deleted)" fallback: a running exe cannot be
-  replaced on Windows.
+  replaced on Windows. The attach picker guesses a process's language from its image name
+  (`node.exe`, `javaw.exe`), else from the program its command line starts with, `\` paths
+  and unquoted `C:\Program Files\…` included (`debug/procs.rs`).
 
 **H. Shells → `os::shell`**
 
@@ -273,6 +275,11 @@ or comparisons; uppercase drive letters; compare prefixes case-insensitively in
 streams), reserved device names (`CON`, `NUL`, `COM1`…, also with an extension) and
 components ending in a dot or space. UNC roots (including `\\wsl$`) are refused with a clear
 message. Test that the canonicalize check follows junctions. `expand_tilde` accepts `~\`.
+Folders other programs record compare the same way (`os::path::same_dir`, `below_dir`):
+Claude Code's `~/.claude.json` project keys, Gemini's `projects.json` (lowercased there, as
+Gemini writes it), and a hook's `cwd` that shortens a permission prompt's path. Local
+History keys a file an agent names by its case on disk (`os::path::on_disk_case`), so a
+hook spelling it in another case adds to its one history. Linux compares as before.
 
 **LSP URIs.** Emit `file:///C:/…`; accept `/c:/` and `/C%3A/`; match the project root with a
 case-insensitive drive letter (servers often lowercase it); `lsp-src://pid/C:/…`.
@@ -326,7 +333,16 @@ gets the variable as every batch file does.
 run's argv; `quote()` follows the choice. (Not done: runs always use PowerShell, `pwsh` else
 Windows PowerShell; there is no `run_shell`.) Add `WT_SESSION` and `WT_PROFILE_ID` to
 `PARENT_TERMINAL_VARS`. (Done: `os::session::PARENT_TERMINAL_VARS`, which terminals clear
-besides their own list.)
+besides their own list.) `quote()` gives a word its value; a native program gets what
+PowerShell makes of it. Only Windows PowerShell 5.1 puts a word with a space in double
+quotes as it is, so a final `\` escapes the closing quote. Every pwsh passes it intact: it
+doubles the trailing `\`s where it writes the command line itself (`Legacy`, every pwsh
+before 7.3, and the `Windows` default for batch files) and quotes by the MSVCRT rules
+elsewhere. A doubled `\` would suit 5.1 and break every pwsh, and the quoting knows neither
+the PowerShell nor the program, so it is left as it is (`os::shell::ps_quote`, tested
+against 5.1 and pwsh in both ways). Workbench's own words never end so, and detection does
+not offer a repository name that does (`native_quoting_safe`): 5.1 runs commands wherever
+pwsh is not installed.
 
 **PowerShell's errors on a pipe.** Started with `-EncodedCommand`, not interactive and with
 stderr redirected (a service's stop command, a local version or health probe: `run_cmd`),
@@ -346,8 +362,9 @@ are unaffected: their stderr is the console.
 /dev/null` (in Windows PowerShell 5.1 `curl` is `Invoke-WebRequest`). Local runs need
 Windows forms: the venv's `Scripts\python.exe`, `os::exe::python()`, `.\bin.exe`, no `&&`
 under 5.1 (or pwsh 7 required); a local via_host probe runs `curl.exe -o NUL`;
-`debug::derive::is_python` accepts `python.exe` and `py`. Deploys and probes for an ssh
-host keep the POSIX forms.
+`debug::derive::is_python` accepts `python.exe` and `py`, and in a Go module a launch
+configuration's `.\cmd\api` is Go like `./cmd/api` (`debug::launch::language_of`). Deploys
+and probes for an ssh host keep the POSIX forms.
 
 **Process trees.** Job Objects replace process groups and the `/proc` session scan;
 `TerminalInfo.lingering` is the job's process count minus one. `KILL_ON_JOB_CLOSE` matches

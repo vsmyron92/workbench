@@ -758,13 +758,18 @@ fn host_file(file: &str, cwd: &Path, container: Option<Option<&(PathBuf, String)
 
 /// `abs` as a path in the project at `root` (which it must stay inside, also
 /// through symlinks), trying the canonical folder when the plain path is not under
-/// `root` (a session started in a symlinked checkout).
+/// `root` (a session started in a symlinked checkout). Spelled as the disk spells it
+/// (`os::path::on_disk_case`), so the store keys a file one way whatever case an agent
+/// wrote it in (Windows).
 fn rel_in_project(root: &Path, abs: &Path) -> Option<String> {
     let rel = util::paths::relative_to(root, abs).or_else(|| {
         let canon = util::os::path::canonicalize(abs.parent()?).ok()?.join(abs.file_name()?);
         util::paths::relative_to(root, &canon)
     })?;
     let checked = util::paths::resolve_in_root(root, &rel).ok()?;
+    let disk = util::os::path::on_disk_case(root, &checked);
+    // Another spelling is checked like the first.
+    let checked = if disk == checked { checked } else { util::paths::resolve_in_root(root, &util::paths::relative_to(root, &disk)?).ok()? };
     util::paths::relative_to(root, &checked).filter(|r| !r.is_empty())
 }
 

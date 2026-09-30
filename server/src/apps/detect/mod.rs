@@ -347,8 +347,10 @@ impl<'a> Ctx<'a> {
         }
         // On Windows a detected tool is often a batch file (`composer.bat`, `mvn.cmd`,
         // `.\gradlew.bat`), whose arguments cmd.exe reads again: a quoted name with `&` or
-        // `%` from a repository file would start a command of its own there.
-        if dialect() == Dialect::PowerShell && !batch_safe(&run.command) {
+        // `%` from a repository file would start a command of its own there. Under Windows
+        // PowerShell 5.1 a quoted name with a space and a final `\` would split the next
+        // quoted one into arguments.
+        if dialect() == Dialect::PowerShell && !(batch_safe(&run.command) && native_quoting_safe(&run.command)) {
             return None;
         }
         // `npm run deploy`, `release`, a `deploy` binary…: kept apart from everyday tasks
@@ -776,19 +778,16 @@ pub(crate) fn detect_as(root: &Path, d: Dialect) -> ProjectFile {
 /// `./cmd/api`), single-quoted otherwise (`dialect`'s rules). Names from repository
 /// files (Make targets, Taskfile keys, script names, directory names) must never add a
 /// command of their own (in PowerShell, `Ctx::add_run` also refuses a quoted word a batch
-/// file would misread: `batch_safe`).
+/// file would misread, `batch_safe`, or Windows PowerShell 5.1 would, `native_quoting_safe`).
 pub(crate) fn sh(s: &str) -> String {
     dialect().quote(s)
 }
 
-/// Whether the single-quoted strings of a PowerShell command line (`sh`'s quoting of names
-/// from repository files) reach a batch file as they are (`os::exe::batch_args_safe`).
-/// PowerShell passes such a string to a program without quotes when it has no space, and
-/// cmd.exe, which runs `.bat` and `.cmd` files, reads it again: `composer run-script
-/// 't&calc'` would start `calc` too.
-fn batch_safe(cmd: &str) -> bool {
+/// The single-quoted strings of a PowerShell command line (`sh`'s quoting of names from
+/// repository files), each as PowerShell reads it.
+fn quoted_strings(cmd: &str) -> Vec<String> {
     const QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
-    let (mut quoted, mut single, mut double) = (String::new(), false, false);
+    let (mut out, mut quoted, mut single, mut double) = (vec![], String::new(), false, false);
     let mut chars = cmd.chars().peekable();
     while let Some(c) = chars.next() {
         if single {
@@ -797,6 +796,7 @@ fn batch_safe(cmd: &str) -> bool {
                 quoted.push(c);
             } else {
                 single = false;
+                out.push(std::mem::take(&mut quoted));
             }
         } else if c == '`' {
             chars.next();
@@ -806,7 +806,29 @@ fn batch_safe(cmd: &str) -> bool {
             single = true;
         }
     }
-    crate::util::os::exe::batch_args_safe(&[quoted])
+    if single {
+        out.push(quoted);
+    }
+    out
+}
+
+/// Whether the single-quoted strings of a PowerShell command line reach a batch file as
+/// they are (`os::exe::batch_args_safe`). PowerShell passes such a string to a program
+/// without quotes when it has no space, and cmd.exe, which runs `.bat` and `.cmd` files,
+/// reads it again: `composer run-script 't&calc'` would start `calc` too.
+fn batch_safe(cmd: &str) -> bool {
+    crate::util::os::exe::batch_args_safe(&quoted_strings(cmd))
+}
+
+/// Whether the single-quoted strings of a PowerShell command line reach a native program
+/// as they are under Windows PowerShell 5.1, which runs commands wherever pwsh is not
+/// installed (`os::shell::ps_quote`). It puts a string with a space in double quotes and
+/// leaves a final `\` to escape the closing one, so the next string it quotes ends the
+/// quotes early: `cargo run -p 'x \' --bin 'y --z'` would hand cargo `--z`. Every pwsh
+/// passes such a string intact, and doubling that `\` is no way out: pwsh would pass both
+/// on.
+fn native_quoting_safe(cmd: &str) -> bool {
+    !quoted_strings(cmd).iter().any(|q| q.ends_with('\\') && q.contains(char::is_whitespace))
 }
 
 /// `first`, then `then` when it succeeded (`Dialect::and_then`: `&&`, which Windows

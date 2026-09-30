@@ -476,6 +476,21 @@ pub fn helper_command(exe: &Path, args: &[&str]) -> String {
 /// `s` as one PowerShell word: unchanged when plain, else a single-quoted string, in which
 /// nothing is special but the quote itself, doubled (PowerShell also ends such a string
 /// at a typographic quote, `‘ ’ ‚ ‛`).
+///
+/// Its value is `s` for every cmdlet, script and redirection. A native program gets the
+/// command line PowerShell writes for it. Only Windows PowerShell 5.1 (`powershell.exe`)
+/// puts a value with a space in double quotes as it is, so a final `\` escapes the closing
+/// quote: `'C:\my dir\' next` arrives as the one argument `C:\my dir" next`. Every pwsh
+/// (6 and later) passes it intact: where it writes the command line itself (always before
+/// 7.3; since then with `$PSNativeCommandArgumentPassing` `Legacy`, and in its `Windows`
+/// default for batch files, `cmd` and a few script hosts) it doubles the trailing `\`s,
+/// and elsewhere it quotes by the MSVCRT rules. Doubling them here would mend 5.1 and break
+/// every pwsh (`C:\my dir\\`), and neither `quote` nor its callers know which PowerShell
+/// runs a command or whether a word reaches a native program, so the value stays `s`
+/// (`windows_native_arguments_follow_the_powershell_version`). Workbench's own words do
+/// not end so; a name from a repository file may, and detection does not offer such a
+/// command (`detect::native_quoting_safe`): Windows PowerShell 5.1 runs commands wherever
+/// pwsh is not installed, and the next word it quotes would then be split into arguments.
 fn ps_quote(s: &str) -> String {
     if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:\\=+".contains(c)) {
         return s.to_string();
@@ -771,6 +786,73 @@ mod tests {
             helper_command(Path::new(r"C:\Program Files\Workbench\workbench.exe"), &["statusline"]),
             r#""C:/Program Files/Workbench/workbench.exe" statusline"#
         );
+    }
+
+    /// Not a test: `native_argv` runs this test binary from PowerShell as a native program,
+    /// and this writes the arguments it got after `--` to the file `WB_ARGV_ECHO` names.
+    #[cfg(windows)]
+    #[test]
+    fn argv_echo() {
+        let Some(out) = std::env::var_os("WB_ARGV_ECHO") else { return };
+        let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
+        let after = args.iter().position(|a| a == "--").map_or(&[][..], |i| &args[i + 1..]);
+        std::fs::write(out, serde_json::to_vec(after).unwrap()).unwrap();
+    }
+
+    /// The arguments a native program gets from the PowerShell `ps` for `words`, each
+    /// `ps_quote`d, after the statements `setup`.
+    #[cfg(windows)]
+    async fn native_argv(ps: &Path, setup: &str, file: &Path, words: &[&str]) -> Vec<String> {
+        let exe = std::env::current_exe().unwrap();
+        let quoted: Vec<String> = words.iter().map(|w| ps_quote(w)).collect();
+        let program = Dialect::PowerShell.program(&exe.display().to_string());
+        let line = format!("{setup}{program} --exact --quiet --test-threads=1 util::os::shell::tests::argv_echo -- {}", quoted.join(" "));
+        let _ = std::fs::remove_file(file);
+        let mut c = super::command(&win::argv_for(ps, &line));
+        c.env("WB_ARGV_ECHO", file);
+        let out = crate::util::proc::run_cmd(c, std::time::Duration::from_secs(90)).await.unwrap();
+        assert!(out.ok(), "{}: {out:?}", ps.display());
+        serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
+    }
+
+    /// `ps_quote` keeps a word's value, and what a native program gets of it is PowerShell's
+    /// doing: Windows PowerShell 5.1 lets the final `\` of a word with a space escape the
+    /// closing quote, every pwsh passes the word intact however it writes the command line
+    /// (`$PSNativeCommandArgumentPassing`'s default and `Legacy`), and a doubled `\` would be
+    /// right for the first and wrong for the others (see `ps_quote`).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_native_arguments_follow_the_powershell_version() {
+        let mut shells = vec![win::windows_powershell().expect("System32 powershell.exe")];
+        match crate::util::os::exe::which("pwsh") {
+            Some(pwsh) => shells.push(pwsh),
+            None => eprintln!("pwsh is not installed: only Windows PowerShell is checked"),
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("argv.json");
+        for ps in shells {
+            let probe = "\"$($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion) $PSNativeCommandArgumentPassing\"";
+            let probe = crate::util::proc::run_cmd(super::command(&win::argv_for(&ps, probe)), std::time::Duration::from_secs(90));
+            let version = probe.await.unwrap().stdout.trim().to_string();
+            // `Desktop` is Windows PowerShell 5.1, `Core` every pwsh.
+            let windows_powershell = version.starts_with("Desktop ");
+            assert!(windows_powershell || version.starts_with("Core "), "{}: {version:?}", ps.display());
+            let setups: &[&str] = if windows_powershell { &[""] } else { &["", "$PSNativeCommandArgumentPassing = 'Legacy'\n"] };
+            for setup in setups {
+                let at = format!("{} ({version}) {setup:?}", ps.display());
+                let plain = ["a b", "it's", r"C:\x y\z.txt", "$(rm x); `n", "é ✓", r"a\b", r"C:\dir\"];
+                assert_eq!(native_argv(&ps, setup, &file, &plain).await, plain, "{at}");
+                let trailing = native_argv(&ps, setup, &file, &[r"C:\my dir\", "next"]).await;
+                let doubled = native_argv(&ps, setup, &file, &[r"C:\my dir\\", "next"]).await;
+                if windows_powershell {
+                    assert_eq!(trailing, [r#"C:\my dir" next"#], "{at}");
+                    assert_eq!(doubled, [r"C:\my dir\", "next"], "{at}");
+                } else {
+                    assert_eq!(trailing, [r"C:\my dir\", "next"], "{at}");
+                    assert_eq!(doubled, [r"C:\my dir\\", "next"], "{at}");
+                }
+            }
+        }
     }
 
     /// A failing command's message, as a stop command's or a version probe's error shows it,

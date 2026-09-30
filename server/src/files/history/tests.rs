@@ -577,12 +577,23 @@ fn agent_paths_stay_inside_the_project() {
     assert_eq!(super::rel_in_project(&root, &root.join("src/../../x")), None);
     assert_eq!(super::rel_in_project(&root, &root), None);
     assert_eq!(super::rel_in_project(&root, Path::new("/etc/passwd")), None);
+    // Linux keeps the name as written: another case is another file.
+    #[cfg(unix)]
+    assert_eq!(super::rel_in_project(&root, &root.join("SRC/a.rs")).as_deref(), Some("SRC/a.rs"));
     // Windows: the root spelled in another case is the same folder.
     #[cfg(windows)]
     {
         let lower = std::path::PathBuf::from(root.display().to_string().to_ascii_lowercase());
         assert_eq!(super::rel_in_project(&root, &lower.join("src").join("a.rs")).as_deref(), Some("src/a.rs"));
         assert_eq!(super::rel_in_project(&root, Path::new(r"C:\Windows\win.ini")), None);
+        // So is a file: its key is the case on disk, one history whatever case the agent wrote.
+        std::fs::create_dir(root.join("src").join("Deep")).unwrap();
+        std::fs::write(root.join("src").join("Deep").join("Main.rs"), "fn main() {}\n").unwrap();
+        for spelled in [root.join("SRC").join("deep").join("MAIN.RS"), lower.join("src").join("deep").join("main.rs"), root.join(r"src\Deep/main.RS")] {
+            assert_eq!(super::rel_in_project(&root, &spelled).as_deref(), Some("src/Deep/Main.rs"), "{}", spelled.display());
+        }
+        // A deleted one: its folder as on disk, its name as written.
+        assert_eq!(super::rel_in_project(&root, &root.join("SRC").join("DEEP").join("Gone.rs")).as_deref(), Some("src/Deep/Gone.rs"));
     }
 }
 
