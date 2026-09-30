@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import type { Uri } from 'monaco-editor'
+import { afterEach, describe, expect, it } from 'vitest'
+import { setHealth } from '@/api/health'
 import type { FileEntry, GitStatus } from './api'
 import { diffLines, rollbackBlock, splitLines } from './lineDiff'
+import { modelFile, modelUriString, parseModelUri } from './modelAccess'
+import { absolutePath } from './openers'
 import {
   ancestors,
   basename,
@@ -8,10 +12,13 @@ import {
   extname,
   fenced,
   hljsLanguage,
+  isAbsolutePath,
   isExternalHref,
   mediaKind,
   parseGoto,
   resolveLink,
+  samePath,
+  segments,
   splitAnchor,
   tabTitle,
   viewerFor,
@@ -77,6 +84,115 @@ describe('paths', () => {
   it('fences code safely', () => {
     expect(fenced('a ``` b', 'rust')).toBe('````rust\na ``` b\n````\n')
     expect(fenced('x', '')).toBe('```\nx\n```\n')
+  })
+})
+
+// The server's OS decides what an absolute path is (`GET /api/health`); before the report
+// arrives, and on Linux, the rules Workbench always had apply.
+describe('absolute paths by the server OS', () => {
+  const onOs = (os: string | null) => setHealth(os ? { ok: true, service: 'workbench', version: '0', startedAt: 1, os } : null)
+  afterEach(() => setHealth(null))
+
+  // Monaco's `Uri.from({scheme: 'file', path}).toString()` for these paths.
+  const WINDOWS_URIS: [string, string][] = [
+    ['C:\\Users\\me\\x.rs', 'file:///~abs/C%3A%5CUsers%5Cme%5Cx.rs'],
+    ['C:/x', 'file:///~abs/C%3A/x'],
+    ['d:\\My Files\\é ü\\main.rs', 'file:///~abs/d%3A%5CMy%20Files%5C%C3%A9%20%C3%BC%5Cmain.rs'],
+  ]
+
+  it('keeps Linux model URIs and paths byte for byte', () => {
+    for (const os of [null, 'linux']) {
+      onOs(os)
+      expect(modelUriString(null, '/etc/hosts')).toBe('file:///~abs/etc/hosts')
+      expect(modelUriString(null, '/home/u/My Files/é.rs')).toBe('file:///~abs/home/u/My%20Files/%C3%A9.rs')
+      expect(modelUriString('api', 'src/main.rs')).toBe('file:///api/src/main.rs')
+      expect(parseModelUri('file:///~abs/etc/hosts')).toEqual({ projectId: null, path: '/etc/hosts' })
+      expect(parseModelUri('file:///~abs/home/u/My%20Files/%C3%A9.rs')).toEqual({ projectId: null, path: '/home/u/My Files/é.rs' })
+      expect(parseModelUri('file:///api/src/main.rs')).toEqual({ projectId: 'api', path: 'src/main.rs' })
+      // On Linux `/C:\x` is a name under `/`: the URI parses back to it.
+      for (const [path, uri] of WINDOWS_URIS) {
+        expect(modelUriString(null, path)).toBe(uri)
+        expect(parseModelUri(uri)).toEqual({ projectId: null, path: '/' + path })
+      }
+      expect(isAbsolutePath('/x')).toBe(true)
+      expect(isAbsolutePath('C:\\x')).toBe(false)
+      expect(basename('a\\b.rs')).toBe('a\\b.rs')
+      expect(dirname('C:/x')).toBe('C:')
+      expect(segments('/a\\b/c')).toEqual(['a\\b', 'c'])
+      expect(samePath('/a/B.c', '/a/b.c')).toBe(false)
+      expect(absolutePath('/home/u/p', 'src/a.rs')).toBe('/home/u/p/src/a.rs')
+      expect(absolutePath('/home/u/p/', 'src/a.rs')).toBe('/home/u/p/src/a.rs')
+      expect(absolutePath('/home/u/we\\ird', 'a.rs')).toBe('/home/u/we\\ird/a.rs')
+      expect(absolutePath('/', 'a.rs')).toBe('/a.rs')
+      expect(absolutePath('/home/u/p', '')).toBe('/home/u/p')
+      expect(absolutePath('/home/u/p', '/tmp/x.md')).toBe('/tmp/x.md')
+      expect(absolutePath('/home/u/p', 'C:\\x')).toBe('/home/u/p/C:\\x')
+      expect(absolutePath(undefined, 'a.rs')).toBe('a.rs')
+      expect(resolveLink('C:\\notes\\plan.md', 'a.png')).toBe('a.png')
+    }
+  })
+
+  it('round-trips Windows drive paths through model URIs', () => {
+    onOs('windows')
+    for (const [path, uri] of WINDOWS_URIS) {
+      expect(modelUriString(null, path)).toBe(uri)
+      expect(parseModelUri(uri)).toEqual({ projectId: null, path })
+      expect(modelFile(uri)).toEqual({ projectId: null, path })
+      expect(modelFile(uri, true)).toBeNull()
+    }
+    // A Monaco `Uri` holds the decoded path.
+    expect(parseModelUri({ scheme: 'file', path: '/~abs/C:\\Users\\me\\x.rs' } as Uri)).toEqual({ projectId: null, path: 'C:\\Users\\me\\x.rs' })
+    // Project files and `/…` paths read as on Linux.
+    expect(parseModelUri('file:///api/src/main.rs')).toEqual({ projectId: 'api', path: 'src/main.rs' })
+    expect(parseModelUri('file:///~abs/etc/hosts')).toEqual({ projectId: null, path: '/etc/hosts' })
+    expect(modelUriString(null, '/etc/hosts')).toBe('file:///~abs/etc/hosts')
+    // Neither a drive-relative `C:x` nor a UNC path is a drive path.
+    expect(parseModelUri('file:///~abs/C%3Ax')).toEqual({ projectId: null, path: '/C:x' })
+    expect(parseModelUri('file:///~abs/%5C%5Cserver%5Cshare')).toEqual({ projectId: null, path: '/\\\\server\\share' })
+  })
+
+  it('reads drive paths on a Windows server', () => {
+    onOs('windows')
+    for (const p of ['C:\\x', 'c:/x', 'D:\\', '/x']) expect(isAbsolutePath(p)).toBe(true)
+    for (const p of ['C:x', 'x\\y', 'src/a.rs', '\\\\server\\share\\x', '']) expect(isAbsolutePath(p)).toBe(false)
+    expect(basename('C:\\Users\\me\\x.rs')).toBe('x.rs')
+    expect(basename('C:/Users/me\\x.rs')).toBe('x.rs')
+    expect(basename('src/a.rs')).toBe('a.rs')
+    expect(dirname('C:\\Users\\me\\x.rs')).toBe('C:\\Users\\me')
+    expect(dirname('C:\\x.rs')).toBe('C:\\')
+    expect(dirname('C:/x.rs')).toBe('C:/')
+    expect(dirname('src/a.rs')).toBe('src')
+    expect(tabTitle('C:\\p\\server\\src\\files\\mod.rs')).toBe('files/mod.rs')
+    expect(tabTitle('C:\\mod.rs')).toBe('mod.rs')
+    expect(segments('C:\\Users/me\\x.rs')).toEqual(['C:', 'Users', 'me', 'x.rs'])
+    expect(samePath('C:\\Users\\Me\\x.c', 'c:/users/me/X.C')).toBe(true)
+    expect(samePath('src/Main.c', 'src/main.c')).toBe(true)
+    expect(samePath('C:\\a\\x.c', 'C:\\b\\x.c')).toBe(false)
+    // Only ASCII letters fold, as on the server.
+    expect(samePath('C:\\É.c', 'C:\\é.c')).toBe(false)
+  })
+
+  it('builds Copy Path and drag and drop paths with the root separator on Windows', () => {
+    onOs('windows')
+    expect(absolutePath('C:\\Users\\me\\p', 'src/main.rs')).toBe('C:\\Users\\me\\p\\src\\main.rs')
+    expect(absolutePath('C:\\Users\\me\\p\\', 'a.rs')).toBe('C:\\Users\\me\\p\\a.rs')
+    expect(absolutePath('C:\\', 'a/b.rs')).toBe('C:\\a\\b.rs')
+    expect(absolutePath('C:/Users/me/p', 'src/main.rs')).toBe('C:/Users/me/p/src/main.rs')
+    expect(absolutePath('C:\\Users\\me\\p', '')).toBe('C:\\Users\\me\\p')
+    expect(absolutePath('C:\\Users\\me\\p', 'D:\\x\\y.rs')).toBe('D:\\x\\y.rs')
+    expect(absolutePath('C:\\Users\\me\\p', 'd:/x')).toBe('d:/x')
+    expect(absolutePath(undefined, 'a.rs')).toBe('a.rs')
+  })
+
+  it('resolves links in a document at a drive path', () => {
+    onOs('windows')
+    expect(resolveLink('C:\\notes\\plan.md', 'img/a%20b.png')).toBe('C:\\notes\\img\\a b.png')
+    expect(resolveLink('C:\\notes\\plan.md', '../x.md')).toBe('C:\\x.md')
+    expect(resolveLink('C:\\plan.md', '../x.md')).toBeNull()
+    expect(resolveLink('C:/notes/plan.md', './a.png')).toBe('C:/notes/a.png')
+    expect(resolveLink('docs/guide.md', '../README.md')).toBe('README.md')
+    expect(resolveLink('docs/guide.md', '/src/main.rs')).toBe('src/main.rs')
+    expect(resolveLink('/tmp/x/plan.md', 'shot.png')).toBe('/tmp/x/shot.png')
   })
 })
 

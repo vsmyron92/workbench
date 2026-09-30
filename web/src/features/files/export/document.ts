@@ -3,6 +3,8 @@
 // its own: nothing of the app's stylesheet or variables comes with it), and the
 // table of contents.
 
+import { basename, samePath, segments } from '../paths'
+
 /** Largest image embedded as a data URI, and all images together. */
 export const IMAGE_CAP = 5 * 1024 * 1024
 export const TOTAL_IMAGE_CAP = 25 * 1024 * 1024
@@ -16,10 +18,10 @@ const IMAGE_NAME = /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i
  * Whether the export may fetch `path` (project-relative or absolute, as resolved
  * from the document) to embed it. Repository Markdown is untrusted: `![](../.git/config)`
  * must not copy a remote URL's token into the file, so only image files outside
- * `.git` qualify.
+ * `.git` qualify (on a Windows server also `C:\p\.git\…` and `.GIT`, the same folder there).
  */
 export function embeddableImagePath(path: string): boolean {
-  return IMAGE_NAME.test(path) && !path.split('/').includes('.git')
+  return IMAGE_NAME.test(path) && !segments(path).some((s) => samePath(s, '.git'))
 }
 
 /** Why an image was not embedded (the text of the export's warning). */
@@ -65,15 +67,14 @@ export function escapeHtml(s: string): string {
 
 /** `docs/README.md` → `README.html`. */
 export function exportFileName(path: string): string {
-  const name = path.slice(path.lastIndexOf('/') + 1) || 'document'
+  const name = basename(path) || 'document'
   const dot = name.lastIndexOf('.')
   return `${dot > 0 ? name.slice(0, dot) : name}.html`
 }
 
 /** The export's path next to the source file. */
 export function exportPath(path: string): string {
-  const i = path.lastIndexOf('/')
-  return (i >= 0 ? path.slice(0, i + 1) : '') + exportFileName(path)
+  return path.slice(0, path.length - basename(path).length) + exportFileName(path)
 }
 
 /** Index of the `)` closing the `(` at `open`, or -1. */

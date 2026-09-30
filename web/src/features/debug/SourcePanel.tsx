@@ -10,6 +10,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { OnMount } from '@monaco-editor/react'
 import { useQuery } from '@tanstack/react-query'
 import { FileCode, Lock } from 'lucide-react'
+import { basename } from '@/features/files/modelAccess'
 import type { PanelProps } from '@/shell/types'
 import { useUi } from '@/state/store'
 import { cssVar } from '@/theme/palette'
@@ -64,7 +65,7 @@ function SourceView({ p }: { p: SourceParams }) {
 
   useEffect(() => {
     let alive = true
-    void import('@/lib/monacoSetup').then((m) => alive && setLang(m.languageFor(p.path ?? p.name ?? '')))
+    void import('@/lib/monacoSetup').then((m) => alive && setLang(m.languageFor(basename(p.path ?? p.name ?? ''))))
     return () => {
       alive = false
     }

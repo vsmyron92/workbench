@@ -1,5 +1,6 @@
 // Pure helpers of the debug feature (unit-tested in logic.test.ts).
 
+import { basename, isAbsolutePath, samePath } from '@/features/files/modelAccess'
 import type { BpStatus, CompletionItem, DebugSession, Frame, LaunchConfig, LineBreakpoint, OutputLine, Variable } from './types'
 
 export function isLive(s: Pick<DebugSession, 'state'> | undefined | null): boolean {
@@ -164,7 +165,7 @@ export function sourceLines(
     const src = f?.source
     if (!src) return false
     if (view.sourceReference) return src.sourceReference === view.sourceReference
-    return !src.inProject && !src.sourceReference && src.path === view.path
+    return !src.inProject && !src.sourceReference && (src.path && view.path ? samePath(src.path, view.path) : src.path === view.path)
   }
   const out: { line: number; kind: 'exec' | 'frame' }[] = []
   const top = stack.frames[0]
@@ -195,8 +196,34 @@ export function revealFrame(frames: Frame[], reason?: string): number {
 export function frameLocation(f: Frame): string {
   const src = f.source
   if (!src?.path) return src?.name ?? ''
-  const name = src.path.split('/').pop() ?? src.path
-  return `${name}:${f.line}`
+  return `${basename(src.path)}:${f.line}`
+}
+
+/** The `debug.source` panel that shows a frame outside the project (null: no source):
+ *  source the debugger holds, or a file at an absolute path (`/…`, or `C:\…` on a
+ *  Windows server). */
+export function sourcePanel(s: Pick<DebugSession, 'id' | 'projectId'>, f: Frame): { kind: string; id: string; title: string; params: Record<string, unknown> } | null {
+  const src = f.source
+  // DAP: a `sourceReference` means "ask the debugger", even with a path (debugpy
+  // names exec'd code `<generated>`).
+  if (src?.sourceReference) {
+    const name = src.name ?? src.path ?? `source ${src.sourceReference}`
+    return {
+      kind: 'debug.source',
+      id: `debug.source:${s.projectId}:${s.id}:ref${src.sourceReference}`,
+      title: basename(name),
+      params: { projectId: s.projectId, sessionId: s.id, sourceReference: src.sourceReference, name },
+    }
+  }
+  if (src?.path && isAbsolutePath(src.path) && !src.inProject) {
+    return {
+      kind: 'debug.source',
+      id: `debug.source:${s.projectId}:${src.path}`,
+      title: basename(src.path),
+      params: { projectId: s.projectId, sessionId: s.id, path: src.path, name: src.name ?? undefined },
+    }
+  }
+  return null
 }
 
 /** A console's entries as lines: an entry without a final newline is ended when the
