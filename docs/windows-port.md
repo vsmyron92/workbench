@@ -388,8 +388,8 @@ but never opens its sign-in window, so an https host it knows nothing about fail
 An ssh key with a passphrase must be loaded in an agent the ssh git uses
 can reach, and a new host must be accepted once in a terminal (`known_hosts`): remote
 operations cannot prompt and fail instead, and their message says so (the OpenSSH
-Authentication Agent service is the agent there; a changed host key is flagged, not
-offered for acceptance). A repository an administrator created, or one
+Authentication Agent service is the agent there; a changed or revoked host key is flagged,
+not offered for acceptance). A repository an administrator created, or one
 on a drive without owners (FAT, exFAT, some network shares), stops with git's
 `safe.directory` message, which names the command that trusts it (`403 unsafe_repository`,
 Windows only: `os::fs::FOREIGN_OWNERS`; on Linux such a folder still reads as "not a git

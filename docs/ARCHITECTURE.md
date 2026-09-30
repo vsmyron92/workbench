@@ -1841,17 +1841,23 @@ separators (`rebase_i::sh_path`; Git for Windows runs them with its sh). On Wind
 (it names the owners and the command that trusts the folder) instead of `not_a_repo`.
 The check is core's `util::git::refuses`, which the other readers of a checkout share:
 `util::git`'s `try_` queries say why git gave no answer (`Failure`: not installed, timed
-out, refused, git's message; `From<Failure> for ApiError` answers as this slice does), so a
-project summary warns about a refused folder with the command that trusts it
+out, refused, git's message, or a working folder that is gone, which is not a missing git
+although the spawn fails with `NotFound`). `From<Failure> for ApiError` answers a missing
+git, a timeout and a refusal as this slice does (`not_configured`, `timeout`,
+`403 unsafe_repository`); every other failure, a folder that is no repository among them
+(this slice's `404 not_a_repo`), is `422 git_error` with git's message. So a project summary
+warns about a refused folder with the command that trusts it
 (`util::git::refused_warning`), a deploy reports git's failure instead of "no commits", and
-the forge pollers and CI summaries (`…_logged`) log a refusal, a missing git or a timeout
-once per folder instead of dropping the branch. The UI keeps the message's line breaks
-(`ErrorBox`), copies git's `git config --global --add safe.directory …` line
-(`trustCommand`), and the status bar shows "Untrusted repository" where the branch would be.
+the forge pollers and CI summaries (`…_logged`) still leave the branch out but log a
+refusal, a missing git or a timeout once per folder instead of dropping it silently. The UI
+keeps the message's line breaks (`ErrorBox`), copies git's `git config --global --add
+safe.directory …` line (`trustCommand`, through `@/ui`'s `copyText`, which falls back to
+`execCommand` on plain HTTP), and the status bar shows "Untrusted repository" where the
+branch would be.
 Remote ops that fail because ssh would have had to ask (an unknown host key, a key with a
 passphrase: `Permission denied (publickey)`) get a hint for doing that once in a terminal or
 loading the key into an agent; a changed host key gets a warning to check its fingerprint
-first (`remote::explain_failure`).
+first, and a revoked one a warning not to trust it again (`remote::explain_failure`).
 
 **UI.** Commit tool window: tabs **Changes / Stash / Shelf**; Changes groups by the
 staging area (as before) or by **changelists** (toolbar ▸ Group by), with a checkbox per

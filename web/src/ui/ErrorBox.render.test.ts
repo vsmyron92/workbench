@@ -1,13 +1,15 @@
 // ErrorBox, rendered on the server: setup help for `not_configured`, the same box for a
 // feature the server's OS leaves out (`unsupported_platform`), without Settings or Retry,
-// and git's multi-line refusal of a repository with a button for its trust command.
+// and git's multi-line refusal of a repository with a button for its trust command, which
+// copies it on plain HTTP too.
 
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/api/client'
 import { setHealth } from '@/api/health'
-import { ErrorBox, errorKind, trustCommand } from './index'
+import { useToasts } from '@/shell/actions'
+import { copyTrustCommand, ErrorBox, errorKind, trustCommand } from './index'
 
 const retry = () => {}
 const render = (error: unknown) => renderToStaticMarkup(createElement(ErrorBox, { error, onRetry: retry }))
@@ -73,5 +75,53 @@ describe('ErrorBox', () => {
     const quoted = "fatal: detected dubious ownership in repository at '/srv/my repo'\nTo add an exception for this directory, call:\n\n\tgit config --global --add safe.directory '/srv/my repo'\n"
     expect(trustCommand(quoted)).toBe("git config --global --add safe.directory '/srv/my repo'")
     expect(trustCommand('fatal: not a git repository')).toBeNull()
+  })
+})
+
+describe('Copy command', () => {
+  const command = 'git config --global --add safe.directory C:/work/shop'
+  const toasts = () => useToasts.getState().toasts.map((t) => `${t.level}: ${t.message}`)
+  /** A page without a DOM: `document` records what `execCommand('copy')` would copy. */
+  function page({ clipboard, secure, allowCopy = true }: { clipboard?: { writeText(t: string): Promise<void> }; secure: boolean; allowCopy?: boolean }) {
+    const copied: string[] = []
+    const field = { value: '', style: {}, select() {}, remove() {} }
+    vi.stubGlobal('navigator', clipboard ? { clipboard } : {})
+    vi.stubGlobal('window', { isSecureContext: secure, setTimeout: () => 0 })
+    vi.stubGlobal('document', {
+      createElement: () => field,
+      body: { appendChild() {} },
+      execCommand: (c: string) => {
+        if (c === 'copy' && allowCopy) copied.push(field.value)
+        return allowCopy
+      },
+    })
+    return copied
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    useToasts.setState({ toasts: [] })
+  })
+
+  it('copies on plain HTTP, where the browser has no Clipboard API', async () => {
+    const copied = page({ secure: false })
+    await copyTrustCommand(command)
+    expect(copied).toEqual([command])
+    expect(toasts()).toEqual(['success: Command copied: run it in a terminal to trust this folder'])
+  })
+
+  it('uses the Clipboard API where there is one', async () => {
+    const written: string[] = []
+    const copied = page({ secure: true, clipboard: { writeText: async (t) => void written.push(t) } })
+    await copyTrustCommand(command)
+    expect(written).toEqual([command])
+    expect(copied).toEqual([])
+    expect(toasts()).toEqual(['success: Command copied: run it in a terminal to trust this folder'])
+  })
+
+  it('says so when the browser allows no copying at all', async () => {
+    page({ secure: true, allowCopy: false, clipboard: { writeText: () => Promise.reject(new Error('denied')) } })
+    await copyTrustCommand(command)
+    expect(toasts()).toEqual(['error: The browser did not allow copying: select the command in the message instead'])
   })
 })

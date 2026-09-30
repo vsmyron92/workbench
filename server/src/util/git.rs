@@ -34,8 +34,10 @@ pub enum Failure {
 }
 
 impl From<Failure> for ApiError {
-    /// As the git slice answers the same failures (`git::cmd`): `not_configured`, `timeout`,
-    /// `403 unsafe_repository`, else `422 git_error` with git's message.
+    /// A missing git, a timeout and a refusal as the git slice answers them (`git::cmd`):
+    /// `not_configured`, `timeout`, `403 unsafe_repository`. Every other failure is
+    /// `422 git_error` with git's message, a folder that is no repository too (where the
+    /// slice answers `404 not_a_repo`).
     fn from(f: Failure) -> Self {
         match f {
             Failure::NotInstalled => ApiError::not_configured(format!(
@@ -112,18 +114,19 @@ fn command(root: &Path, args: &[&str]) -> Command {
 }
 
 async fn query(cmd: Command) -> Result<Option<String>, Failure> {
-    answer(proc::try_run_cmd(cmd, TIMEOUT).await)
+    let dir = cmd.as_std().get_current_dir().map(Path::to_path_buf);
+    answer(proc::try_run_cmd(cmd, TIMEOUT).await, dir.as_deref())
 }
 
-/// What a query's run says: stdout trimmed, `None` when empty or when git answered "no"
-/// (exit 1 and nothing on stderr: `--quiet` for a detached HEAD, a rev that names nothing),
-/// else why git gave no answer.
-fn answer(run: Result<proc::Output, proc::RunError>) -> Result<Option<String>, Failure> {
+/// What a query's run in `dir` says: stdout trimmed, `None` when empty or when git answered
+/// "no" (exit 1 and nothing on stderr: `--quiet` for a detached HEAD, a rev that names
+/// nothing), else why git gave no answer.
+fn answer(run: Result<proc::Output, proc::RunError>, dir: Option<&Path>) -> Result<Option<String>, Failure> {
     let out = match run {
         Ok(out) => out,
-        Err(proc::RunError::Spawn(e)) if e.kind() == std::io::ErrorKind::NotFound => return Err(Failure::NotInstalled),
+        Err(proc::RunError::Spawn(e)) => return Err(spawn_failure(&e, dir)),
         Err(proc::RunError::TimedOut) => return Err(Failure::TimedOut),
-        Err(proc::RunError::Spawn(e) | proc::RunError::Wait(e)) => return Err(Failure::Failed(format!("cannot run git: {e}"))),
+        Err(proc::RunError::Wait(e)) => return Err(Failure::Failed(format!("cannot run git: {e}"))),
     };
     if out.ok() {
         let s = out.stdout.trim();
@@ -144,6 +147,17 @@ fn answer(run: Result<proc::Output, proc::RunError>) -> Result<Option<String>, F
         Some(c) => format!("git exited with code {c}"),
         None => "git was killed".into(),
     }))
+}
+
+/// Why git did not start in `dir`. A working folder that is gone (a project folder moved or
+/// deleted while loaded) fails the spawn too, with `NotFound` on Linux: that is not a
+/// missing git.
+fn spawn_failure(e: &std::io::Error, dir: Option<&Path>) -> Failure {
+    match dir {
+        Some(d) if !d.is_dir() => Failure::Failed(format!("the folder {} does not exist", crate::config::contract_tilde(d))),
+        _ if e.kind() == std::io::ErrorKind::NotFound => Failure::NotInstalled,
+        _ => Failure::Failed(format!("cannot run git: {e}")),
+    }
 }
 
 /// Whether git's `stderr` is git refusing a repository that another user owns (the
@@ -263,6 +277,8 @@ mod tests {
 
     #[test]
     fn tells_why_git_gave_no_answer() {
+        let here = std::env::temp_dir();
+        let answer = |run| answer(run, Some(&here));
         assert_eq!(answer(out(0, "main\n", "")), Ok(Some("main".into())));
         assert_eq!(answer(out(0, "\n", "")), Ok(None));
         // `--quiet`: a detached HEAD, a HEAD without commits.
@@ -271,11 +287,17 @@ mod tests {
         assert_eq!(answer(out(128, "", not_repo)), Err(Failure::Failed(not_repo.trim().into())));
         assert_eq!(answer(out(1, "", "error: short object ID 4b8e is ambiguous")), Err(Failure::Failed("error: short object ID 4b8e is ambiguous".into())));
         assert_eq!(answer(out(129, "", "")), Err(Failure::Failed("git exited with code 129".into())));
-        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
-        assert_eq!(answer(Err(proc::RunError::Spawn(missing))), Err(Failure::NotInstalled));
+        let missing = || std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(answer(Err(proc::RunError::Spawn(missing()))), Err(Failure::NotInstalled));
         assert_eq!(answer(Err(proc::RunError::TimedOut)), Err(Failure::TimedOut));
         let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         assert!(matches!(answer(Err(proc::RunError::Spawn(denied))), Err(Failure::Failed(m)) if m.starts_with("cannot run git")));
+        // A working folder that is gone fails the spawn with NotFound too: not a missing git.
+        let gone = here.join("workbench-test-no-such-folder");
+        assert_eq!(
+            super::answer(Err(proc::RunError::Spawn(missing())), Some(&gone)),
+            Err(Failure::Failed(format!("the folder {} does not exist", crate::config::contract_tilde(&gone))))
+        );
     }
 
     /// The same check as the git slice's `unsafe_repository` answers: on Windows only
@@ -286,7 +308,7 @@ mod tests {
         assert!(is_refusal("fatal: unsafe repository ('/srv/x' is owned by someone else)"));
         assert!(!is_refusal("fatal: not a git repository (or any of the parent directories): .git"));
         assert_eq!(refuses(REFUSAL), crate::util::os::fs::FOREIGN_OWNERS);
-        let got = answer(out(128, "", &format!("{REFUSAL}\n")));
+        let got = answer(out(128, "", &format!("{REFUSAL}\n")), None);
         if crate::util::os::fs::FOREIGN_OWNERS {
             assert_eq!(got, Err(Failure::Refused(REFUSAL.into())));
             let e = ApiError::from(got.unwrap_err());
@@ -391,6 +413,17 @@ mod tests {
         let mut missing = Command::new("workbench-test-no-such-program");
         missing.current_dir(&plain);
         assert_eq!(query(missing).await, Err(Failure::NotInstalled));
+
+        // A project folder deleted or moved while loaded: said so, and not logged as a
+        // missing git (the spawn fails, with NotFound on Linux).
+        let gone = d.path().join("gone");
+        match try_head_sha(&gone).await {
+            Err(f @ Failure::Failed(_)) => {
+                assert_eq!(f, Failure::Failed(format!("the folder {} does not exist", crate::config::contract_tilde(&gone))));
+                assert!(!log_once(&gone, &f));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// Git's own switch for testing its ownership check, and an empty global config, so no

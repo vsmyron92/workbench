@@ -541,6 +541,12 @@ fn explain_failure(msg: &str) -> String {
         format!(
             "{msg}\n\nThe server's ssh host key is not the one you accepted before. That happens when the server was reinstalled or its key was rotated, and also when someone intercepts the connection. Check the new fingerprint with the server's administrators or against the fingerprints they publish before you replace the old key in known_hosts (`ssh-keygen -R <host>` removes it)."
         )
+    } else if msg.contains("REVOKED HOST KEY") || (msg.contains("host key for") && msg.contains("revoked")) {
+        // Never "accept it" either: a revoked key may be a stolen one. (ssh's revoked-key
+        // lines do not say "has changed", and end in "Host key verification failed" too.)
+        format!(
+            "{msg}\n\nThe server's ssh host key is marked as revoked (known_hosts `@revoked`, or ssh's RevokedHostKeys). A revoked key can be a stolen key used to impersonate the server: do not trust it again, ask the server's administrators which key the server uses now."
+        )
     } else if msg.contains("Host key verification failed") {
         format!(
             "{msg}\n\nssh does not know this server's host key yet, and Workbench cannot answer ssh's question. Connect once with ssh in a terminal (for example `ssh -T git@<host>`), check that the fingerprint it shows is one the server publishes, and accept it."
@@ -640,6 +646,14 @@ mod tests {
         assert!(!changed.contains("accept it"), "{changed}");
         let banner = explain_failure("@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\nHost key verification failed.");
         assert!(banner.contains("not the one you accepted before"), "{banner}");
+        // Nor is a revoked one (OpenSSH's words for a key known_hosts marks `@revoked`).
+        let revoked = explain_failure(
+            "@       WARNING: REVOKED HOST KEY DETECTED!               @\nThe ED25519 host key for gitlab.com is marked as revoked.\nThis could mean that a stolen key is being used to\nimpersonate this host.\nED25519 host key for gitlab.com was revoked and you have requested strict checking.\nHost key verification failed.",
+        );
+        assert!(revoked.contains("marked as revoked (known_hosts") && revoked.contains("stolen key"), "{revoked}");
+        assert!(!revoked.contains("accept it") && !revoked.contains("Connect once"), "{revoked}");
+        let revoked = explain_failure("ED25519 host key for gitlab.com was revoked and you have requested strict checking.\nHost key verification failed.");
+        assert!(revoked.contains("do not trust it again"), "{revoked}");
 
         for denied in ["git@gitlab.com: Permission denied (publickey).", "git@git.corp: Permission denied (publickey,password)."] {
             let got = explain_failure(&format!("{denied}\nCould not read from remote repository."));

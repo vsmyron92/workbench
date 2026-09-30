@@ -28,6 +28,7 @@ import { ApiError } from '@/api/client'
 import { osLabel, useHealth } from '@/api/health'
 import { isMobileShell, openSettings, toast } from '@/shell/actions'
 import type { AnsiLog as AnsiLogT } from './AnsiLog'
+import { copyText } from './clipboard'
 import type { Markdown as MarkdownT } from './Markdown'
 import './ui.css'
 
@@ -228,17 +229,7 @@ export function ErrorBox({ error, onRetry, settingsSection = 'integrations' }: {
       {(retry || settingsLink || trust) && (
         <div className="wb-row" style={{ marginTop: 8, gap: 6 }}>
           {trust && (
-            <Button
-              size="small"
-              icon={Copy}
-              title={trust}
-              onClick={() =>
-                void navigator.clipboard?.writeText(trust).then(
-                  () => toast('success', 'Command copied: run it in a terminal to trust this folder'),
-                  () => toast('error', 'The clipboard is not available here'),
-                )
-              }
-            >
+            <Button size="small" icon={Copy} title={trust} onClick={() => void copyTrustCommand(trust)}>
               Copy command
             </Button>
           )}
@@ -268,6 +259,12 @@ export function trustCommand(message: string): string | null {
     if (l.startsWith('git config --global --add safe.directory ')) return l
   }
   return null
+}
+
+/** Copy git's trust command (see `trustCommand`) and say whether that worked. */
+export async function copyTrustCommand(command: string): Promise<void> {
+  if (await copyText(command)) toast('success', 'Command copied: run it in a terminal to trust this folder')
+  else toast('error', 'The browser did not allow copying: select the command in the message instead')
 }
 
 /** How `ErrorBox` shows an error: setup help, a feature this OS leaves out, or a failure. */
@@ -677,6 +674,7 @@ export function formatBytes(n: number | null | undefined): string {
 }
 
 export { BrandIcon, GitLabIcon, ConfluenceIcon, JiraIcon } from './brand'
+export { copyText } from './clipboard'
 export { MonacoEditor, MonacoDiffEditor } from './monaco'
 
 // xterm (~650 KB) and the markdown/highlight stack load the first time a log or a

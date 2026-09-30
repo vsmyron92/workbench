@@ -33,7 +33,7 @@ import { getDockApi, toast } from '@/shell/actions'
 import type { PanelProps } from '@/shell/types'
 import { useUi } from '@/state/store'
 import { cssVar } from '@/theme/palette'
-import { Button, EmptyState, ErrorBox, IconButton, Loading, MonacoDiffEditor, MonacoEditor, showMenu, showMenuAt, Splitter, timeAgo, type MenuEntry } from '@/ui'
+import { Button, copyText, EmptyState, ErrorBox, IconButton, Loading, MonacoDiffEditor, MonacoEditor, showMenu, showMenuAt, Splitter, timeAgo, type MenuEntry } from '@/ui'
 import { filesApi, type FileContent, type GitBlame } from './api'
 import {
   acquireBuffer,
@@ -75,7 +75,6 @@ import {
 } from './openers'
 import { basename, bufferKey, editorPanelId, hljsLanguage, isMarkdown, isSvg, mediaKind, tabTitle, viewerFor } from './paths'
 import { useActiveEditor } from './store'
-import { copyText } from './text'
 import { vcsKindOf, VCS_LABEL } from './vcs'
 import { BinaryNotice, ImageViewer, MediaViewer, PdfViewer, SensitiveNotice } from './viewers'
 
