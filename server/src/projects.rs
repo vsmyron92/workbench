@@ -56,6 +56,9 @@ pub struct Project {
     /// Secret names that repository config (detection, `.workbench.toml`) refers to:
     /// `AppState::secret` resolves them only from the machine overlay.
     pub repo_secret_names: BTreeSet<String>,
+    /// Why the machine overlay was left out (it does not parse, or cannot be read), when
+    /// it was: `AppState::secret` names it for a secret the overlay would have held.
+    pub overlay_error: Option<String>,
 }
 
 impl Project {
@@ -306,6 +309,7 @@ fn scratch_project(state: &AppState) -> anyhow::Result<Project> {
         remote: None,
         warnings: vec![],
         repo_secret_names: BTreeSet::new(),
+        overlay_error: None,
     })
 }
 
@@ -313,7 +317,7 @@ async fn load_project(state: &AppState, id: &str, root: &Path) -> Project {
     let global_site = state.config.read().atlassian.as_ref().map(|a| a.site.clone());
     let detected = crate::apps::detect(root);
     let layered = project::load_layers(detected, root, &state.paths.project_overlay(id), global_site.as_deref());
-    let (mut config, warnings, repo_secret_names) = (layered.config, layered.warnings, layered.repo_secret_names);
+    let project::Layered { mut config, warnings, repo_secret_names, overlay_error } = layered;
     let name = if config.project.name.is_empty() {
         root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| id.to_string())
     } else {
@@ -339,7 +343,7 @@ async fn load_project(state: &AppState, id: &str, root: &Path) -> Project {
         };
         adopt_configured_forge(&mut config, r, gitlab_host.as_deref(), github_host.as_deref());
     }
-    Project { id: id.to_string(), name, root: root.to_path_buf(), config, remote, warnings, repo_secret_names }
+    Project { id: id.to_string(), name, root: root.to_path_buf(), config, remote, warnings, repo_secret_names, overlay_error }
 }
 
 /// `git.corp.example` from a configured forge host (`git.corp.example`,

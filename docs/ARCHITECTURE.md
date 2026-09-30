@@ -114,6 +114,7 @@ packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows rele
   - Values are resolved in the backend (`AppState::secret(project, name)`).
   - They never go to the browser, never go into argv, and are never logged.
   - Text streamed to the UI can be passed through `secrets::redact`.
+  - A machine overlay that does not parse is left out whole (a project warning). A secret missing for that reason answers with the overlay's error in one line (`Project::overlay_error`), not with advice to add it there.
 - **Environment overrides:**
   - `WORKBENCH_CONFIG_DIR` and `WORKBENCH_DATA_DIR` isolate instances. Every test or dev run that is not the owner's real instance must set both.
   - `WORKBENCH_LOG` sets the tracing filter.
@@ -182,7 +183,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 | `<slice>::mcp_tools() -> Vec<McpTool>` | each slice | platform (`/mcp` server via `mcp::all_tools`) |
 | `<slice>::{router, start}`, `terminals::shutdown`, `apps::shutdown`, `lsp::shutdown`, `debug::shutdown` | each slice | app.rs |
 | `git::{cli_askpass, cli_git_editor}`, `terminals::cli_statusline`, `platform::service::cli` | git, terminals, platform | main.rs (`askpass`, `git-editor`, `statusline`, `service`; `cli_askpass` also for `util::os::helper::askpass_prompt`) |
-| `mcp::call_api(state, method, path, body, ctx)` | core | any MCP tool that reuses a REST route |
+| `mcp::call_api(state, method, path, body, ctx)` (a route's error keeps its status and message, and its code when it is one of Workbench's own, `error::CODES`: `not_configured`, `unsupported_platform` with its `feature`…; any other is `upstream`) | core | any MCP tool that reuses a REST route |
 | `McpCtx::{project_for, may_see_project}` | core | every MCP tool that takes a project or reads another terminal |
 | `AppState::secret`, `events.emit/ui_open/ui_open_id/notify`, `projects.require/find_by_path` | core | everyone |
 | `Project::{gitlab, github}() -> Option<(host, path)>` | core | gitlab, github, forge, apps, UI (`ProjectSummary.gitlab/github`) |
@@ -201,6 +202,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 - Errors come from the `ApiError` constructors. Use `not_configured` for a missing token, site or similar, which makes the UI show setup help.
 - A feature the OS leaves out answers `ApiError::unsupported(feature, reason)`: HTTP 501, `{error: {code: "unsupported_platform", message, feature}}`. The table of such features is `util::os::support` (`Feature`, `unsupported(f)`, `require(f)`, `require_root(path)`); everything is supported on Linux. MCP tools return the same reason.
 - Use `conflict` for optimistic-concurrency failures and `upstream` for remote failures.
+- A slice's own code (`ApiError::new(status, code, …)`, such as `port_in_use`) is also listed in `error::CODES`, so an MCP tool that calls the route through `mcp::call_api` gets it too; a test checks the list against the source.
 
 ### Operating-system layer (util::os)
 

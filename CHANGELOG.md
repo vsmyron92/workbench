@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **Machine overlays:** an overlay that does not parse is left out whole, secrets
+  included. A secret missing for that reason used to come with the advice to add it under
+  `[secrets]` in that same overlay; it now comes with the overlay's parse error. The usual
+  cause is a Windows path in double quotes (`"C:\Users\…"`, where a backslash starts an
+  escape); [Make Workbench yours](docs/customization.md#keep-secrets-where-they-are) shows
+  the spellings that work.
+- **Server log:** colour escapes only on a terminal. The Windows `service.log`, the
+  systemd journal and output redirected to a file or a pipe get plain text. `NO_COLOR`
+  still turns colour off on a terminal.
+- **MCP:** a tool that reuses a REST route keeps the route's error code
+  (`not_configured`, `unsupported_platform` with its feature, …) instead of turning every
+  failure into `upstream`. The `workbench_notify` tool's description says what it does
+  everywhere: a toast in Workbench, and a desktop notification, your notify command and a
+  push to your devices where you set them up (Windows has no desktop notifications yet).
+
 ## 0.3.0 - 2026-09-29
 
 - **Windows (experimental):** the first release with a Windows build, for Windows 10 (1809

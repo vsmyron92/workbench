@@ -13,13 +13,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{Method, Request};
+use axum::http::{Method, Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
 use crate::app::AppState;
 use crate::auth::{Caller, InternalCall};
 use crate::error::ApiError;
+use crate::util::os::support::Feature;
 
 /// Who is calling a tool.
 #[derive(Debug, Clone, Default)]
@@ -132,7 +133,8 @@ pub fn all_tools() -> Vec<McpTool> {
 }
 
 /// Call a Workbench REST route in-process and return its JSON body.
-/// Non-2xx responses become `ApiError` with the route's own message.
+/// Non-2xx responses become `ApiError` with the route's own status and message, and its
+/// code when it is one of Workbench's own (`error::CODES`), else `upstream`.
 pub async fn call_api(
     state: &AppState,
     method: Method,
@@ -165,13 +167,24 @@ pub async fn call_api(
     if status.is_success() {
         Ok(value)
     } else {
-        let msg = value
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| value.to_string());
-        Err(ApiError::new(status, "upstream", msg))
+        Err(route_error(status, &value))
     }
+}
+
+/// A route's error answer as an `ApiError`: its status and message, and its code when it
+/// is one of Workbench's own (`not_configured`, `unsupported_platform` with its `feature`…),
+/// so the tool that called it can tell them apart; any other answer is `upstream`.
+fn route_error(status: StatusCode, body: &Value) -> ApiError {
+    let msg = body.pointer("/error/message").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| body.to_string());
+    let code = body.pointer("/error/code").and_then(Value::as_str).and_then(ApiError::own_code).unwrap_or("upstream");
+    let feature = match code {
+        "unsupported_platform" => {
+            let named = body.pointer("/error/feature").and_then(Value::as_str);
+            Feature::ALL.into_iter().map(Feature::key).find(|k| Some(*k) == named)
+        }
+        _ => None,
+    };
+    ApiError { feature, ..ApiError::new(status, code, msg) }
 }
 
 #[cfg(test)]
@@ -209,5 +222,39 @@ mod tests {
         assert!(master.may_see_project(Some("other")) && master.may_see_project(None));
         assert_eq!(McpCtx::default().project_for(None).unwrap_err().code, "bad_request");
         assert_eq!(McpCtx::default().project_for(Some("shop")).unwrap(), "shop");
+    }
+
+    /// A route's own code reaches the tool (setup help stays setup help), with the
+    /// `feature` of an `unsupported_platform`; anything else is `upstream`.
+    #[test]
+    fn route_errors_keep_workbench_codes() {
+        use super::route_error;
+        use axum::http::StatusCode;
+        use serde_json::json;
+
+        let body = |code: &str| json!({ "error": { "code": code, "message": "m", "feature": "devcontainer" } });
+        let e = route_error(StatusCode::NOT_IMPLEMENTED, &body("unsupported_platform"));
+        assert_eq!((e.status, e.code, e.feature, e.message.as_str()), (StatusCode::NOT_IMPLEMENTED, "unsupported_platform", Some("devcontainer"), "m"));
+        let e = route_error(StatusCode::NOT_IMPLEMENTED, &json!({ "error": { "code": "unsupported_platform", "message": "m", "feature": "teleport" } }));
+        assert_eq!((e.code, e.feature), ("unsupported_platform", None), "only features Workbench knows");
+        for code in ["not_configured", "unsafe_repository", "not_found", "conflict", "port_in_use"] {
+            let e = route_error(StatusCode::CONFLICT, &body(code));
+            assert_eq!((e.code, e.feature), (code, None));
+        }
+        let e = route_error(StatusCode::IM_A_TEAPOT, &body("teapot"));
+        assert_eq!((e.status, e.code, e.message.as_str()), (StatusCode::IM_A_TEAPOT, "upstream", "m"));
+        let e = route_error(StatusCode::BAD_GATEWAY, &json!("plain text"));
+        assert_eq!((e.code, e.message.as_str()), ("upstream", "\"plain text\""));
+    }
+
+    /// Through the router: a route without its integration set up answers `not_configured`,
+    /// and so does the tool that calls it.
+    #[tokio::test]
+    async fn call_api_passes_on_not_configured() {
+        let t = crate::platform::testutil::app().await;
+        let e = super::call_api(&t.state, axum::http::Method::GET, "/api/confluence/spaces", None, &McpCtx::default()).await.unwrap_err();
+        assert_eq!((e.status.as_u16(), e.code), (412, "not_configured"), "{e}");
+        let e = super::call_api(&t.state, axum::http::Method::GET, "/api/projects/nope/github/summary", None, &McpCtx::default()).await.unwrap_err();
+        assert_eq!((e.status.as_u16(), e.code), (404, "not_found"), "{e}");
     }
 }

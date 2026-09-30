@@ -561,6 +561,10 @@ pub struct Layered {
     pub repo_secret_names: BTreeSet<String>,
     /// Layers that failed to parse, and what the trust rules removed.
     pub warnings: Vec<String>,
+    /// Why the machine overlay was left out, when it was (it does not parse, or cannot be
+    /// read), in one line ([`LayerError::brief`]): it then vouches for nothing, and a
+    /// secret missing for that reason says so.
+    pub overlay_error: Option<String>,
 }
 
 impl Layered {
@@ -764,15 +768,31 @@ pub fn merge_layers(
     if let Some(o) = overlay {
         config.merge(o);
     }
-    Layered { config, repo_secret_names, warnings }
+    Layered { config, repo_secret_names, warnings, overlay_error: None }
+}
+
+/// Why a layer could not be read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerError {
+    /// As the project's warnings show it: a TOML error quotes the offending line.
+    pub full: String,
+    /// In one line, for a message that names the file: `line 2, column 20: invalid escape…`.
+    pub brief: String,
 }
 
 /// Read one layer; `Ok(None)` when the file does not exist.
-pub fn read_layer(path: &Path) -> Result<Option<ProjectFile>, String> {
+pub fn read_layer(path: &Path) -> Result<Option<ProjectFile>, LayerError> {
     match std::fs::read_to_string(path) {
-        Ok(text) => toml::from_str::<ProjectFile>(&text).map(Some).map_err(|e| e.to_string()),
+        Ok(text) => toml::from_str::<ProjectFile>(&text).map(Some).map_err(|e| {
+            let at = e.span().map(|span| {
+                let before = text.get(..span.start).unwrap_or(&text);
+                let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+                format!("line {}, column {column}: ", before.matches('\n').count() + 1)
+            });
+            LayerError { full: e.to_string(), brief: format!("{}{}", at.unwrap_or_default(), e.message().trim()) }
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(LayerError { full: e.to_string(), brief: e.to_string() }),
     }
 }
 
@@ -788,6 +808,7 @@ pub fn repo_layer_linked_away(root: &Path) -> bool {
 /// Read `<root>/.workbench.toml` and the machine overlay at `overlay_path`, and merge
 /// them over `detected` (see `merge_layers`). Unreadable layers become warnings, and so
 /// does a `.workbench.toml` that links to another computer ([`repo_layer_linked_away`]).
+/// An unreadable overlay's error is also `overlay_error`.
 pub fn load_layers(detected: ProjectFile, root: &Path, overlay_path: &Path, global_atlassian_site: Option<&str>) -> Layered {
     let overlay_label = super::contract_tilde(overlay_path);
     let mut warnings = vec![];
@@ -797,17 +818,18 @@ pub fn load_layers(detected: ProjectFile, root: &Path, overlay_path: &Path, glob
         warnings.push(format!(".workbench.toml ({}): {REPO_LAYER_LINKED_AWAY}", super::contract_tilde(&repo_path)));
     }
     let mut read = |label: &str, path: &Path| match read_layer(path) {
-        Ok(layer) => layer,
+        Ok(layer) => (layer, None),
         Err(e) => {
-            warnings.push(format!("{label} ({}): {e}", super::contract_tilde(path)));
-            None
+            warnings.push(format!("{label} ({}): {}", super::contract_tilde(path), e.full));
+            (None, Some(e.brief))
         }
     };
-    let repo = if linked_away { None } else { read(".workbench.toml", &repo_path) };
-    let overlay = read("machine overlay", overlay_path);
+    let repo = if linked_away { None } else { read(".workbench.toml", &repo_path).0 };
+    let (overlay, overlay_error) = read("machine overlay", overlay_path);
     let mut out = merge_layers(detected, repo, overlay, &overlay_label, global_atlassian_site);
     warnings.append(&mut out.warnings);
     out.warnings = warnings;
+    out.overlay_error = overlay_error;
     out
 }
 
@@ -1087,14 +1109,28 @@ mod tests {
         std::fs::write(&overlay, format!("[secrets]\nmock = {{ file = {} }}\n", toml::Value::String(token.into()))).unwrap();
         let l = load_layers(ProjectFile::default(), dir.path(), &overlay, None);
         assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+        assert_eq!(l.overlay_error, None);
         assert!(l.repo_secret_names.contains("mock"));
         assert_eq!(l.secret_ref("mock", &global), Some(SecretRef::File(token.into())));
+        // The other spellings the docs suggest: a literal string, forward slashes.
+        for spelling in [format!("'{token}'"), format!("\"{}\"", token.replace('\\', "/"))] {
+            std::fs::write(&overlay, format!("[secrets]\nmock = {{ file = {spelling} }}\n")).unwrap();
+            let l = load_layers(ProjectFile::default(), dir.path(), &overlay, None);
+            assert!(l.warnings.is_empty() && l.overlay_error.is_none(), "{spelling}: {:?}", l.warnings);
+        }
 
         std::fs::write(&overlay, format!("[secrets]\nmock = {{ file = \"{token}\" }}\n")).unwrap();
         let l = load_layers(ProjectFile::default(), dir.path(), &overlay, None);
         assert!(l.warnings.iter().any(|w| w.starts_with("machine overlay (")), "{:?}", l.warnings);
         assert!(l.config.secrets.is_empty() && l.repo_secret_names.contains("mock"));
         assert_eq!(l.secret_ref("mock", &global), None, "never config.toml's secret of that name");
+        // The parse error in one line, for messages that would otherwise send the user to
+        // add the secret to a file that has it; the warning quotes the line.
+        let e = l.overlay_error.expect("the overlay's error");
+        let (at, why) = e.split_once(": ").unwrap();
+        assert!(at.starts_with("line 2, column ") && !why.is_empty() && !e.contains('\n') && !e.contains("Users"), "{e}");
+        let quoted = format!("TOML parse error at {at}\n");
+        assert!(l.warnings.iter().any(|w| w.contains(&quoted) && w.contains(token) && w.contains(why)), "{e} / {:?}", l.warnings);
     }
 
     /// A `.workbench.toml` that links to another computer (Windows) is not read, and a

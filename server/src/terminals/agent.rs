@@ -2847,6 +2847,7 @@ mod tests {
             remote: None,
             warnings: vec![],
             repo_secret_names: Default::default(),
+            overlay_error: None,
         }
     }
 

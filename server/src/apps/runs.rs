@@ -1463,6 +1463,7 @@ mod tests {
             remote: None,
             warnings: vec![],
             repo_secret_names: Default::default(),
+            overlay_error: None,
         };
         let run = RunConfig { name: "x".into(), command: "{tool} go".into(), cwd: r"\\server\share\src".into(), ..Default::default() };
         let found = problems(&project, &run, &expand::base_vars(&project), false);
