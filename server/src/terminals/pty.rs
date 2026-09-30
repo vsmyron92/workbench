@@ -889,6 +889,9 @@ pub struct Pty {
     in_tx: mpsc::Sender<Bytes>,
     /// Set once the waiter thread has seen the leader exit.
     exited: Arc<AtomicBool>,
+    /// Set once Workbench set out to end it (`note_killed`, `kill`). The waiter thread reads
+    /// it as the leader exits, so a kill that comes later ended nothing of the leader.
+    killed: Arc<AtomicBool>,
 }
 
 /// What the spawner gets back besides the handle: the leader's exit status, and a signal
@@ -940,6 +943,7 @@ impl Pty {
         let (exit_tx, exit_rx) = oneshot::channel();
         let (done_tx, done_rx) = oneshot::channel();
         let exited = Arc::new(AtomicBool::new(false));
+        let killed = Arc::new(AtomicBool::new(false));
 
         // Secrets: the start of one at the end of a read is held back until the next read
         // (or a short wait for more output times out).
@@ -1001,14 +1005,20 @@ impl Pty {
         // Waiter: the leader's exit status.
         {
             let exited = exited.clone();
+            let killed = killed.clone();
             std::thread::Builder::new().name(format!("pty-wait-{pid}")).spawn(move || {
-                let info = match child.wait() {
+                let status = session::wait(&mut *child);
+                // Read as it exits: a Kill, Close or Restart after that (while the reader
+                // drains what it left running) did not end it, and its own code stands.
+                let killed = killed.load(Ordering::Acquire);
+                let info = match status {
                     Ok(s) => ExitInfo {
-                        code: Some(s.exit_code() as i32),
-                        signal: s.signal().map(str::to_owned),
+                        code: Some(s.code as i32),
+                        signal: s.signal,
                         at: crate::util::now_ms(),
+                        terminated: s.terminated || killed,
                     },
-                    Err(_) => ExitInfo { code: None, signal: None, at: crate::util::now_ms() },
+                    Err(_) => ExitInfo { code: None, signal: None, at: crate::util::now_ms(), terminated: killed },
                 };
                 exited.store(true, Ordering::Release);
                 let _ = exit_tx.send(info);
@@ -1017,7 +1027,10 @@ impl Pty {
                 session::leader_exited(pid);
             })?;
         }
-        Ok((Arc::new(Pty { pid, session, master, in_tx, exited }), PtyEvents { exit: exit_rx, reader_done: done_rx }))
+        Ok((
+            Arc::new(Pty { pid, session, master, in_tx, exited, killed }),
+            PtyEvents { exit: exit_rx, reader_done: done_rx },
+        ))
     }
 
     /// Queue bytes for the child. Fails when the input queue is full (the child stopped
@@ -1047,6 +1060,13 @@ impl Pty {
         self.exited.load(Ordering::Acquire)
     }
 
+    /// Workbench is about to end the process (`kill`, or first what runs it in a container):
+    /// its exit counts as terminated from outside (`ExitInfo::terminated`), whatever status
+    /// it reports, unless it had exited by itself already.
+    pub fn note_killed(&self) {
+        self.killed.store(true, Ordering::Release);
+    }
+
     /// Its process session, for following what the process left running after it exited.
     pub fn session(&self) -> session::Handle {
         self.session.clone()
@@ -1056,8 +1076,9 @@ impl Pty {
     /// can receive it) to every process group in the session, then SIGKILL whatever is
     /// left after `grace` (Windows: the pseudoconsole closes, then the job ends).
     /// portable-pty's own kill signals the leader only, which leaves background and
-    /// HUP-immune jobs behind.
+    /// HUP-immune jobs behind. Its exit counts as terminated (`note_killed`).
     pub async fn kill(&self, grace: Duration) {
+        self.note_killed();
         session::kill(self.pid, grace, || self.has_exited()).await;
     }
 }
@@ -1423,6 +1444,56 @@ mod tests {
         }
         assert!(session::members(sid).is_empty(), "stragglers survived the kill");
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    /// Unix: a leader ended by a signal that asks a process to end (a hang-up, terminate,
+    /// kill or interrupt), from outside or not, is `terminated`, whatever code portable-pty
+    /// adds; another signal and an exit code are not. (A crash's signals would dump core:
+    /// `session::tests` checks them without raising them.)
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn leaders_ended_by_a_request_to_end_are_terminated() {
+        // Python's own SIGINT handler raises KeyboardInterrupt: the default ends the process.
+        let py = |sig: &str| format!("import os, signal\nsignal.signal(signal.SIGINT, signal.SIG_DFL)\nos.kill(os.getpid(), signal.{sig})");
+        let cases = [
+            (py("SIGHUP"), true, true),
+            (py("SIGTERM"), true, true),
+            (py("SIGKILL"), true, true),
+            (py("SIGINT"), true, true),
+            (py("SIGUSR1"), true, false),
+            ("import sys\nsys.exit(1)".to_string(), false, false),
+            ("pass".to_string(), false, false),
+        ];
+        for (code, signaled, terminated) in cases {
+            let (_pty, ev, _screen) = spawn_py(&code, &[]);
+            let info = tokio::time::timeout(Duration::from_secs(10), ev.exit).await.unwrap().unwrap();
+            assert_eq!(info.terminated, terminated, "{code}: {info:?}");
+            // What portable-pty reports is kept: the signal's description, and code 1 with it.
+            assert_eq!(info.signal.is_some(), signaled, "{code}: {info:?}");
+            if signaled {
+                assert_eq!(info.code, Some(1), "{code}");
+            }
+        }
+        // Killed from outside while it runs.
+        let (pty, ev, _screen) = spawn_py("import time\ntime.sleep(30)", &[]);
+        assert!(std::process::Command::new("kill").args(["-TERM", &pty.pid.to_string()]).status().unwrap().success());
+        let info = tokio::time::timeout(Duration::from_secs(10), ev.exit).await.unwrap().unwrap();
+        assert!(info.terminated, "{info:?}");
+    }
+
+    /// Windows: a leader ended from outside (`taskkill /F`, `TerminateProcess` as Task
+    /// Manager's End task) only has the exit code it was given, so it is not `terminated`;
+    /// only Workbench's own kills are (`note_killed`, the terminals' e2e tests).
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn leaders_ended_from_outside_cannot_be_told_on_windows() {
+        let (pty, ev, _screen) = spawn_py("import time\ntime.sleep(30)", &[]);
+        let pid = pty.pid.to_string();
+        assert!(std::process::Command::new("taskkill").args(["/F", "/PID", &pid]).status().unwrap().success());
+        let info = tokio::time::timeout(Duration::from_secs(10), ev.exit).await.unwrap().unwrap();
+        assert!(!info.terminated && info.signal.is_none() && info.code != Some(0), "{info:?}");
+        // Whatever the leader started (a `py` launcher's Python) goes too.
+        pty.kill(Duration::from_millis(300)).await;
     }
 
     /// On every OS (Windows: the job and the pseudoconsole): a kill ends what the

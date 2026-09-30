@@ -97,6 +97,8 @@ export interface ExitInfo {
   code: number | null
   signal: string | null
   at: number
+  /** Ended from outside (closed or killed from Workbench; on Unix a hang-up, terminate, kill or interrupt signal), not by its own exit. Absent when false. */
+  terminated?: boolean
 }
 
 /** terminals/providers.rs ProviderKind: which kind of agent CLI runs a session. */

@@ -848,28 +848,12 @@ mod tests {
         install_fake_docker(dir)
     }
 
-    /// `testdata/fake_docker.py` in `dir`, as `[devcontainer] docker` names it. Unix: the
-    /// script itself, executable. Windows: an npm-style shim, `docker.cmd` (what the lists
+    /// `testdata/fake_docker.py` in `dir`, as `[devcontainer] docker` names it
+    /// (`util::os::exe::test_cli`). Windows: an npm-style shim, `docker.cmd` (what the lists
     /// and actions run, through cmd.exe) with the `docker.ps1` Workbench reads to start
     /// Python on `docker.py` directly (the log and shell terminals).
     fn install_fake_docker(dir: &FsPath) -> PathBuf {
-        let script = if cfg!(windows) { dir.join("docker.py") } else { dir.join("docker") };
-        std::fs::write(&script, include_str!("testdata/fake_docker.py")).unwrap();
-        #[cfg(unix)]
-        {
-            crate::util::os::perm::apply(&script, 0o755).unwrap();
-            script
-        }
-        #[cfg(windows)]
-        {
-            let python: Vec<String> = crate::util::os::exe::python().iter().map(|a| format!("\"{a}\"")).collect();
-            let python = python.join(" ");
-            let ps1 = format!("#!/usr/bin/env pwsh\n$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent\n\n& {python} \"$basedir/docker.py\" $args\nexit $LASTEXITCODE\n");
-            std::fs::write(dir.join("docker.ps1"), ps1).unwrap();
-            let cmd = dir.join("docker.cmd");
-            std::fs::write(&cmd, format!("@{python} \"%~dp0docker.py\" %*\r\n")).unwrap();
-            cmd
-        }
+        crate::util::os::exe::test_cli(dir, "docker", include_str!("testdata/fake_docker.py"))
     }
 
     /// The list and details (masked), the actions' exact argv, terminals, and only the

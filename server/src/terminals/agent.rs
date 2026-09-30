@@ -682,16 +682,26 @@ impl Terminals {
         submit_prompt: bool,
         restarted: bool,
     ) -> Result<(), ApiError> {
-        let prep = self.prepare_launch(state, entry).await?;
-        match prep.provider.kind {
-            ProviderKind::Claude => self.launch_claude(state, entry, prep, cont, prompt, submit_prompt).await,
-            // Codex's rollout lives in the container: in one, it is followed like a
-            // plain CLI (output activity), without Workbench's MCP.
-            ProviderKind::Codex if prep.container.is_none() => self.launch_codex(state, entry, prep, cont, prompt, submit_prompt).await,
-            ProviderKind::Codex | ProviderKind::Kimi | ProviderKind::Gemini | ProviderKind::Aider | ProviderKind::Custom => {
-                self.launch_plain(state, entry, prep, cont, prompt, submit_prompt, restarted).await
+        let launched = async {
+            let prep = self.prepare_launch(state, entry).await?;
+            match prep.provider.kind {
+                ProviderKind::Claude => self.launch_claude(state, entry, prep, cont, prompt, submit_prompt).await,
+                // Codex's rollout lives in the container: in one, it is followed like a
+                // plain CLI (output activity), without Workbench's MCP.
+                ProviderKind::Codex if prep.container.is_none() => self.launch_codex(state, entry, prep, cont, prompt, submit_prompt).await,
+                ProviderKind::Codex | ProviderKind::Kimi | ProviderKind::Gemini | ProviderKind::Aider | ProviderKind::Custom => {
+                    self.launch_plain(state, entry, prep, cont, prompt, submit_prompt, restarted).await
+                }
             }
         }
+        .await;
+        // The token `prepare_launch` issued dies with a start that failed (as with an exit),
+        // also one that failed in `prepare_launch` itself: no process holds it, and pruning
+        // forgets the terminal without revoking anything.
+        if launched.is_err() && entry.running_pty().is_none() {
+            state.auth.revoke_agent_tokens(&entry.id);
+        }
+        launched
     }
 
     /// The provider, command, environment, agent token and directories of a launch.
@@ -731,6 +741,12 @@ impl Terminals {
         // Secret values from `${secret:…}` are masked if the session prints them.
         *entry.redact.lock() = secrets;
 
+        // A terminal forgotten while this start waited for the lifecycle lock (a restart, a
+        // restore) gets no token and no directory: nothing would revoke or remove them.
+        // Callers hold that lock, and `close` forgets under it, so this holds to the launch.
+        if !self.is_registered(entry) {
+            return Err(ApiError::not_found(format!("no terminal {:?}", entry.id)));
+        }
         // A fresh token per process; the old one dies here.
         state.auth.revoke_agent_tokens(&entry.id);
         let token = state.auth.issue_agent_token(&entry.id);
@@ -823,15 +839,20 @@ impl Terminals {
         let settings = session_settings(&format!("{base}/api/hooks/claude/{}", entry.id), &token, helper.as_deref(), statusline, permission_wait(&cfg));
         let mcp = mcp_config(&format!("{base}/mcp"), &token, &entry.id);
         {
-            let (sp, mp) = (settings_path.clone(), mcp_path.clone());
-            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                util::fs::write_atomic(&sp, &serde_json::to_vec_pretty(&settings)?, 0o600)?;
-                util::fs::write_atomic(&mp, &serde_json::to_vec_pretty(&mcp)?, 0o600)?;
-                Ok(())
+            let (sp, mp, e) = (settings_path.clone(), mcp_path.clone(), entry.clone());
+            // Like saves, never into the directory of a terminal forgotten meanwhile.
+            tokio::task::spawn_blocking(move || -> anyhow::Result<Option<()>> {
+                e.unless_removed(|| -> anyhow::Result<()> {
+                    util::fs::write_atomic(&sp, &serde_json::to_vec_pretty(&settings)?, 0o600)?;
+                    util::fs::write_atomic(&mp, &serde_json::to_vec_pretty(&mcp)?, 0o600)?;
+                    Ok(())
+                })
+                .transpose()
             })
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?
-            .map_err(ApiError::from)?;
+            .map_err(ApiError::from)?
+            .ok_or_else(|| ApiError::not_found(format!("no terminal {:?}", entry.id)))?;
         }
         env.push(("WORKBENCH_AGENT_TOKEN".into(), Some(token)));
 

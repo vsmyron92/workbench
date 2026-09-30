@@ -442,6 +442,44 @@ program = "prog.bin"
     assert_eq!(s, 404);
 }
 
+/// A pre-launch run configuration whose terminal is killed (or closed) was terminated: the
+/// error says so, not "failed (exit code 1)" with the code portable-pty gives a signal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pre_launch_run_cut_short_was_terminated() {
+    if !have_python() {
+        eprintln!("skipped: Python 3 is not installed");
+        return;
+    }
+    // `sleep` is the same in bash and PowerShell.
+    let env = setup(
+        r#"
+[[debug]]
+name = "after a run"
+adapter = "fake"
+program = "prog.bin"
+preLaunch = "wait"
+
+[[run]]
+name = "wait"
+command = "sleep 30"
+"#,
+    )
+    .await;
+    let info = env.post("sessions", json!({ "config": "after a run" })).await;
+    let sid = info["id"].as_str().unwrap().to_string();
+    let v = env.wait_session(&sid, "the pre-launch run's terminal", |v| v["prelaunchTerminalId"].is_string()).await;
+    let tid = v["prelaunchTerminalId"].as_str().unwrap().to_string();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while env.state.terminals.info(&tid).unwrap().status != crate::terminals::TerminalStatus::Running {
+        assert!(tokio::time::Instant::now() < deadline, "the pre-launch run did not start");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    env.state.terminals.kill(&tid).await.unwrap();
+    let end = env.wait_session(&sid, "the failure", |v| v["state"] == "failed").await;
+    assert!(end["error"].as_str().unwrap().contains("pre-launch run \"wait\" was terminated"), "{end}");
+    assert!(env.requests("initialize").is_empty(), "no adapter starts after a pre-launch run cut short");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adapters_can_start_child_sessions() {
     if !have_python() {

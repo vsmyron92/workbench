@@ -28,6 +28,8 @@ export interface RunLive {
   exit?: ExitInfo
   result?: TestResult
   error?: string
+  /** Exited because it was cut short (its terminal closed or its process killed), not because it finished. Absent when false. */
+  terminated?: boolean
   phase?: string
   /** The process runs in the project's dev container (in GET …/runs: or a start would put it there). */
   inContainer?: boolean
