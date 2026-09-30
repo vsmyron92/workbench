@@ -543,9 +543,9 @@ npm test           # vitest (src/**/*.test.ts)
   --no-fail-fast` (with Python for the test fakes and `core.autocrlf false`; its Rust cache is
   kept when tests fail) and then, once the build has succeeded and whether the tests passed or
   not, `install.ps1` under Windows PowerShell 5.1: an install, then `-Uninstall`, refused
-  while the installed server runs and then checked to remove the service's Start Menu
-  shortcut, the folder and exactly the PATH entry it added. It counts like the other two
-  jobs: a failed step fails the run (no `continue-on-error`).
+  (naming the server's pid) while the installed server runs and then checked to remove the
+  service's Start Menu shortcut, the folder and exactly the PATH entry it added. It counts
+  like the other two jobs: a failed step fails the run (no `continue-on-error`).
 - **Releases** (`release.yml`): bump `version` in `server/Cargo.toml` (and `web/package.json`),
   give CHANGELOG.md a `## X.Y.Z - date` section, commit, then push a `vX.Y.Z` tag. The
   workflow refuses a tag that does not match the crate version, builds the UI and the
@@ -574,14 +574,16 @@ npm test           # vitest (src/**/*.test.ts)
   `WM_SETTINGCHANGE`), renames files in use aside (`*.old`, removed by the next install,
   renames retried on sharing violations), removes the Mark of the Web from what it installs
   and exits non-zero on failure. `install.ps1 -Uninstall` (same `-Prefix`) changes nothing
-  while a program runs from the folder (Win32_Process by executable path), runs `workbench
-  service uninstall [--name N]` for the services whose `Run` value or Start Menu shortcut
-  starts that folder's `workbenchw.exe` (another folder's stay), deletes the files
-  `install.ps1` puts there (`workbench.exe` last, so running it again finishes an interrupted
-  run) and the folder when nothing else is left in it, removes exactly the PATH entry it
-  added (the value keeps its type; `WM_SETTINGCHANGE`), leaves a folder without
-  `workbench.exe` alone, and keeps the configuration and data folders, printing where they
-  are.
+  while a program runs from the folder, or when it cannot tell (processes by executable
+  path through `QueryFullProcessImageNameW`, no WMI; a `workbench.exe`, `workbenchw.exe` or
+  `OpenConsole.exe` of the current session whose path cannot be read counts as running),
+  runs `workbench service uninstall [--name N]` for the services whose `Run` value or Start
+  Menu shortcut starts that folder's `workbenchw.exe` (another folder's stay), deletes the
+  files `install.ps1` puts there, removes exactly the PATH entry it added (the value keeps
+  its type; `WM_SETTINGCHANGE`), then deletes `workbench.exe` (so running it again finishes
+  an interrupted run) and the folder when nothing else is left in it, leaves a folder
+  without `workbench.exe` alone, and keeps the configuration and data folders, printing
+  where they are.
 
 ## Second phase (2026-09-26): Workspace, agent providers, GitHub, broader detection
 

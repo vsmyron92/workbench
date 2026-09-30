@@ -559,9 +559,9 @@ Each step compiles and passes on Linux. S = under a day, M = 1â€“3 days, L = 3â€
 false`, checkout, setup-python, `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache`
 (workspaces: server; kept when tests fail), `cargo build --locked`, `cargo test --locked
 --no-fail-fast`, then `install.ps1` under Windows PowerShell 5.1 whenever the build
-succeeded: an install, then `-Uninstall`, refused while Workbench runs from the folder and
-then checked to remove the service's shortcut, the folder and the PATH entry (the rest of
-the user PATH and its type unchanged). Informational (`continue-on-error`) until step 13;
+succeeded: an install, then `-Uninstall`, refused while Workbench runs from the folder (the
+refusal must name the server's pid) and then checked to remove the service's shortcut, the
+folder and the PATH entry (the rest of the user PATH and its type unchanged). Informational (`continue-on-error`) until step 13;
 required since (done: see the status at the top).
 
 **Release.** A `windows` job next to the Linux one: `server/.cargo/config.toml` sets
@@ -588,16 +588,23 @@ manifest can come later; revisit MSI once the binaries are code-signed. Users ru
 `Unblock-File` (Mark of the Web) or `-ExecutionPolicy Bypass`.
 
 `install.ps1 -Uninstall` (same `-Prefix`) is the way back. It changes nothing while a
-program runs from the folder (a Win32_Process whose executable is there: the server, the
+program runs from the folder (a process whose executable is there: the server, the
 supervisor, a terminal's `OpenConsole.exe`, a `*.old` still running), and so never runs in a
-terminal of the Workbench it removes. It runs `workbench service uninstall [--name N]` only
-for the services whose `Run` value or Start Menu shortcut starts that folder's
-`workbenchw.exe`, so another install's service stays. It deletes the files `install.ps1`
-puts there (the payload, `*.old`, `*.new`; `workbench.exe` last, so a second run finishes an
-interrupted one), removes the folder only when it is empty then, and removes exactly the
-PATH entry `install.ps1` added, keeping the value's type (`REG_EXPAND_SZ`), then broadcasts
-`WM_SETTINGCHANGE`. A folder that exists without `workbench.exe` is not touched. The
-configuration and data folders stay, and it prints where they are.
+terminal of the Workbench it removes. It lists the processes with
+`System.Diagnostics.Process` and reads each one's path with `QueryFullProcessImageNameW`
+(`PROCESS_QUERY_LIMITED_INFORMATION`, which an elevated process's integrity level does not
+block), not WMI. It fails closed: when the processes cannot be listed, or a `workbench.exe`,
+`workbenchw.exe` or `OpenConsole.exe` of the current session has a path it cannot read, it
+changes nothing and says so (another account's processes in other sessions are not
+counted). It runs `workbench service uninstall [--name N]` only for the services whose
+`Run` value or Start Menu shortcut starts that folder's `workbenchw.exe`, so another
+install's service stays. It deletes the files `install.ps1` puts there (the payload,
+`*.old`, `*.new`), removes exactly the PATH entry `install.ps1` added, keeping the value's
+type (`REG_EXPAND_SZ`), and broadcasts `WM_SETTINGCHANGE`, then deletes `workbench.exe`
+and the folder when it is empty then. Until `workbench.exe` goes, a second run finishes an
+interrupted one; a folder that exists without `workbench.exe` is not touched (and when it
+is still on the PATH, it is refused, naming the manual step). The configuration and data
+folders stay, and it prints where they are.
 
 ## 5. Risks, and what the first version leaves out
 

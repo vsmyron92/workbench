@@ -72,9 +72,9 @@ jobs:
         run: cargo build --locked
       - run: cargo test --locked --no-fail-fast
       # The release archive's installer under Windows PowerShell 5.1, as users run it (the
-      # release job also installs over a running server), then its -Uninstall: refused while
-      # Workbench runs from the folder, then the service, the folder and the PATH entry go. It
-      # runs when tests fail too.
+      # release job also installs over a running server), then its -Uninstall: refused, naming
+      # the server, while Workbench runs from the folder, then the service, the folder and the
+      # PATH entry go. It runs when tests fail too.
       - name: install.ps1
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
@@ -112,8 +112,11 @@ jobs:
           $probe.Start(); $port = $probe.LocalEndpoint.Port; $probe.Stop()
           $server = Start-Process -FilePath $bin -ArgumentList 'serve', '--bind', "127.0.0.1:$port" -NoNewWindow -PassThru `
             -RedirectStandardOutput (Join-Path $scratch 'out.log') -RedirectStandardError (Join-Path $scratch 'err.log')
-          powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Uninstall -Prefix $prefix
+          $serverId = $server.Id
+          # Its output (stderr included), to check that it names the server.
+          $said = @(powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Uninstall -Prefix $prefix 2>&1) -join "`n"
           $refused = $LASTEXITCODE
+          Write-Output $said
           $running = -not $server.HasExited
           if ($running) { Stop-Process -Id $server.Id -Force }
           $server.WaitForExit()
@@ -125,6 +128,10 @@ jobs:
           }
           if ($refused -eq 0 -or -not (Test-Path -LiteralPath $bin) -or -not (Test-Path -LiteralPath $lnk) -or -not (Get-UserPath).Contains($prefix)) {
             Write-Output '::error::install.ps1 -Uninstall changed something while Workbench ran from the folder'
+            exit 1
+          }
+          if (-not $said.Contains("Workbench is running from ${prefix}:") -or -not $said.Contains("workbench.exe (pid $serverId)")) {
+            Write-Output "::error::install.ps1 -Uninstall stopped without naming the running server (pid $serverId)"
             exit 1
           }
           powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Uninstall -Prefix $prefix

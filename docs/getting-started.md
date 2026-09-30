@@ -110,11 +110,11 @@ powershell -ExecutionPolicy Bypass -File .\workbench-<version>-x86_64-pc-windows
 
 It runs `workbench service uninstall` for each service whose sign-in entry or Start Menu
 shortcut starts the programs in `%LOCALAPPDATA%\Programs\Workbench` (a service of Workbench
-in another folder stays), deletes the files `install.ps1` put in that folder, then the folder
-once nothing else is in it, and removes the folder from your user PATH. While a program from
-the folder runs it changes nothing and says what runs. Your configuration and Workbench's
-state (the two folders above) stay for a later install; delete them to remove those too. By
-hand, the same is:
+in another folder stays), deletes the files `install.ps1` put in that folder, removes the
+folder from your user PATH, then deletes the folder once nothing else is in it. While a
+program from the folder runs, or when it cannot tell, it changes nothing and says why. Your
+configuration and Workbench's state (the two folders above) stay for a later install; delete
+them to remove those too. By hand, the same is:
 
 1. `workbench service stop`, then `workbench service uninstall` (with `--name <name>` for a
    service installed under a name).
