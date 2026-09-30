@@ -280,7 +280,7 @@ pub fn problems(project: &Project, c: &RunConfig, vars: &Vars, inside: bool) -> 
         }
     }
     if let Some(prog) = command_program(&c.command).filter(|p| !inside && !program_available(p)) {
-        v.push(format!("`{prog}` is not installed (not found on PATH){}", crate::util::os::exe::INSTALLED_SINCE));
+        v.push(format!("`{prog}` is not installed (not found on PATH)"));
     }
     v
 }

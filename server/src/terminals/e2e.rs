@@ -287,6 +287,28 @@ async fn programs_but_not_interactive_shells_get_the_child_env() {
     assert_eq!(agent, set.map(|v| (VAR.to_string(), v)).into_iter().collect::<Vec<_>>());
 }
 
+/// A terminal finds programs installed since Workbench started: on Windows its `PATH` is the
+/// sign-in's, then Workbench's own entries (`util::os::env::fresh_path`), and a variable
+/// set in the registry since reaches it too. On Unix it has Workbench's `PATH`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminals_get_the_path_of_a_new_sign_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    #[cfg(windows)]
+    let var = crate::util::os::env::UserVar::new("set-since");
+    let out = dir.path().join("env.json");
+    let code = format!("import json, os\nwith open({}, 'w') as f:\n    json.dump(dict(os.environ), f)", py_str(&out.display().to_string()));
+    let info = state.terminals.spawn(&state, spec(dir.path(), &code)).await.unwrap();
+    wait_exit(&state, &info.id).await;
+    let env: std::collections::HashMap<String, String> = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let want = crate::util::os::env::fresh_path().unwrap_or_else(|| std::env::var("PATH").unwrap());
+    // A version manager's shim for Python may put its own folder first.
+    assert!(env["PATH"].ends_with(&want), "{:?}\nwant {want:?}", env["PATH"]);
+    // Python's `os.environ` has uppercase names on Windows.
+    #[cfg(windows)]
+    assert_eq!(env.get(&var.name.to_uppercase()), Some(&var.value));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mcp_output_tool_reads_a_terminal() {
     let dir = tempfile::tempdir().unwrap();

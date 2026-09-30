@@ -7,6 +7,7 @@
 pub mod autostart;
 pub mod desktop;
 pub mod dll;
+pub mod env;
 pub mod exe;
 pub mod fs;
 pub mod helper;

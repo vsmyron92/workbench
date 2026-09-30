@@ -107,9 +107,11 @@ Good to know:
   PowerShell, so a command written for bash needs a PowerShell form (Windows PowerShell 5.1
   has no `&&`: install PowerShell 7).
 - Version control needs [Git for Windows](https://git-scm.com/download/win).
-- Installers put their programs on PATH for programs started afterwards: Workbench, and the
-  terminals and runs it starts, find Git, Node.js, Python or rustup installed while it runs
-  only once it restarts (`workbench service stop`, then Workbench from the Start Menu, or
+- Installers put their programs on PATH for programs started afterwards. Workbench's new
+  terminals, runs and agent sessions get the PATH a new sign-in gets, and its own lookups
+  (language servers, debug adapters, agent CLIs) try it too, so Node.js, Python or rustup
+  installed while it runs are found at once. The Git features find Git for Windows only once
+  Workbench restarts (`workbench service stop`, then Workbench from the Start Menu, or
   `workbench serve` in a new terminal).
 - A `keyring` secret reference reads Windows Credential Manager: `{ keyring =
   "workbench/atlassian" }` is the generic credential named `atlassian.workbench`.

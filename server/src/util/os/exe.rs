@@ -3,20 +3,24 @@
 //! Unix keeps the rules Workbench always had: a command with a `/` is a path, anything
 //! else is the first regular file of that name on `PATH`. On Windows a lookup goes over
 //! `PATH` × `PATHEXT` (the extensions CreateProcess can start), then
-//! `%USERPROFILE%\.local\bin` and `%APPDATA%\npm`, never the current directory, and yields
-//! an absolute path. An npm `.cmd` shim is unwrapped to `node.exe` and the package script
-//! named in the `.ps1` beside it, so cmd.exe neither parses the arguments nor looks for
-//! `node` in the current directory (docs/windows-port.md §2).
+//! `%USERPROFILE%\.local\bin` and `%APPDATA%\npm`, then the folders a new sign-in's `PATH`
+//! has and this process's lacks (`os::env`: a program installed since Workbench started),
+//! never the current directory, and yields an absolute path. An npm `.cmd` shim is unwrapped
+//! to `node.exe` and the package script named in the `.ps1` beside it, so cmd.exe neither
+//! parses the arguments nor looks for `node` in the current directory (docs/windows-port.md
+//! §2).
 
 use std::path::{Path, PathBuf};
 
-/// Ends a "not found on PATH" message: what to do about a program installed after Workbench
-/// started. On Windows installers change `PATH` in the registry only, so the server and
-/// everything it starts keep the old one until it restarts. Nothing on Unix.
+/// Ends a "not found on PATH" message for a program the server starts by its bare name
+/// through the standard library (git), not through [`which`]: what to do about one installed
+/// after Workbench started. On Windows installers change `PATH` in the registry only; `which`
+/// and terminals read the new one (`os::env`), but such a start keeps looking in the `PATH`
+/// the server started with until it restarts. Nothing on Unix.
 #[cfg(unix)]
 pub const INSTALLED_SINCE: &str = "";
 #[cfg(windows)]
-pub const INSTALLED_SINCE: &str = "; if you installed it while Workbench was running, restart Workbench from the Start Menu or a new terminal (`workbench service stop` first): a running program keeps its old PATH";
+pub const INSTALLED_SINCE: &str = "; if you installed it while Workbench was running, restart Workbench from the Start Menu or a new terminal (`workbench service stop` first): Workbench looks for it on the PATH it started with";
 
 /// What a lookup found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,16 +72,24 @@ pub fn classify(path: PathBuf) -> Resolved {
 }
 
 /// The program file `cmd` names: the path itself when `names_path(cmd)` (`~/` expanded),
-/// else the first match on `PATH`.
+/// else the first match on `PATH` (on Windows, then on the folders only a new sign-in's
+/// `PATH` has: a program installed since Workbench started).
 pub fn which(cmd: &str) -> Option<PathBuf> {
     if names_path(cmd) {
         return program_file(crate::config::expand_tilde(cmd));
     }
     #[cfg(unix)]
-    let dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH")?).collect();
+    {
+        let dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH")?).collect();
+        find_in(&dirs, cmd)
+    }
     #[cfg(windows)]
-    let dirs = win::search_path();
-    find_in(&dirs, cmd)
+    {
+        // The sign-in's folders are read only after a miss, and after this process's own, so
+        // what is found today stays what is found.
+        let dirs = win::search_path();
+        find_in(&dirs, cmd).or_else(|| find_in(&super::env::path_added(&dirs), cmd))
+    }
 }
 
 /// The first `dir/name` among `dirs` that is a program file (`program_file`). On Windows
@@ -214,8 +226,9 @@ pub fn python_words() -> String {
 /// Folders where tools often live when this process has a shorter `PATH` than the run
 /// shell's (started from a desktop launcher or as a service), which is a login shell on
 /// Unix: `~/.cargo/bin`, version managers' shims, `/usr/local/bin`… None on Windows: the
-/// run shell (PowerShell without a profile) inherits this process's `PATH`, so a program
-/// off it is off the run's too, whichever folder it is in.
+/// run shell (PowerShell without a profile) gets the terminals' `PATH`
+/// (`os::env::fresh_path`), whose folders [`which`] searches too, so a program off it is off
+/// the run's too, whichever folder it is in.
 pub fn user_tool_dirs() -> Vec<PathBuf> {
     #[cfg(unix)]
     {
@@ -699,8 +712,12 @@ exit $ret
         // The run shell finds Python by name: `python` or the launcher with its `-3`.
         let words = python_words();
         assert!(words == "python" || words == "py -3", "{words}");
-        // Runs inherit this process's `PATH`: no other folder has their programs.
+        // Runs get the terminals' `PATH`, which `which` searches: no other folder has their programs.
         assert!(user_tool_dirs().is_empty());
+        // After a miss, the folders only a new sign-in's `PATH` has: with nothing searched
+        // yet, every one of them, Windows' own among them.
+        let cmd = find_in(&super::super::env::path_added(&[]), "cmd").expect("cmd.exe on the sign-in's PATH");
+        assert!(cmd.file_name().is_some_and(|n| n.eq_ignore_ascii_case("cmd.exe")), "{}", cmd.display());
     }
 
     #[cfg(windows)]

@@ -15,15 +15,16 @@ use windows_sys::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_BINARY, RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW,
-    RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_BINARY, RegCreateKeyExW, RegDeleteKeyValueW, RegSetValueExW,
 };
-use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
+use windows_sys::Win32::System::Threading::{
+    CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW,
+};
 use windows_sys::Win32::UI::Shell::{FOLDERID_Programs, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellLink};
 use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW};
 use windows_sys::core::{GUID, HRESULT, PCWSTR, PWSTR};
 
-use super::win32::{Handle, reg_string, reg_value, wide};
+use super::win32::{Handle, Key, reg_string, reg_value, wide};
 
 /// `HKCU\<RUN_KEY>`: what Windows starts when the user signs in.
 pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -32,16 +33,6 @@ pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 pub const APPROVED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
 
 // ---------------------------------------------------------------- registry (HKCU)
-
-/// An open registry key, closed on drop.
-struct Key(HKEY);
-
-impl Drop for Key {
-    fn drop(&mut self) {
-        // SAFETY: a key this value opened, closed only here.
-        unsafe { RegCloseKey(self.0) };
-    }
-}
 
 fn check(rc: WIN32_ERROR) -> io::Result<()> {
     if rc == ERROR_SUCCESS { Ok(()) } else { Err(io::Error::from_raw_os_error(rc as i32)) }
@@ -323,24 +314,25 @@ pub fn command_line(program: &Path, args: &[&str]) -> io::Result<String> {
 /// Starts `program args…` on its own and returns: it inherits no handles (a terminal's or
 /// a pipe's would stay open while it runs), gets no console window (a console program gets
 /// a hidden console of its own, so the caller's Ctrl-C never reaches it), and starts in
-/// `cwd` (not the caller's folder, which it would keep from being deleted). Not in a new
-/// process group: that would make it, and everything it starts, ignore Ctrl-C (terminals
-/// included). It also leaves the caller's job when the job allows that: a terminal that ends
-/// its job when it closes would end it too. `Ok(false)`: it had to stay in the caller's job.
-pub fn start_detached(program: &Path, args: &[&str], cwd: Option<&Path>) -> io::Result<bool> {
-    match create_detached(program, args, cwd, true) {
+/// `cwd` (not the caller's folder, which it would keep from being deleted), with `env` as
+/// its whole environment when given (else the caller's). Not in a new process group: that
+/// would make it, and everything it starts, ignore Ctrl-C (terminals included). It also
+/// leaves the caller's job when the job allows that: a terminal that ends its job when it
+/// closes would end it too. `Ok(false)`: it had to stay in the caller's job.
+pub fn start_detached(program: &Path, args: &[&str], cwd: Option<&Path>, env: Option<&[(OsString, OsString)]>) -> io::Result<bool> {
+    match create_detached(program, args, cwd, env, true) {
         Ok(()) => Ok(true),
         // A job without JOB_OBJECT_LIMIT_BREAKAWAY_OK refuses the breakaway (access denied):
         // start inside it instead.
-        Err(_) => create_detached(program, args, cwd, false).map(|()| false),
+        Err(_) => create_detached(program, args, cwd, env, false).map(|()| false),
     }
 }
 
 /// As `start_detached`, but only outside the caller's job: `Ok(false)`, with nothing
 /// started, when the job does not let it leave (no `JOB_OBJECT_LIMIT_BREAKAWAY_OK`; a
 /// Workbench terminal's job allows it), so it would end with the job.
-pub fn start_apart(program: &Path, args: &[&str], cwd: Option<&Path>) -> io::Result<bool> {
-    match create_detached(program, args, cwd, true) {
+pub fn start_apart(program: &Path, args: &[&str], cwd: Option<&Path>, env: Option<&[(OsString, OsString)]>) -> io::Result<bool> {
+    match create_detached(program, args, cwd, env, true) {
         Ok(()) => Ok(true),
         Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => Ok(false),
         Err(e) => Err(e),
@@ -349,17 +341,21 @@ pub fn start_apart(program: &Path, args: &[&str], cwd: Option<&Path>) -> io::Res
 
 /// `start_detached`'s CreateProcessW; `breakaway` leaves the caller's job, and then fails
 /// when the job does not allow it (outside a job the flag does nothing).
-fn create_detached(program: &Path, args: &[&str], cwd: Option<&Path>, breakaway: bool) -> io::Result<()> {
+fn create_detached(program: &Path, args: &[&str], cwd: Option<&Path>, env: Option<&[(OsString, OsString)]>, breakaway: bool) -> io::Result<()> {
     // CreateProcessW may write to the command line: a buffer of its own.
     let mut line = wide(&command_line(program, args)?);
     let app = wide_os(program)?;
     let cwd = cwd.map(wide_os).transpose()?;
-    let flags = CREATE_NO_WINDOW | if breakaway { CREATE_BREAKAWAY_FROM_JOB } else { 0 };
+    let block = env.map(super::env::block).transpose()?;
+    let flags = CREATE_NO_WINDOW
+        | if breakaway { CREATE_BREAKAWAY_FROM_JOB } else { 0 }
+        | if block.is_some() { CREATE_UNICODE_ENVIRONMENT } else { 0 };
     let si = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };
     let mut pi = PROCESS_INFORMATION::default();
     // SAFETY: NUL-terminated program, command line and folder that outlive the call;
-    // default attributes; no inherited handles; the parent's environment; `si` and `pi`
-    // are valid for the call, and the handles it returns are closed by `Handle`.
+    // default attributes; no inherited handles; `block` a Unicode environment block (the
+    // flag says so) or null for the parent's environment; `si` and `pi` are valid for the
+    // call, and the handles it returns are closed by `Handle`.
     let ok = unsafe {
         CreateProcessW(
             app.as_ptr(),
@@ -368,7 +364,7 @@ fn create_detached(program: &Path, args: &[&str], cwd: Option<&Path>, breakaway:
             ptr::null(),
             0,
             flags,
-            ptr::null(),
+            block.as_ref().map_or(ptr::null(), |b| b.as_ptr().cast()),
             cwd.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
             &si,
             &mut pi,
@@ -566,16 +562,37 @@ mod tests {
         let _ = elevated();
     }
 
+    /// The text `path` gets, once a line of it is written.
+    fn written(path: &Path) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            if text.ends_with('\n') || std::time::Instant::now() >= deadline {
+                return text;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     #[test]
     fn a_detached_program_starts() {
         let dir = tempfile::tempdir().unwrap();
         let cmd = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join(r"System32\cmd.exe");
-        let flag = dir.path().join("started");
-        start_detached(&cmd, &["/c", "echo", "x>started"], Some(dir.path())).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !flag.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        assert!(flag.exists(), "it ran in `cwd`");
+        start_detached(&cmd, &["/c", "echo", "x>started"], Some(dir.path()), None).unwrap();
+        assert_eq!(written(&dir.path().join("started")).trim_end(), "x", "it ran in `cwd`");
+        // Given an environment, that is all it gets.
+        let (given, not_given) = ("WORKBENCH_TEST_DETACHED_GIVEN", "WORKBENCH_TEST_DETACHED_NOT_GIVEN");
+        // SAFETY: always safe on Windows (std's documentation); the name is this test's own.
+        unsafe { std::env::set_var(not_given, "inherited") };
+        let mut env: Vec<(OsString, OsString)> = std::env::vars_os().filter(|(k, _)| k != not_given).collect();
+        env.push((given.into(), "given".into()));
+        let line = format!("%{given}%.%{not_given}%>env");
+        assert!(start_detached(&cmd, &["/c", "echo", &line], Some(dir.path()), Some(&env)).is_ok());
+        assert_eq!(written(&dir.path().join("env")).trim_end(), format!("given.%{not_given}%"));
+        // A variable that cannot be one starts nothing.
+        env.push(("A=B".into(), "x".into()));
+        assert_eq!(start_apart(&cmd, &["/c", "echo", "x>never"], Some(dir.path()), Some(&env)).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(not_given) };
     }
 }
