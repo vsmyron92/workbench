@@ -33,12 +33,20 @@ run on a Windows 10 or 11 desktop yet.
   a restart during an exit's save that left the new process reading as exited (every OS);
   setup messages that named `~/.config/workbench`; `workbench service` from another Windows
   session ("Service"); and Local History after a watcher overflow ("File watching").
-- **Packaging, after 0.3.0:** `install.ps1 -Uninstall` (§4, "A zip with `install.ps1`"),
-  which CI runs after the install; and an application manifest in both executables (§1.A):
-  Windows 10 and 11 as supported systems, Common Controls 6 for the message boxes of
-  `workbenchw.exe` and the supervisor, `longPathAware`, and `asInvoker`. A `cfg(windows)`
-  test checks in its own process that Windows applies it (GetVersionExW reports 10, comctl32
-  loads in version 6). How the message boxes look is left for a desktop check.
+- **After 0.3.0 (unreleased):** Workbench's own Kill, Close and Restart recorded, so such a
+  run ends terminated, not failed ("Signals"); drive paths in the browser ("Paths in the
+  browser"); a repository git refuses reported, and remote failures that needed ssh's
+  questions explained ("Git"); paths other programs write compared as Windows compares them
+  ("Paths", §1.G, "Detected commands") and why `ps_quote` leaves a final `\` alone
+  ("Shells"); the sign-in `PATH` for new terminals and lookups, and the sign-in environment
+  for the supervisor ("Risks" in §5, "Service"); `install.ps1 -Uninstall` (§4, "A zip with
+  `install.ps1`"), which CI runs after the install; and an application manifest in both
+  executables (§1.A): Windows 10 and 11 as supported systems, Common Controls 6 for the
+  message boxes of `workbenchw.exe` and the supervisor, `longPathAware`, and `asInvoker`. A
+  `cfg(windows)` test checks in its own process that Windows applies it (GetVersionExW
+  reports 10, comctl32 loads in version 6). How the message boxes look is left for a desktop
+  check. The new `cfg(windows)` tests have been compiled, not run: the `windows-latest` job
+  runs them first.
 - **Next:** real Windows 10 and 11 desktops (§5): ConPTY terminals with agent CLIs, the
   service and its Start Menu shortcut (and the look of its message boxes), git over SSH and
   HTTPS, language servers. Until then a tag publishes the Linux archive alone: the release

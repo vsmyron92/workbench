@@ -28,11 +28,6 @@
   and a revoked one with a warning not to trust it again.
   When git is missing or times out, the GitLab and GitHub pollers still watch only the
   default branch, but now log why once per project instead of saying nothing.
-- **On Windows:** a repository git refuses because another user owns the folder
-  (`safe.directory`) no longer just loses its branch. The project shows a warning that
-  names the folder and the command that trusts it. The status bar reads "Untrusted
-  repository", and the git tool windows show git's message with a button that copies the
-  command. Deploys report the refusal too, and the pollers log it once per project.
 - **Machine overlays:** an overlay that does not parse is left out whole, secrets
   included. A secret missing for that reason used to come with the advice to add it under
   `[secrets]` in that same overlay; it now comes with the overlay's parse error. The usual
@@ -47,6 +42,34 @@
   failure into `upstream`. The `workbench_notify` tool's description says what it does
   everywhere: a toast in Workbench, and a desktop notification, your notify command and a
   push to your devices where you set them up (Windows has no desktop notifications yet).
+- **On Windows:** a repository git refuses because another user owns the folder
+  (`safe.directory`) no longer just loses its branch. The project shows a warning that
+  names the folder and the command that trusts it. The status bar reads "Untrusted
+  repository", and the git tool windows show git's message with a button that copies the
+  command. Deploys report the refusal too, and the pollers log it once per project.
+- **On Windows:** programs installed while Workbench runs (Node.js, Python, rustup, an
+  agent CLI, a language server) are found without a restart. New terminals, runs and agent
+  sessions get the `PATH` a new sign-in gets, followed by Workbench's own folders it lacks;
+  Workbench's own lookups (language servers, debug adapters, agent CLIs) try it too and
+  pass its folders on to what they start. The Git features still find a newly installed
+  Git for Windows only after a restart. `workbench service install --enable` and
+  `workbench service open` start Workbench in your sign-in environment, as the sign-in
+  entry does, not in the environment of the shell they run in.
+- **On Windows:** a file outside the project at a drive path (a language server's
+  definition in a library, a debug stop in `C:\…`) opens instead of being refused. Copy
+  Path and drag and drop join the project's folder and a file with `\`, and tab titles,
+  breadcrumbs and stack frames name a file by what follows its last `\`.
+- **On Windows:** paths other programs write compare as Windows compares them (any case,
+  `\` or `/`): Claude Code's project entries in `~/.claude.json`, Gemini's chat folders, the
+  session folder that shortens the paths in a permission prompt, and a file an agent's hook
+  names in another case, which no longer starts a second Local History. The debugger's attach picker knows a
+  process by its image name (`node.exe`, `javaw.exe`) and reads `C:\Program Files\…`
+  command lines, and a launch configuration's `.\cmd\api` in a Go module debugs as Go.
+- **On Windows:** `install.ps1 -Uninstall` (with the `-Prefix` you installed with) removes
+  Workbench: the services started from its folder, the folder and the `PATH` entry the
+  install added. It changes nothing while Workbench runs from there, and keeps your
+  configuration and data. The executables carry an application manifest (Windows 10 and 11,
+  message boxes in the current style, long paths where Windows allows them).
 
 ## 0.3.0 - 2026-09-29
 
