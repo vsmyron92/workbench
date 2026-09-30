@@ -512,7 +512,9 @@ Linux follows links as it always did.
   them (session 0).
 - Its environment (`WORKBENCH_CONFIG_DIR`, `WORKBENCH_DATA_DIR`, `WORKBENCH_LOG`) lives in
   `%LOCALAPPDATA%\workbench\service.json`; PATH is not captured (a logon process already gets
-  the user's PATH).
+  the user's PATH). `install --enable` and `service open` start the supervisor in the user's
+  sign-in environment (`os::env::user_default`) plus these, as the `Run` entry does, not in
+  the environment of the shell they run in.
 - A Start Menu `Workbench.lnk` runs `workbenchw.exe open`. `workbench service status` also
   reads `StartupApproved\Run` to report an entry disabled in Task Manager.
 - `install --enable` over a running service starts the new supervisor outside its own job
@@ -617,11 +619,20 @@ manifest can come later; revisit MSI once the binaries are code-signed. Users ru
 block on Windows 10 if output is not drained). A child can start grandchildren in the gap
 before it joins its Job (portable-pty has no suspended start; fork it if that matters).
 `.cmd` injection wherever the resolver is bypassed. CRLF handling in line staging.
-Installers change `PATH` in the registry only: a program installed while Workbench runs
-(Git for Windows, Node.js, Python, rustup) stays unknown to it, its terminals and runs until
-it restarts. The "not found on PATH" messages say so (`os::exe::INSTALLED_SINCE`); building
-new terminals' `PATH` from the `Environment` registry keys, as Windows Terminal does, could
-come later.
+Installers change `PATH` in the registry only, so Workbench's own `PATH` stays the one it
+started with. Done (`os::env`): `CreateEnvironmentBlock` for the process's token, without its
+own variables, gives the environment a new sign-in gets, re-read once HKLM's or HKCU's
+`Environment` key changes (`RegNotifyChangeKeyValue`). New terminals, runs and agents get its
+`Path`, then Workbench's own absolute entries it lacks (a virtual environment it was started
+from); before, portable-pty put the registry's `Path` over Workbench's, dropping those. A
+lookup (`os::exe::which`) that misses tries its folders, and what Workbench starts by itself
+outside a terminal (language servers, debug adapters, secret and service commands) gets them
+after its own `PATH` (`os::exe::program_env`), so a program installed while Workbench runs
+(Node.js, Python, rustup, an agent CLI, a language server) is found without a restart and
+finds what it runs in turn (gopls its `go`). What the server starts by name through std (git,
+and rustc for gdb's pretty printers) keeps its own `PATH` until it restarts; git's "not
+found" message says so (`os::exe::INSTALLED_SINCE`). The other variables an installer sets
+(`JAVA_HOME`) reach new terminals only (portable-pty reads the `Environment` keys).
 `aws-lc-sys` on MSVC: 0.45 builds with its `cc` builder (no CMake) and, without NASM, links
 the prebuilt NASM objects that rustls's `aws_lc_rs` feature enables (`prebuilt-nasm`), so
 no setup-nasm step should be needed; check the first run. Sharing violations on rename and

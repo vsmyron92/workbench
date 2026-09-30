@@ -496,7 +496,7 @@ pub async fn locate(command: &str, rustup_component: Option<&str>) -> Located {
         .ok()
         .flatten();
     let Some(path) = found else {
-        return Err(format!("{command} was not found on PATH{}", exe::INSTALLED_SINCE));
+        return Err(format!("{command} was not found on PATH"));
     };
     if !exe::is_executable(&path) {
         return Err(format!("{} is not executable", path.display()));

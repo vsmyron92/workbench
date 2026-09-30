@@ -61,11 +61,12 @@ pub fn plain_command(command: &str) -> tokio::process::Command {
 }
 
 /// A shell's argv (`run_argv`, or `apps::remote::argv`'s ssh) as a process to spawn, with
-/// `exe::child_env`: on Windows a cmd.exe started from the command never runs a program
-/// from the current directory (a repository).
+/// `exe::program_env`: on Windows a cmd.exe started from the command never runs a program
+/// from the current directory (a repository), and the command finds a program installed
+/// since Workbench started, as a run's terminal does.
 pub fn command(argv: &[String]) -> tokio::process::Command {
     let mut c = tokio::process::Command::new(&argv[0]);
-    c.args(&argv[1..]).envs(super::exe::child_env().iter().copied());
+    c.args(&argv[1..]).envs(super::exe::program_env());
     c
 }
 

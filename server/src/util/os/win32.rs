@@ -1,6 +1,6 @@
-//! Small Win32 helpers the areas' Windows code shares: owned handles and blocks, UTF-16
-//! strings and paths for the `…W` functions, file identity, the user a process runs as, and
-//! registry values.
+//! Small Win32 helpers the areas' Windows code shares: owned handles, registry keys and
+//! blocks, UTF-16 strings and paths for the `…W` functions, file identity, the user a process
+//! runs as, and registry values.
 
 use std::ffi::c_void;
 use std::fs::OpenOptions;
@@ -11,7 +11,7 @@ use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE, LocalFree};
-use windows_sys::Win32::System::Registry::{HKEY, RRF_RT_REG_SZ, RegGetValueW};
+use windows_sys::Win32::System::Registry::{HKEY, RRF_RT_REG_SZ, RegCloseKey, RegGetValueW};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -39,6 +39,19 @@ impl Drop for Handle {
     fn drop(&mut self) {
         // SAFETY: the handle is owned, valid and closed only here.
         unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// An open registry key, closed on drop.
+pub struct Key(pub HKEY);
+
+// SAFETY: a registry key handle is valid in every thread of the process.
+unsafe impl Send for Key {}
+
+impl Drop for Key {
+    fn drop(&mut self) {
+        // SAFETY: a key this value opened, closed only here.
+        unsafe { RegCloseKey(self.0) };
     }
 }
 

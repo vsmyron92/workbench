@@ -782,7 +782,7 @@ command = "cd . && sh -c true"
     let p = l.state.projects.require("live").unwrap();
     let views = runs::list(&l.state, &p).await;
     let by: std::collections::HashMap<&str, &runs::RunView> = views.iter().map(|v| (v.name.as_str(), v)).collect();
-    assert_eq!(by["api"].problems, vec![format!("`wb-no-such-tool-4242` is not installed (not found on PATH){}", crate::util::os::exe::INSTALLED_SINCE)]);
+    assert_eq!(by["api"].problems, vec!["`wb-no-such-tool-4242` is not installed (not found on PATH)".to_string()]);
     assert!(by["inner"].problems.is_empty() && by["fine"].problems.is_empty(), "{:?} {:?}", by["inner"].problems, by["fine"].problems);
 
     runs::start(&l.state, &p, "api", false).await.unwrap();

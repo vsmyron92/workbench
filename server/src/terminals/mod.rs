@@ -1404,6 +1404,11 @@ pub(crate) fn base_env(state: &AppState, id: &str) -> Vec<(String, Option<String
     if !has_locale {
         env.push(("LANG".into(), Some("C.UTF-8".into())));
     }
+    // Programs installed since Workbench started (Windows: the sign-in's `PATH`, then
+    // Workbench's own entries it lacks). Unix keeps this process's.
+    if let Some(path) = util::os::env::fresh_path() {
+        env.push(("PATH".into(), Some(path)));
+    }
     env
 }
 
