@@ -1,6 +1,6 @@
 //! Small Win32 helpers the areas' Windows code shares: owned handles, registry keys and
-//! blocks, UTF-16 strings and paths for the `…W` functions, file identity, the user a process
-//! runs as, and registry values.
+//! blocks, COM interface pointers, UTF-16 strings and paths for the `…W` functions, file
+//! identity, the user a process runs as, and registry values.
 
 use std::ffi::c_void;
 use std::fs::OpenOptions;
@@ -18,6 +18,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, GetFileInformationByHandle,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::core::{GUID, HRESULT};
 
 /// An owned kernel handle, closed on drop.
 pub struct Handle(pub HANDLE);
@@ -65,6 +66,43 @@ impl Drop for Local {
             unsafe { LocalFree(self.0) };
         }
     }
+}
+
+/// IUnknown's methods, which start every COM vtable. A hand-written vtable mirrors the C
+/// declaration whole, in declaration order (shobjidl_core.h, objidl.h); the methods not
+/// called are placeholders of pointer size, and a method only Windows calls is never read.
+#[repr(C)]
+#[allow(dead_code)]
+pub struct IUnknownVtbl {
+    pub query_interface: unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
+    pub add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
+    pub release: unsafe extern "system" fn(*mut c_void) -> u32,
+}
+
+/// A COM interface pointer, released on drop.
+pub struct Com(pub *mut c_void);
+
+impl Com {
+    /// The object's vtable, as `V`.
+    ///
+    /// # Safety
+    /// The pointer is an interface whose vtable starts with `V`'s layout.
+    pub unsafe fn vtbl<V>(&self) -> &V {
+        // SAFETY: a COM object starts with its vtable pointer (the caller's promise for `V`).
+        unsafe { &**(self.0 as *const *const V) }
+    }
+}
+
+impl Drop for Com {
+    fn drop(&mut self) {
+        // SAFETY: a live interface pointer this value holds one reference to.
+        unsafe { (self.vtbl::<IUnknownVtbl>().release)(self.0) };
+    }
+}
+
+/// An HRESULT as a result: failure codes as the error (Windows words them like Win32 errors).
+pub fn hr(hr: HRESULT) -> io::Result<()> {
+    if hr >= 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(hr)) }
 }
 
 /// `s` NUL-terminated, for the `…W` functions.

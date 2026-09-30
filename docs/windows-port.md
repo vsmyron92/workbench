@@ -47,9 +47,12 @@ run on a Windows 10 or 11 desktop yet.
   reports 10, comctl32 loads in version 6). How the message boxes look is left for a desktop
   check. A terminal whose process exited while what it started ran on learns that its job is
   empty from a completion port, which one thread reads for every terminal (§1.F), and a path
-  of MAX_PATH characters or more is refused with a 422 that says why the Recycle Bin cannot
-  take it and how to delete it instead (§1.L). The new `cfg(windows)` tests have been
-  compiled, not run: the `windows-latest` job runs them first.
+  of MAX_PATH characters or more goes to the Recycle Bin through `IFileOperation`, whose
+  progress sink refuses a delete that would not go to the bin (§1.L). Whether the shell
+  and the bin take such a path is what `trash_takes_long_paths_or_says_why` finds out on
+  `windows-latest`; where they do not, a 422 says why and how to delete it instead. The new
+  `cfg(windows)` tests have been compiled, not run: the `windows-latest` job runs them
+  first.
 - **Next:** real Windows 10 and 11 desktops (§5): ConPTY terminals with agent CLIs, the
   service and its Start Menu shortcut (and the look of its message boxes), git over SSH and
   HTTPS, language servers. Until then a tag publishes the Linux archive alone: the release
@@ -90,8 +93,8 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   `packaging/windows/workbench.manifest`, a no-op elsewhere). The manifest declares Windows
   10 and 11 (`supportedOS`: without it Windows treats the programs as written for Windows
   8), Common Controls 6 (message boxes in the current style), `longPathAware` (no MAX_PATH
-  limit where `LongPathsEnabled` is set; the Recycle Bin's `SHFileOperationW` keeps it, and
-  `os::fs` refuses longer paths there with a 422, §1.L) and `asInvoker`. It is linked into
+  limit where `LongPathsEnabled` is set; the Recycle Bin's `SHFileOperationW` keeps it, so
+  `os::fs` sends longer paths to `IFileOperation`, §1.L) and `asInvoker`. It is linked into
   the test executables too. Not done:
   the Windows dev-dependency `junction`, since the tests make junctions with `cmd /c mklink /J`.
 - Not needed: `if-addrs`, `trash`, `winreg`, `windows` (each replacement is under 80 lines of
@@ -274,16 +277,26 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   FOF_ALLOWUNDO | …)`.
   - What the bin will not take is refused first, with `not_recyclable` (422) and a message
     that says why and how to delete it instead: no bin on the drive, the bin turned off, a
-    file larger than the bin, a path of MAX_PATH (260) characters or more.
-  - An item Windows still cannot recycle (a folder larger than the bin) gets Windows' question
-    on the desktop, and the request stops waiting after 60 s.
-  - Not `IFileOperation`: it drives the same copy engine as Explorer's Delete, which answers
-    an item whose path is too long with "names too long for the Recycle Bin" and an offer to
-    delete it for good. With no UI, `FOF_NOCONFIRMATION` takes that offer and
-    `FOF_WANTNUKEWARNING` asks on the desktop; nothing documented refuses it (a progress
-    sink's `PreDeleteItem` gets `TSF_DELETE_RECYCLE_IF_POSSIBLE`, documented only as
-    "recycle on file delete, if possible"). Microsoft documents the long-path opt-in for the
-    file functions only, and warns that the shell may not read such paths.
+    file larger than the bin.
+  - `SHFileOperationW` takes no path of MAX_PATH (260) characters or more (not with the
+    `\\?\` prefix either). Such a path goes through `IFileOperation` (`os::recycle`: a
+    hand-written vtable, COM in a single-threaded apartment on a thread of its own) with
+    `FOFX_RECYCLEONDELETE` and `FOF_NO_UI`. Where Windows would delete the item for good
+    instead, the flags its progress sink's `PreDeleteItem` gets lack
+    `TSF_DELETE_RECYCLE_IF_POSSIBLE` (Qt's `QFile::moveToTrash` relies on this too); the
+    sink then returns an error, which, as documented, cancels the delete and all that
+    follows it.
+    `PostDeleteItem` names the item in the bin, so a delete for good would still be told
+    from a recycle. When the shell cannot open the path or the sink refuses, the answer is
+    the 422, which says to shorten the path. Not yet known: whether the shell opens such a
+    path and the bin takes it, and whether the refusal comes as documented for an item too
+    long for the bin. `trash_takes_long_paths_or_says_why` finds out on `windows-latest`
+    and accepts either outcome, never a delete for good.
+  - An item with a shorter path Windows still cannot recycle (a folder larger than the bin,
+    or one whose contents' paths are too long for it) gets Windows' question on the desktop,
+    and the request stops waiting after 60 s. Later: `IFileOperation` with the refusing
+    progress sink for every item, once `windows-latest` has shown the long-path case works,
+    so this question is gone too.
 - `notify.rs:198` (`notify-send`) reports `desktop: "unavailable"` in the first version.
 
 **M. Service:** `platform/service.rs` (systemd unit, `.desktop` file, `systemctl`) gets a

@@ -24,7 +24,7 @@ use windows_sys::Win32::UI::Shell::{FOLDERID_Programs, KF_FLAG_DEFAULT, SHGetKno
 use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW};
 use windows_sys::core::{GUID, HRESULT, PCWSTR, PWSTR};
 
-use super::win32::{Handle, Key, reg_string, reg_value, wide};
+use super::win32::{Com, Handle, IUnknownVtbl, Key, hr, reg_string, reg_value, wide};
 
 /// `HKCU\<RUN_KEY>`: what Windows starts when the user signs in.
 pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -162,15 +162,6 @@ const IID_IPERSISTFILE: GUID = GUID::from_u128(0x0000010b_0000_0000_c000_0000000
 
 // The vtables mirror the C declarations whole; the methods not called are never read.
 
-/// IUnknown's methods, which start every COM vtable.
-#[repr(C)]
-#[allow(dead_code)]
-struct IUnknownVtbl {
-    query_interface: unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
-    add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
-    release: unsafe extern "system" fn(*mut c_void) -> u32,
-}
-
 /// IShellLinkW's vtable (shobjidl_core.h), in declaration order; the methods not called
 /// here are placeholders of pointer size.
 #[repr(C)]
@@ -208,31 +199,6 @@ struct IPersistFileVtbl {
     save: unsafe extern "system" fn(*mut c_void, PCWSTR, i32) -> HRESULT,
     save_completed: *const c_void,
     get_cur_file: *const c_void,
-}
-
-/// A COM interface pointer, released on drop.
-struct Com(*mut c_void);
-
-impl Com {
-    /// The object's vtable, as `V`.
-    ///
-    /// # Safety
-    /// The pointer is an interface whose vtable starts with `V`'s layout.
-    unsafe fn vtbl<V>(&self) -> &V {
-        // SAFETY: a COM object starts with its vtable pointer (the caller's promise for `V`).
-        unsafe { &**(self.0 as *const *const V) }
-    }
-}
-
-impl Drop for Com {
-    fn drop(&mut self) {
-        // SAFETY: a live interface pointer this value holds one reference to.
-        unsafe { (self.vtbl::<IUnknownVtbl>().release)(self.0) };
-    }
-}
-
-fn hr(hr: HRESULT) -> io::Result<()> {
-    if hr >= 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(hr)) }
 }
 
 /// Writes the shortcut `lnk` (replacing one there) through the shell's ShellLink object, so
