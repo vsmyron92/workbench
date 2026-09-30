@@ -640,3 +640,24 @@ button.wb-status-item:hover {
   color: var(--fg-subtle);
   font-size: var(--fs-xs);
 }
+
+.wb-folder-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+}
+.wb-folder-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.wb-folder-list {
+  height: 240px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: auto;
+}
+.wb-folder-empty {
+  padding: 8px;
+}

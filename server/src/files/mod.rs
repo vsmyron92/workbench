@@ -116,6 +116,7 @@ pub fn router() -> Router<AppState> {
             "/api/projects/{pid}/search/replace",
             post(search::replace).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
+        .route("/api/fs/dirs", get(abs::dirs))
         .route("/api/fs/read", get(abs::read))
         .route("/api/fs/stat", get(abs::stat))
         .route("/api/fs/raw", get(abs::raw))
