@@ -429,7 +429,7 @@ fn group_rank(r: &RunConfig) -> u8 {
 
 /// `p` relative to `root` with `/` separators; `.` for the root itself.
 pub(crate) fn rel(root: &Path, p: &Path) -> String {
-    let r = p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
+    let r = crate::util::os::path::to_slash(p.strip_prefix(root).unwrap_or(p));
     if r.is_empty() { ".".into() } else { r }
 }
 

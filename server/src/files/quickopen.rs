@@ -77,7 +77,7 @@ pub fn build_index(root: &Path) -> (Vec<String>, bool) {
             break;
         }
         if let Ok(rel) = ent.path().strip_prefix(root) {
-            files.push(rel.to_string_lossy().replace('\\', "/"));
+            files.push(crate::util::os::path::to_slash(rel));
         }
     }
     files.sort();

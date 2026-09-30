@@ -120,6 +120,25 @@ fn cargo_workspace_with_an_axum_server() {
     assert_eq!(pf.components[0].kind, "cargo-workspace");
 }
 
+/// Run folders are written with `/`. On Linux a `\` is part of a folder's name, so a
+/// project in `svc\api` runs there, not in `svc/api`.
+#[test]
+fn run_folders_keep_their_names() {
+    let root = Path::new("/p");
+    assert_eq!(rel(root, root), ".");
+    assert_eq!(rel(root, &root.join("app").join("server")), "app/server");
+    #[cfg(unix)]
+    {
+        assert_eq!(rel(root, &root.join(r"app\server")), r"app\server");
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        write(r, r"svc\api/Cargo.toml", "[package]\nname = \"api\"\n[dependencies]\naxum = \"0.8\"\n");
+        write(r, r"svc\api/src/main.rs", "fn main() { let addr = \"127.0.0.1:3000\"; }");
+        let pf = detect(r);
+        assert_eq!(run(&pf, "api").cwd, r"svc\api", "{:?}", names(&pf));
+    }
+}
+
 #[test]
 fn single_crate_with_several_binaries() {
     let d = tempfile::tempdir().unwrap();
