@@ -111,13 +111,67 @@ async fn working_diff(p: &Path, path: &str) -> super::diff::GitFileDiff {
     file_diff(&repo(p).await, &DiffQuery { path: path.into(), mode: Some(DiffMode::Working), ..Default::default() }).await.unwrap().0
 }
 
-/// A working-tree file git converts, as a diff or a conflict shows it: as git reads it (LF)
-/// on Windows (`eol::FOLLOWS_GIT`), byte for byte elsewhere.
-fn shown(text: &str) -> String {
-    if super::eol::FOLLOWS_GIT { text.replace("\r\n", "\n") } else { text.to_string() }
+/// The lines (from 1) at which two texts differ, split at LF so that a CR counts: what a
+/// side-by-side view of a diff's `original` and `modified` marks as changed.
+fn differing_lines(a: &str, b: &str) -> Vec<usize> {
+    let (a, b): (Vec<&str>, Vec<&str>) = (a.split('\n').collect(), b.split('\n').collect());
+    (0..a.len().max(b.len())).filter(|&i| a.get(i) != b.get(i)).map(|i| i + 1).collect()
 }
 
-/// What `eol` shows and writes on Windows; elsewhere text is shown and written byte for byte.
+/// What makes git check a scratch repository's `.txt` files out with CRLF over LF in the
+/// index: `core.autocrlf=true` (Git for Windows' default) or an `eol=crlf` attribute.
+#[derive(Debug, Clone, Copy)]
+enum CrlfBy {
+    Autocrlf,
+    Attribute,
+}
+
+/// A repository whose `.txt` files git checks out with CRLF (`by`), with `files` committed.
+fn crlf_checkout(by: CrlfBy, files: &[(&str, &str)]) -> tempfile::TempDir {
+    let d = init_repo();
+    let p = d.path();
+    match by {
+        CrlfBy::Autocrlf => {
+            git(p, &["config", "core.autocrlf", "true"]);
+        }
+        CrlfBy::Attribute => write(p, ".gitattributes", "*.txt text eol=crlf\n"),
+    }
+    for (rel, text) in files {
+        write(p, rel, text);
+    }
+    commit_all(p, "init");
+    d
+}
+
+/// On every OS (a repository's `*.ps1 eol=crlf` checks CRLF out on Linux too), a file git
+/// checks out with CRLF over an LF index diffs as git reads it: only the edited lines
+/// differ, staging a line puts no CR into the index, and rolling one back writes CRLF.
+#[tokio::test]
+async fn crlf_checkouts_show_and_stage_only_the_edited_lines() {
+    for by in [CrlfBy::Autocrlf, CrlfBy::Attribute] {
+        let d = crlf_checkout(by, &[("w.txt", "a\r\nb\r\nc\r\nd\r\n")]);
+        let p = d.path();
+        assert_eq!(index_of(p, "w.txt"), "a\nb\nc\nd\n", "{by:?}");
+        write(p, "w.txt", "a\r\nB\r\nc\r\nd\r\n");
+        let diff = working_diff(p, "w.txt").await;
+        assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\nb\nc\nd\n", "a\nB\nc\nd\n"), "{by:?}");
+        assert_eq!(differing_lines(&diff.original, &diff.modified), [2], "{by:?}");
+        assert_eq!(diff.lines.iter().map(|l| (l.kind, l.line)).collect::<Vec<_>>(), [(LineKind::Del, 2), (LineKind::Add, 2)]);
+        // Staging the line puts no CR into the index.
+        lines_op(p, LineOp::Stage, "w.txt", &[del(2), add(2)]).await.unwrap();
+        let cached = git(p, &["diff", "--cached"]);
+        assert!(cached.contains("\n-b\n+B\n") && !cached.contains('\r'), "{by:?}: {cached:?}");
+        assert_eq!(index_of(p, "w.txt"), "a\nB\nc\nd\n", "{by:?}");
+        let diff = working_diff(p, "w.txt").await;
+        assert!(diff.hunks.is_empty() && diff.original == diff.modified, "{by:?}: {diff:?}");
+        // Rolling a line back writes CRLF.
+        write(p, "w.txt", "a\r\nB\r\nc\r\nX\r\nd\r\n");
+        assert_eq!(working_diff(p, "w.txt").await.modified, "a\nB\nc\nX\nd\n", "{by:?}");
+        lines_op(p, LineOp::Discard, "w.txt", &[add(4)]).await.unwrap();
+        assert_eq!(read(p, "w.txt"), "a\r\nB\r\nc\r\nd\r\n", "{by:?}");
+    }
+}
+
 #[tokio::test]
 async fn crlf_working_trees_over_lf_indexes_diff_and_stage_as_git_reads_them() {
     // core.autocrlf=true (Git for Windows' default): LF in the index, CRLF on disk.
@@ -127,21 +181,21 @@ async fn crlf_working_trees_over_lf_indexes_diff_and_stage_as_git_reads_them() {
     write(p, "w.txt", "a\r\nb\r\nc\r\n");
     commit_all(p, "init");
     write(p, "w.txt", "a\r\nNEW\r\nb\r\nc\r\nZ\r\n");
-    // Both sides of the diff read like the hunks: LF (Windows).
+    // Both sides of the diff read like the hunks: LF.
     let diff = working_diff(p, "w.txt").await;
-    assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\nb\nc\n", &*shown("a\r\nNEW\r\nb\r\nc\r\nZ\r\n")));
+    assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\nb\nc\n", "a\nNEW\nb\nc\nZ\n"));
     assert_eq!(diff.lines.iter().map(|l| (l.kind, l.line)).collect::<Vec<_>>(), vec![(LineKind::Add, 2), (LineKind::Add, 5)]);
     let r = repo(p).await;
     let q = DiffQuery { path: "w.txt".into(), mode: Some(DiffMode::Compare), base: Some("HEAD".into()), ..Default::default() };
-    assert_eq!(file_diff(&r, &q).await.unwrap().0.modified, shown("a\r\nNEW\r\nb\r\nc\r\nZ\r\n"));
+    assert_eq!(file_diff(&r, &q).await.unwrap().0.modified, "a\nNEW\nb\nc\nZ\n");
     // Staging a line puts LF into the index; rolling one back keeps the file CRLF.
     lines_op(p, LineOp::Stage, "w.txt", &[add(5)]).await.unwrap();
     assert_eq!(index_of(p, "w.txt"), "a\nb\nc\nZ\n");
     lines_op(p, LineOp::Discard, "w.txt", &[add(2)]).await.unwrap();
     assert_eq!(read(p, "w.txt"), "a\r\nb\r\nc\r\nZ\r\n");
-    // Nothing unstaged is left, and on Windows both sides say so (the UI's "No changes").
+    // Nothing unstaged is left, and both sides say so (the UI's "No changes").
     let diff = working_diff(p, "w.txt").await;
-    assert!(diff.hunks.is_empty() && (diff.original == diff.modified) == super::eol::FOLLOWS_GIT, "{diff:?}");
+    assert!(diff.hunks.is_empty() && diff.original == diff.modified, "{diff:?}");
     // Hunks, the same way.
     write(p, "w.txt", "a\r\nb\r\nH\r\nc\r\nZ\r\n");
     let diff = working_diff(p, "w.txt").await;
@@ -153,20 +207,19 @@ async fn crlf_working_trees_over_lf_indexes_diff_and_stage_as_git_reads_them() {
     super::diff::apply_hunks(&r, super::diff::HunkOp::Unstage, &req(staged.fingerprint)).await.unwrap();
     assert_eq!(index_of(p, "w.txt"), "a\nb\nc\n");
     let diff = working_diff(p, "w.txt").await;
-    assert_eq!(diff.modified, shown("a\r\nb\r\nH\r\nc\r\nZ\r\n"));
+    assert_eq!(diff.modified, "a\nb\nH\nc\nZ\n");
     super::diff::apply_hunks(&r, super::diff::HunkOp::Discard, &req(diff.fingerprint)).await.unwrap();
     assert_eq!(read(p, "w.txt"), "a\r\nb\r\nc\r\n");
 
     // Part of an untracked CRLF file goes into the index with LF, as `git add` would.
     write(p, "u.txt", "x\r\ny\r\nz\r\n");
     let diff = working_diff(p, "u.txt").await;
-    assert!(diff.untracked && diff.modified == shown("x\r\ny\r\nz\r\n"), "{diff:?}");
+    assert!(diff.untracked && diff.modified == "x\ny\nz\n", "{diff:?}");
     lines_op(p, LineOp::Stage, "u.txt", &[add(1), add(3)]).await.unwrap();
     assert_eq!(index_of(p, "u.txt"), "x\nz\n");
-    assert_eq!(working_diff(p, "u.txt").await.modified, shown("x\r\ny\r\nz\r\n"));
+    assert_eq!(working_diff(p, "u.txt").await.modified, "x\ny\nz\n");
 }
 
-/// What `eol` shows and writes on Windows; elsewhere text is shown and written byte for byte.
 #[tokio::test]
 async fn crlf_by_attribute_and_unconverted_crlf() {
     // `text eol=crlf` in .gitattributes, core.autocrlf off.
@@ -177,7 +230,7 @@ async fn crlf_by_attribute_and_unconverted_crlf() {
     commit_all(p, "init");
     assert_eq!(index_of(p, "w.txt"), "a\nb\n");
     write(p, "w.txt", "a\r\nNEW\r\nb\r\nZ\r\n");
-    assert_eq!(working_diff(p, "w.txt").await.modified, shown("a\r\nNEW\r\nb\r\nZ\r\n"));
+    assert_eq!(working_diff(p, "w.txt").await.modified, "a\nNEW\nb\nZ\n");
     lines_op(p, LineOp::Stage, "w.txt", &[add(4)]).await.unwrap();
     assert_eq!(index_of(p, "w.txt"), "a\nb\nZ\n");
     lines_op(p, LineOp::Discard, "w.txt", &[add(2)]).await.unwrap();
@@ -200,42 +253,112 @@ async fn crlf_by_attribute_and_unconverted_crlf() {
     assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\nb\n", "a\r\nb\r\n"));
     assert_eq!(diff.lines.len(), 4);
     // `text` converts a file committed with CRLF all the same (git shows every line changed
-    // until it is renormalized): the working-tree side reads with LF (Windows).
+    // until it is renormalized): the working-tree side reads with LF.
     write(p, "c.txt", "a\r\nb\r\n");
     commit_all(p, "crlf");
     write(p, ".gitattributes", "c.txt text\n");
     let diff = working_diff(p, "c.txt").await;
-    assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\r\nb\r\n", &*shown("a\r\nb\r\n")));
+    assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\r\nb\r\n", "a\nb\n"));
 }
 
-/// What `eol` shows and writes on Windows; elsewhere text is shown and written byte for byte.
+/// The git lookups `eol::of` made on this thread.
+fn eol_lookups() -> usize {
+    super::eol::LOOKUPS.with(std::cell::Cell::get)
+}
+
+/// Files git does not convert keep their bytes, as they always did: an LF repository, and a
+/// file committed with CRLF (`-text`) where git converts the others. Only a file with a CRLF
+/// in it costs git calls to find out: an LF repository pays none.
 #[tokio::test]
-async fn conflicts_in_crlf_working_trees_are_shown_with_lf_and_resolved_with_crlf() {
+async fn unconverted_files_keep_their_bytes_and_lf_files_cost_no_lookup() {
+    // An LF repository: diffs, line staging, a conflict and its resolution.
     let d = init_repo();
     let p = d.path();
-    git(p, &["config", "core.autocrlf", "true"]);
-    write(p, "a.txt", "one\r\ntwo\r\n");
+    write(p, "f.txt", "a\nb\nc\n");
     commit_all(p, "init");
+    let before = eol_lookups();
+    write(p, "f.txt", "a\nB\nc\nd\n");
+    let diff = working_diff(p, "f.txt").await;
+    assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\nb\nc\n", "a\nB\nc\nd\n"));
+    let r = repo(p).await;
+    let q = DiffQuery { path: "f.txt".into(), mode: Some(DiffMode::Compare), base: Some("HEAD".into()), ..Default::default() };
+    assert_eq!(file_diff(&r, &q).await.unwrap().0.modified, "a\nB\nc\nd\n");
+    lines_op(p, LineOp::Stage, "f.txt", &[add(4)]).await.unwrap();
+    assert_eq!(index_of(p, "f.txt"), "a\nb\nc\nd\n");
+    lines_op(p, LineOp::Discard, "f.txt", &[del(2), add(2)]).await.unwrap();
+    assert_eq!(read(p, "f.txt"), "a\nb\nc\nd\n");
+    commit_all(p, "d");
     git(p, &["checkout", "-q", "-b", "feature"]);
-    write(p, "a.txt", "one\r\nfeature\r\n");
+    write(p, "f.txt", "a\nfeature\nc\nd\n");
     commit_all(p, "feature");
     git(p, &["checkout", "-q", "main"]);
-    write(p, "a.txt", "one\r\nmain\r\n");
+    write(p, "f.txt", "a\nmain\nc\nd\n");
+    commit_all(p, "main");
+    let out = ops::merge(&r, &ops::MergeRequest { rev: "feature".into(), no_ff: false, ff_only: false, squash: false, message: None }).await.unwrap();
+    assert!(out.conflicts, "{out:?}");
+    let v = super::conflicts::versions(&r, "f.txt").await.unwrap();
+    assert!(v.merged.starts_with("a\n<<<<<<< HEAD\nmain\n=======\nfeature\n>>>>>>> feature\n"), "{}", v.merged);
+    let req = super::conflicts::ResolveRequest { path: "f.txt".into(), content: Some("a\nboth\nc\nd\n".into()), side: None };
+    super::conflicts::resolve(&r, &req).await.unwrap();
+    assert_eq!(read(p, "f.txt"), "a\nboth\nc\nd\n");
+    assert_eq!(eol_lookups(), before, "LF files cost no git call");
+
+    // `-text` wins over core.autocrlf and `eol=crlf`: CRLF committed, and kept, as is.
+    let d = crlf_checkout(CrlfBy::Autocrlf, &[(".gitattributes", "*.txt text eol=crlf\nraw.txt -text\n"), ("raw.txt", "a\r\nb\r\nc\r\n")]);
+    let p = d.path();
+    assert_eq!(index_of(p, "raw.txt"), "a\r\nb\r\nc\r\n");
+    write(p, "raw.txt", "a\r\nB\r\nc\r\nd\r\n");
+    let before = eol_lookups();
+    let diff = working_diff(p, "raw.txt").await;
+    assert_eq!((diff.original.as_str(), diff.modified.as_str()), ("a\r\nb\r\nc\r\n", "a\r\nB\r\nc\r\nd\r\n"));
+    assert!(eol_lookups() > before, "a file with CRLFs asks git whether it converts it");
+    lines_op(p, LineOp::Stage, "raw.txt", &[add(4)]).await.unwrap();
+    assert_eq!(index_of(p, "raw.txt"), "a\r\nb\r\nc\r\nd\r\n");
+    lines_op(p, LineOp::Discard, "raw.txt", &[del(2), add(2)]).await.unwrap();
+    assert_eq!(read(p, "raw.txt"), "a\r\nb\r\nc\r\nd\r\n");
+    // A conflict in it is shown with its CRs and resolved text is written as sent.
+    commit_all(p, "d");
+    git(p, &["checkout", "-q", "-b", "feature"]);
+    write(p, "raw.txt", "a\r\nfeature\r\nc\r\nd\r\n");
+    commit_all(p, "feature");
+    git(p, &["checkout", "-q", "main"]);
+    write(p, "raw.txt", "a\r\nmain\r\nc\r\nd\r\n");
     commit_all(p, "main");
     let r = repo(p).await;
     let out = ops::merge(&r, &ops::MergeRequest { rev: "feature".into(), no_ff: false, ff_only: false, squash: false, message: None }).await.unwrap();
     assert!(out.conflicts, "{out:?}");
-    assert!(read(p, "a.txt").contains("<<<<<<< HEAD\r\n"), "git writes the conflict with CRLF");
-    let v = super::conflicts::versions(&r, "a.txt").await.unwrap();
-    assert_eq!(v.ours.as_deref(), Some("one\nmain\n"));
-    assert!(v.merged.starts_with(&shown("one\r\n<<<<<<< HEAD\r\nmain\r\n=======\r\n")) && v.merged.contains('\r') != super::eol::FOLLOWS_GIT, "{}", v.merged);
-    let req = super::conflicts::ResolveRequest { path: "a.txt".into(), content: Some("one\nmain and feature\n".into()), side: None };
+    let v = super::conflicts::versions(&r, "raw.txt").await.unwrap();
+    assert!(v.merged.starts_with("a\r\n<<<<<<< HEAD") && v.merged.contains("main\r\n"), "{:?}", v.merged);
+    let req = super::conflicts::ResolveRequest { path: "raw.txt".into(), content: Some("a\nboth\r\nc\r\nd\r\n".into()), side: None };
     super::conflicts::resolve(&r, &req).await.unwrap();
-    // Written back with CRLF on Windows; elsewhere as sent, as it always was.
-    let resolved = if super::eol::FOLLOWS_GIT { "one\r\nmain and feature\r\n" } else { "one\nmain and feature\n" };
-    assert_eq!(read(p, "a.txt"), resolved);
-    assert_eq!(index_of(p, "a.txt"), "one\nmain and feature\n");
-    assert!(status::status(&r, false).await.unwrap().files.iter().all(|f| f.path != "a.txt" || f.worktree == ' '));
+    assert_eq!(read(p, "raw.txt"), "a\nboth\r\nc\r\nd\r\n");
+}
+
+#[tokio::test]
+async fn conflicts_in_crlf_working_trees_are_shown_with_lf_and_resolved_with_crlf() {
+    for by in [CrlfBy::Autocrlf, CrlfBy::Attribute] {
+        let d = crlf_checkout(by, &[("a.txt", "one\r\ntwo\r\n")]);
+        let p = d.path();
+        git(p, &["checkout", "-q", "-b", "feature"]);
+        write(p, "a.txt", "one\r\nfeature\r\n");
+        commit_all(p, "feature");
+        git(p, &["checkout", "-q", "main"]);
+        write(p, "a.txt", "one\r\nmain\r\n");
+        commit_all(p, "main");
+        let r = repo(p).await;
+        let out = ops::merge(&r, &ops::MergeRequest { rev: "feature".into(), no_ff: false, ff_only: false, squash: false, message: None }).await.unwrap();
+        assert!(out.conflicts, "{by:?}: {out:?}");
+        assert!(read(p, "a.txt").contains("<<<<<<< HEAD\r\n"), "{by:?}: git writes the conflict with CRLF");
+        let v = super::conflicts::versions(&r, "a.txt").await.unwrap();
+        assert_eq!(v.ours.as_deref(), Some("one\nmain\n"), "{by:?}");
+        assert!(v.merged.starts_with("one\n<<<<<<< HEAD\nmain\n=======\nfeature\n") && !v.merged.contains('\r'), "{by:?}: {:?}", v.merged);
+        let req = super::conflicts::ResolveRequest { path: "a.txt".into(), content: Some("one\nmain and feature\n".into()), side: None };
+        super::conflicts::resolve(&r, &req).await.unwrap();
+        // Written back with CRLF, as a checkout writes it; LF in the index.
+        assert_eq!(read(p, "a.txt"), "one\r\nmain and feature\r\n", "{by:?}");
+        assert_eq!(index_of(p, "a.txt"), "one\nmain and feature\n", "{by:?}");
+        assert!(status::status(&r, false).await.unwrap().files.iter().all(|f| f.path != "a.txt" || f.worktree == ' '), "{by:?}");
+    }
 }
 
 #[tokio::test]

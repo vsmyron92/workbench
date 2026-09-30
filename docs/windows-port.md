@@ -317,16 +317,16 @@ Linux URIs and paths are unchanged.
 `eol=crlf`). In the git slice read `git ls-files --eol <path>`: when the index has LF and the
 working tree CRLF, strip `\r` from the working-tree side for the diff and for the patch given
 to `git apply --cached`, and put CRLF back when rolling lines back into the working tree.
-Done (`git/eol.rs`, on Windows: `eol::FOLLOWS_GIT`): git's own diffs already read such a
-file with LF, so the staging patches were right and `git apply` writes CRLF back by itself;
-what was missing is the diff's `modified` side and a conflict's `merged` text (now LF, like
-the hunks) and a conflict resolved with edited text (written back with CRLF). "Converted"
-follows git: `ls-files --eol` (`i/lf`, `w/crlf`, the `attr/` column) and `core.autocrlf` when
-no attribute decides; anything else keeps its bytes. Local History keeps "Last commit (HEAD)"
-of a file with CRLFs on disk with the line ends a checkout writes (`files/history`). Linux
-keeps every file byte for byte, with no extra git call: following git's conversions there
-too (they matter with `core.autocrlf` or `eol=crlf` attributes) would be a Linux change for
-the owner to decide.
+Done (`git/eol.rs`): git's own diffs already read such a file with LF, so the staging
+patches were right and `git apply` writes CRLF back by itself; what was missing is the
+diff's `modified` side and a conflict's `merged` text (now LF, like the hunks) and a
+conflict resolved with edited text (written back with CRLF). "Converted" follows git:
+`ls-files --eol` (`i/lf`, `w/crlf`, the `attr/` column) and `core.autocrlf` when no attribute
+decides; anything else keeps its bytes. Local History keeps "Last commit (HEAD)" of a file
+with CRLFs on disk with the line ends a checkout writes (`files/history`). This was
+Windows-only at first; it now holds on every OS, since `eol=crlf` attributes (this
+repository's `*.ps1`) and `core.autocrlf` check CRLF out on Linux too. Only a file with a
+CRLF in it is looked up, so an LF repository pays no extra git call.
 
 **Program lookup, `.cmd` shims and BatBadBut.** portable-pty resolves PATHEXT and launches
 `claude.cmd` with MSVCRT quoting (`cmdbuilder.rs:581-606, 702`): command injection through
