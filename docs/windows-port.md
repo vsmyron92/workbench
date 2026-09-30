@@ -50,9 +50,13 @@ run on a Windows 10 or 11 desktop yet.
   of MAX_PATH characters or more goes to the Recycle Bin through `IFileOperation`, whose
   progress sink refuses a delete that would not go to the bin (§1.L). Whether the shell
   and the bin take such a path is what `trash_takes_long_paths_or_says_why` finds out on
-  `windows-latest`; where they do not, a 422 says why and how to delete it instead. The new
-  `cfg(windows)` tests have been compiled, not run: the `windows-latest` job runs them
-  first.
+  `windows-latest`; where they do not, a 422 says why and how to delete it instead. Git's
+  line-ending conversions are now followed on every OS, not only here ("Line endings"); on
+  Linux a `\` stays part of a name in the relative paths the server answers with
+  (`os::path::to_slash`, "Paths" in ARCHITECTURE.md); and the dev containers message,
+  getting-started and the Help point to the Linux build inside WSL 2, untested ("Dev
+  containers through WSL" in §5). The new `cfg(windows)` tests have been compiled, not run:
+  the `windows-latest` job runs them first.
 - **Next:** real Windows 10 and 11 desktops (§5): ConPTY terminals with agent CLIs, the
   service and its Start Menu shortcut (and the look of its message boxes), git over SSH and
   HTTPS, language servers. Until then a tag publishes the Linux archive alone: the release
