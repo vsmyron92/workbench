@@ -1,114 +1,167 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 - 2026-09-30
 
-- **Runs:** a run whose terminal is closed or killed from outside now ends "exited" and
-  terminated (a warning chip that says "terminated", after the test counts if it has any),
-  no longer "failed: exited with code 1". That covers Kill, Close and Restart in Workbench,
-  and on Linux a hang-up, terminate, kill or interrupt signal from any process. A crash
-  (such as a segmentation fault or an abort), a non-zero exit code and tests that failed
-  before the end still fail, and Stop still stops. A task cut short this way does not count
-  as finished for runs that depend on it, a debug session's pre-launch run says it was
+- **Agent sessions (security fix):** removing an agent session from history while a restart
+  or a restore was waiting to start it could leave a working agent token behind, valid until
+  Workbench restarted. For Claude Code, the session's files also came back with that token
+  in them: `claude-settings.json` and `mcp.json` in the data directory, or inside the
+  container for a session in a dev container. A restart or restore that was waiting now
+  finds the session gone and starts nothing, so it issues no token and writes no files. An
+  agent session that fails to start no longer keeps the token it was given either. An agent
+  token gives what its session has: Workbench's hooks and its MCP tools.
+- **Runs:** a run whose terminal is closed or whose process is ended from outside now ends
+  "exited" with a "terminated" warning (after its test counts, if any), and its toast says
+  it was terminated, not "failed: exited with code 1". That covers Kill, Close and Restart
+  in Workbench and, on Linux, a hang-up, terminate, kill or interrupt signal that ends its
+  process, whoever sends it (Ctrl+C in its terminal, or the kernel's out-of-memory killer).
+  A crash (such as a segmentation fault or an abort), a non-zero exit code and tests that
+  failed before the end still fail, and Stop still stops. A run cut short does not count as
+  finished for runs that depend on it, a debug session's pre-launch run says it was
   terminated, and agents see `terminated` in `run_list`. On Windows only Workbench's own
   closes are known: a process ended from Task Manager exits with code 1 and still reads as
   failed.
-- **Terminals:** removing an agent session from history while a restart or a restore was
-  waiting to start it no longer leaves a working agent token behind, nor its session files
-  (`mcp.json` holds that token) in the data directory. An agent session that fails to start
-  no longer keeps the token it was given.
 - **Deploys:** a deploy no longer reports "the repository has no commits" (or "unknown
   commit") when git itself failed. It gives git's own message, such as "not a git
   repository", or says that the folder is gone or that git is missing or timed out. "No
-  commits" now means that git ran and HEAD names no commit.
-- **Git messages:** error boxes keep the line breaks of multi-line messages, such as git's.
-  A fetch, update or push that fails because ssh would have had to ask something now says
-  what to do. For an unknown host key, connect once with ssh in a terminal and accept the
-  key. For `Permission denied (publickey)`, load a key that has a passphrase into ssh-agent.
-  A changed host key is flagged with a warning to check its fingerprint before replacing it,
-  and a revoked one with a warning not to trust it again.
-  When git is missing or times out, the GitLab and GitHub pollers still watch only the
-  default branch, but now log why once per project instead of saying nothing.
-- **Machine overlays:** an overlay that does not parse is left out whole, secrets
-  included. A secret missing for that reason used to come with the advice to add it under
-  `[secrets]` in that same overlay; it now comes with the overlay's parse error. The usual
-  cause is a Windows path in double quotes (`"C:\Users\…"`, where a backslash starts an
-  escape); [Make Workbench yours](docs/customization.md#keep-secrets-where-they-are) shows
-  the spellings that work.
-- **Server log:** colour escapes only on a terminal. The Windows `service.log`, the
-  systemd journal and output redirected to a file or a pipe get plain text. `NO_COLOR`
-  still turns colour off on a terminal.
-- **MCP:** a tool that reuses a REST route keeps the route's error code
-  (`not_configured`, `unsupported_platform` with its feature, …) instead of turning every
-  failure into `upstream`. The `workbench_notify` tool's description says what it does
-  everywhere: a toast in Workbench, and a desktop notification, your notify command and a
-  push to your devices where you set them up (Windows has no desktop notifications yet).
+  commits" and "unknown commit" now mean that git ran and found no such commit.
 - **Line endings:** Workbench follows git's line-ending conversions on Linux too, as it
-  already did on Windows. This affects a file that git reads with LF although it has CRLF
-  on disk: one git checks out with CRLF over LF in the repository (an `eol=crlf` attribute
-  in `.gitattributes`, `core.autocrlf=true`), and one saved with CRLF where a `text`
-  attribute, `text=auto` or `core.autocrlf=input` has git convert it. Its diff shows the
-  working tree as git reads it, so once every change is staged the diff says "Nothing
-  unstaged in this file." instead of showing two identical sides. A conflict in it is
-  shown with LF, like both sides, and text you resolve it with is written back with CRLF.
-  For a file git checks out with CRLF, Local History keeps its "Last commit (HEAD)" with
-  CRLF, as the checkout wrote it. Comparing that entry with the first change now shows the
-  edited lines, not every line, and a file that only went through the checkout no longer
-  gets one. Files git does not convert keep their bytes as before: LF files, `-text` files
-  and CRLF committed as is, unless a `text` or `eol` attribute has git convert it too (git
-  then shows every line changed until the file is renormalized, and Workbench's
-  working-tree side now has LF to match). LF files cost no extra git call.
-- **Files (Linux):** a `\` in a file or folder name is part of the name, as Linux has it.
-  Workbench used to turn it into `/`, so `a\b.txt` came back as `a/b.txt`, the file `b.txt`
-  in the folder `a`. The files in a folder named `d\x` then opened as `d/x/…`, search and
-  quick open results (and Replace in Files from them) led to that other file, and Local
-  History and an agent's `workbench_open_file` kept or opened its path. The file tree,
-  opening, saving, renaming, search, quick open, the watcher, Local History and detected
-  run folders now keep the name. Windows is unchanged: `\` separates there.
+  already did on Windows. They apply to a file git reads with LF although it has CRLF on
+  disk: checked out with CRLF over LF in the repository (`eol=crlf` in `.gitattributes`,
+  `core.autocrlf=true`), or saved with CRLF where git converts it (a `text` attribute,
+  `text=auto`, `core.autocrlf=input`). Its diff shows the working tree as git reads it, so
+  once every change is staged it says "Nothing unstaged in this file." instead of showing
+  two identical sides. A conflict in it is shown with LF, like both sides, and the text you
+  resolve it with is written back with CRLF (a file with mixed line endings gets the text as
+  sent). Local History keeps the "Last commit (HEAD)" of a CRLF checkout with CRLF, so
+  comparing it with the first change shows the edited lines, not every line, and a file
+  that only went through the checkout no longer gets that entry. Files git does not convert
+  keep their bytes: LF files, `-text` files, and CRLF committed as is under `text=auto` or
+  `core.autocrlf`. A `text` attribute, or `eol` without `text=auto`, has git convert CRLF
+  committed as is too and show every line changed until the file is renormalized;
+  Workbench's working-tree side now has LF to match.
+- **File names with `\` (Linux):** a `\` in a file or folder name is part of the name, as
+  Linux has it. Workbench used to read it as `/`, so `a\b.txt` became the file `b.txt` in
+  the folder `a`: the files in a folder named `d\x` opened as `d/x/…`, search and quick
+  open results (and Replace in Files from them) led to that other file, and Local History
+  and an agent's `workbench_open_file` kept or opened its path. The file tree, opening,
+  saving, renaming, search, quick open, the watcher, Local History and detected run folders
+  now keep the name. On Windows `\` still separates.
+- **Git messages:** error boxes keep the line breaks of multi-line messages, such as git's.
+  A fetch, update, push or remote-branch deletion that fails because ssh would have had to
+  ask something now says what to do: for an unknown host key, connect once with ssh in a
+  terminal, check the fingerprint and accept the key; for `Permission denied (publickey)`,
+  load a key that has a passphrase into ssh-agent (on Windows, start the OpenSSH
+  Authentication Agent service first), or else add your public key to your account on the
+  server. A changed host key is flagged with a warning to check its fingerprint before
+  replacing it, and a revoked one with a warning not to trust it again. When git is missing
+  or times out, the GitLab and GitHub pollers still watch only the default branch, and now
+  log why once per project.
+- **Machine overlays:** an overlay that does not parse or cannot be read is still left out
+  whole, secrets included, but a secret missing for that reason now comes with the
+  overlay's error (for a parse error, its line and column) instead of the advice to add it
+  under `[secrets]` in that same overlay. The usual cause is a Windows path in double quotes
+  (`"C:\Users\…"`, where `\` starts an escape);
+  [Make Workbench yours](docs/customization.md#keep-secrets-where-they-are) shows the
+  spellings that work.
+- **Server log:** colour escapes only on a terminal. The systemd journal, output redirected
+  to a file or a pipe, and the Windows `service.log` get plain text. `NO_COLOR` still turns
+  colour off on a terminal.
+- **MCP:** the `workbench_notify` description says what it does: a toast in Workbench, plus
+  a desktop notification, your notify command and a push to your devices where you set them
+  up (Windows has no desktop notifications yet).
+- **API:** a terminal's `exit` (also in `terminal.exited`) and a run (`GET …/runs`,
+  `run.state`) have `terminated: true` when they were cut short. `POST …/deploy/check` and
+  `…/deploy` answer a git failure with `422 git_error`, `504 timeout`, `412 not_configured`
+  (no git) or, on Windows, `403 unsafe_repository`, no longer `400 bad_request`. On
+  Windows, a delete the Recycle Bin would not take answers `422 not_recyclable`, not 500.
+- **Windows (experimental):** still experimental. Its test suite passes on GitHub's
+  `windows-latest` (Windows Server 2025); it has not been tried on a Windows 10 or 11
+  desktop yet ([status](docs/windows-port.md)).
+- **Run configurations (security fix, Windows):** detection no longer offers a run whose
+  command quotes a name from a repository file that has a space and ends in `\`. Windows
+  PowerShell 5.1, which runs commands wherever PowerShell 7 is not installed, lets that `\`
+  escape the closing quote, so the next quoted name is split into arguments of its own:
+  `cargo run -p 'x \' --bin 'y --z'` would hand cargo `--z`.
 - **On Windows:** a repository git refuses because another user owns the folder
-  (`safe.directory`) no longer just loses its branch. The project shows a warning that
-  names the folder and the command that trusts it. The status bar reads "Untrusted
-  repository", and the git tool windows show git's message with a button that copies the
-  command. Deploys report the refusal too, and the pollers log it once per project.
-- **On Windows:** programs installed while Workbench runs (Node.js, Python, rustup, an
-  agent CLI, a language server) are found without a restart. New terminals, runs and agent
-  sessions get the `PATH` a new sign-in gets, followed by Workbench's own folders it lacks;
-  Workbench's own lookups (language servers, debug adapters, agent CLIs) try it too and
-  pass its folders on to what they start. The Git features still find a newly installed
-  Git for Windows only after a restart. `workbench service install --enable` and
-  `workbench service open` start Workbench in your sign-in environment, as the sign-in
-  entry does, not in the environment of the shell they run in.
+  (`safe.directory`) no longer just loses its branch. The project shows a warning that names
+  the folder and the command that trusts it, the status bar reads "Untrusted repository",
+  and the git tool windows show git's message with a button that copies the command.
+  Deploys report the refusal too, and the pollers log it once per project.
+- **On Windows:** programs installed while Workbench runs (Node.js, Python, rustup, an agent
+  CLI, a language server) are found without a restart. New terminals, runs and agent
+  sessions get the `PATH` a new sign-in gets, followed by the folders of Workbench's own
+  `PATH` that it lacks (such as a virtual environment Workbench was started from).
+  Workbench's own lookups (language servers, debug adapters, agent CLIs) try it too, and
+  what Workbench starts by itself gets its new folders after Workbench's own, so a newly
+  installed gopls finds a newly installed Go. A newly installed Git for Windows is still
+  found only after a restart. `workbench service install --enable` and
+  `workbench service open` start Workbench in your sign-in environment, not in that of the
+  shell they run in.
 - **On Windows:** a file outside the project at a drive path (a language server's
   definition in a library, a debug stop in `C:\…`) opens instead of being refused. Copy
-  Path and drag and drop join the project's folder and a file with `\`, and tab titles,
-  breadcrumbs and stack frames name a file by what follows its last `\`.
+  Path and drag and drop join paths with `\`, and tab titles, breadcrumbs and stack frames
+  name a file by what follows its last `\`.
 - **On Windows:** paths other programs write compare as Windows compares them (any case,
-  `\` or `/`): Claude Code's project entries in `~/.claude.json`, Gemini's chat folders, the
-  session folder that shortens the paths in a permission prompt, and a file an agent's hook
-  names in another case, which no longer starts a second Local History. The debugger's attach picker knows a
-  process by its image name (`node.exe`, `javaw.exe`) and reads `C:\Program Files\…`
-  command lines, and a launch configuration's `.\cmd\api` in a Go module debugs as Go.
-- **On Windows:** `install.ps1 -Uninstall` (with the `-Prefix` you installed with) removes
-  Workbench: the services started from its folder, the folder and the `PATH` entry the
-  install added. It changes nothing while Workbench runs from there, and keeps your
-  configuration and data. The executables carry an application manifest (Windows 10 and 11,
-  message boxes in the current style, long paths where Windows allows them).
-- **On Windows:** the install notes, the Help's Agents page and the "not available on
-  Windows" message for dev containers now say how to get them: run the Linux build inside a
-  WSL 2 distribution with Docker Engine installed in that distribution, and keep its
-  projects in the distribution's own folders. A browser on Windows then opens only ports the
-  container publishes (`forwardPorts`, `appPort`). With Docker Desktop's WSL integration
-  instead, Workbench may be unable to listen on the container network's gateway, and then
-  refuses Claude Code sessions inside the container. Neither setup has been tested yet.
+  `\` or `/`): Claude Code's project entries in `~/.claude.json`, Gemini's chat folders,
+  the session folder that shortens the paths in a permission prompt, and a file an agent's
+  hook names in another case, which no longer starts a second Local History. The
+  debugger's attach picker knows a process by its image name (`node.exe`, `javaw.exe`) and
+  reads `C:\Program Files\…` command lines, and a launch configuration's `.\cmd\api` in a
+  Go module debugs as Go.
 - **On Windows:** a terminal whose own process has exited while something it started runs
-  on (a background job, a program it opened) ends as soon as Windows reports that the last
-  of those has ended (should the report not come, within about a second), and waiting for
-  that no longer keeps a thread per terminal.
+  on (a background job, a program it opened) no longer keeps a thread waiting for those to
+  end. One thread hears from Windows, for every terminal, when the last of them has ended,
+  and checks every second in case that report does not come.
 - **On Windows:** deleting a file or folder whose own path is 260 characters or longer no
   longer fails with a server error. It goes to the Recycle Bin where Windows takes it;
-  where it does not, the message says why and how to delete it instead (shorten the path,
-  or delete it for good from a terminal), and nothing is deleted. Deleting on a drive
-  without a Recycle Bin, with the bin turned off, or a file larger than the bin says so
-  in the same way.
+  where it does not, nothing is deleted and the message says why and how to delete it
+  instead (shorten the path, or delete it for good from a terminal). A drive without a
+  Recycle Bin, a bin turned off, or a file larger than the bin gets the same kind of
+  answer.
+- **On Windows:** `install.ps1 -Uninstall` (with the `-Prefix` you installed with) removes
+  Workbench: the services started from its folder, the files the install put there, the
+  `PATH` entry it added, and the folder once nothing else is in it. It keeps your
+  configuration and data, and changes nothing while Workbench runs from that folder, or
+  when it cannot tell. The executables carry an application manifest (Windows 10 and 11,
+  message boxes in the current style, long paths where Windows allows them).
+- **Dev containers on Windows:** the install notes, the Help's Agents page and the "not
+  available on Windows" message now say how to get them: run the Linux build inside a WSL 2
+  distribution with Docker Engine installed in that distribution, and keep its projects in
+  the distribution's own folders. A browser on Windows then opens only ports the container
+  publishes (`forwardPorts`, `appPort`). With Docker Desktop's WSL integration instead,
+  Workbench may be unable to listen on the container network's gateway, and then refuses
+  Claude Code sessions inside the container. Neither setup has been tested yet.
+
+**Install:** Linux x86_64 (glibc 2.35 or newer): unpack
+`workbench-0.3.1-x86_64-unknown-linux-gnu.tar.gz` and run
+`./workbench-0.3.1-x86_64-unknown-linux-gnu/install.sh`.
+
+Windows 10 (1809 or newer) or 11 on x86_64, experimental: in PowerShell, run
+`Unblock-File` on `workbench-0.3.1-x86_64-pc-windows-msvc.zip`. It removes the Mark of the
+Web that Windows puts on downloads, so the unpacked files do not carry it. Unpack the zip
+with `Expand-Archive .\workbench-0.3.1-x86_64-pc-windows-msvc.zip -DestinationPath .`, then
+run its installer:
+`powershell -ExecutionPolicy Bypass -File .\workbench-0.3.1-x86_64-pc-windows-msvc\install.ps1`
+(`-ExecutionPolicy Bypass` allows the unsigned script for this one run). It installs into
+`%LOCALAPPDATA%\Programs\Workbench` without administrator rights and adds that folder to
+your PATH. Then run `workbench serve --open` in a new terminal. The binaries are not
+code-signed: SmartScreen or an antivirus may warn, and Windows 11's Smart App Control, when
+on, blocks them. To remove Workbench, stop it (`workbench service stop`, or Ctrl+C), then
+run the same command with `-Uninstall` from a terminal outside Workbench.
+
+Each archive has a `.sha256` to check it against (`sha256sum -c`, or `Get-FileHash` on
+Windows).
+
+**Update:** from 0.3.0 or earlier, install the new archive (or pull and rebuild), then
+restart Workbench (`systemctl --user restart workbench.service` or the running
+`workbench serve`). The restart also ends any agent token an earlier version left behind.
+Your configuration and data stay as they are. On Windows, 0.3.1's `install.ps1` installs
+over 0.3.0, also while Workbench runs. Then restart Workbench:
+- If you started it with `workbench serve`, stop it (Ctrl+C) and start it again in a new
+  terminal.
+- If it runs as the service (from the Start Menu or at sign-in), run
+  `workbench service stop` and open Workbench from the Start Menu.
 
 ## 0.3.0 - 2026-09-29
 
