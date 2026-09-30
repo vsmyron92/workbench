@@ -81,7 +81,7 @@ web/               React 19 + TS + Vite 8
   src/features/<slice>/   one folder per slice; index.ts exports a FeatureModule
 docs/              this file
 packaging/linux/   install.sh shipped in the Linux release archive
-packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows release archive; workbench.ico, embedded in the Windows executables (from web/scripts/icons.mjs)
+packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows release archive; workbench.ico (from web/scripts/icons.mjs) and workbench.manifest, embedded in the Windows executables
 .github/workflows/ ci.yml (web and server build + tests, Linux and Windows), release.yml (tag → Linux archive, Windows zip when `RELEASE_WINDOWS` is set, + GitHub release)
 ```
 
@@ -545,8 +545,10 @@ npm test           # vitest (src/**/*.test.ts)
   `windows-latest` job builds the server (`cargo build --locked`), runs `cargo test --locked
   --no-fail-fast` (with Python for the test fakes and `core.autocrlf false`; its Rust cache is
   kept when tests fail) and then, once the build has succeeded and whether the tests passed or
-  not, `install.ps1` under Windows PowerShell 5.1. It counts like the other two jobs: a failed
-  step fails the run (no `continue-on-error`).
+  not, `install.ps1` under Windows PowerShell 5.1: an install, then `-Uninstall`, refused
+  (naming the server's pid) while the installed server runs and then checked to remove the
+  service's Start Menu shortcut, the folder and exactly the PATH entry it added. It counts
+  like the other two jobs: a failed step fails the run (no `continue-on-error`).
 - **Releases** (`release.yml`): bump `version` in `server/Cargo.toml` (and `web/package.json`),
   give CHANGELOG.md a `## X.Y.Z - date` section, commit, then push a `vX.Y.Z` tag. The
   workflow refuses a tag that does not match the crate version, builds the UI and the
@@ -574,7 +576,17 @@ npm test           # vitest (src/**/*.test.ts)
   existing one lets others write), adds it to the user PATH (`HKCU\Environment`, then
   `WM_SETTINGCHANGE`), renames files in use aside (`*.old`, removed by the next install,
   renames retried on sharing violations), removes the Mark of the Web from what it installs
-  and exits non-zero on failure.
+  and exits non-zero on failure. `install.ps1 -Uninstall` (same `-Prefix`) changes nothing
+  while a program runs from the folder, or when it cannot tell (processes by executable
+  path through `QueryFullProcessImageNameW`, no WMI; a `workbench.exe`, `workbenchw.exe` or
+  `OpenConsole.exe` of the current session whose path cannot be read counts as running),
+  runs `workbench service uninstall [--name N]` for the services whose `Run` value or Start
+  Menu shortcut starts that folder's `workbenchw.exe` (another folder's stay), deletes the
+  files `install.ps1` puts there, removes exactly the PATH entry it added (the value keeps
+  its type; `WM_SETTINGCHANGE`), then deletes `workbench.exe` (so running it again finishes
+  an interrupted run) and the folder when nothing else is left in it, leaves a folder
+  without `workbench.exe` alone, and keeps the configuration and data folders, printing
+  where they are.
 
 ## Second phase (2026-09-26): Workspace, agent providers, GitHub, broader detection
 
@@ -2094,7 +2106,10 @@ favicon's) by `node web/scripts/icons.mjs` (no dependencies; generated PNGs are 
 circle), `apple-touch-icon.png` (180, full bleed), `badge-96.png` (monochrome notification badge),
 and, outside the web bundle, `packaging/windows/workbench.ico` (PNG images of 16–256 px: the icon
 `server/build.rs` embeds in the Windows executables with a version resource, through the
-build-dependency `winresource`; a build without a resource compiler only warns).
+build-dependency `winresource`; a build without a resource compiler only warns). The same
+resource holds the application manifest `packaging/windows/workbench.manifest`: Windows 10/11
+as `supportedOS`, Common Controls 6 (message boxes), `longPathAware` and `asInvoker`, in the test
+executables too, where a `cfg(windows)` test in `os::autostart` checks that Windows applies it.
 `spa.rs` serves `/sw.js` as `text/javascript` with `no-cache` and its own CSP (`spa::SW_CSP`:
 `default-src 'self'`, same-origin fetches only) and the manifest as `application/manifest+json`
 with `no-cache`; the SPA's CSP is unchanged (`worker-src 'self'` covers the registration). A launch

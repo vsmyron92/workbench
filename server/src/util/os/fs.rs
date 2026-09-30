@@ -582,9 +582,10 @@ mod win {
     }
 
     /// `path` as `SHFileOperationW` takes it: full, without the `\\?\` prefix, shorter
-    /// than MAX_PATH, NUL-terminated. A name with a character Windows never allows in one
-    /// is refused: the shell reads `*` and `?` (and `<`, `>`, `"`) as wildcards, so such a
-    /// name could delete other files.
+    /// than MAX_PATH (the shell takes no long paths, whatever the manifest's
+    /// `longPathAware` allows elsewhere), NUL-terminated. A name with a character Windows
+    /// never allows in one is refused: the shell reads `*` and `?` (and `<`, `>`, `"`) as
+    /// wildcards, so such a name could delete other files.
     fn shell_path(path: &Path) -> io::Result<Vec<u16>> {
         let abs = std::path::absolute(path)?;
         let plain = dunce::simplified(&abs);
@@ -671,6 +672,10 @@ mod win {
                 assert_eq!(e.kind(), ErrorKind::InvalidInput, "{name}");
             }
             assert!(shell_path(&Path::new(r"C:\").join("x".repeat(300))).is_err());
+            // At most MAX_PATH - 1 characters (the NUL makes MAX_PATH), long paths or not.
+            let near = |n: usize| Path::new(r"C:\").join("a".repeat(128)).join("b".repeat(n - 3 - 128 - 1));
+            assert_eq!(shell_path(&near(MAX_PATH as usize - 1)).unwrap().len(), MAX_PATH as usize);
+            assert_eq!(shell_path(&near(MAX_PATH as usize)).unwrap_err().kind(), ErrorKind::InvalidInput);
             assert_eq!(shell_path(Path::new(r"C:/proj/sub/../a b.txt")).unwrap(), wide(r"C:\proj\a b.txt"));
             assert_eq!(shell_path(Path::new(r"\\?\C:\proj\a.txt")).unwrap(), wide(r"C:\proj\a.txt"));
         }

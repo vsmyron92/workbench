@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Installs Workbench from a release archive for the current user.
+    Installs Workbench from a release archive for the current user, or uninstalls it.
 
 .DESCRIPTION
     Copies workbench.exe, with workbenchw.exe, conpty.dll, OpenConsole.exe and the documents
@@ -21,12 +21,27 @@
     are renamed aside (*.old, removed by the next install) and the new ones take their names.
     Restart Workbench to use the new version.
 
+    With -Uninstall it removes Workbench from that folder instead:
+
+        powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
+
+    It runs workbench service uninstall for each service (sign-in entry, Start Menu shortcut)
+    that starts the folder's programs, removes the files install.ps1 put in the folder, the
+    folder's entry in your PATH, then the folder once nothing else is in it. Your
+    configuration (%APPDATA%\workbench) and Workbench's state (%LOCALAPPDATA%\workbench) stay.
+    It changes nothing while a program from the folder runs, or when it cannot tell: stop
+    Workbench first, and run it from a terminal outside Workbench.
+
 .PARAMETER Prefix
-    The folder to install into. Default: %LOCALAPPDATA%\Programs\Workbench.
+    The folder to install into, or to uninstall from. Default: %LOCALAPPDATA%\Programs\Workbench.
+
+.PARAMETER Uninstall
+    Remove Workbench from the folder instead of installing it.
 #>
 [CmdletBinding()]
 param(
-    [string]$Prefix
+    [string]$Prefix,
+    [switch]$Uninstall
 )
 
 # Windows PowerShell 5.1 runs this file: keep it ASCII (it has no byte order mark) and 5.1
@@ -51,6 +66,8 @@ trap { Fail (Get-Reason $_) }
 # What a release archive holds besides this script; only workbench.exe is required.
 $Payload = @('workbench.exe', 'workbenchw.exe', 'conpty.dll', 'OpenConsole.exe',
     'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_NOTICES.md', 'CONPTY_NOTICE.md')
+# The programs among them.
+$Programs = @($Payload | Where-Object { $_ -like '*.exe' })
 
 # The accounts an install folder may let change it: you, SYSTEM, Administrators, and the
 # CREATOR OWNER and TrustedInstaller entries Windows puts on its own folders.
@@ -118,9 +135,18 @@ function Get-OtherWriters([string]$Dir) {
     $names
 }
 
-# Renames $From to $To. Another program can hold either file for a moment without letting it
-# be renamed (an antivirus scanning the new file, Explorer's preview), so a sharing violation
-# is retried for about a second.
+# Whether a rename or a delete failed because another program holds the file for a moment
+# without letting it be renamed or deleted (an antivirus scanning it, Explorer's preview, a
+# program that has just ended), which is worth retrying.
+function Test-Busy($ErrorRecord) {
+    $e = $ErrorRecord.Exception
+    if ($e.InnerException) { $e = $e.InnerException }
+    ($e -is [System.UnauthorizedAccessException]) -or (($e -is [System.IO.IOException]) -and
+        ($e -isnot [System.IO.FileNotFoundException]) -and ($e -isnot [System.IO.DirectoryNotFoundException]))
+}
+
+# Renames $From to $To. Another program can hold either file for a moment, so a sharing
+# violation is retried for about a second.
 function Move-File([string]$From, [string]$To) {
     $attempt = 0
     while ($true) {
@@ -129,13 +155,33 @@ function Move-File([string]$From, [string]$To) {
             [System.IO.File]::Move($From, $To)
             return
         } catch {
-            $e = $_.Exception
-            if ($e.InnerException) { $e = $e.InnerException }
-            $busy = ($e -is [System.UnauthorizedAccessException]) -or (($e -is [System.IO.IOException]) -and
-                ($e -isnot [System.IO.FileNotFoundException]) -and ($e -isnot [System.IO.DirectoryNotFoundException]))
-            if ($attempt -ge 10 -or -not $busy) { throw }
+            if ($attempt -ge 10 -or -not (Test-Busy $_)) { throw }
             Start-Sleep -Milliseconds 100
         }
+    }
+}
+
+# Deletes $Path (nothing when it is gone), retrying a sharing violation as Move-File does.
+function Remove-File([string]$Path) {
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            [System.IO.File]::Delete($Path)
+            return
+        } catch {
+            if ($attempt -ge 10 -or -not (Test-Busy $_)) { throw }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
+# Deletes $Path, a file install.ps1 put in $Prefix, for -Uninstall.
+function Remove-InstalledFile([string]$Path) {
+    try {
+        Remove-File $Path
+    } catch {
+        Fail "cannot remove ${Path}: $(Get-Reason $_) (is a program from $Prefix running?)"
     }
 }
 
@@ -168,6 +214,41 @@ function Add-UserPath([string]$Dir) {
     }
 }
 
+# Whether the user's PATH has the entry Add-UserPath writes for $Dir.
+function Test-UserPath([string]$Dir) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+    if (-not $key) { return $false }
+    try {
+        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        return @($raw.Split(';') | Where-Object { $_ -ieq $Dir }).Length -gt 0
+    } finally {
+        $key.Close()
+    }
+}
+
+# Removes the entry Add-UserPath wrote for $Dir from the user's PATH, keeping the value's
+# type (REG_EXPAND_SZ or REG_SZ) and every other entry as they are; the value goes when no
+# entry is left. $true when there was one.
+function Remove-UserPath([string]$Dir) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if (-not $key) { return $false }
+    try {
+        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $entries = $raw.Split(';')
+        $rest = @($entries | Where-Object { $_ -ine $Dir })
+        if ($rest.Length -eq $entries.Length) { return $false }
+        $value = $rest -join ';'
+        if ($value.Trim(';')) {
+            $key.SetValue('Path', $value, $key.GetValueKind('Path'))
+        } else {
+            $key.DeleteValue('Path')
+        }
+        return $true
+    } finally {
+        $key.Close()
+    }
+}
+
 # Tells Explorer that the user environment changed, so what it starts from now on (a new
 # terminal) gets the new PATH.
 function Send-SettingChange {
@@ -180,18 +261,209 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     [void][WorkbenchInstall.NativeMethods]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
 }
 
+# Whether $Path is $Prefix or something in it.
+function Test-Inside([string]$Path) {
+    ($Path.TrimEnd('\') + '\').StartsWith($Prefix.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+# Whether install.ps1 puts a file of this name in the install folder: the payload, a file it
+# renamed aside (<name>.<id>.old) or a copy it staged (<name>.new).
+function Test-Installed([string]$Name) {
+    foreach ($p in $Payload) {
+        if ($Name -eq $p -or $Name -eq "$p.new" -or $Name -like "$p.*.old") { return $true }
+    }
+    $false
+}
+
+# The programs that may run from $Prefix (the server, its supervisor, the console hosts of its
+# terminals, a workbench command, a *.old still running), as "name (pid N)"; throws when the
+# programs cannot be listed. Each program's path comes from QueryFullProcessImageNameW, which
+# needs no WMI, and whose PROCESS_QUERY_LIMITED_INFORMATION an elevated program's integrity
+# level does not block. A program of this session named like one in $Programs whose path
+# cannot be read counts, marked as such; another account's programs in other sessions do not
+# show.
+function Get-FolderProcesses {
+    Add-Type -Namespace WorkbenchInstall -Name ProcessImage -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true)]
+static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, System.Text.StringBuilder lpExeName, ref uint lpdwSize);
+[DllImport("kernel32.dll")]
+static extern bool CloseHandle(IntPtr hObject);
+
+// The path of the program process id runs, or null when it cannot be read.
+public static string PathOf(int id) {
+    // PROCESS_QUERY_LIMITED_INFORMATION
+    IntPtr process = OpenProcess(0x1000, false, (uint)id);
+    if (process == IntPtr.Zero) return null;
+    try {
+        System.Text.StringBuilder path = new System.Text.StringBuilder(32768);
+        uint size = (uint)path.Capacity;
+        return QueryFullProcessImageNameW(process, 0, path, ref size) ? path.ToString() : null;
+    } finally {
+        CloseHandle(process);
+    }
+}
+'@
+    $session = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+    foreach ($p in [System.Diagnostics.Process]::GetProcesses()) {
+        $path = [WorkbenchInstall.ProcessImage]::PathOf($p.Id)
+        if ($path) {
+            if (Test-Inside $path) { "$([System.IO.Path]::GetFileName($path)) (pid $($p.Id))" }
+        } elseif ($p.SessionId -eq $session -and $Programs -contains "$($p.ProcessName).exe") {
+            "$($p.ProcessName).exe (pid $($p.Id), whose path cannot be read)"
+        }
+    }
+}
+
+# The services of workbench service install [--name N] that start $Launcher, by their entry
+# name (Workbench or Workbench-N): a value of HKCU's Run key or a Start Menu shortcut of that
+# name. The services of Workbench in another folder are left alone.
+function Get-FolderServices([string]$Launcher) {
+    $pattern = '^Workbench(-[A-Za-z0-9_-]{1,64})?$'
+    $entries = @()
+    $run = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
+    if ($run) {
+        try {
+            foreach ($value in $run.GetValueNames()) {
+                if ($value -notmatch $pattern) { continue }
+                # "<folder>\workbenchw.exe" [--name N]: the program first, quoted.
+                if ([string]$run.GetValue($value) -match '^\s*"([^"]*)"' -and $Matches[1] -ieq $Launcher) { $entries += $value }
+            }
+        } finally {
+            $run.Close()
+        }
+    }
+    $programs = [Environment]::GetFolderPath('Programs')
+    if ($programs -and (Test-Path -LiteralPath $programs -PathType Container)) {
+        $links = @(Get-ChildItem -LiteralPath $programs -Filter 'Workbench*.lnk' -File -Force |
+            Where-Object { $_.BaseName -match $pattern -and $entries -notcontains $_.BaseName })
+        if ($links.Length) {
+            $shell = New-Object -ComObject WScript.Shell
+            foreach ($link in $links) {
+                # A shortcut that cannot be read is not one of ours.
+                try { $target = $shell.CreateShortcut($link.FullName).TargetPath } catch { $target = $null }
+                if ($target -ieq $Launcher) { $entries += $link.BaseName }
+            }
+        }
+    }
+    $entries
+}
+
+# Removes Workbench from $Prefix: the services that start its programs, the files install.ps1
+# put there, its PATH entry, then workbench.exe and the folder once nothing else is in it. The
+# configuration and the state stay.
+function Uninstall-Workbench {
+    $exe = Join-Path $Prefix 'workbench.exe'
+    $launcher = Join-Path $Prefix 'workbenchw.exe'
+    $installed = Test-Path -LiteralPath $exe -PathType Leaf
+    if (-not $installed -and (Test-Path -LiteralPath $Prefix)) {
+        # Not an install folder, or one an earlier -Uninstall kept for the other files in it
+        # (which removed its PATH entry before workbench.exe).
+        if (Test-UserPath $Prefix) {
+            Fail ("no workbench.exe in ${Prefix}, which is on your PATH: is it the folder Workbench was installed into? " +
+                'Nothing was changed. If it is, remove it from Path in your user variables by hand.')
+        }
+        Write-Host "Workbench is not installed in $Prefix."
+        return
+    }
+    if ($installed) {
+        # Windows keeps the files of a running program, and workbench service uninstall stops a
+        # server this very script may run in (a Workbench terminal).
+        try {
+            $running = @(Get-FolderProcesses)
+        } catch {
+            Fail "cannot list the running programs, to tell whether Workbench runs from ${Prefix}: $(Get-Reason $_). Nothing was changed."
+        }
+        if ($running.Length) {
+            Fail ("Workbench is running from ${Prefix}: $($running -join ', '). Stop it first (workbench service stop, " +
+                'or Ctrl+C where workbench serve runs), then run install.ps1 -Uninstall again from a terminal outside ' +
+                'Workbench. Nothing was changed.')
+        }
+        # A process's current folder cannot be removed.
+        if (Test-Inside ([Environment]::CurrentDirectory)) {
+            Fail "the current folder is in ${Prefix}: change to another one (cd ~) and run install.ps1 -Uninstall again. Nothing was changed."
+        }
+    }
+    try {
+        $services = @(Get-FolderServices $launcher)
+    } catch {
+        Fail "cannot read the sign-in entries and Start Menu shortcuts: $(Get-Reason $_). Nothing was changed."
+    }
+    if ($installed) {
+        foreach ($entry in $services) {
+            $arguments = @('service', 'uninstall')
+            if ($entry -ne 'Workbench') { $arguments += @('--name', $entry.Substring('Workbench-'.Length)) }
+            & $exe @arguments
+            if ($LASTEXITCODE -ne 0) { Fail "workbench $($arguments -join ' ') failed (exit code $LASTEXITCODE)" }
+        }
+        # What install.ps1 put there but workbench.exe, which goes after the PATH entry: as long
+        # as it is there, running this again finishes a run stopped half-way.
+        foreach ($file in @(Get-ChildItem -LiteralPath $Prefix -File -Force)) {
+            if ($file.Name -ne 'workbench.exe' -and (Test-Installed $file.Name)) { Remove-InstalledFile $file.FullName }
+        }
+    } else {
+        foreach ($entry in $services) {
+            Write-Warning "$entry still starts $launcher, which is gone: turn it off in Task Manager > Startup apps and delete its Start Menu shortcut."
+        }
+    }
+    $unlisted = Remove-UserPath $Prefix
+    if ($unlisted) {
+        try {
+            Send-SettingChange
+        } catch {
+            Write-Warning "could not announce the new PATH ($(Get-Reason $_)): sign out and in again."
+        }
+        Write-Host "Removed $Prefix from your PATH: terminals opened from now on do not have it."
+    }
+    if ($installed) {
+        Remove-InstalledFile $exe
+        $left = @(Get-ChildItem -LiteralPath $Prefix -Force | ForEach-Object { $_.Name })
+        if ($left.Length) {
+            Write-Host "Removed Workbench from $Prefix, and kept the folder for the other files in it: $($left -join ', ')"
+        } else {
+            try {
+                [System.IO.Directory]::Delete($Prefix)
+                Write-Host "Removed Workbench and its folder $Prefix"
+            } catch {
+                Write-Warning "removed Workbench from $Prefix, but not the empty folder: $(Get-Reason $_)"
+            }
+        }
+    } elseif (-not $unlisted) {
+        Write-Host "Workbench is not installed in $Prefix."
+        return
+    }
+    # What a new install uses again, where Workbench looks for it (WORKBENCH_CONFIG_DIR and
+    # WORKBENCH_DATA_DIR override both).
+    $config = $env:WORKBENCH_CONFIG_DIR
+    if (-not $config) { $config = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'workbench' }
+    $state = $env:WORKBENCH_DATA_DIR
+    if (-not $state) { $state = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'workbench' }
+    $kept = @()
+    if (Test-Path -LiteralPath $config -PathType Container) { $kept += "  $config  (config.toml, project overlays)" }
+    if (Test-Path -LiteralPath $state -PathType Container) {
+        $kept += "  $state  (sign-ins, sessions, Local History, Workspace cards)"
+    }
+    if ($kept.Length) {
+        Write-Host 'Kept your configuration and Workbench''s state for a later install; delete these folders to remove them too:'
+        foreach ($line in $kept) { Write-Host $line }
+    }
+}
+
 $here = $PSScriptRoot
-if (-not $here) {
-    Fail 'run install.ps1 as a file, from the unpacked archive'
-}
-if (-not (Test-Path -LiteralPath (Join-Path $here 'workbench.exe') -PathType Leaf)) {
-    Fail "no workbench.exe next to this script ($here)"
-}
-if (-not [Environment]::Is64BitOperatingSystem) {
-    Fail 'Workbench needs 64-bit Windows'
-}
-if ([Environment]::OSVersion.Version -lt [Version]'10.0.17763') {
-    Write-Warning 'Workbench needs Windows 10 version 1809 or newer, or Windows 11.'
+if (-not $Uninstall) {
+    if (-not $here) {
+        Fail 'run install.ps1 as a file, from the unpacked archive'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $here 'workbench.exe') -PathType Leaf)) {
+        Fail "no workbench.exe next to this script ($here)"
+    }
+    if (-not [Environment]::Is64BitOperatingSystem) {
+        Fail 'Workbench needs 64-bit Windows'
+    }
+    if ([Environment]::OSVersion.Version -lt [Version]'10.0.17763') {
+        Write-Warning 'Workbench needs Windows 10 version 1809 or newer, or Windows 11.'
+    }
 }
 
 if (-not $Prefix) {
@@ -201,7 +473,7 @@ if (-not $Prefix) {
 # Relative to the current location, like any PowerShell path; no trailing separator.
 $Prefix = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Prefix)
 if ($Prefix.Length -gt 3) { $Prefix = $Prefix.TrimEnd('\') }
-if ($Prefix -ieq $here.TrimEnd('\')) {
+if (-not $Uninstall -and $Prefix -ieq $here.TrimEnd('\')) {
     Fail "run install.ps1 from the unpacked archive, not from $Prefix"
 }
 # PATH separates folders with ; and expands %NAME%.
@@ -210,7 +482,12 @@ if ($Prefix.Contains(';') -or $Prefix.Contains('%')) {
 }
 if (Test-Path -LiteralPath $Prefix -PathType Leaf) {
     Fail "$Prefix is a file, not a folder"
-} elseif (Test-Path -LiteralPath $Prefix) {
+}
+if ($Uninstall) {
+    Uninstall-Workbench
+    exit 0
+}
+if (Test-Path -LiteralPath $Prefix) {
     try {
         $others = @(Get-OtherWriters $Prefix)
     } catch {
