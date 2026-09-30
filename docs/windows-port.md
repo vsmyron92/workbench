@@ -325,12 +325,15 @@ run's argv; `quote()` follows the choice. (Not done: runs always use PowerShell,
 Windows PowerShell; there is no `run_shell`.) Add `WT_SESSION` and `WT_PROFILE_ID` to
 `PARENT_TERMINAL_VARS`. (Done: `os::session::PARENT_TERMINAL_VARS`, which terminals clear
 besides their own list.) `quote()` gives a word its value; a native program gets what
-PowerShell makes of it. Windows PowerShell 5.1 (and pwsh for batch files) put a word with a
-space in double quotes as it is, so a final `\` escapes the closing quote; pwsh 7.3 and
-later quote by the MSVCRT rules. A doubled `\` would suit one and break the other, and the
-quoting knows neither the PowerShell nor the program, so it is left as it is
-(`os::shell::ps_quote`, tested against both PowerShells). Workbench's own words never end
-so, and detection does not offer a repository name that does (`native_quoting_safe`).
+PowerShell makes of it. Only Windows PowerShell 5.1 puts a word with a space in double
+quotes as it is, so a final `\` escapes the closing quote. Every pwsh passes it intact: it
+doubles the trailing `\`s where it writes the command line itself (`Legacy`, every pwsh
+before 7.3, and the `Windows` default for batch files) and quotes by the MSVCRT rules
+elsewhere. A doubled `\` would suit 5.1 and break every pwsh, and the quoting knows neither
+the PowerShell nor the program, so it is left as it is (`os::shell::ps_quote`, tested
+against 5.1 and pwsh in both ways). Workbench's own words never end so, and detection does
+not offer a repository name that does (`native_quoting_safe`): 5.1 runs commands wherever
+pwsh is not installed.
 
 **PowerShell's errors on a pipe.** Started with `-EncodedCommand`, not interactive and with
 stderr redirected (a service's stop command, a local version or health probe: `run_cmd`),

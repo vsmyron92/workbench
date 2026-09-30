@@ -347,8 +347,9 @@ impl<'a> Ctx<'a> {
         }
         // On Windows a detected tool is often a batch file (`composer.bat`, `mvn.cmd`,
         // `.\gradlew.bat`), whose arguments cmd.exe reads again: a quoted name with `&` or
-        // `%` from a repository file would start a command of its own there. A quoted name
-        // with a space and a final `\` would split the next quoted one into arguments.
+        // `%` from a repository file would start a command of its own there. Under Windows
+        // PowerShell 5.1 a quoted name with a space and a final `\` would split the next
+        // quoted one into arguments.
         if dialect() == Dialect::PowerShell && !(batch_safe(&run.command) && native_quoting_safe(&run.command)) {
             return None;
         }
@@ -777,7 +778,7 @@ pub(crate) fn detect_as(root: &Path, d: Dialect) -> ProjectFile {
 /// `./cmd/api`), single-quoted otherwise (`dialect`'s rules). Names from repository
 /// files (Make targets, Taskfile keys, script names, directory names) must never add a
 /// command of their own (in PowerShell, `Ctx::add_run` also refuses a quoted word a batch
-/// file would misread, `batch_safe`, or the old way of quoting would, `native_quoting_safe`).
+/// file would misread, `batch_safe`, or Windows PowerShell 5.1 would, `native_quoting_safe`).
 pub(crate) fn sh(s: &str) -> String {
     dialect().quote(s)
 }
@@ -820,11 +821,12 @@ fn batch_safe(cmd: &str) -> bool {
 }
 
 /// Whether the single-quoted strings of a PowerShell command line reach a native program
-/// as they are where PowerShell writes its command line the old way (Windows PowerShell
-/// 5.1, and pwsh for batch files: `os::shell::ps_quote`). It puts a string with a space in
-/// double quotes and leaves a final `\` to escape the closing one, so the next string it
-/// quotes ends the quotes early: `cargo run -p 'x \' --bin 'y --z'` would hand cargo
-/// `--z`. Doubling that `\` is no way out: pwsh would pass both on.
+/// as they are under Windows PowerShell 5.1, which runs commands wherever pwsh is not
+/// installed (`os::shell::ps_quote`). It puts a string with a space in double quotes and
+/// leaves a final `\` to escape the closing one, so the next string it quotes ends the
+/// quotes early: `cargo run -p 'x \' --bin 'y --z'` would hand cargo `--z`. Every pwsh
+/// passes such a string intact, and doubling that `\` is no way out: pwsh would pass both
+/// on.
 fn native_quoting_safe(cmd: &str) -> bool {
     !quoted_strings(cmd).iter().any(|q| q.ends_with('\\') && q.contains(char::is_whitespace))
 }

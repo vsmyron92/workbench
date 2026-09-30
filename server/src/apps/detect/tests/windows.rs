@@ -259,9 +259,9 @@ fn names_from_repository_files_never_reach_a_batch_file() {
     assert!(!batch_safe("npm run 'a&b'") && !batch_safe("x 'it''s%'") && !batch_safe("x '\"'") && !batch_safe("x 'a^b"));
 }
 
-/// Where PowerShell quotes the old way (Windows PowerShell 5.1), a final `\` in a quoted
-/// name with a space escapes its closing quote, and the next quoted word is split into
-/// arguments: a run with such a name is not offered.
+/// Under Windows PowerShell 5.1, a final `\` in a quoted name with a space escapes its
+/// closing quote, and the next quoted word is split into arguments: a run with such a name
+/// is not offered.
 #[test]
 fn quoted_names_ending_in_a_backslash_are_not_offered() {
     let d = tree(&[("package.json", r#"{"scripts":{"dev server\\":"vite","a\\b c":"x","ok\\":"x"}}"#)]);
