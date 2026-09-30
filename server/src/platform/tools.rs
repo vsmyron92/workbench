@@ -27,9 +27,11 @@ pub fn platform_tools() -> Vec<McpTool> {
         ),
         mcp::tool(
             "workbench_notify",
-            "Show a notification to the user in Workbench (a toast in every open Workbench window, plus a desktop \
-             notification when enabled). Use it when a long task finishes or you need the user's attention; \
-             keep the message short.",
+            "Notify the user: a toast in every open Workbench window, and whatever else they set up: a desktop \
+             notification on the computer Workbench runs on (where its OS supports them), their notify command, \
+             a push to their phone or other devices. The result says whether the desktop notification and the \
+             push went out. Use it when a long task finishes or you need the user's attention; keep the message \
+             short.",
             json!({
                 "type": "object",
                 "properties": {

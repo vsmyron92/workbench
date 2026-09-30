@@ -36,6 +36,20 @@ On Windows (experimental), `~` is your user folder (`%USERPROFILE%`), `config.to
 overlays are in `%APPDATA%\workbench`, and a `keyring` reference reads Windows Credential
 Manager: `workbench/atlassian` is the generic credential named `atlassian.workbench`.
 
+Write Windows paths in these files as `~/...`, with forward slashes, or in single quotes.
+In double quotes a backslash starts an escape, so `"C:\Users\me\token"` does not parse:
+
+```toml
+[secrets]
+gitlab = { file = "~/.gitlab_token" }
+github = { file = "C:/Users/me/tokens/github" }
+db_url = { dotenv = { path = 'C:\Users\me\shop\.env', key = "DATABASE_URL" } }
+```
+
+A machine overlay that does not parse is left out whole, secrets included, until you fix
+it. Settings › Projects shows its error, and so does anything that needs one of its
+secrets.
+
 ## Configure a project
 
 Workbench detects a project's run configurations and environments from its files. You

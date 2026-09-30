@@ -18,7 +18,55 @@ pub struct ApiError {
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
+/// Every `code` Workbench's routes answer with: the constructors' below, the slices' own
+/// (`port_in_use`, `unsafe_repository`…) and the dev container routes' `approval_required`.
+/// `mcp::call_api` keeps a route's code when it is one of these; a test checks the list
+/// against the source.
+pub const CODES: &[&str] = &[
+    "agent_busy",
+    "approval_required",
+    "bad_request",
+    "busy",
+    "confirmation_required",
+    "conflict",
+    "debugger_error",
+    "dirty_tree",
+    "docker_failed",
+    "docker_unavailable",
+    "exists",
+    "forbidden",
+    "git_error",
+    "inline_comments",
+    "internal",
+    "invalid_registry",
+    "length_required",
+    "locked",
+    "not_a_repo",
+    "not_configured",
+    "not_found",
+    "not_merged",
+    "not_pending",
+    "not_restartable",
+    "not_startable",
+    "pid_required",
+    "port_in_use",
+    "pushed",
+    "rate_limited",
+    "timeout",
+    "too_large",
+    "unauthorized",
+    "unsafe_repository",
+    "unsupported_platform",
+    "untracked_overwritten",
+    "upstream",
+];
+
 impl ApiError {
+    /// `code` as Workbench's own `&'static str` when it is one of [`CODES`].
+    pub fn own_code(code: &str) -> Option<&'static str> {
+        CODES.iter().copied().find(|c| *c == code)
+    }
+
     pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self { status, code, message: message.into(), feature: None }
     }
@@ -138,5 +186,42 @@ mod tests {
         // Through anyhow (handlers that use `?` on it) the feature stays.
         let e: ApiError = anyhow::Error::new(ApiError::unsupported("networkRoots", "x")).into();
         assert_eq!((e.code, e.feature), ("unsupported_platform", Some("networkRoots")));
+    }
+
+    /// `CODES` has every code the source gives an error: a code missing there would reach
+    /// MCP tools as `upstream`.
+    #[test]
+    fn codes_lists_every_code_in_the_source() {
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = vec![];
+        rs_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        // Calls whose second argument is the code (spelled in pieces, so this test is not one).
+        let calls = [concat!("ApiError", "::new("), concat!("Self", "::new(StatusCode::")];
+        let mut found = std::collections::BTreeSet::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).unwrap();
+            for call in calls {
+                for (at, _) in text.match_indices(call) {
+                    let Some((_, rest)) = text[at + call.len()..].split_once(',') else { continue };
+                    if let Some(literal) = rest.trim_start().strip_prefix('"') {
+                        found.insert(literal.split('"').next().unwrap_or_default().to_string());
+                    }
+                }
+            }
+        }
+        assert!(found.contains("not_configured") && found.contains("port_in_use"), "the scan found {found:?}");
+        let missing: Vec<&String> = found.iter().filter(|c| ApiError::own_code(c).is_none()).collect();
+        assert!(missing.is_empty(), "add these to error::CODES: {missing:?}");
+        assert_eq!(ApiError::own_code("approval_required"), Some("approval_required"));
+        assert_eq!(ApiError::own_code("teapot"), None);
     }
 }
