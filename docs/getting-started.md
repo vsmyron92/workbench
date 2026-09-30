@@ -100,6 +100,28 @@ both folders):
 | Projects found on the first start | git repositories directly under `%USERPROFILE%\workspace` |
 | Token files found on the first start | `.gitlab_token`, `.github_token`, `.atlassian_token` in `%USERPROFILE%` |
 
+To remove Workbench, stop it (`workbench service stop`, or Ctrl+C where `workbench serve`
+runs), then run the installer with `-Uninstall` from a terminal outside Workbench (add the
+`-Prefix` you installed with, if any):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\workbench-<version>-x86_64-pc-windows-msvc\install.ps1 -Uninstall
+```
+
+It runs `workbench service uninstall` for each service whose sign-in entry or Start Menu
+shortcut starts the programs in `%LOCALAPPDATA%\Programs\Workbench` (a service of Workbench
+in another folder stays), deletes the files `install.ps1` put in that folder, then the folder
+once nothing else is in it, and removes the folder from your user PATH. While a program from
+the folder runs it changes nothing and says what runs. Your configuration and Workbench's
+state (the two folders above) stay for a later install; delete them to remove those too. By
+hand, the same is:
+
+1. `workbench service stop`, then `workbench service uninstall` (with `--name <name>` for a
+   service installed under a name).
+2. Delete `%LOCALAPPDATA%\Programs\Workbench`.
+3. Remove that folder from `Path` in your user variables (search the Start menu for *Edit
+   environment variables for your account*), then open a new terminal.
+
 Good to know:
 
 - Terminals start PowerShell 7 (`pwsh`) when it is installed, else Windows PowerShell.
@@ -251,6 +273,9 @@ administrator rights:
   Workbench stops).
 - In a terminal started with *Run as administrator*, `install --enable` starts nothing:
   Workbench and its agents would run as administrator too.
+- `uninstall` removes the sign-in entry, the shortcut and `service.json`, and stops the
+  Workbench the service runs. Workbench itself stays installed: `install.ps1 -Uninstall`
+  removes it ([Install on Windows](#install-on-windows-experimental)).
 
 ## Next steps
 

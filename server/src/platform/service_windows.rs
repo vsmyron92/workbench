@@ -1203,6 +1203,19 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_without_a_service_is_fine() {
+        // As `install.ps1 -Uninstall` may run it: nothing is installed, for either name.
+        let f = fixture();
+        for name in ["workbench", "other"] {
+            let mut out = vec![];
+            uninstall(&f.env, name, false, &mut out).unwrap();
+            assert_eq!(text(out), "nothing to remove\n");
+        }
+        assert!(!f.env.state_dir.exists());
+        assert!(std::fs::read_dir(&f.env.programs_dir).unwrap().next().is_none());
+    }
+
+    #[test]
     fn status_reports_each_part() {
         let f = fixture();
         let mut out = vec![];

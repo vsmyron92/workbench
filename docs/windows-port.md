@@ -33,11 +33,17 @@ run on a Windows 10 or 11 desktop yet.
   a restart during an exit's save that left the new process reading as exited (every OS);
   setup messages that named `~/.config/workbench`; `workbench service` from another Windows
   session ("Service"); and Local History after a watcher overflow ("File watching").
+- **Packaging, after 0.3.0:** `install.ps1 -Uninstall` (§4, "A zip with `install.ps1`"),
+  which CI runs after the install; and an application manifest in both executables (§1.A):
+  Windows 10 and 11 as supported systems, Common Controls 6 for the message boxes of
+  `workbenchw.exe` and the supervisor, `longPathAware`, and `asInvoker`. A `cfg(windows)`
+  test checks in its own process that Windows applies it (GetVersionExW reports 10, comctl32
+  loads in version 6). How the message boxes look is left for a desktop check.
 - **Next:** real Windows 10 and 11 desktops (§5): ConPTY terminals with agent CLIs, the
-  service and its Start Menu shortcut, git over SSH and HTTPS, language servers. Until then a
-  tag publishes the Linux archive alone: the release workflow builds the Windows archive on
-  a tag only once the repository variable `RELEASE_WINDOWS` is `true` (by hand it always
-  does).
+  service and its Start Menu shortcut (and the look of its message boxes), git over SSH and
+  HTTPS, language servers. Until then a tag publishes the Linux archive alone: the release
+  workflow builds the Windows archive on a tag only once the repository variable
+  `RELEASE_WINDOWS` is `true` (by hand it always does).
 
 This is the plan for a native `x86_64-pc-windows-msvc` build that works on Windows 10 and
 11, with Linux behaviour unchanged. File and line references are from 0.1.0 (commit
@@ -69,7 +75,13 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   - `dunce` (already in the lock). The Start Menu shortcut is written through the shell's
     ShellLink COM object with windows-sys (`os::autostart`), not `mslnk` (unmaintained since
     2022, bitflags 1, a subset of the format).
-- Build-dependency `winresource` (icon and version resource, a no-op elsewhere). Not done:
+- Build-dependency `winresource` (icon, version resource and the application manifest
+  `packaging/windows/workbench.manifest`, a no-op elsewhere). The manifest declares Windows
+  10 and 11 (`supportedOS`: without it Windows treats the programs as written for Windows
+  8), Common Controls 6 (message boxes in the current style), `longPathAware` (no MAX_PATH
+  limit where `LongPathsEnabled` is set; the Recycle Bin's `SHFileOperationW` keeps it, and
+  `os::fs` refuses longer paths there) and `asInvoker`. It is linked into the test
+  executables too. Not done:
   the Windows dev-dependency `junction`, since the tests make junctions with `cmd /c mklink /J`.
 - Not needed: `if-addrs`, `trash`, `winreg`, `windows` (each replacement is under 80 lines of
   windows-sys).
@@ -547,8 +559,10 @@ Each step compiles and passes on Linux. S = under a day, M = 1–3 days, L = 3�
 false`, checkout, setup-python, `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache`
 (workspaces: server; kept when tests fail), `cargo build --locked`, `cargo test --locked
 --no-fail-fast`, then `install.ps1` under Windows PowerShell 5.1 whenever the build
-succeeded. Informational (`continue-on-error`) until step 13; required since (done: see the
-status at the top).
+succeeded: an install, then `-Uninstall`, refused while Workbench runs from the folder and
+then checked to remove the service's shortcut, the folder and the PATH entry (the rest of
+the user PATH and its type unchanged). Informational (`continue-on-error`) until step 13;
+required since (done: see the status at the top).
 
 **Release.** A `windows` job next to the Linux one: `server/.cargo/config.toml` sets
 `[target.x86_64-pc-windows-msvc] rustflags = ["-C", "target-feature=+crt-static"]` (no VC++
@@ -572,6 +586,18 @@ user PATH, can move a running exe aside before copying the new one, and needs no
 toolchain (cargo-wix targets WiX 3 and per-machine installs). A winget "portable zip"
 manifest can come later; revisit MSI once the binaries are code-signed. Users run
 `Unblock-File` (Mark of the Web) or `-ExecutionPolicy Bypass`.
+
+`install.ps1 -Uninstall` (same `-Prefix`) is the way back. It changes nothing while a
+program runs from the folder (a Win32_Process whose executable is there: the server, the
+supervisor, a terminal's `OpenConsole.exe`, a `*.old` still running), and so never runs in a
+terminal of the Workbench it removes. It runs `workbench service uninstall [--name N]` only
+for the services whose `Run` value or Start Menu shortcut starts that folder's
+`workbenchw.exe`, so another install's service stays. It deletes the files `install.ps1`
+puts there (the payload, `*.old`, `*.new`; `workbench.exe` last, so a second run finishes an
+interrupted one), removes the folder only when it is empty then, and removes exactly the
+PATH entry `install.ps1` added, keeping the value's type (`REG_EXPAND_SZ`), then broadcasts
+`WM_SETTINGCHANGE`. A folder that exists without `workbench.exe` is not touched. The
+configuration and data folders stay, and it prints where they are.
 
 ## 5. Risks, and what the first version leaves out
 

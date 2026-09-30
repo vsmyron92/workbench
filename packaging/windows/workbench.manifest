@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  The application manifest of workbench.exe and workbenchw.exe, embedded by server/build.rs
+  (and so in the test executables too). Windows reads it when a program starts.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!-- Workbench runs on Windows 10 (1809 or newer) and 11: without this, Windows gives it the
+       behaviour of programs written for Windows 8. -->
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and 11 (and Windows Server 2016 and newer) -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+  <!-- Common Controls 6: message boxes (workbenchw.exe, the service's errors) in the current
+       Windows style rather than the classic one. -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"
+        processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+  <!-- Paths of MAX_PATH (260) characters or more work without the \\?\ prefix where Windows
+       allows long paths (LongPathsEnabled). APIs without long-path support, such as the
+       Recycle Bin's SHFileOperation, keep the limit (util::os::fs checks it). -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
+  <!-- Runs with the rights of whoever starts it, never elevated, and without the installer
+       detection that elevates programs by their name. -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>

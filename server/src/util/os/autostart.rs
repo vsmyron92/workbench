@@ -578,4 +578,39 @@ mod tests {
         }
         assert!(flag.exists(), "it ran in `cwd`");
     }
+
+    /// build.rs embeds `packaging/windows/workbench.manifest` in every executable, this test's
+    /// included, and Windows applies it: with its `supportedOS`, GetVersionExW reports the
+    /// real version (6.2, Windows 8, without it), and with its Common Controls dependency
+    /// `comctl32.dll` loads in version 6 (5.82 without it), which [`message_box`] draws with.
+    #[test]
+    fn the_application_manifest_is_in_effect() {
+        use windows_sys::Win32::Foundation::{FARPROC, FreeLibrary};
+        use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
+        use windows_sys::Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOW};
+        use windows_sys::Win32::UI::Shell::{DLLGETVERSIONPROC, DLLVERSIONINFO};
+
+        let mut os = OSVERSIONINFOW { dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32, ..Default::default() };
+        // SAFETY: `os` is writable and gives its size.
+        assert_ne!(unsafe { GetVersionExW(&mut os) }, 0, "{}", io::Error::last_os_error());
+        assert!(os.dwMajorVersion >= 10, "Windows reports {}.{}: no supportedOS in effect", os.dwMajorVersion, os.dwMinorVersion);
+
+        let name = wide("comctl32.dll");
+        // SAFETY: a NUL-terminated name; the activation context redirects it before System32
+        // is searched.
+        let lib = unsafe { LoadLibraryExW(name.as_ptr(), ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) };
+        assert!(!lib.is_null(), "{}", io::Error::last_os_error());
+        // SAFETY: a loaded module and a NUL-terminated name.
+        let export = unsafe { GetProcAddress(lib, c"DllGetVersion".as_ptr().cast()) };
+        // SAFETY: comctl32's DllGetVersion has DLLGETVERSIONPROC's signature; both types are
+        // optional function pointers.
+        let get_version = unsafe { std::mem::transmute::<FARPROC, DLLGETVERSIONPROC>(export) }.expect("comctl32.dll exports DllGetVersion");
+        let mut v = DLLVERSIONINFO { cbSize: size_of::<DLLVERSIONINFO>() as u32, ..Default::default() };
+        // SAFETY: `v` is writable and gives its size; the module stays loaded until FreeLibrary.
+        let hr = unsafe { get_version(&mut v) };
+        // SAFETY: the module loaded above, released once.
+        unsafe { FreeLibrary(lib) };
+        assert_eq!(hr, 0);
+        assert_eq!(v.dwMajorVersion, 6, "comctl32.dll {}.{}: no Common Controls 6 in effect", v.dwMajorVersion, v.dwMinorVersion);
+    }
 }
