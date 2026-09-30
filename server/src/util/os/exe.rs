@@ -202,6 +202,40 @@ pub fn python() -> Vec<String> {
     }
 }
 
+/// Tests: the file `test_cli` writes the program of the command `name` to in `dir`:
+/// `dir/name` (Unix), `dir/name.py` (Windows). Python runs it directly as that file.
+#[cfg(test)]
+pub(crate) fn test_cli_script(dir: &Path, name: &str) -> PathBuf {
+    if cfg!(windows) { dir.join(format!("{name}.py")) } else { dir.join(name) }
+}
+
+/// Tests: the Python 3 program `source` in `dir` as the command `name`, a stand-in for a CLI
+/// that config.toml names (an agent provider's or `[devcontainer] docker`'s `command`);
+/// returns that command. Unix: the script itself (`test_cli_script`), executable. Windows: an
+/// npm-style shim, `name.cmd` with the `name.ps1` beside it that `launch` reads to start
+/// Python on `name.py` directly, so it takes the shim unwrapping path; cmd.exe runs the
+/// `.cmd` where nothing unwraps it.
+#[cfg(test)]
+pub(crate) fn test_cli(dir: &Path, name: &str, source: &str) -> PathBuf {
+    let script = test_cli_script(dir, name);
+    std::fs::write(&script, source).unwrap();
+    #[cfg(unix)]
+    {
+        super::perm::apply(&script, 0o755).unwrap();
+        script
+    }
+    #[cfg(windows)]
+    {
+        let python: Vec<String> = python().iter().map(|a| format!("\"{a}\"")).collect();
+        let python = python.join(" ");
+        let ps1 = format!("#!/usr/bin/env pwsh\n$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent\n\n& {python} \"$basedir/{name}.py\" $args\nexit $LASTEXITCODE\n");
+        std::fs::write(dir.join(format!("{name}.ps1")), ps1).unwrap();
+        let cmd = dir.join(format!("{name}.cmd"));
+        std::fs::write(&cmd, format!("@{python} \"%~dp0{name}.py\" %*\r\n")).unwrap();
+        cmd
+    }
+}
+
 /// `python()` as the start of a command line for the run shell: the program's name, which
 /// the shell finds on `PATH` as `python()` did, then its arguments: `python3` (Unix);
 /// `python` or `py -3` (Windows).

@@ -50,6 +50,33 @@ impl Handle {
     }
 }
 
+/// How a PTY's leader ended (`wait`).
+#[derive(Debug, Clone)]
+pub struct LeaderExit {
+    /// Its exit code as portable-pty reports it: 1 for a process a signal ended (Unix).
+    pub code: u32,
+    /// The signal that ended it, as portable-pty describes it (`strsignal`, which may be
+    /// translated). Unix only.
+    pub signal: Option<String>,
+    /// A request to end it did, rather than its own exit or a crash: on Unix a hang-up (its
+    /// terminal closed), terminate, kill or interrupt signal; not SIGSEGV, SIGABRT and the
+    /// like. Always false on Windows, where a process ended from outside (`TerminateProcess`,
+    /// as Task Manager's End task does) exits with the code it was given, 1 there, like one
+    /// that exited with that code by itself.
+    pub terminated: bool,
+}
+
+/// Blocking: wait for `child`, a PTY's leader (`SlavePty::spawn_command`), to exit. The code
+/// and signal are portable-pty's, as its own `wait` reports them.
+pub fn wait(child: &mut dyn portable_pty::Child) -> std::io::Result<LeaderExit> {
+    imp::wait(child)
+}
+
+/// A `LeaderExit` with the code and signal of portable-pty's status.
+fn leader_exit(s: portable_pty::ExitStatus, terminated: bool) -> LeaderExit {
+    LeaderExit { code: s.exit_code(), signal: s.signal().map(str::to_owned), terminated }
+}
+
 /// Blocking, on the thread that saw the leader of session `sid` exit. Unix returns at once
 /// (the reader sees EOF once no process has the PTY open). Windows waits until no process
 /// of the session runs, then closes its pseudoconsole, so the reader sees EOF, and forgets
@@ -170,6 +197,24 @@ mod imp {
     }
 
     pub fn leader_exited(_sid: i32) {}
+
+    /// portable-pty's status names the signal but not its number, and reports a code of 1
+    /// with it. Its children are std's (`std::process::Child`), whose status has the number.
+    pub fn wait(child: &mut dyn portable_pty::Child) -> std::io::Result<super::LeaderExit> {
+        use std::os::unix::process::ExitStatusExt;
+        let Some(c) = child.downcast_mut::<std::process::Child>() else {
+            return Ok(super::leader_exit(child.wait()?, false));
+        };
+        let st = c.wait()?;
+        Ok(super::leader_exit(st.into(), st.signal().is_some_and(terminating)))
+    }
+
+    /// Signals that ask a process to end: a hang-up (its terminal closed, or Workbench's
+    /// kill), a terminate or kill request, an interrupt (Ctrl-C). Not those of a crash
+    /// (SIGSEGV, SIGABRT, SIGBUS…) or SIGQUIT's core dump.
+    pub(super) fn terminating(signal: i32) -> bool {
+        matches!(signal, libc::SIGHUP | libc::SIGTERM | libc::SIGKILL | libc::SIGINT)
+    }
 
     /// SIGHUP, and SIGCONT so stopped jobs can receive it, to every process group of the
     /// session. portable-pty's own kill signals the leader only, which leaves background
@@ -403,6 +448,13 @@ mod imp {
         release(sid, &s);
     }
 
+    /// Never `terminated`: Task Manager's End task (`TerminateProcess`) leaves exit code 1
+    /// and nothing else, so it cannot be told from a process that exited with 1 itself. Only
+    /// the ends Workbench causes are known as such (the terminals slice notes them).
+    pub fn wait(child: &mut dyn portable_pty::Child) -> std::io::Result<super::LeaderExit> {
+        Ok(super::leader_exit(child.wait()?, false))
+    }
+
     pub fn members(sid: i32) -> Vec<(i32, i32)> {
         session(sid).map(|s| live(&s).into_iter().map(|p| (p as i32, sid)).collect()).unwrap_or_default()
     }
@@ -617,6 +669,19 @@ mod tests {
         let line = "1234 (we(ird) name) S 1 1200 1100 34816 1234 4194560 0 0";
         assert_eq!(imp::parse_stat(line), Some(("S", 1200, 1100)));
         assert_eq!(imp::parse_stat("garbage"), None);
+    }
+
+    /// Signals that ask a process to end make its exit `terminated`; a crash's do not (they
+    /// dump core, so `pty::tests` does not raise them).
+    #[cfg(unix)]
+    #[test]
+    fn only_requests_to_end_are_terminating_signals() {
+        for sig in [libc::SIGHUP, libc::SIGTERM, libc::SIGKILL, libc::SIGINT] {
+            assert!(imp::terminating(sig), "{sig}");
+        }
+        for sig in [libc::SIGSEGV, libc::SIGABRT, libc::SIGBUS, libc::SIGFPE, libc::SIGILL, libc::SIGQUIT, libc::SIGUSR1, libc::SIGPIPE] {
+            assert!(!imp::terminating(sig), "{sig}");
+        }
     }
 
     #[test]

@@ -549,6 +549,65 @@ ready = {{ log = "READY-LINE", timeout_s = 60 }}
     runs::stop(&l.state, &p, "srv").await.unwrap();
 }
 
+/// A run whose terminal is closed or killed from outside was not a failure of its own: it
+/// ends Exited, not Failed "exited with code 1". A non-zero exit still fails, and Stop
+/// still stops. (Every OS; the signal from another process is Unix only, since Windows
+/// cannot tell a process ended from outside from one that exited with that code.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runs_ended_from_outside_exit_and_failures_fail() {
+    // `sleep` and `exit` are the same in bash and PowerShell.
+    let l = live_fixture(
+        r#"
+[[run]]
+name = "srv"
+kind = "server"
+command = "sleep 30"
+[[run]]
+name = "bad"
+command = "exit 1"
+"#,
+    )
+    .await;
+    let p = l.state.projects.require("live").unwrap();
+    let t = &l.state.terminals;
+    let running = |x: &runs::RunLive| x.state == runs::RunState::Running;
+    let ended_from_outside = |x: &runs::RunLive| {
+        assert_ne!(x.state, runs::RunState::Failed, "{x:?}");
+        x.state == runs::RunState::Exited
+    };
+
+    // (a) Its terminal closed (or killed) in Workbench.
+    runs::start(&l.state, &p, "srv", false).await.unwrap();
+    let tid = wait_run(&l.state, "srv", "running", running).await.terminal_id.unwrap();
+    t.close(&l.state, &tid, false).await.unwrap();
+    let live = wait_run(&l.state, "srv", "exited", ended_from_outside).await;
+    assert!(live.error.is_none() && live.exit.as_ref().is_some_and(|e| e.terminated), "{live:?}");
+
+    // (b) Killed by another process (SIGTERM), whatever code portable-pty reports with it.
+    #[cfg(unix)]
+    {
+        runs::start(&l.state, &p, "srv", false).await.unwrap();
+        wait_run(&l.state, "srv", "running", running).await;
+        let pid = t.get(&tid).and_then(|e| e.running_pty()).expect("the run's process").pid;
+        assert!(std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status().unwrap().success());
+        let live = wait_run(&l.state, "srv", "exited", ended_from_outside).await;
+        assert!(live.exit.as_ref().is_some_and(|e| e.terminated && e.signal.is_some()), "{live:?}");
+    }
+
+    // (c) A command that exits with 1 fails.
+    runs::start(&l.state, &p, "bad", false).await.unwrap();
+    let live = wait_run(&l.state, "bad", "failed", |x| x.state == runs::RunState::Failed).await;
+    assert_eq!(live.error.as_deref(), Some("exited with code 1"));
+    assert!(live.exit.is_some_and(|e| e.code == Some(1) && !e.terminated));
+
+    // (d) Stop stops.
+    runs::start(&l.state, &p, "srv", false).await.unwrap();
+    wait_run(&l.state, "srv", "running", running).await;
+    assert_eq!(runs::stop(&l.state, &p, "srv").await.unwrap().state, runs::RunState::Stopped);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(l.state.apps.runs.live("live", "srv").state, runs::RunState::Stopped);
+}
+
 /// `free_port = true` is standing consent: the start frees the port instead of
 /// answering `port_in_use`. Without it, a busy port is still refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

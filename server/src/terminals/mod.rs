@@ -131,6 +131,13 @@ pub struct ExitInfo {
     pub code: Option<i32>,
     pub signal: Option<String>,
     pub at: i64,
+    /// It was ended from outside, not by its own exit or a crash: Workbench killed, closed
+    /// or restarted the terminal, or (Unix) a hang-up, terminate, kill or interrupt signal
+    /// ended it (`code` then is portable-pty's 1). Windows cannot tell a process ended from
+    /// outside (Task Manager) from one that exited with the same code: there only
+    /// Workbench's own stops count.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub terminated: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -259,8 +266,9 @@ pub(crate) struct Entry {
     pub exit_tx: watch::Sender<Option<ExitInfo>>,
     pub meta_dirty: AtomicBool,
     screen_saved_at: Mutex<Option<Instant>>,
-    /// Held while its files are saved or removed; true once they are removed (it was
-    /// forgotten), so that no save already under way brings them back.
+    /// Held while its files are saved, written for a launch (an agent's settings and MCP
+    /// config) or removed; true once they are removed (it was forgotten), so that no write
+    /// already under way brings them back (`Entry::unless_removed`).
     files_removed: Mutex<bool>,
     /// Serializes programmatic sends so pastes and their Enter never interleave.
     pub input_lock: tokio::sync::Mutex<()>,
@@ -334,6 +342,13 @@ impl Entry {
         if visible {
             self.rt.lock().permissions.note_visible();
         }
+    }
+
+    /// Run `f`, which writes into the terminal's directory (blocking), unless its files were
+    /// removed because it was forgotten: `None` then. They are not removed while `f` runs.
+    fn unless_removed<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
+        let removed = self.files_removed.lock();
+        (!*removed).then(f)
     }
 
     /// Wait (up to `max`) until the user has not typed for `quiet`. False if still typing.
@@ -808,7 +823,7 @@ impl Terminals {
                 let state2 = state.clone();
                 let entry2 = entry.clone();
                 tokio::spawn(async move {
-                    let info = events.exit.await.unwrap_or(ExitInfo { code: None, signal: None, at: util::now_ms() });
+                    let info = events.exit.await.unwrap_or(ExitInfo { code: None, signal: None, at: util::now_ms(), terminated: false });
                     // Let the reader drain the last output before the final screen is saved.
                     let _ = tokio::time::timeout(Duration::from_millis(800), events.reader_done).await;
                     state2.terminals.on_exit(&state2, &entry2, &pty, info).await;
@@ -818,7 +833,7 @@ impl Terminals {
             Err(e) => {
                 let msg = format!("cannot start {program}: {e:#}");
                 entry.screen.feed(format!("\r\n\x1b[31m{msg}\x1b[0m\r\n").as_bytes());
-                let exit = ExitInfo { code: None, signal: Some("failed to start".into()), at: util::now_ms() };
+                let exit = ExitInfo { code: None, signal: Some("failed to start".into()), at: util::now_ms(), terminated: false };
                 // Recorded and saved before it is announced, as in `on_exit`.
                 self.update_as("terminal.exited", entry, |r| {
                     r.info.status = TerminalStatus::Exited;
@@ -836,7 +851,10 @@ impl Terminals {
         }
     }
 
-    async fn on_exit(&self, state: &AppState, entry: &Arc<Entry>, pty: &Arc<pty::Pty>, info: ExitInfo) {
+    async fn on_exit(&self, state: &AppState, entry: &Arc<Entry>, pty: &Arc<pty::Pty>, mut info: ExitInfo) {
+        // Workbench ended it (Kill, Close, Restart): from outside, whatever its status says.
+        // On Windows that is the only way to tell (`ExitInfo::terminated`).
+        info.terminated |= pty.killed();
         // Held until the exit is announced: no start slips in between (`Entry::exit_lock`).
         let _exit = entry.exit_lock.lock().await;
         {
@@ -885,9 +903,12 @@ impl Terminals {
 
     /// Kill the current process (if any) and wait until its exit is recorded and saved
     /// (also that of one that exited by itself and is being recorded); also end whatever
-    /// earlier processes left running in their sessions.
+    /// earlier processes left running in their sessions. The exit of a process it kills is
+    /// recorded as `terminated`.
     pub(crate) async fn stop_process(&self, entry: &Arc<Entry>) {
         if let Some(p) = entry.running_pty() {
+            // Noted before anything ends it, the kill inside a container included.
+            p.note_killed();
             // Killing `docker exec` leaves its process running in the container: end
             // that too (and first, so a server's port is free when this returns).
             let inside = container_exec(&entry.rec.lock().info);
@@ -970,22 +991,26 @@ impl Terminals {
     /// forget it entirely.
     pub(crate) async fn close(&self, state: &AppState, id: &str, forget: bool) -> Result<(), ApiError> {
         let entry = self.require(id)?;
-        {
-            let _l = entry.lifecycle.lock().await;
-            self.stop_process(&entry).await;
-        }
+        let lifecycle = entry.lifecycle.lock().await;
+        self.stop_process(&entry).await;
         if forget {
+            // Still under the lifecycle lock: a restart or restore waiting for it then finds
+            // the terminal gone and starts nothing, so no agent token is issued for it and no
+            // file written into its directory afterwards (`agent::prepare_launch`).
             self.entries.write().remove(id);
             state.auth.revoke_agent_tokens(id);
             if let Some(root) = self.root() {
                 let e = entry.clone();
                 let _ = tokio::task::spawn_blocking(move || remove_files(&root, &e)).await;
             }
+            drop(lifecycle);
             if let Some(ctx) = self.ctx() {
                 let pid = entry.rec.lock().info.project_id.clone();
                 ctx.events.emit("terminal.removed", pid.as_deref(), json!({ "id": id }));
             }
         } else {
+            // Released first: hibernating and pruning skip a terminal whose lock is held.
+            drop(lifecycle);
             self.update(&entry, |r| {
                 let was = r.info.open;
                 r.info.open = false;
@@ -1254,16 +1279,11 @@ impl Terminals {
 
     fn write_all(root: &Path, writes: Vec<(Arc<Entry>, Write)>) {
         for (entry, w) in writes {
-            let removed = entry.files_removed.lock();
-            if *removed {
-                continue;
-            }
-            let r = match &w {
+            let r = entry.unless_removed(|| match &w {
                 Write::Meta(rec) => store::save_meta(root, rec),
                 Write::Screen(id, data) => store::save_screen(root, id, data),
-            };
-            drop(removed);
-            if let Err(e) = r {
+            });
+            if let Some(Err(e)) = r {
                 tracing::warn!("cannot save terminal state: {e:#}");
             }
         }
@@ -1406,7 +1426,7 @@ pub async fn start(state: &AppState) {
             rec.was_running = true;
             rec.info.status = TerminalStatus::Exited;
             if rec.info.exit.is_none() {
-                rec.info.exit = Some(ExitInfo { code: None, signal: Some("Workbench stopped".into()), at: now });
+                rec.info.exit = Some(ExitInfo { code: None, signal: Some("Workbench stopped".into()), at: now, terminated: false });
             }
         }
         if let Some(a) = rec.info.agent.as_mut() {

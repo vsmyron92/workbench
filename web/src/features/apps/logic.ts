@@ -55,6 +55,8 @@ export function runStateLabel(r: Pick<RunView, 'state' | 'phase' | 'port' | 'res
     case 'failed':
       return counts ?? (r.exit?.code != null ? `failed (${r.exit.code})` : 'failed')
     case 'exited':
+      // Closed or killed from outside: its exit code (portable-pty's 1 with a signal) says nothing.
+      if (r.exit?.terminated) return counts ?? 'terminated'
       return counts ?? (r.exit?.code != null ? `exit ${r.exit.code}` : 'finished')
     default:
       return ''

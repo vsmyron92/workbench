@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **Runs:** a run whose terminal is closed or killed from outside now ends "exited"
+  (the chip says "terminated", with a warning), no longer "failed: exited with code 1".
+  That covers Kill, Close and Restart in Workbench, and on Linux a hang-up, terminate, kill
+  or interrupt signal from any process. A crash (such as a segmentation fault or an abort)
+  and a non-zero exit code still fail, and Stop still stops. A task cut short this way does
+  not count as finished for runs that depend on it. On Windows only Workbench's own closes
+  are known: a process ended from Task Manager exits with code 1 and still reads as failed.
+- **Terminals:** removing an agent session from history while a restart or a restore was
+  waiting to start it no longer leaves a working agent token behind, nor its session files
+  (`mcp.json` holds that token) in the data directory. An agent session that fails to start
+  no longer keeps the token it was given.
+
 ## 0.3.0 - 2026-09-29
 
 - **Windows (experimental):** the first release with a Windows build, for Windows 10 (1809

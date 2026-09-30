@@ -18,6 +18,9 @@
 //! * **Services** (`kind = "service"`) are daemons: `command` starts them, `status`
 //!   (exit 0 = running) and `stop` manage them.
 //! * **Results**: `result_pattern` lines are parsed into `{passed, failed, items}`.
+//! * **The end**: `exited` after exit code 0 (and no failed test) or an end from outside
+//!   (its terminal closed or killed, `ended_from_outside`), `failed` otherwise, `stopped`
+//!   after Stop.
 //!
 //! Every state change emits `run.state` (`{name, state, port?, url?, terminalId?, …}`).
 
@@ -926,8 +929,11 @@ async fn wait_dep(state: &AppState, pid: &str, d: &Dep) -> Result<(), String> {
                 let notified = state.apps.runs.changed.notified();
                 let live = state.apps.runs.live(pid, r);
                 let finishes = matches!(kind.0, RunKind::Task | RunKind::Test | RunKind::Build);
+                // A task cut short (its terminal closed or killed) did not finish.
+                let terminated = live.exit.as_ref().is_some_and(|e| e.code != Some(0) && ended_from_outside(e));
                 match live.state {
                     RunState::Ready => return Ok(()),
+                    RunState::Exited if finishes && terminated => return Err(format!("dependency {r} was terminated")),
                     RunState::Exited if finishes => return Ok(()),
                     RunState::Running if !finishes && !has_readiness(state, pid, r) => return Ok(()),
                     RunState::Failed => return Err(format!("dependency {r} failed{}", live.error.map(|e| format!(": {e}")).unwrap_or_default())),
@@ -1194,12 +1200,13 @@ async fn finish(state: &AppState, pid: &str, name: &str, epoch: u64, p: &Prepare
         return;
     }
 
+    let succeeded = code == Some(0) && !failed_tests;
+    // Its terminal closed or killed, not a failure of its own: whatever code it reports.
+    let terminated = !succeeded && exit.as_ref().is_some_and(ended_from_outside);
     let new_state = if stopping {
         RunState::Stopped
-    } else if code == Some(0) && !failed_tests {
+    } else if succeeded || terminated {
         RunState::Exited
-    } else if code.is_none() && exit.as_ref().is_some_and(|e| e.signal.is_some()) {
-        RunState::Exited // terminated from outside (terminal closed)
     } else {
         RunState::Failed
     };
@@ -1230,6 +1237,8 @@ async fn finish(state: &AppState, pid: &str, name: &str, epoch: u64, p: &Prepare
         return;
     }
     match (kind, new_state) {
+        // Not "finished": a build or test run cut short did not succeed.
+        (_, RunState::Exited) if terminated => state.events.notify("warning", &format!("{name} was terminated")),
         (RunKind::Test | RunKind::Build | RunKind::Task, RunState::Exited) => {
             let msg = match summary {
                 Some(s) => format!("{name}: {s}"),
@@ -1244,6 +1253,17 @@ async fn finish(state: &AppState, pid: &str, name: &str, epoch: u64, p: &Prepare
         (RunKind::Server, RunState::Exited) => state.events.notify("warning", &format!("{name} exited")),
         _ => {}
     }
+}
+
+/// Whether a run's process was ended from outside rather than failing: its terminal was
+/// closed or killed, by Workbench or (Unix) by a hang-up, terminate, kill or interrupt
+/// signal (`ExitInfo::terminated`, whatever code portable-pty reports with the signal), or
+/// the exit is one the terminals slice records itself (`code` none, a reason in `signal`:
+/// "Workbench stopped"). A crash (SIGSEGV, SIGABRT) and a non-zero code are failures. On
+/// Windows only Workbench's own closes count: Task Manager's End task leaves exit code 1,
+/// which nothing tells apart from a failure.
+fn ended_from_outside(e: &ExitInfo) -> bool {
+    e.terminated || (e.code.is_none() && e.signal.is_some())
 }
 
 /// Run a short command (service status/stop) with the run's cwd and env; `Some(success)`.
@@ -1468,6 +1488,25 @@ mod tests {
         let found = problems(&project, &run, &expand::base_vars(&project), false);
         assert!(found.iter().any(|p| p.starts_with("toolchain {tool} is on a network path")), "{found:?}");
         assert!(found.iter().any(|p| p.contains(r"working directory \\server\share\src is on a network path")), "{found:?}");
+    }
+
+    #[test]
+    fn ends_from_outside_are_not_failures() {
+        let exit = |code: Option<i32>, signal: Option<&str>, terminated: bool| ExitInfo { code, signal: signal.map(str::to_string), at: 0, terminated };
+        // Unix: a hang-up or a kill comes with portable-pty's code 1; Workbench's own kill.
+        assert!(ended_from_outside(&exit(Some(1), Some("Hangup"), true)));
+        assert!(ended_from_outside(&exit(Some(1), None, true)));
+        // Recorded by the terminals slice itself.
+        assert!(ended_from_outside(&exit(None, Some("Workbench stopped"), false)));
+        // A crash, an exit code (Task Manager's End task on Windows too).
+        assert!(!ended_from_outside(&exit(Some(1), Some("Segmentation fault"), false)));
+        assert!(!ended_from_outside(&exit(Some(1), None, false)));
+        assert!(!ended_from_outside(&exit(Some(127), None, false)));
+        // The field is sent only when set (records and events keep their shape).
+        assert!(serde_json::to_value(exit(Some(3), None, false)).unwrap().get("terminated").is_none());
+        assert_eq!(serde_json::to_value(exit(Some(1), None, true)).unwrap()["terminated"], true);
+        let old: ExitInfo = serde_json::from_str(r#"{"code":1,"signal":null,"at":5}"#).unwrap();
+        assert!(!old.terminated);
     }
 
     #[test]

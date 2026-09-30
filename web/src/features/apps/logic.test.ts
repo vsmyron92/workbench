@@ -72,6 +72,8 @@ describe('runs', () => {
     expect(runStateLabel(run('t', { state: 'exited', result: { passed: 12, failed: 0 } }))).toBe('12 passed')
     expect(runStateLabel(run('t', { state: 'failed', result: { passed: 3, failed: 2 } }))).toBe('3 passed, 2 failed')
     expect(runStateLabel(run('t', { state: 'failed', exit: { code: 101, signal: null, at: 0 } }))).toBe('failed (101)')
+    expect(runStateLabel(run('t', { state: 'exited', exit: { code: 3, signal: null, at: 0 } }))).toBe('exit 3')
+    expect(runStateLabel(run('w', { state: 'exited', exit: { code: 1, signal: 'Hangup', at: 0, terminated: true } }))).toBe('terminated')
     expect(runStateLabel(run('t'))).toBe('')
     expect(runTone(run('w', { state: 'ready' }))).toBe('success')
     expect(runTone(run('w', { state: 'running', error: 'not ready after 60s' }))).toBe('warning')
