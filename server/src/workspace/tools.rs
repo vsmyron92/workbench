@@ -35,7 +35,7 @@ loading=\"lazy\"; keep wide tables scrollable. Markdown uses relative image path
 
 fn scope_for(ctx: &McpCtx, requested: Option<&str>) -> ApiResult<String> {
     match requested.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(store::HOME) => Ok(store::HOME.into()),
+        Some(s @ (store::HOME | store::SANDBOX)) => Ok(s.into()),
         Some(r) => ctx.project_for(Some(r)),
         None => Ok(ctx.project_id.clone().unwrap_or_else(|| store::HOME.into())),
     }
@@ -83,7 +83,7 @@ pub fn tools() -> Vec<McpTool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "scope": { "type": "string", "description": "\"home\" or a project id; default: this session's project, else home" },
+                    "scope": { "type": "string", "description": "\"home\", \"wb-sandbox\" (throwaway experiments) or a project id; default: this session's project, else home" },
                     "query": { "type": "string", "description": "Filter by words in the title, description, category or id" },
                     "includeArchived": { "type": "boolean" }
                 }
@@ -117,7 +117,7 @@ pub fn tools() -> Vec<McpTool> {
                     "title": { "type": "string", "description": "Short, readable title" },
                     "description": { "type": "string", "description": "One or two sentences: what this is and why" },
                     "category": { "type": "string", "description": "Free-form group, e.g. research, report, design, image-gen, analytics, dev" },
-                    "scope": { "type": "string", "description": "\"home\" or a project id; default: this session's project, else home" }
+                    "scope": { "type": "string", "description": "\"home\", \"wb-sandbox\" (throwaway experiments) or a project id; default: this session's project, else home" }
                 },
                 "required": ["title", "description"]
             }),
@@ -314,6 +314,7 @@ mod tests {
         let agent = McpCtx { terminal_id: Some("t".into()), project_id: Some("shop".into()) };
         assert_eq!(scope_for(&agent, None).unwrap(), "shop");
         assert_eq!(scope_for(&agent, Some("home")).unwrap(), "home");
+        assert_eq!(scope_for(&agent, Some("wb-sandbox")).unwrap(), "wb-sandbox");
         assert_eq!(scope_for(&agent, Some("other")).unwrap_err().code, "forbidden");
         let loose = McpCtx { terminal_id: Some("t".into()), project_id: None };
         assert_eq!(scope_for(&loose, None).unwrap(), "home");

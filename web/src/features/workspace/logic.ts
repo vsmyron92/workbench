@@ -6,7 +6,20 @@
 import type { ViewerKind, WorkspaceCard, WorkspaceStep } from './api'
 
 export const HOME = 'home'
+/** The Sandbox scope: throwaway cards, not tied to a project (server `store::SANDBOX`). */
+export const SANDBOX = 'wb-sandbox'
 export const ALL = 'all'
+
+/** Home and the Sandbox belong to no project. */
+export function isProjectless(scope: string): boolean {
+  return scope === HOME || scope === SANDBOX
+}
+
+/** The scope the tool window and the phone list show. */
+export function listedScope(listScope: 'project' | 'home' | 'sandbox', projectId: string | null): string {
+  if (listScope === 'sandbox') return SANDBOX
+  return listScope === 'home' || !projectId ? HOME : projectId
+}
 
 export function cardPanelId(scope: string, cardId: string): string {
   return `card:${scope}:${cardId}`

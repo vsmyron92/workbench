@@ -550,3 +550,46 @@ async fn examples_never_join_cards_that_are_already_there() {
     let (_, list) = env.json(Method::GET, "/api/workspace/home/cards", None).await;
     assert_eq!(list["cards"].as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn the_sandbox_is_a_scope_of_its_own_that_reset_empties() {
+    let env = setup().await;
+    let sandbox = || super::store::scope(&env.state, "wb-sandbox").unwrap();
+    assert_eq!(super::examples::seed(&sandbox()).unwrap(), 1);
+    assert_eq!(super::examples::seed(&sandbox()).unwrap(), 0, "only on a first start");
+
+    let (_, scopes) = env.json(Method::GET, "/api/workspace/scopes", None).await;
+    let ids: Vec<&str> = scopes.as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect();
+    assert_eq!(&ids[..2], ["home", "wb-sandbox"]);
+    assert!(env.state.projects.get("wb-sandbox").is_none() && env.state.projects.list().iter().all(|p| p.id != "wb-sandbox"));
+
+    let (_, list) = env.json(Method::GET, "/api/workspace/wb-sandbox/cards", None).await;
+    let guide = &list["cards"][0];
+    assert_eq!((guide["id"].as_str(), guide["scope"].as_str()), (Some("sandbox-playground"), Some("wb-sandbox")));
+    assert!(guide["steps"].as_array().unwrap().iter().all(|s| s["exists"] == true), "{guide}");
+
+    // The playground report is served like any card's, and the sandbox stays out of All.
+    let base = guide["base"].as_str().unwrap();
+    let (s, _, body) = env.call(Method::GET, &format!("{base}playground.html"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(String::from_utf8(body).unwrap().contains("../_shared/report.css"));
+    let (_, all) = env.json(Method::GET, "/api/workspace/cards", None).await;
+    assert!(all["cards"].as_array().unwrap().iter().all(|c| c["scope"] != "wb-sandbox"), "{all}");
+
+    // Reset trashes every card, keeps them restorable and brings the guide back.
+    let (s, mine) = env.json(Method::POST, "/api/workspace/wb-sandbox/cards", Some(json!({ "title": "Experiment" }))).await;
+    assert_eq!(s, StatusCode::OK, "{mine}");
+    let (s, r) = env.json(Method::POST, "/api/workspace/wb-sandbox/reset", None).await;
+    assert_eq!((s, r["removed"].as_u64()), (StatusCode::OK, Some(2)), "{r}");
+    let (_, list) = env.json(Method::GET, "/api/workspace/wb-sandbox/cards", None).await;
+    let ids: Vec<&str> = list["cards"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["sandbox-playground"]);
+    let (_, trash) = env.json(Method::GET, "/api/workspace/wb-sandbox/trash", None).await;
+    assert_eq!(trash["items"].as_array().unwrap().len(), 2, "{trash}");
+
+    // Only the sandbox can be reset.
+    for scope in ["home", "proj"] {
+        let (s, _) = env.json(Method::POST, &format!("/api/workspace/{scope}/reset"), None).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{scope}");
+    }
+}

@@ -30,9 +30,12 @@ use crate::util;
 /// The scratch files' project (see the module doc).
 pub const SCRATCH_ID: &str = "wb-scratches";
 
-/// Ids no project gets: the Workspace's `home` scope, the UI's `all` view and the
-/// scratch files share the namespace of project ids.
-pub const RESERVED_IDS: &[&str] = &["home", "all", SCRATCH_ID];
+/// The Workspace's Sandbox scope: throwaway cards, not tied to a project.
+pub const SANDBOX_ID: &str = "wb-sandbox";
+
+/// Ids no project gets: the Workspace's `home` and Sandbox scopes, the UI's `all` view
+/// and the scratch files share the namespace of project ids.
+pub const RESERVED_IDS: &[&str] = &["home", "all", SCRATCH_ID, SANDBOX_ID];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -463,6 +466,9 @@ async fn reload(State(state): State<AppState>) -> Json<serde_json::Value> {
 #[derive(Deserialize)]
 struct AddBody {
     path: String,
+    /// Create the directory (and its parents) when it does not exist yet.
+    #[serde(default)]
+    create: bool,
 }
 
 /// Change `[projects]` in config.toml. The change is applied to the file as it is on
@@ -499,6 +505,12 @@ async fn add(State(state): State<AppState>, Json(body): Json<AddBody>) -> ApiRes
     // UNC and WSL paths on Windows, and links to them: refused before `is_dir` connects
     // to their server.
     util::os::support::require_local_root(&p)?;
+    if body.create && !p.exists() {
+        std::fs::create_dir_all(&p).map_err(|e| ApiError::bad_request(format!("cannot create {}: {e}", p.display())))?;
+    }
+    if !p.exists() {
+        return Err(ApiError::not_found(format!("{} does not exist", p.display())));
+    }
     if !p.is_dir() {
         return Err(ApiError::bad_request(format!("{} is not a directory", p.display())));
     }
@@ -662,6 +674,34 @@ mod tests {
         let after = std::fs::read_to_string(&file).unwrap();
         assert!(after.contains("# where my repos live") && after.contains("exclude"), "{after}");
         assert!(app.state.config.read().projects.exclude.len() == 1);
+    }
+
+    /// A missing directory is `not_found` until the client asks for it to be created.
+    #[tokio::test]
+    async fn adding_a_missing_directory_needs_create() {
+        let app = testutil::app().await;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("a/new-project");
+        let post = |body: serde_json::Value| {
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("host", "127.0.0.1:7999")
+                .header("authorization", format!("Bearer {}", app.state.auth.master_token()))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            let router = app.router.clone();
+            async move {
+                use tower::ServiceExt;
+                router.oneshot(req).await.unwrap().status()
+            }
+        };
+        assert_eq!(post(serde_json::json!({ "path": &target })).await, axum::http::StatusCode::NOT_FOUND);
+        assert!(!target.exists());
+        assert!(post(serde_json::json!({ "path": &target, "create": true })).await.is_success());
+        assert!(target.is_dir());
+        assert!(app.state.projects.find_by_path(&target.canonicalize().unwrap()).is_some());
     }
 
     /// Windows: WSL and network paths are refused as `unsupported_platform` before

@@ -1,22 +1,27 @@
 // The center area: IDE-style tabs and splits (dockview). Panels are the kinds
 // features register; the layout is saved per browser and restored on load.
 
-import { Component, Suspense, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Component, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   DockviewReact,
   themeAbyss,
+  type DockviewApi,
   type DockviewReadyEvent,
   type DockviewTheme,
   type IDockviewPanelProps,
 } from 'dockview-react'
 import 'dockview-react/dist/styles/dockview.css'
+import { useUi } from '@/state/store'
 import { Loading, ErrorBox } from '@/ui'
 import { noteActiveGroup, setDockApi } from './actions'
 import { panelDefs } from './registry'
 import { Welcome } from './Welcome'
 import type { PanelProps } from './types'
 
-const LAYOUT_KEY = 'wb.layout.v1'
+// One layout (tabs and splits) per project, so switching projects switches the tabs.
+// `wb.layout.v1` is the single layout older versions saved: the first project restores it.
+const LEGACY_LAYOUT_KEY = 'wb.layout.v1'
+const layoutKey = (pid: string | null) => (pid ? `wb.layout.v2.${pid}` : LEGACY_LAYOUT_KEY)
 
 const theme: DockviewTheme = {
   ...themeAbyss,
@@ -98,35 +103,23 @@ function Watermark() {
 }
 
 export function Dock() {
+  const projectId = useUi((s) => s.projectId)
+  const [dock, setDock] = useState<DockviewApi | null>(null)
+  const shown = useRef<string | null | undefined>(undefined)
+  const saveTimer = useRef<number | undefined>(undefined)
+
   const onReady = useMemo(
     () => (e: DockviewReadyEvent) => {
       const api = e.api
-      const saved = localStorage.getItem(LAYOUT_KEY)
-      if (saved) {
-        try {
-          api.fromJSON(JSON.parse(saved))
-        } catch (err) {
-          console.warn('layout restore failed', err)
-          localStorage.removeItem(LAYOUT_KEY)
-        }
-      }
       // Keep-alive panels (terminals, editors) render even while their tab is hidden.
-      for (const p of api.panels) {
-        if (panelDefs[p.view.contentComponent]?.keepAlive) p.api.setRenderer('always')
-      }
       api.onDidAddPanel((p) => {
         if (panelDefs[p.view.contentComponent]?.keepAlive) p.api.setRenderer('always')
       })
-      let t: number | undefined
       api.onDidLayoutChange(() => {
-        window.clearTimeout(t)
-        t = window.setTimeout(() => {
-          try {
-            localStorage.setItem(LAYOUT_KEY, JSON.stringify(api.toJSON()))
-          } catch {
-            /* quota */
-          }
-        }, 400)
+        window.clearTimeout(saveTimer.current)
+        const key = layoutKey(shown.current ?? null)
+        if (shown.current === undefined) return
+        saveTimer.current = window.setTimeout(() => saveLayout(api, key), 400)
       })
       api.onDidActiveGroupChange((g) => noteActiveGroup(g))
       // dockview 8.3: removing the active group disposes it and *then* deactivates it,
@@ -144,10 +137,50 @@ export function Dock() {
         }),
       )
       setDockApi(api)
+      setDock(api)
     },
     [],
   )
-  useEffect(() => () => setDockApi(null), [])
+
+  // Save the layout of the project being left and restore the one being entered.
+  useEffect(() => {
+    if (!dock || shown.current === projectId) return
+    window.clearTimeout(saveTimer.current)
+    const prev = shown.current
+    if (prev) saveLayout(dock, layoutKey(prev))
+    // Not yet restoring: layout events fired by clear() and fromJSON() must not save.
+    shown.current = undefined
+    if (prev !== undefined) dock.clear()
+    let saved = localStorage.getItem(layoutKey(projectId))
+    if (!saved && !prev && !localStorage.getItem(MIGRATED_KEY)) saved = localStorage.getItem(LEGACY_LAYOUT_KEY)
+    if (saved) {
+      try {
+        dock.fromJSON(JSON.parse(saved))
+      } catch (err) {
+        console.warn('layout restore failed', err)
+        localStorage.removeItem(layoutKey(projectId))
+      }
+    }
+    if (!prev && projectId) {
+      try {
+        localStorage.setItem(MIGRATED_KEY, '1')
+      } catch {
+        /* quota */
+      }
+    }
+    for (const p of dock.panels) {
+      if (panelDefs[p.view.contentComponent]?.keepAlive) p.api.setRenderer('always')
+    }
+    shown.current = projectId
+  }, [dock, projectId])
+
+  useEffect(
+    () => () => {
+      window.clearTimeout(saveTimer.current)
+      setDockApi(null)
+    },
+    [],
+  )
   return (
     <DockviewReact
       className="wb-dock"
@@ -158,4 +191,14 @@ export function Dock() {
       defaultRenderer="onlyWhenVisible"
     />
   )
+}
+
+const MIGRATED_KEY = 'wb.layout.v2.migrated'
+
+function saveLayout(api: DockviewApi, key: string) {
+  try {
+    localStorage.setItem(key, JSON.stringify(api.toJSON()))
+  } catch {
+    /* quota */
+  }
 }

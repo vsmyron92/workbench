@@ -13,7 +13,7 @@ import { initialProvider, isDangerous, pickerProviders, presetOf, PROVIDER_CONFI
 import { ProviderIcon } from './parts'
 import { useAgentsUi, type NewSessionPrefill } from './store'
 
-const CLAUDE_MODELS = ['opus', 'sonnet', 'haiku']
+const CLAUDE_MODELS = ['fable', 'opus', 'sonnet', 'haiku']
 
 /**
  * Ask for notification permission once, from a user gesture, on remote devices (a phone):

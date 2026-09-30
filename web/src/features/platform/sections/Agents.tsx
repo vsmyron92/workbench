@@ -70,6 +70,7 @@ export function AgentsSection({ onGoto }: { onGoto: (section: string) => void })
         <Row label="Model" hint="Alias or full model name. Empty: Claude Code's own default.">
           <Input value={form.model ?? ''} onChange={(e) => set({ model: e.target.value })} placeholder="default" list="wb-agent-models" />
           <datalist id="wb-agent-models">
+            <option value="fable" />
             <option value="opus" />
             <option value="sonnet" />
             <option value="haiku" />

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **Sandbox:** the Workspace has a Sandbox scope (`wb-sandbox`) for throwaway documents,
+  reports and agent experiments. It has its own tab in the Workspace tool window, the phone
+  list, the Workspace home and the New card dialog, a guide card with a playground report that
+  shows what a sandboxed report can reach, and **Reset**, which moves every card to the trash
+  and brings the guide back. Its cards stay out of the "All" view, and agents may write to it.
+- **Tabs follow the project:** each project keeps its own tabs and splits; switching projects
+  switches them.
+- **Add project** offers to create the directory when it does not exist, and switches to the
+  new project.
+- **Models:** `fable` is offered when starting a Claude Code session and in Settings › Agents.
+- **Settings** moved to the top left of the window.
+
 ## 0.3.1 - 2026-09-30
 
 - **Agent sessions (security fix):** removing an agent session from history while a restart

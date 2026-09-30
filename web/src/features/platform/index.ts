@@ -9,7 +9,7 @@ import { ActivityToolWindow } from './Activity'
 import { MobileMore } from './MobileMore'
 import { openPairDialog } from './PairDialog'
 import { PlatformProvider } from './Provider'
-import { openSettings, RemoteIndicator, SettingsButton } from './StatusBar'
+import { openSettings, RemoteIndicator } from './StatusBar'
 
 const SettingsPanel = lazy(() => import('./SettingsPanel').then((m) => ({ default: m.SettingsPanel })))
 
@@ -44,7 +44,7 @@ const feature: FeatureModule = {
     },
     { id: 'platform.rawConfig', title: 'Edit config.toml', group: 'Workbench', icon: FileCode, keywords: ['raw', 'toml'], run: () => openSettings('raw') },
   ],
-  statusbar: [RemoteIndicator, SettingsButton],
+  statusbar: [RemoteIndicator],
   mobileTabs: [
     {
       id: 'more',

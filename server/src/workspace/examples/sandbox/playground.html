@@ -1,0 +1,65 @@
+<!doctype html>
+<!-- Playground report: copy this file, change it, and see how a sandboxed report behaves.
+     Keep it self-contained: relative files only, no CDN scripts, web fonts or remote images. -->
+<html lang="en" data-wb-report="document">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Report playground</title>
+<link rel="stylesheet" href="../_shared/report.css">
+<script defer src="../_shared/report.js"></script>
+</head>
+<body>
+<main>
+<h1>Report playground</h1>
+<p class="meta">Sandbox example · edit this file (or copy it) and reload the tab</p>
+
+<div class="kpis">
+  <div class="kpi">Styles<b class="good">shared</b></div>
+  <div class="kpi">Scripts<b class="good">inline</b></div>
+  <div class="kpi">Network<b class="warn">own files only</b></div>
+  <div class="kpi">Workbench<b class="bad">out of reach</b></div>
+</div>
+
+<div class="card">
+  <h3>What this page can reach</h3>
+  <p>The checks below run in your browser, inside the report's sandbox.</p>
+  <table>
+    <thead><tr><th>Check</th><th>Result</th></tr></thead>
+    <tbody id="checks"></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3>Try it</h3>
+  <p>Change a number and watch the bar move.</p>
+  <input id="n" type="range" min="0" max="100" value="40" aria-label="Value">
+  <div style="height:12px;border-radius:6px;background:#2a2f3a;margin-top:8px">
+    <div id="bar" style="height:100%;width:40%;border-radius:6px;background:#4c9aff"></div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var rows = document.getElementById('checks');
+  function add(name, ok, note) {
+    var tr = document.createElement('tr');
+    var a = document.createElement('td'); a.textContent = name;
+    var b = document.createElement('td'); b.textContent = (ok ? 'Allowed' : 'Blocked') + (note ? ' · ' + note : '');
+    b.className = ok ? 'good' : 'bad';
+    tr.appendChild(a); tr.appendChild(b); rows.appendChild(tr);
+  }
+  function attempt(name, fn) {
+    try { add(name, !!fn(), ''); } catch (e) { add(name, false, e.name); }
+  }
+  attempt('Run inline script', function () { return true; });
+  attempt('Read cookies', function () { return document.cookie.length >= 0; });
+  attempt('Use localStorage', function () { localStorage.setItem('x', '1'); return true; });
+  attempt('Reach the parent page', function () { return window.parent.document.title.length >= 0; });
+  fetch('/api/health').then(function (r) { add('Call Workbench’s API', r.ok, ''); }, function () { add('Call Workbench’s API', false, 'request failed'); });
+  var n = document.getElementById('n'), bar = document.getElementById('bar');
+  n.addEventListener('input', function () { bar.style.width = n.value + '%'; });
+})();
+</script>
+</body>
+</html>

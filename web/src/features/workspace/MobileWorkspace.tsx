@@ -8,7 +8,7 @@ import { ApiError } from '@/api/client'
 import { EmptyState, ErrorBox, IconButton, Loading, showMenuAt } from '@/ui'
 import { useCard, useCards } from './api'
 import { patchCard } from './actions'
-import { categoryLabel, HOME, relativeDay, resolveStep, visibleCards } from './logic'
+import { categoryLabel, HOME, listedScope, relativeDay, resolveStep, SANDBOX, visibleCards } from './logic'
 import { CardThumb, KindIcon, StatusBadge } from './parts'
 import { type MobileSelection, useWsPrefs, useWsUi } from './store'
 import { StepViewer } from './viewers/StepViewer'
@@ -94,7 +94,7 @@ export function MobileWorkspace({ projectId }: { projectId: string | null }) {
   const setMobile = useWsUi((s) => s.setMobile)
   const listScope = useWsPrefs((s) => s.listScope)
   const setListScope = useWsPrefs((s) => s.setListScope)
-  const scope = listScope === 'home' || !projectId ? HOME : projectId
+  const scope = listedScope(listScope, projectId)
   const { data, error, isLoading, refetch } = useCards(scope)
   const [query, setQuery] = useState('')
   if (sel) return <MobileCard sel={sel} onBack={() => setMobile(null)} />
@@ -104,12 +104,15 @@ export function MobileWorkspace({ projectId }: { projectId: string | null }) {
       <div className="ws-m-bar">
         <div className="ws-seg" role="tablist" aria-label="Scope">
           {projectId && (
-            <button role="tab" aria-selected={scope !== HOME} className={scope !== HOME ? 'active' : ''} onClick={() => setListScope('project')}>
+            <button role="tab" aria-selected={scope !== HOME && scope !== SANDBOX} className={scope !== HOME && scope !== SANDBOX ? 'active' : ''} onClick={() => setListScope('project')}>
               Project
             </button>
           )}
           <button role="tab" aria-selected={scope === HOME} className={scope === HOME ? 'active' : ''} onClick={() => setListScope('home')}>
             Home
+          </button>
+          <button role="tab" aria-selected={scope === SANDBOX} className={scope === SANDBOX ? 'active' : ''} onClick={() => setListScope('sandbox')}>
+            Sandbox
           </button>
         </div>
         <label className="ws-search wb-grow">

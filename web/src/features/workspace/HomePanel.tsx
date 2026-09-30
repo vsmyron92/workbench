@@ -4,14 +4,14 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Archive, LayoutGrid, Pin, Plus, Search, Trash2, X } from 'lucide-react'
+import { Archive, LayoutGrid, Pin, Plus, RotateCcw, Search, Trash2, X } from 'lucide-react'
 import { useProjects } from '@/api/queries'
 import type { PanelProps } from '@/shell/types'
 import { useUi } from '@/state/store'
 import { Button, EmptyState, ErrorBox, IconButton, Loading, showMenu } from '@/ui'
 import { type WorkspaceCard, useCards, useTrash } from './api'
-import { cardMenu, dragHasPayload, dropOnCard, openCard } from './actions'
-import { ALL, categoryLabel, groupCards, HOME, relativeDay, visibleCards } from './logic'
+import { cardMenu, dragHasPayload, dropOnCard, openCard, resetSandbox } from './actions'
+import { ALL, categoryLabel, groupCards, HOME, isProjectless, relativeDay, SANDBOX, visibleCards } from './logic'
 import { CardThumb, CategoryIcon, KindIcon } from './parts'
 import { useWsPrefs, useWsUi } from './store'
 import { TrashView } from './TrashView'
@@ -118,6 +118,7 @@ function Section({ title, icon, cards, showScope }: { title: string; icon: React
 
 export function HomePanel({ params, setParams, setTitle, active }: PanelProps<HomeParams>) {
   const projectId = useUi((s) => s.projectId)
+  const qc = useQueryClient()
   const { data: projects } = useProjects()
   const scope = params.scope || projectId || HOME
   const trashView = params.view === 'trash'
@@ -153,10 +154,11 @@ export function HomePanel({ params, setParams, setTitle, active }: PanelProps<Ho
   }, [active])
 
   const scopeOptions = useMemo(() => {
-    const ids = [projectId, scope !== HOME && scope !== ALL ? scope : null].filter((x, i, a): x is string => !!x && a.indexOf(x) === i)
+    const ids = [projectId, !isProjectless(scope) && scope !== ALL ? scope : null].filter((x, i, a): x is string => !!x && a.indexOf(x) === i)
     return [
       ...ids.map((id) => ({ id, label: projects?.find((p) => p.id === id)?.name ?? id })),
       { id: HOME, label: 'Home' },
+      { id: SANDBOX, label: 'Sandbox' },
       { id: ALL, label: 'All' },
     ]
   }, [projectId, projects, scope])
@@ -216,6 +218,11 @@ export function HomePanel({ params, setParams, setTitle, active }: PanelProps<Ho
         >
           {trashView ? 'Cards' : `Trash${trashCount ? ` (${trashCount})` : ''}`}
         </Button>
+        {scope === SANDBOX && !trashView && (
+          <Button size="small" icon={RotateCcw} onClick={() => void resetSandbox(qc)} title="Move every card to the trash and bring the guide card back">
+            Reset
+          </Button>
+        )}
         <Button size="small" variant="primary" icon={Plus} onClick={newCard}>
           New card
         </Button>

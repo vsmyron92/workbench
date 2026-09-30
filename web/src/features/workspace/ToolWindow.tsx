@@ -4,11 +4,11 @@
 
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Archive, LayoutGrid, Plus, Search, X } from 'lucide-react'
+import { Archive, LayoutGrid, Plus, RotateCcw, Search, X } from 'lucide-react'
 import { EmptyState, ErrorBox, IconButton, Loading, Section, showMenu } from '@/ui'
 import { type WorkspaceCard, useCards } from './api'
-import { cardMenu, dragHasPayload, dropOnCard, openCard, openHome } from './actions'
-import { groupCards, HOME, relativeDay, visibleCards } from './logic'
+import { cardMenu, dragHasPayload, dropOnCard, openCard, openHome, resetSandbox } from './actions'
+import { groupCards, HOME, listedScope, relativeDay, SANDBOX, visibleCards } from './logic'
 import { CardThumb } from './parts'
 import { useWsPrefs, useWsUi } from './store'
 
@@ -46,7 +46,8 @@ export function WorkspaceToolWindow({ projectId }: { projectId: string | null })
   const setListScope = useWsPrefs((s) => s.setListScope)
   const showArchived = useWsPrefs((s) => s.showArchived)
   const setShowArchived = useWsPrefs((s) => s.setShowArchived)
-  const scope = listScope === 'home' || !projectId ? HOME : projectId
+  const scope = listedScope(listScope, projectId)
+  const qc = useQueryClient()
   const { data, error, isLoading, refetch } = useCards(scope)
   const [query, setQuery] = useState('')
   const cards = data?.cards ?? []
@@ -60,15 +61,19 @@ export function WorkspaceToolWindow({ projectId }: { projectId: string | null })
       <div className="wb-toolbar">
         <div className="ws-seg small" role="tablist" aria-label="Scope">
           {projectId && (
-            <button role="tab" aria-selected={scope !== HOME} className={scope !== HOME ? 'active' : ''} onClick={() => setListScope('project')}>
+            <button role="tab" aria-selected={scope !== HOME && scope !== SANDBOX} className={scope !== HOME && scope !== SANDBOX ? 'active' : ''} onClick={() => setListScope('project')}>
               Project
             </button>
           )}
           <button role="tab" aria-selected={scope === HOME} className={scope === HOME ? 'active' : ''} onClick={() => setListScope('home')}>
             Home
           </button>
+          <button role="tab" aria-selected={scope === SANDBOX} className={scope === SANDBOX ? 'active' : ''} onClick={() => setListScope('sandbox')}>
+            Sandbox
+          </button>
         </div>
         <span className="spacer" />
+        {scope === SANDBOX && <IconButton icon={RotateCcw} size="small" label="Reset the Sandbox" onClick={() => void resetSandbox(qc)} />}
         <IconButton icon={Plus} size="small" label="New card" onClick={() => useWsUi.getState().openNewCard(scope)} />
         <IconButton icon={LayoutGrid} size="small" label="Open Workspace home" onClick={() => openHome(scope)} />
       </div>

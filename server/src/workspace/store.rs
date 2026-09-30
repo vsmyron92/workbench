@@ -32,6 +32,13 @@ use crate::projects::Project;
 use crate::util;
 
 pub const HOME: &str = "home";
+/// The Sandbox scope: a playground for cards and reports, emptied with Reset.
+pub const SANDBOX: &str = crate::projects::SANDBOX_ID;
+
+/// Scopes that are not a project: Home and the Sandbox.
+pub fn is_projectless(id: &str) -> bool {
+    id == HOME || id == SANDBOX
+}
 /// Public id prefix of cards from a repository's own registry.
 pub const REPO_PREFIX: &str = "repo:";
 /// Shared report assets every scope gets (`../_shared/report.css` from a card folder).
@@ -122,14 +129,15 @@ pub fn migrate_legacy_dirs(state: &AppState) {
     }
 }
 
-/// `home` or a known project. No project gets the id `home` (the registry reserves
-/// it), so the Home scope never hides a project's cards.
+/// `home`, the Sandbox or a known project. No project gets the ids `home` and
+/// `wb-sandbox` (the registry reserves them), so those scopes never hide a project's cards.
 pub fn scope(state: &AppState, id: &str) -> ApiResult<Scope> {
     let id = id.trim();
-    if id == HOME {
-        return Ok(Scope { id: HOME.into(), name: "Home".into(), dir: root_dir(state).join(HOME), project: None });
+    if is_projectless(id) {
+        let name = if id == HOME { "Home" } else { "Sandbox" };
+        return Ok(Scope { id: id.into(), name: name.into(), dir: root_dir(state).join(id), project: None });
     }
-    let project = state.projects.get(id).ok_or_else(|| ApiError::not_found(format!("no workspace scope {id:?}: use \"home\" or a project id")))?;
+    let project = state.projects.get(id).ok_or_else(|| ApiError::not_found(format!("no workspace scope {id:?}: use \"home\", \"{SANDBOX}\" or a project id")))?;
     // Project ids are slugs; never let one become a path.
     if !model::valid_folder(&project.id) {
         return Err(ApiError::bad_request("unusable project id for a workspace scope"));
@@ -137,14 +145,16 @@ pub fn scope(state: &AppState, id: &str) -> ApiResult<Scope> {
     Ok(Scope { id: project.id.clone(), name: project.name.clone(), dir: root_dir(state).join(&project.id), project: Some(project) })
 }
 
-/// Home first, then every project.
+/// Home, the Sandbox, then every project.
 pub fn all_scopes(state: &AppState) -> Vec<Scope> {
     let mut out = vec![];
-    if let Ok(h) = scope(state, HOME) {
-        out.push(h);
+    for id in [HOME, SANDBOX] {
+        if let Ok(s) = scope(state, id) {
+            out.push(s);
+        }
     }
     for p in state.projects.list() {
-        if p.id == HOME {
+        if is_projectless(&p.id) {
             continue;
         }
         if let Ok(s) = scope(state, &p.id) {

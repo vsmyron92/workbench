@@ -8,7 +8,7 @@ import { toast, toastError } from '@/shell/actions'
 import { Button, EmptyState, Field, Input, Loading, Modal, Select, TextArea } from '@/ui'
 import { useCardFiles, useCards, VIEWERS, wsApi, type WorkspaceCard, type WorkspaceStep } from './api'
 import { applyCard, openCard, patchCard } from './actions'
-import { ALL, basename, categoryLabel, HOME, matchesQuery, relativeDay } from './logic'
+import { ALL, basename, categoryLabel, HOME, matchesQuery, relativeDay, SANDBOX } from './logic'
 import { CardThumb } from './parts'
 import { useWsUi } from './store'
 
@@ -88,6 +88,7 @@ export function NewCardDialog({ initialScope, onClose }: { initialScope: string;
                 </option>
               ))}
               <option value={HOME}>Home (not tied to a project)</option>
+              <option value={SANDBOX}>Sandbox (throwaway experiments)</option>
             </Select>
           </Field>
         </div>
