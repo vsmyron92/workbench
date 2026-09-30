@@ -94,9 +94,11 @@ pub fn copy_symlink(from: &Path, to: &Path) -> io::Result<()> {
 /// every desktop's quirks, otherwise the freedesktop.org Trash specification: the home
 /// trash on the same filesystem, else `$topdir/.Trash/$uid` if the admin created a sticky
 /// `.Trash`, or `$topdir/.Trash-$uid`), or `recycle-bin` (Windows: refused where the bin
-/// would delete for good: no bin on that drive, the bin turned off, a file larger than
-/// it; should Windows still find it cannot recycle the item, it asks on the host's
-/// desktop, and after a minute the request stops waiting with an error).
+/// would delete for good or cannot take the item, with a `not_recyclable` 422 that says
+/// why and how to delete it instead: no bin on that drive, the bin turned off, a file
+/// larger than it, a path of MAX_PATH characters or more; should Windows still find it
+/// cannot recycle the item, it asks on the host's desktop, and after a minute the request
+/// stops waiting with an error).
 pub async fn trash(path: &Path) -> ApiResult<&'static str> {
     #[cfg(test)]
     return scratch_trash(path);
@@ -507,13 +509,47 @@ mod win {
     /// recycle takes longer: Windows is then asking on the desktop.
     const RECYCLE_WAIT: Duration = Duration::from_secs(60);
 
+    /// Why [`recycle`] refused an item before anything happened: what the Recycle Bin does
+    /// not take, as opposed to a failure.
+    #[derive(Debug)]
+    struct Refused(String);
+
+    impl std::fmt::Display for Refused {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    impl std::error::Error for Refused {}
+
+    fn refused(kind: ErrorKind, why: impl Into<String>) -> io::Error {
+        io::Error::new(kind, Refused(why.into()))
+    }
+
+    fn is_refusal(e: &io::Error) -> bool {
+        e.get_ref().is_some_and(|inner| inner.is::<Refused>())
+    }
+
     // Tests use the scratch trash (super::scratch_trash).
     #[cfg_attr(test, allow(dead_code))]
     pub async fn trash(path: &Path) -> ApiResult<&'static str> {
-        recycle_waiting(path)
-            .await?
-            .map(|()| "recycle-bin")
-            .map_err(|e| ApiError::internal(format!("cannot move {} to the Recycle Bin: {e}", path.display())))
+        recycle_waiting(path).await?.map(|()| "recycle-bin").map_err(|e| not_recycled(path, &e))
+    }
+
+    /// What the request answers when `path` did not go to the Recycle Bin: a refusal is the
+    /// item's (a 422 that says why, and that it can still be deleted for good), anything
+    /// else a failure.
+    fn not_recycled(path: &Path, e: &io::Error) -> ApiError {
+        let message = format!("cannot move {} to the Recycle Bin: {e}", path.display());
+        if is_refusal(e) {
+            ApiError::new(
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "not_recyclable",
+                format!("{message}. To delete it for good instead, remove it from a terminal."),
+            )
+        } else {
+            ApiError::internal(message)
+        }
     }
 
     // Tests use the scratch trash (super::scratch_trash).
@@ -557,7 +593,7 @@ mod win {
         }
         // SAFETY: GetVolumePathNameW left a NUL-terminated root in `root`.
         if unsafe { GetDriveTypeW(root.as_ptr()) } != DRIVE_FIXED {
-            return Err(io::Error::other(format!("{} has no Recycle Bin", wide_str(&root))));
+            return Err(refused(ErrorKind::Other, format!("{} has no Recycle Bin", wide_str(&root))));
         }
         bin_takes(&root, &std::fs::symlink_metadata(path)?)?;
         // `pFrom` is a list of NUL-terminated names that ends with an empty one.
@@ -586,29 +622,40 @@ mod win {
     /// `longPathAware` allows elsewhere), NUL-terminated. A name with a character Windows
     /// never allows in one is refused: the shell reads `*` and `?` (and `<`, `>`, `"`) as
     /// wildcards, so such a name could delete other files.
+    ///
+    /// `IFileOperation` would not take a longer path either: it drives the shell's copy
+    /// engine, the one behind Explorer's Delete, which answers such an item with "names too
+    /// long for the Recycle Bin" and an offer to delete it for good: FOF_NOCONFIRMATION
+    /// takes that offer, FOF_WANTNUKEWARNING asks on the desktop, and nothing documented
+    /// refuses it. Microsoft documents the long-path opt-in only for the file functions,
+    /// and warns that the shell may not read such paths.
     fn shell_path(path: &Path) -> io::Result<Vec<u16>> {
         let abs = std::path::absolute(path)?;
         let plain = dunce::simplified(&abs);
         for c in plain.components() {
             if let Component::Normal(name) = c {
                 if name.encode_wide().any(|c| c < 32 || br#"<>:"|?*"#.iter().any(|&b| c == u16::from(b))) {
-                    return Err(io::Error::new(ErrorKind::InvalidInput, format!("{name:?} is not a name Windows allows")));
+                    return Err(refused(ErrorKind::InvalidInput, format!("{name:?} is not a name Windows allows")));
                 }
             }
         }
         let mut w: Vec<u16> = plain.as_os_str().encode_wide().collect();
         if w.contains(&0) {
-            return Err(io::Error::new(ErrorKind::InvalidInput, "path contains a NUL character"));
+            return Err(refused(ErrorKind::InvalidInput, "the path contains a NUL character"));
         }
         if w.len() >= MAX_PATH as usize {
-            return Err(io::Error::new(
+            return Err(refused(
                 ErrorKind::InvalidInput,
-                format!("the path is too long for the Recycle Bin ({} characters, at most {})", w.len(), MAX_PATH - 1),
+                format!(
+                    "the path is {} characters long, and the Recycle Bin takes at most {} (rename or move it, or a folder above it, to shorten the path)",
+                    w.len(),
+                    MAX_PATH - 1
+                ),
             ));
         }
         // dunce keeps the prefix only where the path cannot do without it.
         if starts_with(&w, r"\\?\") || starts_with(&w, r"\\.\") {
-            return Err(io::Error::new(ErrorKind::InvalidInput, format!("the Recycle Bin cannot take {}", plain.display())));
+            return Err(refused(ErrorKind::InvalidInput, format!("the Recycle Bin cannot take {}", plain.display())));
         }
         w.push(0);
         Ok(w)
@@ -621,16 +668,16 @@ mod win {
     fn bin_takes(root: &[u16], md: &std::fs::Metadata) -> io::Result<()> {
         const POLICY: &str = r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer";
         if [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER].into_iter().any(|k| reg_dword(k, POLICY, "NoRecycleFiles") == Some(1)) {
-            return Err(io::Error::other("a policy turns the Recycle Bin off"));
+            return Err(refused(ErrorKind::Other, "a policy turns the Recycle Bin off"));
         }
         let Some(guid) = volume_guid(root) else { return Ok(()) };
         let key = format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{guid}");
         if reg_dword(HKEY_CURRENT_USER, &key, "NukeOnDelete") == Some(1) {
-            return Err(io::Error::other(format!("the Recycle Bin is turned off on {}", wide_str(root))));
+            return Err(refused(ErrorKind::Other, format!("the Recycle Bin is turned off on {}", wide_str(root))));
         }
         match reg_dword(HKEY_CURRENT_USER, &key, "MaxCapacity") {
             Some(mb) if md.is_file() && md.len() > u64::from(mb) << 20 => {
-                Err(io::Error::other(format!("the file is larger than the Recycle Bin on {} ({mb} MB)", wide_str(root))))
+                Err(refused(ErrorKind::Other, format!("the file is larger than the Recycle Bin on {} ({mb} MB)", wide_str(root))))
             }
             _ => Ok(()),
         }
@@ -678,6 +725,22 @@ mod win {
             assert_eq!(shell_path(&near(MAX_PATH as usize)).unwrap_err().kind(), ErrorKind::InvalidInput);
             assert_eq!(shell_path(Path::new(r"C:/proj/sub/../a b.txt")).unwrap(), wide(r"C:\proj\a b.txt"));
             assert_eq!(shell_path(Path::new(r"\\?\C:\proj\a.txt")).unwrap(), wide(r"C:\proj\a.txt"));
+        }
+
+        /// What the bin does not take is the item's, a 422 that says how to delete it
+        /// instead; a failure stays a 500.
+        #[test]
+        fn refusals_are_told_from_failures() {
+            let at = Path::new(r"C:\proj\x");
+            for refusal in [shell_path(&Path::new(r"C:\").join("x".repeat(300))).unwrap_err(), shell_path(Path::new(r"C:\a?.txt")).unwrap_err()] {
+                assert!(is_refusal(&refusal), "{refusal}");
+                let e = not_recycled(at, &refusal);
+                assert_eq!((e.status.as_u16(), e.code), (422, "not_recyclable"), "{}", e.message);
+                assert!(e.message.starts_with(r"cannot move C:\proj\x to the Recycle Bin: ") && e.message.contains("delete it for good"), "{}", e.message);
+            }
+            let failure = io::Error::from_raw_os_error(5);
+            assert!(!is_refusal(&failure));
+            assert_eq!(not_recycled(at, &failure).code, "internal");
         }
     }
 }
@@ -844,6 +907,28 @@ mod tests {
         if recycled(&f).await {
             assert!(!f.exists());
         }
+    }
+
+    /// Windows: a path of MAX_PATH characters or more is refused before anything reaches
+    /// the Recycle Bin (which takes no such path): a 422 that says why and how to delete it
+    /// instead, and the file stays. The bin is not touched, so this runs everywhere.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn trash_refuses_long_paths_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("a".repeat(120)).join("b".repeat(120));
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("workbench-long.txt");
+        std::fs::write(&file, "keep").unwrap();
+        let e = sys::trash(&file).await.unwrap_err();
+        assert_eq!((e.status.as_u16(), e.code), (422, "not_recyclable"), "{}", e.message);
+        for says in ["characters long", "shorten the path", "delete it for good"] {
+            assert!(e.message.contains(says), "{says}: {}", e.message);
+        }
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep");
+        // `desktop_trash` says it did not take it: git's rollback then uses its own folder.
+        assert!(!sys::desktop_trash(&file).await.unwrap());
+        assert!(file.is_file());
     }
 
     #[cfg(windows)]

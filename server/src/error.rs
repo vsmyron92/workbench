@@ -46,6 +46,7 @@ pub const CODES: &[&str] = &[
     "not_found",
     "not_merged",
     "not_pending",
+    "not_recyclable",
     "not_restartable",
     "not_startable",
     "pid_required",

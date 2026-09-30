@@ -70,6 +70,14 @@
   install added. It changes nothing while Workbench runs from there, and keeps your
   configuration and data. The executables carry an application manifest (Windows 10 and 11,
   message boxes in the current style, long paths where Windows allows them).
+- **On Windows:** a terminal whose own process has exited while something it started runs
+  on (a background job, a program it opened) ends as soon as the last of those ends, no
+  longer up to half a second later, and waiting for that no longer keeps a thread per
+  terminal.
+- **On Windows:** deleting a file or folder the Recycle Bin does not take, such as one whose
+  path is 260 characters or longer, says why and how to delete it instead (shorten the path,
+  or delete it for good from a terminal), no longer a server error. So does a drive without
+  a Recycle Bin, a bin turned off, or a file larger than the bin.
 
 ## 0.3.0 - 2026-09-29
 

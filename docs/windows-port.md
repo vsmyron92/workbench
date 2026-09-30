@@ -45,8 +45,11 @@ run on a Windows 10 or 11 desktop yet.
   message boxes of `workbenchw.exe` and the supervisor, `longPathAware`, and `asInvoker`. A
   `cfg(windows)` test checks in its own process that Windows applies it (GetVersionExW
   reports 10, comctl32 loads in version 6). How the message boxes look is left for a desktop
-  check. The new `cfg(windows)` tests have been compiled, not run: the `windows-latest` job
-  runs them first.
+  check. A terminal whose process exited while what it started ran on learns that its job is
+  empty from a completion port, which one thread reads for every terminal (§1.F), and a path
+  of MAX_PATH characters or more is refused with a 422 that says why the Recycle Bin cannot
+  take it and how to delete it instead (§1.L). The new `cfg(windows)` tests have been
+  compiled, not run: the `windows-latest` job runs them first.
 - **Next:** real Windows 10 and 11 desktops (§5): ConPTY terminals with agent CLIs, the
   service and its Start Menu shortcut (and the look of its message boxes), git over SSH and
   HTTPS, language servers. Until then a tag publishes the Linux archive alone: the release
@@ -88,8 +91,8 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   10 and 11 (`supportedOS`: without it Windows treats the programs as written for Windows
   8), Common Controls 6 (message boxes in the current style), `longPathAware` (no MAX_PATH
   limit where `LongPathsEnabled` is set; the Recycle Bin's `SHFileOperationW` keeps it, and
-  `os::fs` refuses longer paths there) and `asInvoker`. It is linked into the test
-  executables too. Not done:
+  `os::fs` refuses longer paths there with a 422, §1.L) and `asInvoker`. It is linked into
+  the test executables too. Not done:
   the Windows dev-dependency `junction`, since the tests make junctions with `cmd /c mklink /J`.
 - Not needed: `if-addrs`, `trash`, `winreg`, `windows` (each replacement is under 80 lines of
   windows-sys).
@@ -164,15 +167,22 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   `signal_session`, `pid_alive`). `terminals/mod.rs`: 863, 1401, 1463 (lingering processes);
   1136, 1175, 1236-1241 (`$SHELL -l`).
 - Windows: a terminal's session is a Job registered under the leader pid, so the existing
-  `i32 sid` keys keep working. Hang-up is `ClosePseudoConsole` (CTRL_CLOSE_EVENT to every
-  attached process), then `TerminateJobObject` after the grace period. The redaction hold-back
-  uses a reader thread feeding a channel with `recv_timeout(HOLD_BACK)`.
+  sid keys keep working (pids are `u32` throughout `os::proc` and `os::session`). Hang-up is
+  `ClosePseudoConsole` (CTRL_CLOSE_EVENT to every attached process), then
+  `TerminateJobObject` after the grace period. The redaction hold-back uses a reader thread
+  feeding a channel with `recv_timeout(HOLD_BACK)`.
 - Done (`util/os/session.rs`): the session registry holds a `ProcGroup` and the closure that
   closes the pseudoconsole (the session owns it until it is over, so a `Pty` dropped early
   does not hang up its background jobs). It stays registered while a `session::Handle` of it
   lives (the `Pty`, the lingering-process watch), so a reused leader pid never makes a
   terminal follow or kill another terminal's session. The pump thread always drains the
-  pipe, also after the reader stopped, so `ClosePseudoConsole` never waits for good. A secret
+  pipe, also after the reader stopped, so `ClosePseudoConsole` never waits for good. The
+  pseudoconsole closes once the job is empty: every terminal's job reports to one I/O
+  completion port (`JOBOBJECT_ASSOCIATE_COMPLETION_PORT`, associated before the leader
+  joins, keyed per session), and one thread (`pty-jobs`) reads it for all of them, so a
+  terminal whose own process exited while what it started runs on costs no thread and gets
+  its EOF with `JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO`. Windows does not guarantee these
+  reports, so that thread also looks at the waiting sessions every second. A secret
   is also masked when ConPTY's repainting puts escape sequences between its characters
   (`session::REPAINTS`). A GUI program started from a terminal joins its job like any other
   process, counts as lingering once the terminal's own process has exited, and ends with the
@@ -262,11 +272,18 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   `--app=`, else `ShellExecuteW`; never `cmd /c start` (cmd interprets `&` in a URL).
 - Trash (`files/trash.rs`, `git/ops.rs:182-185`) → `SHFileOperationW(FO_DELETE,
   FOF_ALLOWUNDO | …)`.
-  - What the bin will not take is refused first: no bin on the drive, the bin turned off, a
-    file larger than the bin.
+  - What the bin will not take is refused first, with `not_recyclable` (422) and a message
+    that says why and how to delete it instead: no bin on the drive, the bin turned off, a
+    file larger than the bin, a path of MAX_PATH (260) characters or more.
   - An item Windows still cannot recycle (a folder larger than the bin) gets Windows' question
-    on the desktop, and the request stops waiting after 60 s. Later: `IFileOperation` with a
-    progress sink that refuses the item instead.
+    on the desktop, and the request stops waiting after 60 s.
+  - Not `IFileOperation`: it drives the same copy engine as Explorer's Delete, which answers
+    an item whose path is too long with "names too long for the Recycle Bin" and an offer to
+    delete it for good. With no UI, `FOF_NOCONFIRMATION` takes that offer and
+    `FOF_WANTNUKEWARNING` asks on the desktop; nothing documented refuses it (a progress
+    sink's `PreDeleteItem` gets `TSF_DELETE_RECYCLE_IF_POSSIBLE`, documented only as
+    "recycle on file delete, if possible"). Microsoft documents the long-path opt-in for the
+    file functions only, and warns that the shell may not read such paths.
 - `notify.rs:198` (`notify-send`) reports `desktop: "unavailable"` in the first version.
 
 **M. Service:** `platform/service.rs` (systemd unit, `.desktop` file, `systemctl`) gets a
