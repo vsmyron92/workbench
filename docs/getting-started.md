@@ -54,8 +54,9 @@ binary again); then restart the service (below) or the running `workbench serve`
 
 ## Install on Windows (experimental)
 
-The Windows port is in progress ([status](windows-port.md)). It has not been tested on a
-real Windows machine yet, and some features are left out (below). It needs Windows 10
+The Windows port is experimental ([status](windows-port.md)). It installs and runs on a
+Windows desktop, but not every feature has been exercised there yet, and some are left out
+(below). It needs Windows 10
 version 1809 or newer, or Windows 11, on x86_64.
 
 A release that includes `workbench-<version>-x86_64-pc-windows-msvc.zip` installs from
