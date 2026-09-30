@@ -532,9 +532,30 @@ fn summarize_success(spec: &RemoteOpSpec, lines: &[String]) -> String {
     }
 }
 
-/// Add a hint to the most common remote failures.
+/// Add a hint to the most common remote failures. Remote ops cannot answer ssh's own
+/// questions (askpass refuses passphrase and host-key prompts), so those fail and say what
+/// to do in a terminal instead.
 fn explain_failure(msg: &str) -> String {
-    if msg.contains("could not read Username") || msg.contains("Authentication failed") || msg.contains("terminal prompts disabled") {
+    if msg.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") || (msg.contains("Host key for") && msg.contains("has changed")) {
+        // Never "accept it": a changed key is also what an intercepted connection shows.
+        format!(
+            "{msg}\n\nThe server's ssh host key is not the one you accepted before. That happens when the server was reinstalled or its key was rotated, and also when someone intercepts the connection. Check the new fingerprint with the server's administrators or against the fingerprints they publish before you replace the old key in known_hosts (`ssh-keygen -R <host>` removes it)."
+        )
+    } else if msg.contains("REVOKED HOST KEY") || (msg.contains("host key for") && msg.contains("revoked")) {
+        // Never "accept it" either: a revoked key may be a stolen one. (ssh's revoked-key
+        // lines do not say "has changed", and end in "Host key verification failed" too.)
+        format!(
+            "{msg}\n\nThe server's ssh host key is marked as revoked (known_hosts `@revoked`, or ssh's RevokedHostKeys). A revoked key can be a stolen key used to impersonate the server: do not trust it again, ask the server's administrators which key the server uses now."
+        )
+    } else if msg.contains("Host key verification failed") {
+        format!(
+            "{msg}\n\nssh does not know this server's host key yet, and Workbench cannot answer ssh's question. Connect once with ssh in a terminal (for example `ssh -T git@<host>`), check that the fingerprint it shows is one the server publishes, and accept it."
+        )
+    } else if msg.contains("Permission denied (") && msg.contains("publickey") {
+        format!(
+            "{msg}\n\nThe server accepted none of your ssh keys. If your key has a passphrase, load it into ssh-agent (`ssh-add`; on Windows, start the OpenSSH Authentication Agent service first): Workbench cannot answer passphrase prompts. Otherwise add your public key to your account on the server."
+        )
+    } else if msg.contains("could not read Username") || msg.contains("Authentication failed") || msg.contains("terminal prompts disabled") {
         format!("{msg}\n\nAuthentication failed. Configure [gitlab] (host + token secret) in config.toml, or a git credential helper / ssh key for this remote.")
     } else if msg.contains("[rejected]") && (msg.contains("fetch first") || msg.contains("non-fast-forward")) {
         format!("{msg}\n\nThe remote has commits you do not have. Update (pull) first, or push with force-with-lease.")
@@ -606,5 +627,40 @@ mod tests {
     #[test]
     fn explains_auth_failures() {
         assert!(explain_failure("fatal: could not read Username for 'https://gitlab.com'").contains("Authentication failed"));
+    }
+
+    /// What git and ssh print (after `clean_message`) when ssh would have had to ask.
+    #[test]
+    fn explains_ssh_failures() {
+        let unknown = explain_failure("Host key verification failed.\nCould not read from remote repository.\nPlease make sure you have the correct access rights\nand the repository exists.");
+        assert!(unknown.starts_with("Host key verification failed."), "git's message first: {unknown}");
+        assert!(unknown.contains("Connect once with ssh in a terminal") && unknown.contains("fingerprint"), "{unknown}");
+        let strict = explain_failure("No ED25519 host key is known for gitlab.com and you have requested strict checking.\nHost key verification failed.");
+        assert!(strict.contains("Connect once with ssh in a terminal"), "{strict}");
+
+        // A changed key is never "accepted": it can be an intercepted connection.
+        let changed = explain_failure(
+            "Offending ED25519 key in /home/u/.ssh/known_hosts:3\nremove with:\nssh-keygen -f '/home/u/.ssh/known_hosts' -R 'gitlab.com'\nHost key for gitlab.com has changed and you have requested strict checking.\nHost key verification failed.",
+        );
+        assert!(changed.contains("not the one you accepted before") && changed.contains("intercepts"), "{changed}");
+        assert!(!changed.contains("accept it"), "{changed}");
+        let banner = explain_failure("@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\nHost key verification failed.");
+        assert!(banner.contains("not the one you accepted before"), "{banner}");
+        // Nor is a revoked one (OpenSSH's words for a key known_hosts marks `@revoked`).
+        let revoked = explain_failure(
+            "@       WARNING: REVOKED HOST KEY DETECTED!               @\nThe ED25519 host key for gitlab.com is marked as revoked.\nThis could mean that a stolen key is being used to\nimpersonate this host.\nED25519 host key for gitlab.com was revoked and you have requested strict checking.\nHost key verification failed.",
+        );
+        assert!(revoked.contains("marked as revoked (known_hosts") && revoked.contains("stolen key"), "{revoked}");
+        assert!(!revoked.contains("accept it") && !revoked.contains("Connect once"), "{revoked}");
+        let revoked = explain_failure("ED25519 host key for gitlab.com was revoked and you have requested strict checking.\nHost key verification failed.");
+        assert!(revoked.contains("do not trust it again"), "{revoked}");
+
+        for denied in ["git@gitlab.com: Permission denied (publickey).", "git@git.corp: Permission denied (publickey,password)."] {
+            let got = explain_failure(&format!("{denied}\nCould not read from remote repository."));
+            assert!(got.contains("ssh-agent") && got.contains("OpenSSH Authentication Agent") && got.contains("passphrase"), "{got}");
+        }
+        // Other failures keep their own hints, or none.
+        assert!(!explain_failure("Permission denied (password).").contains("ssh-agent"));
+        assert_eq!(explain_failure("fatal: repository 'x' not found"), "fatal: repository 'x' not found");
     }
 }

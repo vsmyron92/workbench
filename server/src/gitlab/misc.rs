@@ -79,7 +79,7 @@ fn soft<T>(r: ApiResult<T>, what: &str, warnings: &mut Vec<String>) -> Option<T>
 
 pub async fn summary(ctx: &GlCtx) -> ApiResult<Summary> {
     let root = ctx.project.root.clone();
-    let (branch, head) = tokio::join!(crate::util::git::current_branch(&root), crate::util::git::head_sha(&root));
+    let (branch, head) = tokio::join!(crate::util::git::current_branch_logged(&root), crate::util::git::head_sha_logged(&root));
     let default = ctx.default_branch().map(str::to_string);
     let on_default = branch.is_some() && branch == default;
     let (branch_pipeline, default_pipeline, current_mr, head_status, mrs, issues, envs) = tokio::join!(

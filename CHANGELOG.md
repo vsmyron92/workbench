@@ -16,6 +16,23 @@
   waiting to start it no longer leaves a working agent token behind, nor its session files
   (`mcp.json` holds that token) in the data directory. An agent session that fails to start
   no longer keeps the token it was given.
+- **Deploys:** a deploy no longer reports "the repository has no commits" (or "unknown
+  commit") when git itself failed. It gives git's own message, such as "not a git
+  repository", or says that the folder is gone or that git is missing or timed out. "No
+  commits" now means that git ran and HEAD names no commit.
+- **Git messages:** error boxes keep the line breaks of multi-line messages, such as git's.
+  A fetch, update or push that fails because ssh would have had to ask something now says
+  what to do. For an unknown host key, connect once with ssh in a terminal and accept the
+  key. For `Permission denied (publickey)`, load a key that has a passphrase into ssh-agent.
+  A changed host key is flagged with a warning to check its fingerprint before replacing it,
+  and a revoked one with a warning not to trust it again.
+  When git is missing or times out, the GitLab and GitHub pollers still watch only the
+  default branch, but now log why once per project instead of saying nothing.
+- **On Windows:** a repository git refuses because another user owns the folder
+  (`safe.directory`) no longer just loses its branch. The project shows a warning that
+  names the folder and the command that trusts it. The status bar reads "Untrusted
+  repository", and the git tool windows show git's message with a button that copies the
+  command. Deploys report the refusal too, and the pollers log it once per project.
 
 ## 0.3.0 - 2026-09-29
 

@@ -119,7 +119,7 @@ pub(super) async fn poll_project(state: &AppState, project: Arc<Project>) -> Api
         return Ok(true); // keep the schedule short but skip this round
     }
     let mut refs: Vec<String> = vec![];
-    if let Some(b) = crate::util::git::current_branch(&project.root).await {
+    if let Some(b) = crate::util::git::current_branch_logged(&project.root).await {
         refs.push(b);
     }
     if let Some(d) = ctx.default_branch() {

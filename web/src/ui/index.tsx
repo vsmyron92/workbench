@@ -23,11 +23,12 @@ import {
   type TextareaHTMLAttributes,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertTriangle, ChevronDown, ChevronRight, MonitorX, Settings2 } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronRight, Copy, MonitorX, Settings2 } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import { osLabel, useHealth } from '@/api/health'
-import { isMobileShell, openSettings } from '@/shell/actions'
+import { isMobileShell, openSettings, toast } from '@/shell/actions'
 import type { AnsiLog as AnsiLogT } from './AnsiLog'
+import { copyText } from './clipboard'
 import type { Markdown as MarkdownT } from './Markdown'
 import './ui.css'
 
@@ -203,6 +204,8 @@ export function EmptyState({
  * Settings panel). Edits to config.toml apply live, so Retry works after either.
  * `unsupported_platform` errors (the server's OS leaves the feature out) get the same
  * box with the reason, and neither Settings nor Retry, which cannot change that.
+ * The message keeps its line breaks (git's are several lines); for a repository git
+ * refuses (`unsafe_repository`) a button copies the command git names to trust it.
  */
 export function ErrorBox({ error, onRetry, settingsSection = 'integrations' }: { error: unknown; onRetry?: () => void; settingsSection?: string }) {
   const os = osLabel(useHealth()?.os)
@@ -211,6 +214,7 @@ export function ErrorBox({ error, onRetry, settingsSection = 'integrations' }: {
   const msg = error instanceof Error ? error.message : String(error)
   const settingsLink = setup && !isMobileShell()
   const retry = kind === 'unsupported' ? undefined : onRetry
+  const trust = error instanceof ApiError && error.code === 'unsafe_repository' ? trustCommand(msg) : null
   return (
     <div className={kind === 'error' ? 'wb-error' : 'wb-error setup'}>
       <div className="wb-row" style={{ alignItems: 'flex-start' }}>
@@ -219,11 +223,16 @@ export function ErrorBox({ error, onRetry, settingsSection = 'integrations' }: {
           <div style={{ fontWeight: 600, marginBottom: 2 }}>
             {kind === 'unsupported' ? `Not available on ${os ?? 'this system'}` : setup ? 'Not set up yet' : 'Something went wrong'}
           </div>
-          <div className="wb-small">{msg}</div>
+          <div className="wb-small wb-error-message">{msg}</div>
         </div>
       </div>
-      {(retry || settingsLink) && (
+      {(retry || settingsLink || trust) && (
         <div className="wb-row" style={{ marginTop: 8, gap: 6 }}>
+          {trust && (
+            <Button size="small" icon={Copy} title={trust} onClick={() => void copyTrustCommand(trust)}>
+              Copy command
+            </Button>
+          )}
           {settingsLink && (
             <Button size="small" icon={Settings2} onClick={() => openSettings(settingsSection)}>
               Open Settings
@@ -238,6 +247,24 @@ export function ErrorBox({ error, onRetry, settingsSection = 'integrations' }: {
       )}
     </div>
   )
+}
+
+/**
+ * The `git config --global --add safe.directory …` line of git's refusal of a repository
+ * another user owns, which trusts the folder (git quotes the path when it needs quoting).
+ */
+export function trustCommand(message: string): string | null {
+  for (const line of message.split('\n')) {
+    const l = line.trim()
+    if (l.startsWith('git config --global --add safe.directory ')) return l
+  }
+  return null
+}
+
+/** Copy git's trust command (see `trustCommand`) and say whether that worked. */
+export async function copyTrustCommand(command: string): Promise<void> {
+  if (await copyText(command)) toast('success', 'Command copied: run it in a terminal to trust this folder')
+  else toast('error', 'The browser did not allow copying: select the command in the message instead')
 }
 
 /** How `ErrorBox` shows an error: setup help, a feature this OS leaves out, or a failure. */
@@ -647,6 +674,7 @@ export function formatBytes(n: number | null | undefined): string {
 }
 
 export { BrandIcon, GitLabIcon, ConfluenceIcon, JiraIcon } from './brand'
+export { copyText } from './clipboard'
 export { MonacoEditor, MonacoDiffEditor } from './monaco'
 
 // xterm (~650 KB) and the markdown/highlight stack load the first time a log or a

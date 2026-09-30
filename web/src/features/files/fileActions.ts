@@ -23,7 +23,7 @@ import {
 } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import { closePanel, confirmDialog, promptDialog, toast, toastError } from '@/shell/actions'
-import type { MenuEntry } from '@/ui'
+import { copyText, type MenuEntry } from '@/ui'
 import { filesApi } from './api'
 import { bufferKey, useBuffers } from './buffers'
 import {
@@ -41,7 +41,6 @@ import {
 } from './openers'
 import { showLocalHistory } from './history/open'
 import { basename, dirname, isMarkdown, isWithin, joinPath } from './paths'
-import { copyText } from './text'
 import { forgetDir, refreshDirs } from './treeLoader'
 
 const MAX_UPLOAD = 200 * 1024 * 1024

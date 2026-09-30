@@ -299,10 +299,14 @@ async fn env_views_never_carry_secret_values() {
 async fn deploy_plans_gate_and_refuse_before_spawning() {
     let f = fixture().await;
     let p = project(&f);
-    // The project is not a git repository: planning reports it instead of guessing.
+    // The project is not a git repository: planning reports it in git's words, not as a
+    // repository without commits (as it did for any git failure).
     let staging = envs::find(&p, "staging").unwrap().clone();
     let e = deploy::plan(&f.state, &p, &staging, None).await.unwrap_err();
-    assert!(e.message.contains("no commits"), "{}", e.message);
+    assert_eq!(e.code, "git_error", "{}", e.message);
+    assert!(e.message.contains("not a git repository"), "{}", e.message);
+    let e = deploy::plan(&f.state, &p, &staging, Some("4b8e2508")).await.unwrap_err();
+    assert!(e.message.contains("not a git repository"), "not an unknown commit: {}", e.message);
     // A remote deploy needs a defined host.
     let remote = envs::find(&p, "remote").unwrap().clone();
     let e = deploy::plan(&f.state, &p, &remote, None).await.unwrap_err();
@@ -326,6 +330,8 @@ async fn deploy_plans_gate_and_refuse_before_spawning() {
         )
     };
     git(&["init", "-q", "-b", "main"]);
+    let e = deploy::plan(&f.state, &p, &staging, None).await.unwrap_err();
+    assert!(e.message.contains("no commits"), "{}", e.message);
     git(&["add", "-A"]);
     git(&["commit", "-q", "-m", "c1"]);
     let plan = deploy::plan(&f.state, &p, &staging, None).await.unwrap();
