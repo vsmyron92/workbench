@@ -139,8 +139,8 @@ export async function killTerminal(t: TerminalInfo) {
   }
 }
 
-/** Close the tab: stops the process; the terminal stays in history. */
-export async function closeTerminal(t: TerminalInfo) {
+/** Close the tab: stops the process; the terminal stays in history. Resolves to whether it was closed. */
+export async function closeTerminal(t: TerminalInfo): Promise<boolean> {
   const busy = isRunning(t) && t.agent && t.agent.state === 'working'
   if (busy) {
     const ok = await confirmDialog({
@@ -149,13 +149,15 @@ export async function closeTerminal(t: TerminalInfo) {
       confirmLabel: 'Close',
       danger: true,
     })
-    if (!ok) return
+    if (!ok) return false
   }
   closePanel(terminalPanelId(t.id))
   try {
     await terminalsApi.close(t.id)
+    return true
   } catch (e) {
     toastError(e, 'Could not close the terminal')
+    return false
   }
 }
 

@@ -98,11 +98,41 @@
   gap: 4px;
   background: var(--bg-panel);
 }
-.wb-main > .wb-stripe:first-child {
+.wb-stripe.left {
   border-right: 1px solid var(--border);
 }
-.wb-main > .wb-stripe:last-child {
+.wb-stripe.right {
   border-left: 1px solid var(--border);
+}
+/* Settings, under the bottom tool windows. */
+.wb-stripe-foot {
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+/* The agents column: sessions and terminals, left of the stripe and the workspace area. */
+/* Two windows side by side: the agents window (project switcher on top) and the workspace window (everything else). */
+.wb-windows {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.wb-agentwin {
+  flex: none;
+  min-width: 0;
+  max-width: 70vw;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.wb-agentwin-body {
+  flex: 1;
+  min-height: 0;
+}
+.wb-workwin {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 .wb-stripe-group {
   display: flex;

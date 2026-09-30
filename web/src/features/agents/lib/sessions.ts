@@ -135,6 +135,35 @@ export function agentSessions(list: TerminalInfo[] | undefined, projectId: strin
   return (list ?? []).filter((t) => t.kind === 'agent' && (allProjects || !projectId || t.projectId === projectId))
 }
 
+/**
+ * The tabs of the agents column for a project: its open terminals (agent sessions,
+ * shells, runs, commands) in a stable order, pinned first, then the `extras` opened on
+ * request (another project's session, a closed one's saved screen) in the order they
+ * were opened. Terminals that no longer exist are left out.
+ */
+export function columnTabs(list: TerminalInfo[] | undefined, projectId: string | null, extras: string[] = []): TerminalInfo[] {
+  const all = list ?? []
+  const own = all
+    .filter((t) => t.open && t.projectId === projectId)
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.order - b.order || a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+  const seen = new Set(own.map((t) => t.id))
+  const more: TerminalInfo[] = []
+  for (const id of extras) {
+    const t = seen.has(id) ? undefined : all.find((x) => x.id === id)
+    if (!t) continue
+    seen.add(id)
+    more.push(t)
+  }
+  return [...own, ...more]
+}
+
+/** The tab to show once `closing` goes away: its right neighbour, else its left one, else the home tab (null). */
+export function tabAfterClose(tabs: TerminalInfo[], closing: string): string | null {
+  const i = tabs.findIndex((t) => t.id === closing)
+  if (i === -1) return null
+  return (tabs[i + 1] ?? tabs[i - 1])?.id ?? null
+}
+
 export interface Counts {
   attention: number
   working: number

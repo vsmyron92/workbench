@@ -35,7 +35,7 @@ the editor's editing keys to VS Code's.
 | Alt+8 | Services |
 | Alt+9 | Git Log |
 | Alt+0 | Commit |
-| Alt+F12 | Terminal |
+| Alt+F12 | Collapse or expand the workspace window (the agents window then has the whole width) |
 
 ## Editor
 

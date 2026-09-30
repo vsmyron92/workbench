@@ -886,17 +886,7 @@
   color: var(--warning);
 }
 
-/* ---------------------------------------------------------------- bottom terminal tool window */
-.wb-ag-tabs {
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  height: 30px;
-  padding: 0 4px;
-  border-bottom: 1px solid var(--border);
-  overflow-x: auto;
-  flex: none;
-}
+/* ---------------------------------------------------------------- terminal tabs (the agents column's) */
 .wb-ag-tab {
   display: inline-flex;
   align-items: center;
@@ -936,12 +926,6 @@
 .wb-ag-tab-close:hover {
   background: var(--bg-active-muted);
   color: var(--fg);
-}
-.wb-ag-bottom-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
 }
 
 /* ---------------------------------------------------------------- top bar / status bar */
@@ -1102,4 +1086,111 @@
   background: var(--bg-panel);
   color: var(--warning);
   font-size: var(--fs-xs);
+}
+
+/* ---------------------------------------------------------------- agents column */
+.wb-agcol {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+/* One flow, left to right: the Agents button, the tabs at their own width, then "+". It
+   takes as many rows as the tabs need, under the Agents button too. */
+.wb-agcol-tabs {
+  --wb-agcol-row: 32px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 1px;
+  padding: 0 4px 0 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex: none;
+  min-width: 0;
+}
+.wb-agcol-home {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--wb-agcol-row);
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--fg-muted);
+  font-weight: 600;
+  cursor: pointer;
+  flex: none;
+}
+.wb-agcol-home:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+.wb-agcol-home.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+.wb-agcol-tabs .wb-ag-tab {
+  height: var(--wb-agcol-row);
+  min-width: 0;
+  /* Three to a row in the column's default width. */
+  max-width: 150px;
+  gap: 5px;
+  padding: 0 2px 0 8px;
+  flex: none;
+  border-radius: 0;
+}
+.wb-agcol-tabs .wb-ag-tab .unread {
+  color: var(--fg);
+  font-weight: 600;
+}
+.wb-agcol-tabs .wb-ag-tab.attention {
+  color: var(--agent-attention);
+}
+.wb-agcol-tabs > .wb-icon-btn {
+  margin: 0 4px;
+}
+.wb-agcol-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+.wb-agcol-pane {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+}
+/* The home in a column: one column of boxes, less air around them. */
+.wb-agcol .wb-ag-home-inner {
+  padding: 12px 12px 24px;
+}
+.wb-agcol .wb-ag-home-cols {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* A session's header in the column is narrow: its parts wrap onto a second row instead of being cut to "Fabl…". */
+.wb-agcol .wb-ag-header {
+  height: auto;
+  min-height: 32px;
+  flex-wrap: wrap;
+  row-gap: 2px;
+  padding: 4px 6px 4px 10px;
+}
+.wb-agcol .wb-ag-header-title {
+  flex: 1 1 110px;
+  max-width: none;
+  min-width: 90px;
+}
+.wb-agcol .wb-ag-header-meta {
+  flex: 0 1 auto;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.wb-agcol .wb-ag-header > .wb-spacer,
+.wb-agcol .wb-ag-header > span[style*='flex: 1'] {
+  flex: 1 1 0;
+  min-width: 0;
 }

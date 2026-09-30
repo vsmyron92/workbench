@@ -9,9 +9,9 @@ in the card's header. Archiving keeps its files.
 
 ## Start with one task
 
-1. Open **Agents** (Ctrl+Shift+A), pick an agent and describe the result you want, or
-   leave the prompt empty for an interactive session. It runs in the project's folder,
-   in a real terminal.
+1. In the **Agents** column on the left, pick an agent and describe the result you
+   want, or leave the prompt empty for an interactive session. It becomes a tab of that
+   column and runs in the project's folder, in a real terminal.
 2. Let it work. When a Claude Code session asks for permission, **Allow**, **For
    session** and **Deny** appear on its card, as a toast and on your phone. The prompt in
    the terminal keeps working too; the first answer wins.
@@ -27,9 +27,10 @@ in the card's header. Archiving keeps its files.
 
 | Where | What is there |
 | --- | --- |
-| Left stripe | Files, Commit, Agents, Find, Workspace |
+| Agents column | Agent sessions, shells and run output as tabs; **+** starts one |
+| Left stripe | Workspace, Files, Commit, Find; Settings at its foot |
 | Right stripe | GitLab, GitHub, Confluence, Jira, Apps, Database |
-| Bottom stripe | Terminal, Problems, TODO, Git Log, Debug, Run, Services |
+| Bottom stripe | Problems, TODO, Git Log, Debug, Run, Services |
 | Top bar | The project and branch switchers, run configurations |
 | Status bar | The language server, the branch, CI status, the dev container |
 

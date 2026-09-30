@@ -24,7 +24,11 @@ export const panelDefs: Record<string, PanelDef> = Object.assign({}, ...features
 export const toolWindows: ToolWindowDef[] = features.flatMap((f) => f.toolWindows ?? []).sort((a, b) => a.order - b.order)
 toolWindows.forEach((t) => toolWindowSides.set(t.id, t.side))
 
+export const column = features.find((f) => f.column)?.column ?? null
+export const startPanel = features.find((f) => f.startPanel)?.startPanel ?? null
+
 export const topbarWidgets = features.flatMap((f) => f.topbar ?? [])
+export const columnbarWidgets = features.flatMap((f) => f.columnbar ?? [])
 export const statusbarWidgets = features.flatMap((f) => f.statusbar ?? [])
 export const mobileTabs: MobileTabDef[] = features.flatMap((f) => f.mobileTabs ?? []).sort((a, b) => a.order - b.order)
 export const providers = features.flatMap((f) => f.providers ?? [])

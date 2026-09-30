@@ -13,8 +13,8 @@ import {
 import 'dockview-react/dist/styles/dockview.css'
 import { useUi } from '@/state/store'
 import { Loading, ErrorBox } from '@/ui'
-import { noteActiveGroup, setDockApi } from './actions'
-import { panelDefs } from './registry'
+import { isColumnKind, noteActiveGroup, openPanel, setDockApi } from './actions'
+import { panelDefs, startPanel } from './registry'
 import { Welcome } from './Welcome'
 import type { PanelProps } from './types'
 
@@ -168,10 +168,17 @@ export function Dock() {
         /* quota */
       }
     }
+    // Agent sessions and terminals are tabs of the agents column: a layout saved by an
+    // earlier version still has them in the dock.
+    const moved = dock.panels.filter((p) => isColumnKind(p.view.contentComponent))
+    for (const p of moved) dock.removePanel(p)
     for (const p of dock.panels) {
       if (panelDefs[p.view.contentComponent]?.keepAlive) p.api.setRenderer('always')
     }
     shown.current = projectId
+    // A project without tabs of its own starts on the Workspace cards; so does one whose
+    // agents tab just left the dock.
+    if (startPanel && (moved.length > 0 || dock.panels.length === 0)) openPanel(startPanel)
   }, [dock, projectId])
 
   useEffect(

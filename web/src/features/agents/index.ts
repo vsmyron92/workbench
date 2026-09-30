@@ -3,27 +3,25 @@
 import { Bot, LayoutGrid, SquareTerminal } from 'lucide-react'
 import type { FeatureModule } from '@/shell/types'
 import './agents.css'
+import { AgentColumn } from './AgentColumn'
 import { AgentsHome } from './AgentsHome'
 import { agentCommands } from './commands'
 import { MobileAgents } from './MobileAgents'
-import { AgentDialogs, AttentionNotifier, FirstRunHome, TerminalsSync } from './providers'
+import { AgentDialogs, AttentionNotifier, TerminalsSync } from './providers'
 import { useAgentsUi } from './store'
 import { TerminalPanel } from './TerminalPanel'
-import { AgentsBadge, AgentsToolWindow, TerminalToolWindow } from './ToolWindows'
-import { AgentStatus, AttentionPill } from './widgets'
+import { AgentsBadge, AgentStatus, AttentionPill } from './widgets'
 
 const feature: FeatureModule = {
   id: 'agents',
+  // On the desktop both kinds are tabs of the agents column, not of the dock (shell/actions `isColumnKind`).
   panels: {
     'agents.home': { component: AgentsHome, icon: LayoutGrid },
     terminal: { component: TerminalPanel, keepAlive: true, icon: SquareTerminal },
   },
-  toolWindows: [
-    { id: 'agents', title: 'Agents', icon: Bot, side: 'left', order: 30, component: AgentsToolWindow, badge: AgentsBadge },
-    { id: 'terminal', title: 'Terminal', icon: SquareTerminal, side: 'bottom', order: 10, component: TerminalToolWindow },
-  ],
+  column: AgentColumn,
   commands: agentCommands,
-  topbar: [AttentionPill],
+  columnbar: [AttentionPill],
   statusbar: [AgentStatus],
   mobileTabs: [
     {
@@ -42,7 +40,7 @@ const feature: FeatureModule = {
       },
     },
   ],
-  providers: [TerminalsSync, AttentionNotifier, FirstRunHome, AgentDialogs],
+  providers: [TerminalsSync, AttentionNotifier, AgentDialogs],
 }
 
 export default feature

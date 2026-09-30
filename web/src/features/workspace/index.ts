@@ -23,7 +23,9 @@ const feature: FeatureModule = {
     'workspace.home': { component: HomePanel, icon: LayoutGrid },
     card: { component: CardPanel, icon: SquareKanban },
   },
-  toolWindows: [{ id: 'workspace', title: 'Workspace', icon: LayoutGrid, side: 'left', order: 35, component: WorkspaceToolWindow }],
+  // First on the stripe, above Files, and the dock's first tab: the cards are what a project opens on.
+  toolWindows: [{ id: 'workspace', title: 'Workspace', icon: LayoutGrid, side: 'left', order: 5, component: WorkspaceToolWindow }],
+  startPanel: { kind: 'workspace.home', id: 'workspace.home', title: 'Workspace' },
   commands: () => [
     {
       id: 'workspace.home',

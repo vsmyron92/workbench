@@ -15,12 +15,12 @@ separate installations, with your own accounts, and are not bundled with Workben
 - [Install Claude Code](https://code.claude.com/docs/en/setup)
 - [Install Codex CLI](https://developers.openai.com/codex/cli)
 
-![Workbench with an agent's changes under review, the project tree and the git log](docs/assets/workbench-overview.png)
+![Workbench: the agents column on the left, then the project tree, the Workspace cards and the git log](docs/assets/workbench-overview.png)
 
 ## Everyday tools
 
-- **Agents at the center.** Start a session from the composer or with Ctrl+Shift+A on
-  a selection. Answer permission requests from the session card, a toast or your phone.
+- **Agents at the center.** Sessions and terminals are tabs of a column on the left. Start
+  a session from its composer, or with Ctrl+Shift+A on a selection. Answer permission requests from the session card, a toast or your phone.
   Review Changes lists everything a session edited, with Revert per file or for all.
 - **Code the CLion way.** A Monaco editor on CLion's keymap, language servers
   (rust-analyzer, typescript-language-server, pyright, gopls, clangd, Verible,
@@ -115,14 +115,14 @@ as a service, and `config.toml`. The pages are Markdown in `web/src/features/hel
 
 | Area | Key | What it does |
 | --- | --- | --- |
-| **Agents** | Ctrl+Shift+A | Sessions, history, the composer, permission requests, Remote Control |
+| **Agents** | Ctrl+Shift+A | A column on the left: the composer, sessions and shells as tabs, history, permission requests, Remote Control |
 | **Files** | Alt+1 | The project tree with VCS colours; a Scratches view for notes and requests |
 | **Commit** | Alt+0 | Changes, changelists, the shelf and stashes |
 | **Git Log** | Alt+9 | Branches, graph and commit details |
 | **Run** / **Debug** | Alt+4 / Alt+5 | Run configurations and their output; the debugger |
 | **Problems** / **Structure** | Alt+6 / Alt+7 | Diagnostics from language servers; the file's symbols |
 | **Services** | Alt+8 | Docker containers, compose projects and images |
-| **Terminal** | Alt+F12 | Shells, on the host or in the dev container |
+| **Terminals** | Alt+F12 | Shells, on the host or in the dev container, as tabs of the Agents column |
 | **Workspace** | | Deliverable cards: reports, galleries, PDFs, 3D comparisons |
 | **GitLab** / **GitHub** | | Merge and pull requests, pipelines and Actions, issues |
 | **Confluence** / **Jira** | | Pages, comments and boards |

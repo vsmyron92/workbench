@@ -257,9 +257,10 @@ Workbench keeps its own state (sessions, Local History, Workspace cards, scratch
 
 ## Connect an agent
 
-Open **Agents** (the robot in the left stripe, or Ctrl+Shift+A). Pick a provider, type a
-task or leave it empty for an interactive session, and press **Start session**. The session
-runs in a real terminal in the project folder; Workbench adds hooks and an MCP server so
+The **Agents** column on the left has the prompt for a new session (Ctrl+Shift+A opens
+it as a dialog). Pick a provider, type a task or leave it empty for an interactive
+session, and press **Start session**. The session becomes a tab of that column and runs
+in a real terminal in the project folder; Workbench adds hooks and an MCP server so
 the agent can open files for you, read CI logs and Confluence pages, and hand back
 Workspace cards.
 
@@ -272,15 +273,22 @@ and the first answer wins. See [working with agents](agents.md).
 
 ## A short tour
 
-- **The stripes** on the left, right and bottom open tool windows: Files, Commit, Agents,
-  Find and Workspace on the left; GitLab, GitHub, Confluence, Jira, Apps and Database on
-  the right; Terminal, Problems, TODO, Git Log, Debug, Run and Services at the bottom.
+- **The Agents column** on the left holds agent sessions, shells and run output as tabs,
+  which wrap onto more rows as you open more. Its first tab starts a session or a shell
+  and lists the project's sessions; **+** does the same from any tab. Its top bar has the
+  project switcher and, at the right, how many sessions are working or need you. Alt+F12
+  collapses the workspace window beside it.
+- **The stripes** open tool windows around the workspace area: Workspace, Files, Commit
+  and Find on the left, right of the Agents column; GitLab, GitHub, Confluence, Jira, Apps
+  and Database on the right; Problems, TODO, Git Log, Debug, Run and Services at the
+  bottom. Settings is the last button of the left stripe.
 - **The command palette** (Ctrl+K) lists every action; **Search Everywhere** (double
   Shift) finds files, symbols, text and actions.
-- **The top bar** switches projects and branches and starts run configurations.
+- **The workspace window's top bar** switches branches and starts run configurations.
 - **The status bar** shows the language server, the branch, CI status and the dev
   container.
-- **The Workspace** (left stripe) starts with four example cards in Home: a welcome
+- **The Workspace** is what a project opens on: its cards, as the first tab and the first
+  button of the left stripe. It starts with four example cards in Home: a welcome
   guide, a tour in screenshots, a report template for agents and a checklist for
   connecting your services. They stay until you archive them.
 

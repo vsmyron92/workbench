@@ -109,12 +109,15 @@ export function NewSessionForm({
   prefill,
   onStarted,
   autoFocus,
+  focusToken,
   compact,
 }: {
   projectId: string | null
   prefill?: NewSessionPrefill
   onStarted?: (t: TerminalInfo) => void
   autoFocus?: boolean
+  /** Put the caret into the prompt each time this changes (the agents column's "+"). */
+  focusToken?: number
   /** Phone: prompt + start only; options folded. */
   compact?: boolean
 }) {
@@ -143,6 +146,12 @@ export function NewSessionForm({
   useEffect(() => {
     if (autoFocus) ref.current?.focus()
   }, [autoFocus])
+  const lastFocus = useRef(focusToken)
+  useEffect(() => {
+    if (focusToken === lastFocus.current) return
+    lastFocus.current = focusToken
+    ref.current?.focus()
+  }, [focusToken])
 
   const providers = useMemo(() => pickerProviders(d?.providers ?? []), [d])
   const providerId = chosen && providers.some((p) => p.id === chosen) ? chosen : d ? initialProvider(d.providers, lastProvider, d.defaultProvider) : null
