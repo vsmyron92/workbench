@@ -42,6 +42,13 @@
   failure into `upstream`. The `workbench_notify` tool's description says what it does
   everywhere: a toast in Workbench, and a desktop notification, your notify command and a
   push to your devices where you set them up (Windows has no desktop notifications yet).
+- **Files (Linux):** a `\` in a file or folder name is part of the name, as Linux has it.
+  Workbench used to turn it into `/`, so `a\b.txt` came back as `a/b.txt`, the file `b.txt`
+  in the folder `a`. The files in a folder named `d\x` then opened as `d/x/…`, search and
+  quick open results (and Replace in Files from them) led to that other file, and Local
+  History and an agent's `workbench_open_file` kept or opened its path. The file tree,
+  opening, saving, renaming, search, quick open, the watcher, Local History and detected
+  run folders now keep the name. Windows is unchanged: `\` separates there.
 - **On Windows:** a repository git refuses because another user owns the folder
   (`safe.directory`) no longer just loses its branch. The project shows a warning that
   names the folder and the command that trusts it. The status bar reads "Untrusted

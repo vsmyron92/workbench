@@ -30,6 +30,8 @@ mod ops;
 mod quickopen;
 mod search;
 mod sensitive;
+#[cfg(all(test, unix))]
+mod tests_backslash;
 mod todo;
 mod tools;
 mod watch;

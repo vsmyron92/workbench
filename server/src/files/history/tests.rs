@@ -460,6 +460,51 @@ async fn files_in_a_new_folder_are_recorded() {
     assert_eq!(kinds(&env.wait_for("newmod/deep/a.rs", 2).await), ["deleted", "disk"]);
 }
 
+/// Linux: `a\b.txt` is one file, not `b.txt` in the folder `a` (which exists too). A change
+/// on disk, a save, an agent's edit and the MCP tool keep its history under its own name
+/// and with its own content, and the other file keeps only its own version.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backslash_in_a_name_is_one_file() {
+    const NAME: &str = r"a\b.txt";
+    const QUERY: &str = "a%5Cb.txt";
+    let env = setup().await;
+    std::fs::create_dir_all(env.root.join("a")).unwrap();
+    std::fs::write(env.root.join("a/b.txt"), "other\n").unwrap();
+    assert_eq!(env.wait_for("a/b.txt", 1).await.len(), 1);
+
+    std::fs::write(env.root.join(NAME), "v1\n").unwrap();
+    let h = env.wait_for(QUERY, 1).await;
+    assert_eq!(kinds(&h), ["disk"], "{h:?}");
+    assert_eq!(h[0]["path"], NAME);
+    let read = env.api(Method::GET, &format!("/files/read?path={QUERY}"), None).await.unwrap();
+    assert_eq!(read["content"], "v1\n");
+    env.api(Method::PUT, "/files/write", Some(json!({ "path": NAME, "content": "v2\n", "etag": read["etag"] }))).await.unwrap();
+    assert_eq!(kinds(&env.wait_for(QUERY, 2).await), ["save", "disk"]);
+
+    let abs = env.root.join(NAME).display().to_string();
+    std::fs::write(env.root.join(NAME), "v3\n").unwrap();
+    let hook = json!({ "hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": { "file_path": abs } });
+    super::agent_edit(&env.state, &session("t-agent", Some(&env.pid), &env.root), &hook);
+    env.wait_for(QUERY, 3).await;
+    env.settle().await;
+    let h = env.history(QUERY).await;
+    assert_eq!(kinds(&h), ["agent", "save", "disk"], "{h:?}");
+    let rev = env.api(Method::GET, &format!("/files/history/revision?id={}", h[0]["id"]), None).await.unwrap();
+    assert_eq!(rev["content"], "v3\n");
+
+    let tools = super::tools::tools();
+    let t = tools.iter().find(|t| t.name == "files_local_history").unwrap();
+    let ctx = McpCtx { terminal_id: Some("t1".into()), project_id: Some(env.pid.clone()) };
+    let ToolOutput::Json(v) = (t.handler)(env.state.clone(), ctx, json!({ "path": abs })).await.unwrap() else { panic!("json expected") };
+    assert_eq!((v["path"].as_str(), v["entries"].as_array().map(Vec::len)), (Some(NAME), Some(3)), "{v}");
+
+    let other = env.history("a/b.txt").await;
+    assert_eq!(other.len(), 1, "{other:?}");
+    let rev = env.api(Method::GET, &format!("/files/history/revision?id={}", other[0]["id"]), None).await.unwrap();
+    assert_eq!(rev["content"], "other\n");
+}
+
 /// A folder with more files than one batch takes (a clone, an unpacked archive) is
 /// not snapshotted file by file.
 #[test]
@@ -577,9 +622,14 @@ fn agent_paths_stay_inside_the_project() {
     assert_eq!(super::rel_in_project(&root, &root.join("src/../../x")), None);
     assert_eq!(super::rel_in_project(&root, &root), None);
     assert_eq!(super::rel_in_project(&root, Path::new("/etc/passwd")), None);
-    // Linux keeps the name as written: another case is another file.
+    // Linux keeps the name as written: another case is another file, and a `\` is part
+    // of a name.
     #[cfg(unix)]
-    assert_eq!(super::rel_in_project(&root, &root.join("SRC/a.rs")).as_deref(), Some("SRC/a.rs"));
+    {
+        assert_eq!(super::rel_in_project(&root, &root.join("SRC/a.rs")).as_deref(), Some("SRC/a.rs"));
+        assert_eq!(super::rel_in_project(&root, &root.join(r"src\a.rs")).as_deref(), Some(r"src\a.rs"));
+        assert_eq!(super::rel_in_project(&root, &root.join(r"..\x")).as_deref(), Some(r"..\x"));
+    }
     // Windows: the root spelled in another case is the same folder.
     #[cfg(windows)]
     {

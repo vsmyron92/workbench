@@ -257,7 +257,7 @@ pub fn run_search(root: &Path, p: &SearchParams, sensitive: &Sensitive, cancel: 
             if !ent.file_type().is_some_and(|t| t.is_file()) {
                 return WalkState::Continue;
             }
-            let rel = ent.path().strip_prefix(root).unwrap_or(ent.path()).to_string_lossy().replace('\\', "/");
+            let rel = crate::util::os::path::to_slash(ent.path().strip_prefix(root).unwrap_or(ent.path()));
             if sensitive.matches(&rel) {
                 out.sensitive_skipped.fetch_add(1, Ordering::Relaxed);
                 return WalkState::Continue;

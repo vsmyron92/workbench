@@ -99,9 +99,10 @@ fn check_contained(root: &Path, joined: &Path) -> Result<(), ApiError> {
     }
 }
 
-/// Path of `abs` relative to `root`, with `/` separators, or `None` if outside.
+/// Path of `abs` relative to `root`, with `/` separators, or `None` if outside. On Unix a
+/// `\` stays: it is part of a name there (`a\b.txt` is one file, not `a/b.txt`).
 pub fn relative_to(root: &Path, abs: &Path) -> Option<String> {
-    os::path::strip_prefix(abs, root).map(|p| p.to_string_lossy().replace('\\', "/"))
+    os::path::strip_prefix(abs, root).map(os::path::to_slash)
 }
 
 #[cfg(test)]
@@ -161,14 +162,21 @@ mod tests {
     fn unix_names_are_not_windows_names() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        for name in [r"a\..\..\x", "a:b", "NUL", "com1.txt", "x.", "x ", "GIT~1/config", r"C:\x"] {
+        for name in [r"a\..\..\x", r"..\x", r"..\..\etc\passwd", "a:b", "NUL", "com1.txt", "x.", "x ", "GIT~1/config", r"C:\x"] {
+            assert_eq!(os::path::check_relative(name), Ok(()), "{name}");
             assert_eq!(resolve_in_root(root, name).unwrap(), root.join(name), "{name}");
+            assert!(!root.join(name).components().any(|c| c == Component::ParentDir), "{name}");
         }
         assert_eq!(resolve_entry_in_root(root, r"a\b").unwrap(), root.join(r"a\b"));
+        assert_eq!(resolve_entry_in_root(root, r"d\x/..\y").unwrap(), root.join(r"d\x").join(r"..\y"));
         assert_eq!(resolve_absolute_in(&[root.to_path_buf()], &format!("{}/a\\b", root.display())).unwrap(), root.join(r"a\b"));
+        assert_eq!(resolve_absolute_in(&[root.to_path_buf()], &format!("{}/..\\x", root.display())).unwrap(), root.join(r"..\x"));
         let upper = root.display().to_string().to_uppercase();
         assert!(resolve_absolute_in(&[root.to_path_buf()], &format!("{upper}/x")).is_err());
-        assert_eq!(relative_to(root, &root.join(r"a\b")).as_deref(), Some("a/b"));
+        // Relative paths keep the name: `a\b` is not the file `b` in the folder `a`.
+        assert_eq!(relative_to(root, &root.join(r"a\b")).as_deref(), Some(r"a\b"));
+        assert_eq!(relative_to(root, &root.join(r"d\x").join("y.txt")).as_deref(), Some(r"d\x/y.txt"));
+        assert_eq!(resolve_in_root(root, &relative_to(root, &root.join(r"a\b")).unwrap()).unwrap(), root.join(r"a\b"));
     }
 
     #[cfg(windows)]
