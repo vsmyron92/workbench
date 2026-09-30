@@ -259,6 +259,25 @@ fn names_from_repository_files_never_reach_a_batch_file() {
     assert!(!batch_safe("npm run 'a&b'") && !batch_safe("x 'it''s%'") && !batch_safe("x '\"'") && !batch_safe("x 'a^b"));
 }
 
+/// Where PowerShell quotes the old way (Windows PowerShell 5.1), a final `\` in a quoted
+/// name with a space escapes its closing quote, and the next quoted word is split into
+/// arguments: a run with such a name is not offered.
+#[test]
+fn quoted_names_ending_in_a_backslash_are_not_offered() {
+    let d = tree(&[("package.json", r#"{"scripts":{"dev server\\":"vite","a\\b c":"x","ok\\":"x"}}"#)]);
+    let pf = win(d.path());
+    assert!(!has_run(&pf, r"dev server\"), "{:?}", names(&pf));
+    // A `\` elsewhere, or in a name without a space (passed without quotes), arrives as it is.
+    assert_eq!(run(&pf, r"a\b c").command, r"npm run 'a\b c'");
+    assert_eq!(run(&pf, r"ok\").command, r"npm run ok\");
+    // bash reads its quotes itself.
+    assert_eq!(run(&detect_checked(d.path()), r"dev server\").command, r"npm run 'dev server\'");
+
+    use super::super::native_quoting_safe;
+    assert!(!native_quoting_safe(r"cargo run -p 'x \' --bin 'y --z'") && !native_quoting_safe("x 'a\tb\\'"));
+    assert!(native_quoting_safe(r"& '..\.venv\Scripts\my tool.exe' -x") && native_quoting_safe(r"x 'a b\c' 'd\'") && native_quoting_safe("x 'it''s \\ ok'"));
+}
+
 #[test]
 fn validate_scripts_in_bash_are_not_offered() {
     let d = tree(&[("data/validate.sh", "#!/bin/sh\nexit 0\n"), ("schema/validate.mjs", "process.exit(0)\n")]);

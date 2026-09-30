@@ -35,18 +35,32 @@ pub fn gemini_dir(env_override: Option<&str>) -> PathBuf {
     home.join(".gemini")
 }
 
-/// The chat folders that can hold a project directory's sessions.
+/// The chat folders that can hold a project directory's sessions: the one `projects.json`
+/// names, then the one older versions named by a hash.
 fn chat_dirs(gemini: &Path, project_dir: &Path) -> Vec<PathBuf> {
-    let key = project_dir.to_string_lossy().trim_end_matches('/').to_string();
+    use crate::util::os::path::{CASE_INSENSITIVE, same_dir, trim_end_separators};
+    // The directory as Gemini's `path.resolve` writes it: no trailing separator.
+    let key = trim_end_separators(&project_dir.to_string_lossy()).to_string();
+    // `projects.json`'s keys are that, lowercased on Windows (`ProjectRegistry.normalizePath`,
+    // JavaScript's `toLowerCase`, beyond ASCII too): the exact key, else one naming the
+    // same folder once both are lowercased there.
+    let fold = |s: &str| if CASE_INSENSITIVE { s.to_lowercase() } else { s.to_string() };
     let mut out = vec![];
     let slug = std::fs::read(gemini.join("projects.json"))
         .ok()
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .and_then(|v| v.pointer("/projects").and_then(|p| p.get(&key)).and_then(Value::as_str).map(str::to_string))
+        .and_then(|v| {
+            let projects = v.pointer("/projects")?.as_object()?;
+            let folded = fold(&key);
+            let found = projects.get(&key).or_else(|| projects.iter().find(|(k, _)| same_dir(&fold(k), &folded)).map(|(_, slug)| slug));
+            found.and_then(Value::as_str).map(str::to_string)
+        })
         .filter(|s| !s.is_empty() && !crate::util::os::path::has_separator(s) && s != "." && s != ".." && crate::util::os::path::check_component(s).is_ok());
     if let Some(s) = slug {
         out.push(gemini.join("tmp").join(s).join("chats"));
     }
+    // Older versions hashed the folder they ran in, `path.resolve`d and not lowercased
+    // (`Storage.getFilePathHash(targetDir)`): the directory as Workbench started them in.
     let hash = hex::encode(Sha256::digest(key.as_bytes()));
     out.push(gemini.join("tmp").join(hash).join("chats"));
     out
@@ -248,6 +262,31 @@ mod tests {
         let old = list(&g, Path::new("/w/old"), 10);
         assert_eq!((old[0].id.as_str(), old[0].first_prompt.as_deref(), old[0].last_message.as_deref()), (id2, Some("hello"), Some("hi there")));
         assert!(session_exists(&g, Path::new("/w/old"), id2));
+        assert!(session_exists(&g, Path::new("/w/old/"), id2));
         assert_eq!(gemini_dir(Some("/opt/g")), PathBuf::from("/opt/g/.gemini"));
+    }
+
+    /// `projects.json` as Gemini writes it: the folder `path.resolve`d, lowercased on Windows.
+    #[test]
+    fn project_keys_match_as_gemini_writes_them() {
+        let home = tempfile::tempdir().unwrap();
+        let g = fixture(home.path(), Path::new("/unused"));
+        let (project, key, other) = if cfg!(windows) {
+            (r"C:\Work\Élan\Proj\", r"c:\work\élan\proj", r"C:\Work\Elan\Proj")
+        } else {
+            ("/w/Élan/Proj/", "/w/Élan/Proj", "/w/élan/proj")
+        };
+        std::fs::write(g.join("projects.json"), serde_json::to_vec(&serde_json::json!({ "projects": { key: "proj-a" } })).unwrap()).unwrap();
+        assert!(session_exists(&g, Path::new(project), ID), "{project}");
+        assert_eq!(list(&g, Path::new(project), 10).len(), 1);
+        // Another folder's key is not taken (on Linux, one in another case).
+        assert!(!session_exists(&g, Path::new(other), ID), "{other}");
+        // The legacy hash is of the folder without its trailing separator, in its own case.
+        let id2 = "2f0e0d0c-1111-4222-8333-444455556666";
+        let (old, hashed) = if cfg!(windows) { (r"C:\W\Old\", r"C:\W\Old") } else { ("/w/Old/", "/w/Old") };
+        let legacy = g.join("tmp").join(hex::encode(Sha256::digest(hashed.as_bytes()))).join("chats");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join(format!("session-2026-01-01T00-00-{}.json", &id2[..8])), format!(r#"{{"sessionId":"{id2}","messages":[]}}"#)).unwrap();
+        assert!(session_exists(&g, Path::new(old), id2));
     }
 }

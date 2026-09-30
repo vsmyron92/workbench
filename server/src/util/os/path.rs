@@ -481,6 +481,70 @@ pub fn dir_within(dir: &str, root: &str) -> bool {
     }
 }
 
+/// What follows the directory `dir` in `p`, both as programs record them (a hook's `cwd`
+/// and `file_path`): `None` when `p` is not below `dir`, is `dir` itself, or `dir` is
+/// empty or a root. Unix compares the strings (`/w/p/src/x.rs` below `/w/p` is
+/// `src/x.rs`); Windows compares like [`same_dir`], so case and `/` or `\` do not
+/// matter, and the rest keeps `p`'s own separators (`src\x.rs`).
+pub fn below_dir<'a>(p: &'a str, dir: &str) -> Option<&'a str> {
+    #[cfg(unix)]
+    {
+        let d = dir.trim_end_matches('/');
+        if d.is_empty() {
+            return None;
+        }
+        p.strip_prefix(d)?.strip_prefix('/').filter(|rest| !rest.is_empty())
+    }
+    #[cfg(windows)]
+    {
+        win::below_dir(p, dir)
+    }
+}
+
+/// `s`, a directory as a program records it, without trailing separators: `/` on Unix
+/// (all of them, as before); `/` and `\` on Windows, where a drive's root keeps its own
+/// (`C:\`: `C:` alone names the drive's current folder).
+pub fn trim_end_separators(s: &str) -> &str {
+    #[cfg(unix)]
+    {
+        s.trim_end_matches('/')
+    }
+    #[cfg(windows)]
+    {
+        win::trim_end_separators(s)
+    }
+}
+
+/// `p`, a path below the folder `base`, spelled as the file system stores it, for keys that
+/// must name a file one way whatever spelling a program used (Local History). Unix: `p` as
+/// it is: names compare byte for byte, so there is one spelling. Windows, where names
+/// compare without regard to case: an existing `p` canonical ([`canonicalize`]: each name
+/// in its case on disk, 8.3 names long, links resolved to the file the watcher sees
+/// change); otherwise (a deleted file, a link that does not resolve) its folder canonical
+/// and its name as the folder lists it, or as given when the folder has no such entry.
+/// `p` as it is when that does not stay below `base`.
+pub fn on_disk_case(base: &Path, p: &Path) -> PathBuf {
+    #[cfg(unix)]
+    {
+        let _ = base;
+        p.to_path_buf()
+    }
+    #[cfg(windows)]
+    {
+        if let Some(c) = canonicalize(p).ok().filter(|c| starts_with(c, base)) {
+            return c;
+        }
+        let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else { return p.to_path_buf() };
+        let Some(dir) = canonicalize(parent).ok().filter(|d| starts_with(d, base)) else { return p.to_path_buf() };
+        // Nothing to list for a file that is gone (the usual case).
+        let listed = std::fs::symlink_metadata(dir.join(name)).ok().and_then(|_| {
+            let names: Vec<std::ffi::OsString> = std::fs::read_dir(&dir).ok()?.flatten().map(|e| e.file_name()).collect();
+            names.iter().find(|n| n.as_os_str() == name).or_else(|| names.iter().find(|n| n.eq_ignore_ascii_case(name))).cloned()
+        });
+        dir.join(listed.as_deref().unwrap_or(name))
+    }
+}
+
 /// An absolute path (an absolute glob pattern) as its file system root and the rest
 /// with `/` separators: `/` and `home/u/x/**` (Unix); `C:\` and `Users/me/x/**` on
 /// Windows, where a UNC path's root is its share (`\\server\share\`).
@@ -854,6 +918,19 @@ mod win {
         Some(skip_empty(rest))
     }
 
+    pub fn below_dir<'a>(p: &'a str, dir: &str) -> Option<&'a str> {
+        // An empty `dir` or a root (`C:\`, `\`): nothing is shown relative to it.
+        if skip_empty(split_root(dir).1).is_empty() {
+            return None;
+        }
+        strip_prefix(p, dir).filter(|rest| !rest.is_empty())
+    }
+
+    pub fn trim_end_separators(s: &str) -> &str {
+        let t = s.trim_end_matches(is_sep);
+        if t.len() == 2 && drive(t).is_some() && s.len() > 2 { &s[..3] } else { t }
+    }
+
     /// `C:` for `c:` (also after `\\?\`); `None` when nothing changes.
     pub fn upper_drive(s: &str) -> Option<String> {
         let (pre, rest) = match s.strip_prefix(r"\\?\") {
@@ -922,6 +999,15 @@ mod tests {
         assert!(same_name(".git", ".git") && !same_name(".GIT", ".git"));
         assert!(same_dir("/p/x/", "/p/x") && !same_dir("/p/X", "/p/x") && !same_dir("/p//x", "/p/x"));
         assert!(dir_within("/p/x", "/p/") && dir_within("/p", "/p") && !dir_within("/p2", "/p") && !dir_within("/P/x", "/p"));
+        assert_eq!(below_dir("/w/p/src/x.rs", "/w/p/"), Some("src/x.rs"));
+        assert_eq!(below_dir("/w/p//x", "/w/p"), Some("/x"));
+        for (p, dir) in [("/w/p", "/w/p"), ("/w/p/", "/w/p"), ("/w/pp/x", "/w/p"), ("/w/p/x", "/"), ("/w/p/x", ""), ("/W/p/x", "/w/p"), (r"C:\p\x", r"C:\p")] {
+            assert_eq!(below_dir(p, dir), None, "{p} below {dir}");
+        }
+        assert_eq!(trim_end_separators("/w/p//"), "/w/p");
+        assert_eq!(trim_end_separators("/"), "");
+        assert_eq!(trim_end_separators(r"C:\p\"), r"C:\p\");
+        assert_eq!(on_disk_case(Path::new("/w"), Path::new("/w/SRC/A.rs")), PathBuf::from("/w/SRC/A.rs"));
         assert_eq!(uri_path("/x/y"), (String::new(), "/x/y".to_string()));
         assert_eq!(from_uri_path("/c:/x".into()).as_deref(), Some("/c:/x"));
         assert!(!CASE_INSENSITIVE);
@@ -931,6 +1017,8 @@ mod tests {
         assert!(!leaves_machine(&dir.path().join("link")) && !leaves_machine_below(dir.path(), &dir.path().join("link/x")));
         assert!(!leaves_machine(Path::new(r"\\server\share\x")));
         assert!(!ancestors_leave(&dir.path().join("link"), |_| true));
+        // A key keeps the path as named: nothing is resolved.
+        assert_eq!(on_disk_case(dir.path(), &dir.path().join("link")), dir.path().join("link"));
         assert_eq!(canonicalize(dir.path().join("link")).unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 
@@ -1254,6 +1342,35 @@ mod tests {
     }
 
     #[test]
+    fn windows_directories_as_programs_record_them() {
+        let below = win::below_dir;
+        assert_eq!(below(r"C:\Users\me\proj\src\a.rs", r"c:\users\me\proj"), Some(r"src\a.rs"));
+        assert_eq!(below("C:/Users/me/proj/src/a.rs", r"C:\Users\me\proj\"), Some("src/a.rs"));
+        assert_eq!(below(r"C:\p\.\x", r"C:\p"), Some("x"));
+        for (p, dir) in [
+            (r"C:\p", r"C:\P\"),
+            (r"C:\p\", r"C:\p"),
+            (r"C:\pp\x", r"C:\p"),
+            (r"D:\p\x", r"C:\p"),
+            (r"C:\x\y", r"C:\"),
+            (r"C:\x\y", "c:/"),
+            (r"C:\x\y", ""),
+            (r"src\a.rs", r"C:\p"),
+        ] {
+            assert_eq!(below(p, dir), None, "{p} below {dir}");
+        }
+        let trim = win::trim_end_separators;
+        assert_eq!(trim(r"C:\p\"), r"C:\p");
+        assert_eq!(trim("C:/p//"), "C:/p");
+        assert_eq!(trim(r"C:\p"), r"C:\p");
+        assert_eq!(trim(r"C:\"), r"C:\");
+        assert_eq!(trim("C:\\\\"), r"C:\");
+        assert_eq!(trim("c:/"), "c:/");
+        assert_eq!(trim("C:"), "C:");
+        assert_eq!(trim(r"\\server\share\"), r"\\server\share");
+    }
+
+    #[test]
     fn windows_drive_letters_are_uppercased() {
         assert_eq!(win::upper_drive(r"c:\x").as_deref(), Some(r"C:\x"));
         assert_eq!(win::upper_drive(r"\\?\d:\x").as_deref(), Some(r"\\?\D:\x"));
@@ -1301,6 +1418,33 @@ mod tests {
         assert!(same_name(".GIT", ".git") && CASE_INSENSITIVE);
         assert!(same_dir(r"C:\Proj\", "c:/proj") && !same_dir(r"C:\proj\x", r"C:\proj"));
         assert!(dir_within(r"c:\proj\Sub", r"C:\Proj") && dir_within("C:/proj", r"C:\proj\") && !dir_within(r"C:\proj2", r"C:\proj"));
+    }
+
+    /// One spelling per file: a key taken from a path another program wrote in its own case.
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_take_the_case_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonicalize(dir.path()).unwrap();
+        std::fs::create_dir(root.join("Src")).unwrap();
+        std::fs::write(root.join("Src").join("Main.rs"), "x").unwrap();
+        let main = root.join("Src").join("Main.rs");
+        assert_eq!(on_disk_case(&root, &root.join("src").join("MAIN.RS")), main);
+        assert_eq!(on_disk_case(&root, &main), main);
+        let upper = PathBuf::from(root.to_str().unwrap().to_ascii_uppercase());
+        assert_eq!(on_disk_case(&root, &upper.join("SRC").join("main.rs")), main);
+        // Gone: its folder as on disk, its name as given.
+        assert_eq!(on_disk_case(&root, &root.join("SRC").join("Gone.rs")), root.join("Src").join("Gone.rs"));
+        // Not below `base`, or in no folder that exists: as given.
+        let other = tempfile::tempdir().unwrap();
+        let outside = canonicalize(other.path()).unwrap().join("x.rs");
+        std::fs::write(&outside, "x").unwrap();
+        assert_eq!(on_disk_case(&root, &outside), outside);
+        assert_eq!(on_disk_case(&root, &root.join("no").join("such.rs")), root.join("no").join("such.rs"));
+        // A link that does not resolve: its name as the folder lists it.
+        if crate::files::symlink_or_skip("missing-target", root.join("Src").join("Dangling.txt")) {
+            assert_eq!(on_disk_case(&root, &root.join("src").join("DANGLING.TXT")), root.join("Src").join("Dangling.txt"));
+        }
     }
 
     #[cfg(windows)]

@@ -476,6 +476,22 @@ pub fn helper_command(exe: &Path, args: &[&str]) -> String {
 /// `s` as one PowerShell word: unchanged when plain, else a single-quoted string, in which
 /// nothing is special but the quote itself, doubled (PowerShell also ends such a string
 /// at a typographic quote, `‘ ’ ‚ ‛`).
+///
+/// Its value is `s` for every cmdlet, script and redirection. A native program gets the
+/// command line PowerShell writes for it, and a value with a space that ends in `\` reaches
+/// it intact only where PowerShell quotes by the MSVCRT rules: pwsh 7.3 and later
+/// (`$PSNativeCommandArgumentPassing`, whose `Windows` default keeps the old way for `.bat`,
+/// `.cmd`, `.js`, `.vbs` and `.wsf` files, `cmd`, `cscript`, `wscript`, `find` and
+/// `sqlcmd`). Windows PowerShell 5.1 and
+/// older pwsh put such a value in double quotes as it is, so its last `\` escapes the
+/// closing quote: `'C:\my dir\' next` arrives as the one argument `C:\my dir" next`.
+/// Doubling the trailing `\` would mend the old way and break the new one (`C:\my dir\\`),
+/// and neither `quote` nor its callers know which PowerShell runs a command or whether a
+/// word reaches a native program, so the value stays `s`
+/// (`windows_native_arguments_follow_the_powershell_version`). Workbench's own words do
+/// not end so; a name from a repository file may, and detection does not offer such a
+/// command (`detect::native_quoting_safe`), since the next word PowerShell quotes would
+/// then be split into arguments.
 fn ps_quote(s: &str) -> String {
     if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:\\=+".contains(c)) {
         return s.to_string();
@@ -771,6 +787,65 @@ mod tests {
             helper_command(Path::new(r"C:\Program Files\Workbench\workbench.exe"), &["statusline"]),
             r#""C:/Program Files/Workbench/workbench.exe" statusline"#
         );
+    }
+
+    /// Not a test: `native_argv` runs this test binary from PowerShell as a native program,
+    /// and this writes the arguments it got after `--` to the file `WB_ARGV_ECHO` names.
+    #[cfg(windows)]
+    #[test]
+    fn argv_echo() {
+        let Some(out) = std::env::var_os("WB_ARGV_ECHO") else { return };
+        let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
+        let after = args.iter().position(|a| a == "--").map_or(&[][..], |i| &args[i + 1..]);
+        std::fs::write(out, serde_json::to_vec(after).unwrap()).unwrap();
+    }
+
+    /// The arguments a native program gets from the PowerShell `ps` for `words`, each
+    /// `ps_quote`d.
+    #[cfg(windows)]
+    async fn native_argv(ps: &Path, file: &Path, words: &[&str]) -> Vec<String> {
+        let exe = std::env::current_exe().unwrap();
+        let quoted: Vec<String> = words.iter().map(|w| ps_quote(w)).collect();
+        let program = Dialect::PowerShell.program(&exe.display().to_string());
+        let line = format!("{program} --exact --quiet --test-threads=1 util::os::shell::tests::argv_echo -- {}", quoted.join(" "));
+        let _ = std::fs::remove_file(file);
+        let mut c = super::command(&win::argv_for(ps, &line));
+        c.env("WB_ARGV_ECHO", file);
+        let out = crate::util::proc::run_cmd(c, std::time::Duration::from_secs(90)).await.unwrap();
+        assert!(out.ok(), "{}: {out:?}", ps.display());
+        serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
+    }
+
+    /// `ps_quote` keeps a word's value, and what a native program gets of it is PowerShell's
+    /// doing: the old way (Windows PowerShell 5.1) lets the final `\` of a word with a space
+    /// escape the closing quote, the new one (pwsh 7.3 and later) does not, and a doubled
+    /// `\` would be right for the first and wrong for the second (see `ps_quote`).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_native_arguments_follow_the_powershell_version() {
+        let mut shells = vec![win::windows_powershell().expect("System32 powershell.exe")];
+        match crate::util::os::exe::which("pwsh") {
+            Some(pwsh) => shells.push(pwsh),
+            None => eprintln!("pwsh is not installed: only Windows PowerShell is checked"),
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("argv.json");
+        for ps in shells {
+            let probe = crate::util::proc::run_cmd(super::command(&win::argv_for(&ps, "$PSNativeCommandArgumentPassing")), std::time::Duration::from_secs(90));
+            let mode = probe.await.unwrap().stdout.trim().to_string();
+            let old_way = mode.is_empty() || mode.eq_ignore_ascii_case("Legacy");
+            let plain = ["a b", "it's", r"C:\x y\z.txt", "$(rm x); `n", "é ✓", r"a\b", r"C:\dir\"];
+            assert_eq!(native_argv(&ps, &file, &plain).await, plain, "{} ({mode})", ps.display());
+            let trailing = native_argv(&ps, &file, &[r"C:\my dir\", "next"]).await;
+            let doubled = native_argv(&ps, &file, &[r"C:\my dir\\", "next"]).await;
+            if old_way {
+                assert_eq!(trailing, [r#"C:\my dir" next"#], "{} ({mode})", ps.display());
+                assert_eq!(doubled, [r"C:\my dir\", "next"], "{} ({mode})", ps.display());
+            } else {
+                assert_eq!(trailing, [r"C:\my dir\", "next"], "{} ({mode})", ps.display());
+                assert_eq!(doubled, [r"C:\my dir\\", "next"], "{} ({mode})", ps.display());
+            }
+        }
     }
 
     /// A failing command's message, as a stop command's or a version probe's error shows it,

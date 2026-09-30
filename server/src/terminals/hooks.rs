@@ -104,15 +104,7 @@ fn set<T: PartialEq>(slot: &mut T, value: T, changed: &mut bool) {
 pub fn describe_permission(tool: Option<&str>, input: Option<&Value>, cwd: Option<&str>) -> String {
     let tool = tool.unwrap_or("a tool");
     let field = |k: &str| input.and_then(|i| i.get(k)).and_then(Value::as_str).map(|v| permission::redact_patterns(&permission::show_invisible(v)));
-    let short = |p: &str| -> String {
-        cwd.map(|c| c.trim_end_matches('/'))
-            .filter(|c| !c.is_empty())
-            .and_then(|c| p.strip_prefix(c))
-            .and_then(|rest| rest.strip_prefix('/'))
-            .filter(|rest| !rest.is_empty())
-            .unwrap_or(p)
-            .to_string()
-    };
+    let short = |p: &str| -> String { cwd.and_then(|c| crate::util::os::path::below_dir(p, c)).unwrap_or(p).to_string() };
     let what = match tool {
         "Bash" => field("command").map(|c| format!("run `{}`", clean_line(&c, 140))),
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "Read" => {
@@ -608,6 +600,15 @@ mod tests {
         assert_eq!(describe_permission(Some("Edit"), Some(&json!({"file_path":"/a/b.rs"})), None), "Permission to edit /a/b.rs");
         assert_eq!(describe_permission(Some("Write"), Some(&json!({"file_path":"/w/p/src/x.rs"})), Some("/w/p")), "Permission to write src/x.rs");
         assert_eq!(describe_permission(Some("Write"), Some(&json!({"file_path":"/w/pp/x.rs"})), Some("/w/p")), "Permission to write /w/pp/x.rs");
+        assert_eq!(describe_permission(Some("Read"), Some(&json!({"file_path":"/etc/hosts"})), Some("/")), "Permission to read /etc/hosts");
+        // Windows: below the cwd in any case, with `\` or `/`; Unix compares the strings.
+        let edit = describe_permission(Some("Edit"), Some(&json!({"file_path": r"C:\Users\me\Proj\src\a.rs"})), Some(r"c:\users\me\proj\"));
+        let write = describe_permission(Some("Write"), Some(&json!({"file_path": "C:/Users/me/Proj/b.rs"})), Some(r"C:\Users\me\Proj"));
+        if cfg!(windows) {
+            assert_eq!((edit.as_str(), write.as_str()), (r"Permission to edit src\a.rs", "Permission to write b.rs"));
+        } else {
+            assert_eq!((edit.as_str(), write.as_str()), (r"Permission to edit C:\Users\me\Proj\src\a.rs", "Permission to write C:/Users/me/Proj/b.rs"));
+        }
         assert_eq!(describe_permission(Some("mcp__x__y"), None, None), "Permission to use mcp__x__y");
         assert_eq!(describe_permission(None, None, None), "Permission to use a tool");
         // Invisible characters are shown, never passed through.
