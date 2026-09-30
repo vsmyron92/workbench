@@ -1,11 +1,13 @@
 // Models of project files for other features (lsp, debug): the files contract of
 // docs/ARCHITECTURE.md "Editor models". A project file's Monaco model has the URI
 // `file:///<projectId>/<project-relative path>` (`~abs` instead of the project id for
-// absolute paths) and belongs to the files slice's buffers (`buffers.ts`): one model
-// per file, shared by every editor that shows it, with its dirty state and saves.
+// absolute paths, `file:///~abs/C%3A%5Cx` for `C:\x` on a Windows server) and belongs to
+// the files slice's buffers (`buffers.ts`): one model per file, shared by every editor
+// that shows it, with its dirty state and saves.
 //
 // * `modelUriString` / `parseModelUri`: the URI of a file and back (pure); `modelFile`:
 //   the file an editor's model shows (debug and git hook every editor with it).
+// * `isAbsolutePath`, `basename`, `samePath`: the paths models carry (`paths.ts`).
 // * `peekModel`: the open model of a file, if any editor has it (no loading).
 // * `readText`: a file's text, unsaved edits included when it is open, else the disk's.
 // * `ensureModel`: the file's model, creating the buffer (reading the file) when no
@@ -16,12 +18,17 @@
 import type { editor, Uri } from 'monaco-editor'
 import { filesApi } from './api'
 import { acquireBuffer, getModel, releaseBuffer, saveBuffer, useBuffers } from './buffers'
-import { bufferKey } from './paths'
+import { bufferKey, isDrivePath, modelUriPath } from './paths'
+
+// The paths models carry, for other features: absolute paths as the server's OS writes
+// them (`C:\…` on Windows), a file's name, and comparing a model's path with a path
+// another program reported (a debug adapter's).
+export { basename, isAbsolutePath, samePath } from './paths'
 
 export interface FileRef {
   /** `null` for a file outside every project (absolute `path`). */
   projectId: string | null
-  /** Project-relative, or absolute when `projectId` is null. */
+  /** Project-relative (`/`-separated on every OS), or absolute when `projectId` is null. */
   path: string
 }
 
@@ -41,8 +48,7 @@ export function encodeUriPath(p: string): string {
 
 /** The model URI of a file, as a string (`Uri.toString()` of `modelUri`). */
 export function modelUriString(projectId: string | null, path: string): string {
-  const rel = path.startsWith('/') ? path : '/' + path
-  return 'file://' + encodeUriPath(`/${projectId ?? '~abs'}${rel}`)
+  return 'file://' + encodeUriPath(modelUriPath(projectId, path))
 }
 
 /** The file a `file:` model URI names; null for other URIs. */
@@ -63,7 +69,8 @@ export function parseModelUri(uri: string | Uri): FileRef | null {
   const m = /^\/([^/]+)(\/.*)?$/.exec(path)
   if (!m) return null
   const rest = m[2] ?? '/'
-  if (m[1] === '~abs') return { projectId: null, path: rest }
+  // `/~abs/C:\x` is the drive path `C:\x` (Windows server); `/~abs/etc/x` is `/etc/x`.
+  if (m[1] === '~abs') return { projectId: null, path: isDrivePath(rest.slice(1)) ? rest.slice(1) : rest }
   return { projectId: m[1], path: rest.slice(1) }
 }
 

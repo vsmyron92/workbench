@@ -73,7 +73,7 @@ import {
   type EditorParams,
   type MarkdownMode,
 } from './openers'
-import { basename, bufferKey, editorPanelId, hljsLanguage, isMarkdown, isSvg, mediaKind, tabTitle, viewerFor } from './paths'
+import { basename, bufferKey, editorPanelId, hljsLanguage, isMarkdown, isSvg, mediaKind, segments, tabTitle, viewerFor } from './paths'
 import { useActiveEditor } from './store'
 import { copyText } from './text'
 import { vcsKindOf, VCS_LABEL } from './vcs'
@@ -731,7 +731,7 @@ function languageName(monaco: Monaco | null, id: string): string {
 }
 
 function Breadcrumb({ projectId, path }: { projectId: string | null; path: string }) {
-  const parts = path.split('/').filter(Boolean)
+  const parts = segments(path)
   return (
     <div className="wb-editor-crumbs wb-ellipsis" title={path}>
       {parts.map((p, i) => {

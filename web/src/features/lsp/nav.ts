@@ -2,7 +2,7 @@
 // library file outside the project in this slice's read-only `lsp.source` panel.
 
 import { openPanel } from '@/shell/actions'
-import { parseModelUri, readText } from '@/features/files/modelAccess'
+import { basename, parseModelUri, readText } from '@/features/files/modelAccess'
 import type { LspRange } from './api'
 import { displayPath, projectOfUri } from './convert'
 
@@ -13,10 +13,6 @@ export interface SourceParams {
   column?: number
   endColumn?: number
   t?: number
-}
-
-function basename(p: string): string {
-  return p.slice(p.lastIndexOf('/') + 1)
 }
 
 export const sourcePanelId = (projectId: string, uri: string) => `lsp.source:${projectId}:${displayPath(uri)}`

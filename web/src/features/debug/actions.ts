@@ -5,8 +5,9 @@ import { ApiError } from '@/api/client'
 import { askAgent } from '@/shell/agentBridge'
 import { openPanel, showToolWindow, toast, toastError } from '@/shell/actions'
 import { useUi } from '@/state/store'
+import { basename } from '@/features/files/modelAccess'
 import { applyBreakpoints, cachedBreakpoints, cachedConfigs, debugApi } from './api'
-import { agentPrompt, fileBreakpoints, isLive, moveLines, patchLine, rememberedConfig, toggleLine } from './logic'
+import { agentPrompt, fileBreakpoints, isLive, moveLines, patchLine, rememberedConfig, sourcePanel, toggleLine } from './logic'
 import { activeSession, openAttachPicker, openDebugPicker, useDebug, useDebugPrefs } from './store'
 import type { DebugSession, Frame, LineBreakpoint } from './types'
 
@@ -243,7 +244,7 @@ export function openFrame(s: Pick<DebugSession, 'id' | 'projectId'>, f: Frame, f
     openPanel({
       kind: 'editor',
       id: `editor:${s.projectId}:${src.path}`,
-      title: src.path.split('/').pop() ?? src.path,
+      title: basename(src.path),
       params: { projectId: s.projectId, path: src.path, ...at },
       focus,
     })
@@ -255,31 +256,6 @@ export function openFrame(s: Pick<DebugSession, 'id' | 'projectId'>, f: Frame, f
     return
   }
   openPanel({ ...view, params: { ...view.params, ...at }, focus })
-}
-
-/** The `debug.source` panel that shows a frame outside the project (null: no source). */
-export function sourcePanel(s: Pick<DebugSession, 'id' | 'projectId'>, f: Frame): { kind: string; id: string; title: string; params: Record<string, unknown> } | null {
-  const src = f.source
-  // DAP: a `sourceReference` means "ask the debugger", even with a path (debugpy
-  // names exec'd code `<generated>`).
-  if (src?.sourceReference) {
-    const name = src.name ?? src.path ?? `source ${src.sourceReference}`
-    return {
-      kind: 'debug.source',
-      id: `debug.source:${s.projectId}:${s.id}:ref${src.sourceReference}`,
-      title: name.split('/').pop() ?? name,
-      params: { projectId: s.projectId, sessionId: s.id, sourceReference: src.sourceReference, name },
-    }
-  }
-  if (src?.path?.startsWith('/') && !src.inProject) {
-    return {
-      kind: 'debug.source',
-      id: `debug.source:${s.projectId}:${src.path}`,
-      title: src.path.split('/').pop() ?? src.path,
-      params: { projectId: s.projectId, sessionId: s.id, path: src.path, name: src.name ?? undefined },
-    }
-  }
-  return null
 }
 
 export async function askAgentAboutStop(s: DebugSession) {

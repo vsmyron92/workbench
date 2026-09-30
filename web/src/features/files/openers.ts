@@ -6,7 +6,7 @@ import type { TerminalInfo } from '@/api/types'
 import { askAgent } from '@/shell/agentBridge'
 import { getDockApi, openPanel, showToolWindow, toast, toastError } from '@/shell/actions'
 import { useUi } from '@/state/store'
-import { basename, dirname, editorPanelId, isMarkdown, markdownPanelId, searchPanelId, tabTitle } from './paths'
+import { basename, dirname, editorPanelId, isAbsolutePath, isMarkdown, joinAbsolute, markdownPanelId, searchPanelId, tabTitle } from './paths'
 import { isScratch, useFilesView } from './scratchStore'
 import { noteRecent, useQuickOpen, useSearchStore, useTreeStore } from './store'
 
@@ -133,10 +133,10 @@ export function revealInTree(projectId: string | null, path: string) {
 /** The tree listens to scroll the revealed row into view once it is loaded. */
 export const revealRequests = new Set<(projectId: string, path: string) => void>()
 
-/** Absolute filesystem path of a project file (for drag and drop, Copy Path). */
+/** Absolute filesystem path of a project file (for drag and drop, Copy Path), as the server's OS writes it. */
 export function absolutePath(rootAbs: string | undefined, path: string): string {
-  if (path.startsWith('/') || !rootAbs) return path
-  return path ? `${rootAbs.replace(/\/$/, '')}/${path}` : rootAbs
+  if (isAbsolutePath(path) || !rootAbs) return path
+  return joinAbsolute(rootAbs, path)
 }
 
 export async function openTerminalAt(projectId: string, cwd: string) {

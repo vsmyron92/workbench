@@ -277,6 +277,15 @@ message. Test that the canonicalize check follows junctions. `expand_tilde` acce
 **LSP URIs.** Emit `file:///C:/…`; accept `/c:/` and `/C%3A/`; match the project root with a
 case-insensitive drive letter (servers often lowercase it); `lsp-src://pid/C:/…`.
 
+**Paths in the browser.** The web app reads the server's OS from `GET /api/health`
+(`features/files/paths.ts`). On a Windows server a drive path (`C:\…`, `C:/…`) is absolute
+and `\` also separates names (tab titles, breadcrumbs, a debug frame's file, Markdown links
+in a file outside the project); paths the server and a debug adapter wrote compare without
+regard to `/` versus `\` or ASCII case (`samePath`). A file outside the project has the
+model URI `file:///~abs/C%3A%5Cx` and parses back to `C:\x`; a debug stop in such a file
+opens its source; Copy Path and drag and drop join a project path to the root with `\`.
+Linux URIs and paths are unchanged.
+
 **Line endings.** Add `.gitattributes` (`* text=auto eol=lf`, `*.ps1` and `*.cmd`
 `eol=crlf`). In the git slice read `git ls-files --eol <path>`: when the index has LF and the
 working tree CRLF, strip `\r` from the working-tree side for the diff and for the patch given

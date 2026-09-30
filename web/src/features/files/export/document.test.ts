@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { setHealth } from '@/api/health'
 import { documentHtml, embeddableImagePath, escapeHtml, exportFileName, exportPath, fetchEmbeddableImage, IMAGE_CAP, ImageSkip, resolveVars, tocHtml, TOTAL_IMAGE_CAP, varNames } from './document'
 
 describe('resolveVars', () => {
@@ -96,6 +97,24 @@ describe('embedding images', () => {
     expect(embeddableImagePath('target/local.yml')).toBe(false)
     expect(embeddableImagePath('src/lib.rs')).toBe(false)
     expect(embeddableImagePath('logo.png.txt')).toBe(false)
+  })
+
+  it('reads a document at a Windows drive path on a Windows server', () => {
+    setHealth({ ok: true, service: 'workbench', version: '0', startedAt: 1, os: 'windows' })
+    try {
+      expect(embeddableImagePath('C:\\notes\\shot.png')).toBe(true)
+      expect(embeddableImagePath('docs/logo.png')).toBe(true)
+      // `\` separates and case does not matter there: all of these are in `.git`.
+      expect(embeddableImagePath('C:\\p\\.git\\logo.png')).toBe(false)
+      expect(embeddableImagePath('C:\\p\\.GIT\\logo.png')).toBe(false)
+      expect(embeddableImagePath('C:/p/.Git/logo.png')).toBe(false)
+      expect(embeddableImagePath('sub/.GIT/x.gif')).toBe(false)
+      expect(exportFileName('C:\\notes\\plan.md')).toBe('plan.html')
+      expect(exportPath('C:\\notes\\plan.md')).toBe('C:\\notes\\plan.html')
+      expect(exportPath('docs/guide.md')).toBe('docs/guide.html')
+    } finally {
+      setHealth(null)
+    }
   })
 
   it('never fetches or embeds ../.git/config, whatever the server says', async () => {
