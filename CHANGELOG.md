@@ -92,6 +92,13 @@
   install added. It changes nothing while Workbench runs from there, and keeps your
   configuration and data. The executables carry an application manifest (Windows 10 and 11,
   message boxes in the current style, long paths where Windows allows them).
+- **On Windows:** the install notes, the Help's Agents page and the "not available on
+  Windows" message for dev containers now say how to get them: run the Linux build inside a
+  WSL 2 distribution with Docker Engine installed in that distribution, and keep its
+  projects in the distribution's own folders. A browser on Windows then opens only ports the
+  container publishes (`forwardPorts`, `appPort`). With Docker Desktop's WSL integration
+  instead, Workbench may be unable to listen on the container network's gateway, and then
+  refuses Claude Code sessions inside the container. Neither setup has been tested yet.
 
 ## 0.3.0 - 2026-09-29
 

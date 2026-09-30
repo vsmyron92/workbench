@@ -162,14 +162,17 @@ The first version leaves a few things out; where one of them is asked for, Workb
 
 - **Dev containers.** Their chip, status item and commands are not shown. The **Services**
   window (Docker containers, compose projects, images) works with Docker Desktop but is
-  marked *experimental*: it has not been tested there yet.
+  marked *experimental*: it has not been tested there yet. To get dev containers, run the
+  Linux build inside a WSL 2 distribution with Docker Engine installed in it: see
+  [The Linux build inside WSL](#the-linux-build-inside-wsl).
 - **Desktop notifications** from the server. Turn on browser notifications
   (Settings › General), which then also notify on the computer Workbench runs on, or push.
 - **gdb attaching to a running process**, and rust-gdb's pretty printers. Attach to
   Process… uses lldb-dap or CodeLLDB for native programs and debugpy for Python.
 - **Projects on a network share or inside WSL** (`\\server\share`, `\\wsl$\…`, and a mapped
   network drive such as `H:`, which is a share too). Clone the repository to a local drive,
-  or run the Linux Workbench inside WSL for those projects.
+  or run the Linux Workbench inside WSL for those projects
+  ([The Linux build inside WSL](#the-linux-build-inside-wsl)).
 
 Building from source on Windows needs Rust with the MSVC toolchain (the Visual Studio Build
 Tools' C++ workload) and Node.js 22. In PowerShell, from the repository (build in `server`,
@@ -188,6 +191,42 @@ package (a `.nupkg` is a zip) next to them; the release archives use version 1.2
 Workbench loads `conpty.dll` only from its own folder or System32, never from the folder you
 start it in. Without the two files, terminals use the console host built into Windows, which
 renders less well on Windows 10.
+
+### The Linux build inside WSL
+
+Inside a WSL 2 distribution, install the Linux release as on Linux
+([Install a release](#install-a-release)). It is the Linux program there: dev containers are
+offered, and its projects are the distribution's own folders (`~/workspace` in the
+distribution), the ones the Windows build refuses as `\\wsl$\…` paths. WSL 2 forwards ports
+that listen on the distribution's loopback to Windows by default, so a browser on Windows
+can open the link `workbench url` prints.
+
+What decides whether dev containers work there is where the Docker engine runs. A Claude
+Code session inside a container reaches Workbench through a listener on the container
+network's gateway (usually `172.17.0.1` on Docker's default network), so that address has
+to belong to the distribution Workbench runs in.
+
+- **Docker Engine installed in the same distribution:** the engine's networks are set up
+  in that distribution, so the gateway is one of its addresses and Workbench listens there
+  as it does on Linux. One thing differs from Linux: for a port the container does not
+  publish, the link to a run inside (and the port's link in the dev container panel) is
+  the container's own address, such as `http://172.17.0.2:8000/`. That address is on
+  Docker's network inside the distribution, and WSL forwards only ports that listen in
+  the distribution, so only a browser inside the distribution opens it. For a browser on
+  Windows, publish the port: list it in `forwardPorts` or `appPort` in `devcontainer.json`
+  (Workbench's built-in engine publishes them on `127.0.0.1`), and the link becomes a
+  `localhost` port that WSL forwards like Workbench's own.
+- **Docker Desktop's WSL integration:** the engine runs in Docker Desktop's own WSL
+  distribution, apart from yours, so the gateway may not be an address of your
+  distribution. Workbench then cannot listen on it, as on Windows: the server log says
+  `dev containers: cannot listen on <gateway>`, and a Claude Code session in the container
+  is refused with "Workbench cannot listen on the container network's gateway". Shells and
+  runs inside do not need that listener. Container addresses are then most likely out of
+  reach too: Workbench uses them to tell when a run inside listens on its port, which then
+  goes unseen, and for links to ports the container does not publish, so publish those
+  ports here as well.
+
+None of this has been tested yet: Workbench's tests do not run under WSL.
 
 ## First start
 
