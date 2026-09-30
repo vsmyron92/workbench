@@ -889,8 +889,9 @@ pub struct Pty {
     in_tx: mpsc::Sender<Bytes>,
     /// Set once the waiter thread has seen the leader exit.
     exited: Arc<AtomicBool>,
-    /// Set once Workbench set out to end it (`note_killed`, `kill`).
-    killed: AtomicBool,
+    /// Set once Workbench set out to end it (`note_killed`, `kill`). The waiter thread reads
+    /// it as the leader exits, so a kill that comes later ended nothing of the leader.
+    killed: Arc<AtomicBool>,
 }
 
 /// What the spawner gets back besides the handle: the leader's exit status, and a signal
@@ -942,6 +943,7 @@ impl Pty {
         let (exit_tx, exit_rx) = oneshot::channel();
         let (done_tx, done_rx) = oneshot::channel();
         let exited = Arc::new(AtomicBool::new(false));
+        let killed = Arc::new(AtomicBool::new(false));
 
         // Secrets: the start of one at the end of a read is held back until the next read
         // (or a short wait for more output times out).
@@ -1003,15 +1005,20 @@ impl Pty {
         // Waiter: the leader's exit status.
         {
             let exited = exited.clone();
+            let killed = killed.clone();
             std::thread::Builder::new().name(format!("pty-wait-{pid}")).spawn(move || {
-                let info = match session::wait(&mut *child) {
+                let status = session::wait(&mut *child);
+                // Read as it exits: a Kill, Close or Restart after that (while the reader
+                // drains what it left running) did not end it, and its own code stands.
+                let killed = killed.load(Ordering::Acquire);
+                let info = match status {
                     Ok(s) => ExitInfo {
                         code: Some(s.code as i32),
                         signal: s.signal,
                         at: crate::util::now_ms(),
-                        terminated: s.terminated,
+                        terminated: s.terminated || killed,
                     },
-                    Err(_) => ExitInfo { code: None, signal: None, at: crate::util::now_ms(), terminated: false },
+                    Err(_) => ExitInfo { code: None, signal: None, at: crate::util::now_ms(), terminated: killed },
                 };
                 exited.store(true, Ordering::Release);
                 let _ = exit_tx.send(info);
@@ -1021,7 +1028,7 @@ impl Pty {
             })?;
         }
         Ok((
-            Arc::new(Pty { pid, session, master, in_tx, exited, killed: AtomicBool::new(false) }),
+            Arc::new(Pty { pid, session, master, in_tx, exited, killed }),
             PtyEvents { exit: exit_rx, reader_done: done_rx },
         ))
     }
@@ -1054,14 +1061,10 @@ impl Pty {
     }
 
     /// Workbench is about to end the process (`kill`, or first what runs it in a container):
-    /// its exit counts as terminated from outside, whatever status it reports.
+    /// its exit counts as terminated from outside (`ExitInfo::terminated`), whatever status
+    /// it reports, unless it had exited by itself already.
     pub fn note_killed(&self) {
         self.killed.store(true, Ordering::Release);
-    }
-
-    /// Whether Workbench set out to end the process (`note_killed`).
-    pub fn killed(&self) -> bool {
-        self.killed.load(Ordering::Acquire)
     }
 
     /// Its process session, for following what the process left running after it exited.
@@ -1475,7 +1478,7 @@ mod tests {
         let (pty, ev, _screen) = spawn_py("import time\ntime.sleep(30)", &[]);
         assert!(std::process::Command::new("kill").args(["-TERM", &pty.pid.to_string()]).status().unwrap().success());
         let info = tokio::time::timeout(Duration::from_secs(10), ev.exit).await.unwrap().unwrap();
-        assert!(info.terminated && !pty.killed(), "{info:?}");
+        assert!(info.terminated, "{info:?}");
     }
 
     /// Windows: a leader ended from outside (`taskkill /F`, `TerminateProcess` as Task

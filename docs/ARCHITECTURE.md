@@ -382,7 +382,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `debug.session` | `SessionInfo`; `{id, projectId, removed: true}` when an ended session is forgotten | debug |
 | `debug.output` | `{sessionId, lines}` (a flood sends 500 lines; the UI fetches the rest) | debug |
 | `debug.breakpoints` | the whole breakpoints view (lines, functions, exception filters, muted, watches) | debug |
-| `run.state` | `{name, state, port?, url?, terminalId?, startedAt?, readyAt?, exit?, result?, error?, phase?, inContainer?, reach?}` | apps |
+| `run.state` | `{name, state, port?, url?, terminalId?, startedAt?, readyAt?, exit?, result?, error?, terminated?, phase?, inContainer?, reach?}` | apps |
 | `devcontainer.state` | `{projectId, state, containerId?, inContainer}` (`none`, `stopped`, `running`, `building`, `error`) | devcontainer |
 | `docker.changed` | `{kinds: ('container' \| 'image')[]}` (a container or image changed; `docker events`, 300 ms debounce, `exec_*` ignored; also after each Services action) | devcontainer |
 | `env.health` | `{env, status, httpStatus?, latencyMs?, version?, checkedAt, error?, sample?}`; partial updates `{env, previewChanged}`, `{env, deploying}`, `{env, versionInfo}` | apps |

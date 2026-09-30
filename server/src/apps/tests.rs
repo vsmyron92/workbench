@@ -550,12 +550,13 @@ ready = {{ log = "READY-LINE", timeout_s = 60 }}
 }
 
 /// A run whose terminal is closed or killed from outside was not a failure of its own: it
-/// ends Exited, not Failed "exited with code 1". A non-zero exit still fails, and Stop
-/// still stops. (Every OS; the signal from another process is Unix only, since Windows
-/// cannot tell a process ended from outside from one that exited with that code.)
+/// ends Exited and `terminated` (also in the MCP run list), not Failed "exited with code 1",
+/// unless tests had failed by then. A non-zero exit still fails, and Stop still stops.
+/// (Every OS; the signal from another process is Unix only, since Windows cannot tell a
+/// process ended from outside from one that exited with that code.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn runs_ended_from_outside_exit_and_failures_fail() {
-    // `sleep` and `exit` are the same in bash and PowerShell.
+    // `sleep`, `echo`, `exit` and `;` are the same in bash and PowerShell.
     let l = live_fixture(
         r#"
 [[run]]
@@ -565,6 +566,16 @@ command = "sleep 30"
 [[run]]
 name = "bad"
 command = "exit 1"
+[[run]]
+name = "tests"
+kind = "test"
+command = "sleep 30"
+result_pattern = 'RESULT (?P<name>\w+) (?P<status>PASS|FAIL)'
+[[run]]
+name = "failing"
+kind = "test"
+command = "echo 'RESULT one FAIL'; sleep 30"
+result_pattern = 'RESULT (?P<name>\w+) (?P<status>PASS|FAIL)'
 "#,
     )
     .await;
@@ -581,7 +592,13 @@ command = "exit 1"
     let tid = wait_run(&l.state, "srv", "running", running).await.terminal_id.unwrap();
     t.close(&l.state, &tid, false).await.unwrap();
     let live = wait_run(&l.state, "srv", "exited", ended_from_outside).await;
-    assert!(live.error.is_none() && live.exit.as_ref().is_some_and(|e| e.terminated), "{live:?}");
+    assert!(live.terminated && live.error.is_none() && live.exit.as_ref().is_some_and(|e| e.terminated), "{live:?}");
+    // Agents polling run_list see that it did not finish.
+    let list = mcp_tools().into_iter().find(|t| t.name == "run_list").unwrap();
+    let ctx = McpCtx { terminal_id: None, project_id: Some("live".into()) };
+    let ToolOutput::Json(v) = (list.handler)(l.state.clone(), ctx, json!({})).await.unwrap() else { panic!() };
+    let srv = v["runs"].as_array().unwrap().iter().find(|r| r["name"] == "srv").unwrap().clone();
+    assert_eq!((&srv["state"], &srv["terminated"]), (&json!("exited"), &json!(true)), "{srv}");
 
     // (b) Killed by another process (SIGTERM), whatever code portable-pty reports with it.
     #[cfg(unix)]
@@ -591,19 +608,35 @@ command = "exit 1"
         let pid = t.get(&tid).and_then(|e| e.running_pty()).expect("the run's process").pid;
         assert!(std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status().unwrap().success());
         let live = wait_run(&l.state, "srv", "exited", ended_from_outside).await;
-        assert!(live.exit.as_ref().is_some_and(|e| e.terminated && e.signal.is_some()), "{live:?}");
+        assert!(live.terminated && live.exit.as_ref().is_some_and(|e| e.terminated && e.signal.is_some()), "{live:?}");
     }
 
     // (c) A command that exits with 1 fails.
     runs::start(&l.state, &p, "bad", false).await.unwrap();
     let live = wait_run(&l.state, "bad", "failed", |x| x.state == runs::RunState::Failed).await;
     assert_eq!(live.error.as_deref(), Some("exited with code 1"));
-    assert!(live.exit.is_some_and(|e| e.code == Some(1) && !e.terminated));
+    assert!(!live.terminated && live.exit.is_some_and(|e| e.code == Some(1) && !e.terminated));
 
-    // (d) Stop stops.
+    // (d) A test run cut short before any test failed is terminated, with the results it has
+    // (none passed: not a success); one whose tests failed by then still fails.
+    runs::start(&l.state, &p, "tests", false).await.unwrap();
+    let tid = wait_run(&l.state, "tests", "running", running).await.terminal_id.unwrap();
+    t.close(&l.state, &tid, false).await.unwrap();
+    let live = wait_run(&l.state, "tests", "exited", ended_from_outside).await;
+    assert!(live.terminated && live.result.as_ref().is_some_and(|r| r.passed == 0 && r.failed == 0), "{live:?}");
+    runs::start(&l.state, &p, "failing", false).await.unwrap();
+    let live = wait_run(&l.state, "failing", "a failed test", |x| running(x) && x.result.as_ref().is_some_and(|r| r.failed == 1)).await;
+    t.close(&l.state, live.terminal_id.as_deref().unwrap(), false).await.unwrap();
+    let live = wait_run(&l.state, "failing", "failed", |x| x.state == runs::RunState::Failed).await;
+    assert!(!live.terminated && live.exit.as_ref().is_some_and(|e| e.terminated), "{live:?}");
+    assert_eq!(live.error.as_deref(), Some("0 passed, 1 failed"));
+
+    // (e) Stop stops.
     runs::start(&l.state, &p, "srv", false).await.unwrap();
     wait_run(&l.state, "srv", "running", running).await;
-    assert_eq!(runs::stop(&l.state, &p, "srv").await.unwrap().state, runs::RunState::Stopped);
+    let stopped = runs::stop(&l.state, &p, "srv").await.unwrap();
+    assert_eq!(stopped.state, runs::RunState::Stopped);
+    assert!(!stopped.terminated, "{stopped:?}");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(l.state.apps.runs.live("live", "srv").state, runs::RunState::Stopped);
 }

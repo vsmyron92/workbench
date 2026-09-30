@@ -973,6 +973,9 @@ async fn run_prelaunch_config(state: &AppState, project: &Arc<Project>, s: &Arc<
         }
         match live.state {
             RunState::Ready => return Ok(()),
+            // Its terminal closed or its process killed: the code (portable-pty's 1 with a
+            // signal) is not one it exited with.
+            RunState::Exited if live.terminated => return Err(format!("pre-launch run {name:?} was terminated")),
             RunState::Exited => {
                 return match live.exit.as_ref().and_then(|e| e.code) {
                     Some(0) => Ok(()),

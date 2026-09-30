@@ -18,9 +18,9 @@
 //! * **Services** (`kind = "service"`) are daemons: `command` starts them, `status`
 //!   (exit 0 = running) and `stop` manage them.
 //! * **Results**: `result_pattern` lines are parsed into `{passed, failed, items}`.
-//! * **The end**: `exited` after exit code 0 (and no failed test) or an end from outside
-//!   (its terminal closed or killed, `ended_from_outside`), `failed` otherwise, `stopped`
-//!   after Stop.
+//! * **The end**: `exited` after exit code 0 (and no failed test), or with `terminated`
+//!   after an end from outside (its terminal closed or killed, `ended_from_outside`) before
+//!   any test failed; `failed` otherwise, `stopped` after Stop.
 //!
 //! Every state change emits `run.state` (`{name, state, port?, url?, terminalId?, …}`).
 
@@ -84,6 +84,10 @@ pub struct RunLive {
     /// Why it failed, or a warning while running (ready check timed out).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// It is `exited` because it was cut short (its terminal closed or its process killed,
+    /// `ended_from_outside`), not because it finished. Sent only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub terminated: bool,
     /// What a starting run is waiting for ("waiting for api", "waiting for :8080").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
@@ -929,11 +933,10 @@ async fn wait_dep(state: &AppState, pid: &str, d: &Dep) -> Result<(), String> {
                 let notified = state.apps.runs.changed.notified();
                 let live = state.apps.runs.live(pid, r);
                 let finishes = matches!(kind.0, RunKind::Task | RunKind::Test | RunKind::Build);
-                // A task cut short (its terminal closed or killed) did not finish.
-                let terminated = live.exit.as_ref().is_some_and(|e| e.code != Some(0) && ended_from_outside(e));
                 match live.state {
                     RunState::Ready => return Ok(()),
-                    RunState::Exited if finishes && terminated => return Err(format!("dependency {r} was terminated")),
+                    // A task cut short (its terminal closed or killed) did not finish.
+                    RunState::Exited if finishes && live.terminated => return Err(format!("dependency {r} was terminated")),
                     RunState::Exited if finishes => return Ok(()),
                     RunState::Running if !finishes && !has_readiness(state, pid, r) => return Ok(()),
                     RunState::Failed => return Err(format!("dependency {r} failed{}", live.error.map(|e| format!(": {e}")).unwrap_or_default())),
@@ -1201,8 +1204,9 @@ async fn finish(state: &AppState, pid: &str, name: &str, epoch: u64, p: &Prepare
     }
 
     let succeeded = code == Some(0) && !failed_tests;
-    // Its terminal closed or killed, not a failure of its own: whatever code it reports.
-    let terminated = !succeeded && exit.as_ref().is_some_and(ended_from_outside);
+    // Its terminal closed or killed, not a failure of its own: whatever code it reports (a 0
+    // too: it was cut short, and did not finish). Tests that failed before that still failed.
+    let terminated = !stopping && !failed_tests && exit.as_ref().is_some_and(ended_from_outside);
     let new_state = if stopping {
         RunState::Stopped
     } else if succeeded || terminated {
@@ -1220,6 +1224,7 @@ async fn finish(state: &AppState, pid: &str, name: &str, epoch: u64, p: &Prepare
     runs.update(state, pid, name, epoch, |s| {
         s.live.state = new_state;
         s.live.exit = exit.clone();
+        s.live.terminated = terminated;
         s.live.phase = None;
         if result.is_some() {
             s.live.result = result.clone();
@@ -1331,6 +1336,7 @@ pub async fn stop(state: &AppState, project: &Project, name: &str) -> Result<Run
         if slot.epoch == epoch {
             slot.stopping = false;
             slot.live.state = RunState::Stopped;
+            slot.live.terminated = false;
             slot.live.phase = None;
             slot.live.error = error.clone();
             slot.live.exit = tid.as_deref().and_then(|t| state.terminals.info(t)).and_then(|i| i.exit).or(slot.live.exit.take());
@@ -1416,6 +1422,7 @@ fn refresh_services(state: &AppState, project: &Project) {
                     return;
                 }
                 slot.live.state = after;
+                slot.live.terminated = false;
                 slot.live.clone()
             };
             st.apps.runs.changed.notify_waiters();
@@ -1507,6 +1514,10 @@ mod tests {
         assert_eq!(serde_json::to_value(exit(Some(1), None, true)).unwrap()["terminated"], true);
         let old: ExitInfo = serde_json::from_str(r#"{"code":1,"signal":null,"at":5}"#).unwrap();
         assert!(!old.terminated);
+        // A run's `terminated` too.
+        assert!(serde_json::to_value(RunLive::default()).unwrap().get("terminated").is_none());
+        let cut = RunLive { state: RunState::Exited, terminated: true, ..Default::default() };
+        assert_eq!(serde_json::to_value(cut).unwrap()["terminated"], true);
     }
 
     #[test]

@@ -264,6 +264,30 @@ async fn a_kill_during_the_save_of_an_exit_waits_for_it() {
     assert_eq!(saved.info.status, TerminalStatus::Exited);
 }
 
+/// A process that exited by itself keeps its own end when a Kill (or Close, or Restart)
+/// comes while its exit is still being recorded (the reader drains the output of what it
+/// left running for up to 800 ms first): its code stands, and it is not `terminated`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kill_after_a_process_exited_by_itself_leaves_its_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let t = &state.terminals;
+    // The job it leaves holds the terminal open, so the reader has not ended when it exits.
+    let script = format!("{}\nsys.exit(2)", leave_job(&dir.path().join("job.pid"), 30, "started"));
+    let id = t.spawn(&state, command(dir.path(), &script, json!({}))).await.unwrap().id;
+    let pty = t.get(&id).and_then(|e| e.running_pty()).expect("its process");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !pty.has_exited() {
+        assert!(tokio::time::Instant::now() < deadline, "the process did not exit");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(t.info(&id).unwrap().status, TerminalStatus::Running, "its exit was recorded already");
+    t.kill(&id).await.unwrap();
+    let exit = t.info(&id).unwrap().exit.unwrap();
+    assert_eq!(exit.code, Some(2), "{exit:?}");
+    assert!(!exit.terminated, "it exited by itself before the kill: {exit:?}");
+}
+
 /// A restart and a restore of an agent session that wait for the lifecycle lock while the
 /// terminal is forgotten start nothing once it is gone: no agent token of it stays valid,
 /// and its directory (`mcp.json` holds the token) does not come back.

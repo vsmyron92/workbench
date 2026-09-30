@@ -132,10 +132,11 @@ pub struct ExitInfo {
     pub signal: Option<String>,
     pub at: i64,
     /// It was ended from outside, not by its own exit or a crash: Workbench killed, closed
-    /// or restarted the terminal, or (Unix) a hang-up, terminate, kill or interrupt signal
-    /// ended it (`code` then is portable-pty's 1). Windows cannot tell a process ended from
-    /// outside (Task Manager) from one that exited with the same code: there only
-    /// Workbench's own stops count.
+    /// or restarted the terminal while it ran (`Pty::note_killed`, read as it exits: a kill
+    /// after its own exit changes nothing), or (Unix) a hang-up, terminate, kill or
+    /// interrupt signal ended it (`code` then is portable-pty's 1). Windows cannot tell a
+    /// process ended from outside (Task Manager) from one that exited with the same code:
+    /// there only Workbench's own stops count.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub terminated: bool,
 }
@@ -851,10 +852,7 @@ impl Terminals {
         }
     }
 
-    async fn on_exit(&self, state: &AppState, entry: &Arc<Entry>, pty: &Arc<pty::Pty>, mut info: ExitInfo) {
-        // Workbench ended it (Kill, Close, Restart): from outside, whatever its status says.
-        // On Windows that is the only way to tell (`ExitInfo::terminated`).
-        info.terminated |= pty.killed();
+    async fn on_exit(&self, state: &AppState, entry: &Arc<Entry>, pty: &Arc<pty::Pty>, info: ExitInfo) {
         // Held until the exit is announced: no start slips in between (`Entry::exit_lock`).
         let _exit = entry.exit_lock.lock().await;
         {
@@ -904,10 +902,12 @@ impl Terminals {
     /// Kill the current process (if any) and wait until its exit is recorded and saved
     /// (also that of one that exited by itself and is being recorded); also end whatever
     /// earlier processes left running in their sessions. The exit of a process it kills is
-    /// recorded as `terminated`.
+    /// recorded as `terminated`, not that of one that had exited already.
     pub(crate) async fn stop_process(&self, entry: &Arc<Entry>) {
         if let Some(p) = entry.running_pty() {
-            // Noted before anything ends it, the kill inside a container included.
+            // Noted before anything ends it, the kill inside a container included (on Windows
+            // that is the only way to tell, `ExitInfo::terminated`). The waiter reads it as
+            // the leader exits: a leader already gone keeps its own code.
             p.note_killed();
             // Killing `docker exec` leaves its process running in the container: end
             // that too (and first, so a server's port is free when this returns).

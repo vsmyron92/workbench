@@ -20,7 +20,7 @@ export function healthTone(s: HealthStatus | undefined): Tone {
   }
 }
 
-export function runTone(r: Pick<RunView, 'state' | 'error' | 'result'>): Tone {
+export function runTone(r: Pick<RunView, 'state' | 'error' | 'result' | 'terminated'>): Tone {
   switch (r.state) {
     case 'ready':
       return r.error ? 'warning' : 'success'
@@ -31,7 +31,8 @@ export function runTone(r: Pick<RunView, 'state' | 'error' | 'result'>): Tone {
     case 'failed':
       return 'danger'
     case 'exited':
-      return r.result && r.result.failed > 0 ? 'danger' : r.result ? 'success' : 'muted'
+      // Cut short: results it has so far ("0 passed") are no success.
+      return r.result && r.result.failed > 0 ? 'danger' : r.terminated ? 'warning' : r.result ? 'success' : 'muted'
     default:
       return 'muted'
   }
@@ -42,7 +43,7 @@ export function isActive(s: RunState | undefined): boolean {
 }
 
 /** Short state text for chips: "ready :5173", "12 passed", "waiting for api". */
-export function runStateLabel(r: Pick<RunView, 'state' | 'phase' | 'port' | 'result' | 'exit' | 'config'>): string {
+export function runStateLabel(r: Pick<RunView, 'state' | 'phase' | 'port' | 'result' | 'exit' | 'terminated' | 'config'>): string {
   const res = r.result
   const counts = res ? `${res.passed} passed${res.failed ? `, ${res.failed} failed` : ''}` : null
   switch (r.state) {
@@ -55,8 +56,9 @@ export function runStateLabel(r: Pick<RunView, 'state' | 'phase' | 'port' | 'res
     case 'failed':
       return counts ?? (r.exit?.code != null ? `failed (${r.exit.code})` : 'failed')
     case 'exited':
-      // Closed or killed from outside: its exit code (portable-pty's 1 with a signal) says nothing.
-      if (r.exit?.terminated) return counts ?? 'terminated'
+      // Closed or killed from outside: its exit code (portable-pty's 1 with a signal) says nothing,
+      // and its results so far are not all of them.
+      if (r.terminated) return counts ? `${counts} · terminated` : 'terminated'
       return counts ?? (r.exit?.code != null ? `exit ${r.exit.code}` : 'finished')
     default:
       return ''
@@ -117,6 +119,7 @@ export function applyRunEvent<T extends RunView>(run: T, ev: RunLive): T {
     exit: ev.exit,
     result: ev.result,
     error: ev.error,
+    terminated: ev.terminated,
     phase: ev.phase,
   }
 }

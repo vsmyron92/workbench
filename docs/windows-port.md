@@ -349,9 +349,10 @@ get a hidden console of their own, so the server's Ctrl-C never reaches them (th
 counterpart of `process_group(0)`). `ExitInfo.signal` is always `None`, and a process ended
 from outside (Task Manager's End task, `taskkill /F`: `TerminateProcess`) only has the exit
 code it was given, 1, like one that exited with 1 itself: its run ends Failed. Kill, Close and
-Restart in Workbench are recorded (`ExitInfo.terminated`, `Pty::note_killed`), so a run whose
-terminal Workbench closed ends Exited, as on Linux, where a hang-up, terminate, kill or
-interrupt signal from anywhere counts too (`os::session::wait`). Windows keeps
+Restart in Workbench are recorded (`ExitInfo.terminated`, `Pty::note_killed`, read by the
+waiter as the process exits), so a run whose terminal Workbench closed ends Exited and
+terminated, as on Linux, where a hang-up, terminate, kill or interrupt signal from anywhere
+counts too (`os::session::wait`). Windows keeps
 "ignore Ctrl-C" per process and hands it down: a process started with
 `CREATE_NEW_PROCESS_GROUP` has it, so a server below one would start every terminal with
 Ctrl-C dead. `serve` clears it first (`os::proc::enable_ctrl_c`, as Windows Terminal does),

@@ -73,7 +73,13 @@ describe('runs', () => {
     expect(runStateLabel(run('t', { state: 'failed', result: { passed: 3, failed: 2 } }))).toBe('3 passed, 2 failed')
     expect(runStateLabel(run('t', { state: 'failed', exit: { code: 101, signal: null, at: 0 } }))).toBe('failed (101)')
     expect(runStateLabel(run('t', { state: 'exited', exit: { code: 3, signal: null, at: 0 } }))).toBe('exit 3')
-    expect(runStateLabel(run('w', { state: 'exited', exit: { code: 1, signal: 'Hangup', at: 0, terminated: true } }))).toBe('terminated')
+    expect(runStateLabel(run('w', { state: 'exited', terminated: true, exit: { code: 1, signal: 'Hangup', at: 0, terminated: true } }))).toBe('terminated')
+    // A test run cut short: what it counted so far is no success.
+    const cut = run('t', { state: 'exited', terminated: true, result: { passed: 0, failed: 0 }, exit: { code: 1, signal: null, at: 0, terminated: true } })
+    expect(runStateLabel(cut)).toBe('0 passed · terminated')
+    expect(runTone(cut)).toBe('warning')
+    expect(runTone(run('w', { state: 'exited', terminated: true }))).toBe('warning')
+    expect(runTone(run('t', { state: 'exited', result: { passed: 2, failed: 0 } }))).toBe('success')
     expect(runStateLabel(run('t'))).toBe('')
     expect(runTone(run('w', { state: 'ready' }))).toBe('success')
     expect(runTone(run('w', { state: 'running', error: 'not ready after 60s' }))).toBe('warning')
@@ -83,9 +89,10 @@ describe('runs', () => {
 
   it('applies run.state events, clearing absent fields', () => {
     const before = run('web', { state: 'failed', error: 'boom', terminalId: 't1' })
-    const after = applyRunEvent(before, { state: 'starting', phase: 'waiting for api' })
+    const after = applyRunEvent({ ...before, terminated: true }, { state: 'starting', phase: 'waiting for api' })
     expect(after.state).toBe('starting')
     expect(after.error).toBeUndefined()
+    expect(after.terminated).toBeUndefined()
     expect(after.terminalId).toBeUndefined()
     expect(after.config).toBe(before.config)
   })
