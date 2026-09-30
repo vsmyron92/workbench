@@ -1729,11 +1729,15 @@ context would put lines after it, the change is kept and a copy with a newline i
 emitted (the smallest valid patch). Lines are raw bytes (CRLF and any encoding
 round-trip). A working tree git checks out with CRLF over an LF index (`core.autocrlf`,
 `text`/`eol=crlf` attributes): git's diffs already show it with LF, so the staging patches
-are LF and `git apply` writes CRLF back when rolling back. On every OS Workbench also shows
-the working-tree side (`modified`, a conflict's `merged`) with LF and writes a conflict
-resolved with edited text back with CRLF (`eol.rs` reads `git ls-files --eol` and
-`core.autocrlf`, only for a file with a CRLF in it: an LF file costs no git call); files git
-does not convert (`-text`, CRLF committed as is, no conversion configured) keep their
+are LF and `git apply` writes CRLF back when rolling back. On every OS Workbench follows git
+for any file git reads with LF although it has CRLF on disk: the working-tree side
+(`modified`, a conflict's `merged`) is shown with LF and a conflict resolved with edited
+text is written back with CRLF (`eol.rs` reads `git ls-files --eol` and `core.autocrlf`,
+only for a file with a CRLF in it: an LF file costs no git call). Besides the checkouts
+above, that is a file saved with CRLF over an LF index under `text`, `text=auto` or
+`core.autocrlf=input`, and CRLF committed as is under a `text` or `eol` attribute (git shows
+every line changed until it is renormalized). Files git does not convert (`-text`, CRLF
+committed as is under the automatic conversions, no conversion configured) keep their
 bytes. Part of an untracked file becomes a `new file` patch; an intent-to-add
 entry gets a modification patch; renames patch the new path; every line of a new/deleted
 file becomes the file-level operation; partial roll back of a deleted file and partial
