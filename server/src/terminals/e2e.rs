@@ -103,6 +103,7 @@ async fn contract_spawn_input_output_exit_restart_forget() {
     t.send_text(&info.id, "hello", true).await.unwrap();
     let exit = wait_exit(&state, &info.id).await;
     assert_eq!(exit.code, Some(3));
+    assert!(!exit.terminated, "it exited by itself");
     // The exit is recorded by the time it is announced.
     let now = t.info(&info.id).unwrap();
     assert_eq!((now.status, now.exit.as_ref().and_then(|e| e.code)), (TerminalStatus::Exited, Some(3)));
@@ -127,7 +128,10 @@ async fn contract_spawn_input_output_exit_restart_forget() {
     // Kill returns once the exit is recorded (on Windows it usually waits for the record:
     // the output ends only once the pseudoconsole has closed).
     t.kill(&info.id).await.unwrap();
-    assert_eq!(t.info(&info.id).unwrap().status, TerminalStatus::Exited);
+    let now = t.info(&info.id).unwrap();
+    assert_eq!(now.status, TerminalStatus::Exited);
+    // Workbench ended it, on every OS.
+    assert!(now.exit.is_some_and(|e| e.terminated), "a kill's exit is terminated");
     assert!(t.write(&info.id, b"x").is_err(), "writing to an exited terminal must fail");
 
     // Close keeps it in history; forget removes it and its files.
@@ -260,6 +264,122 @@ async fn a_kill_during_the_save_of_an_exit_waits_for_it() {
     assert_eq!(saved.info.status, TerminalStatus::Exited);
 }
 
+/// A process that exited by itself keeps its own end when a Kill (or Close, or Restart)
+/// comes while its exit is still being recorded (the reader drains the output of what it
+/// left running for up to 800 ms first): its code stands, and it is not `terminated`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kill_after_a_process_exited_by_itself_leaves_its_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let t = &state.terminals;
+    // The job it leaves holds the terminal open, so the reader has not ended when it exits.
+    let script = format!("{}\nsys.exit(2)", leave_job(&dir.path().join("job.pid"), 30, "started"));
+    let id = t.spawn(&state, command(dir.path(), &script, json!({}))).await.unwrap().id;
+    let pty = t.get(&id).and_then(|e| e.running_pty()).expect("its process");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !pty.has_exited() {
+        assert!(tokio::time::Instant::now() < deadline, "the process did not exit");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(t.info(&id).unwrap().status, TerminalStatus::Running, "its exit was recorded already");
+    t.kill(&id).await.unwrap();
+    let exit = t.info(&id).unwrap().exit.unwrap();
+    assert_eq!(exit.code, Some(2), "{exit:?}");
+    assert!(!exit.terminated, "it exited by itself before the kill: {exit:?}");
+}
+
+/// A restart and a restore of an agent session that wait for the lifecycle lock while the
+/// terminal is forgotten start nothing once it is gone: no agent token of it stays valid,
+/// and its directory (`mcp.json` holds the token) does not come back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn starts_waiting_while_an_agent_is_forgotten_leave_no_token_or_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    let claude_home = dir.path().join("claude-home");
+    std::fs::create_dir_all(&claude_home).unwrap();
+    let claude = crate::config::global::ProviderConfig {
+        command: Some(fake.display().to_string()),
+        // Hermetic: never the user's own ~/.claude.
+        env: [
+            ("CLAUDE_CONFIG_DIR".to_string(), claude_home.display().to_string()),
+            ("FAKE_CLAUDE_LOG".to_string(), dir.path().join("claude.log").display().to_string()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let (state, pid) = provider_state(dir.path(), vec![("claude", claude)]).await;
+    state.config.write().agents.restore_on_start = true;
+    let t = &state.terminals;
+    let id = t.spawn_agent(&state, super::agent::AgentRequest { project_id: pid, ..Default::default() }).await.unwrap().id;
+    let tdir = state.paths.data_dir.join("terminals").join(&id);
+    assert!(tdir.join("mcp.json").is_file() && state.auth.has_agent_token(&id));
+    let entry = t.get(&id).unwrap();
+    // As a restore finds a session that ran when Workbench stopped.
+    t.update(&entry, |r| {
+        r.was_running = true;
+        true
+    });
+
+    // The close holds the lifecycle lock while the exit is being saved; a restart and a
+    // restore wait for it meanwhile.
+    let held = hold_saves(&entry);
+    let close = tokio::spawn({
+        let (state, id) = (state.clone(), id.clone());
+        async move { state.terminals.close(&state, &id, true).await }
+    });
+    wait_for("the close to take the lock", || entry.lifecycle.try_lock().is_err()).await;
+    let restart = tokio::spawn({
+        let (state, id) = (state.clone(), id.clone());
+        async move { state.terminals.restart(&state, &id).await }
+    });
+    super::agent::restore(state.clone()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!close.is_finished() && !restart.is_finished());
+    drop(held);
+    close.await.unwrap().unwrap();
+    assert_eq!(restart.await.unwrap().unwrap_err().code, "not_found");
+    // The restore's attempt comes after the restart's (the lock is fair).
+    wait_for("the restore's attempt", || entry.lifecycle.try_lock().is_ok()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(t.info(&id).is_none());
+    assert!(!state.auth.has_agent_token(&id), "a forgotten terminal has a valid agent token");
+    assert!(!tdir.exists(), "a forgotten terminal's files came back");
+}
+
+/// A start that fails after its agent token was issued leaves no valid token: no process
+/// holds it, and pruning forgets the terminal without revoking anything. (Unix: the
+/// terminal's directory cannot be made in a read-only `terminals`.)
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_start_that_fails_leaves_no_valid_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    let claude_home = dir.path().join("claude-home");
+    std::fs::create_dir_all(&claude_home).unwrap();
+    let claude = crate::config::global::ProviderConfig {
+        command: Some(fake.display().to_string()),
+        env: [
+            ("CLAUDE_CONFIG_DIR".to_string(), claude_home.display().to_string()),
+            ("FAKE_CLAUDE_LOG".to_string(), dir.path().join("claude.log").display().to_string()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let (state, pid) = provider_state(dir.path(), vec![("claude", claude)]).await;
+    let root = state.paths.data_dir.join("terminals");
+    crate::util::os::perm::apply(&root, 0o500).unwrap();
+    if std::fs::create_dir(root.join("probe")).is_ok() {
+        eprintln!("skip: permissions do not apply to this user");
+        return;
+    }
+    let t = &state.terminals;
+    let r = t.spawn_agent(&state, super::agent::AgentRequest { project_id: pid, ..Default::default() }).await;
+    crate::util::os::perm::apply(&root, 0o700).unwrap();
+    assert!(r.is_err(), "{r:?}");
+    let info = t.list().into_iter().find(|i| i.kind == TerminalKind::Agent).expect("the agent terminal");
+    assert!(!state.auth.has_agent_token(&info.id), "a start that failed left a valid agent token");
+}
+
 /// What Workbench starts in a terminal (a run, a pre-launch step, a command, an agent CLI)
 /// gets `util::os::exe::child_env` (on Windows a cmd.exe among its processes never takes a
 /// program from the current directory); an interactive shell keeps its usual lookup.
@@ -285,6 +405,28 @@ async fn programs_but_not_interactive_shells_get_the_child_env() {
     }
     let agent: Vec<_> = super::program_env(TerminalKind::Agent).into_iter().map(|(k, v)| (k, v.unwrap_or_default())).collect();
     assert_eq!(agent, set.map(|v| (VAR.to_string(), v)).into_iter().collect::<Vec<_>>());
+}
+
+/// A terminal finds programs installed since Workbench started: on Windows its `PATH` is the
+/// sign-in's, then Workbench's own entries (`util::os::env::fresh_path`), and a variable
+/// set in the registry since reaches it too. On Unix it has Workbench's `PATH`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminals_get_the_path_of_a_new_sign_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    #[cfg(windows)]
+    let var = crate::util::os::env::UserVar::new("set-since");
+    let out = dir.path().join("env.json");
+    let code = format!("import json, os\nwith open({}, 'w') as f:\n    json.dump(dict(os.environ), f)", py_str(&out.display().to_string()));
+    let info = state.terminals.spawn(&state, spec(dir.path(), &code)).await.unwrap();
+    wait_exit(&state, &info.id).await;
+    let env: std::collections::HashMap<String, String> = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let want = crate::util::os::env::fresh_path().unwrap_or_else(|| std::env::var("PATH").unwrap());
+    // A version manager's shim for Python may put its own folder first.
+    assert!(env["PATH"].ends_with(&want), "{:?}\nwant {want:?}", env["PATH"]);
+    // Python's `os.environ` has uppercase names on Windows.
+    #[cfg(windows)]
+    assert_eq!(env.get(&var.name.to_uppercase()), Some(&var.value));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -699,7 +841,7 @@ async fn background_jobs_left_behind_are_reported_and_killed() {
     let info = t.spawn(&state, command(dir.path(), &script, json!({ "restartable": true }))).await.unwrap();
     wait_exit(&state, &info.id).await;
     wait_for("the pid file", || pidfile.is_file()).await;
-    let job: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+    let job: u32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
     assert!(crate::util::os::proc::pid_alive(job));
     wait_for("the lingering count", || t.info(&info.id).is_some_and(|i| i.lingering == 1)).await;
     assert_eq!(t.info(&info.id).unwrap().status, TerminalStatus::Exited);
@@ -714,7 +856,7 @@ async fn background_jobs_left_behind_are_reported_and_killed() {
     let info = t.spawn(&state, command(dir.path(), &script, json!({}))).await.unwrap();
     wait_exit(&state, &info.id).await;
     wait_for("the second pid file", || pidfile2.is_file()).await;
-    let job2: i32 = std::fs::read_to_string(&pidfile2).unwrap().trim().parse().unwrap();
+    let job2: u32 = std::fs::read_to_string(&pidfile2).unwrap().trim().parse().unwrap();
     wait_for("the second lingering count", || t.info(&info.id).is_some_and(|i| i.lingering == 1)).await;
     t.close(&state, &info.id, true).await.unwrap();
     wait_for("the second job to die", || !crate::util::os::proc::pid_alive(job2)).await;
@@ -785,39 +927,17 @@ async fn a_restarted_remote_control_server_shows_its_new_link_only() {
 
 // ---------------------------------------------------------------- agent providers
 
-/// The file `fake_cli` writes for the CLI `name` into `dir`.
-fn fake_cli_file(dir: &Path, name: &str) -> PathBuf {
-    if cfg!(windows) { dir.join(format!("{name}.py")) } else { dir.join(name) }
-}
-
 /// The fake agent CLI `name` (`testdata/fake_cli.py`, which acts as the CLI it is named
-/// after) in `dir`: what a provider's `command` names. Unix: the script itself, executable.
-/// Windows: an npm-style shim, `name.cmd` with the `name.ps1` that Workbench reads to run
-/// Python on the script, so it starts the way npm's CLIs do.
+/// after) in `dir`: what a provider's `command` names (`util::os::exe::test_cli`: on Windows
+/// an npm-style shim, so it starts the way npm's CLIs do).
 pub(super) fn fake_cli(dir: &Path, name: &str) -> PathBuf {
-    let script = fake_cli_file(dir, name);
-    std::fs::write(&script, include_str!("testdata/fake_cli.py")).unwrap();
-    #[cfg(unix)]
-    {
-        crate::util::os::perm::apply(&script, 0o755).unwrap();
-        script
-    }
-    #[cfg(windows)]
-    {
-        let python: Vec<String> = crate::util::os::exe::python().iter().map(|a| format!("\"{a}\"")).collect();
-        let python = python.join(" ");
-        let ps1 = format!("#!/usr/bin/env pwsh\n$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent\n\n& {python} \"$basedir/{name}.py\" $args\nexit $LASTEXITCODE\n");
-        std::fs::write(dir.join(format!("{name}.ps1")), ps1).unwrap();
-        let cmd = dir.join(format!("{name}.cmd"));
-        std::fs::write(&cmd, format!("@{python} \"%~dp0{name}.py\" %*\r\n")).unwrap();
-        cmd
-    }
+    crate::util::os::exe::test_cli(dir, name, include_str!("testdata/fake_cli.py"))
 }
 
 /// argv running the fake CLI `name` of `dir` directly (a session outside Workbench).
 pub(super) fn fake_cli_argv(dir: &Path, name: &str) -> Vec<String> {
     let mut argv = crate::util::os::exe::python();
-    argv.push(fake_cli_file(dir, name).display().to_string());
+    argv.push(crate::util::os::exe::test_cli_script(dir, name).display().to_string());
     argv
 }
 

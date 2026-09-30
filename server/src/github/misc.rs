@@ -110,7 +110,7 @@ fn head_status_from_runs(runs: &[Run], head: &str) -> Option<CiStatus> {
 /// The local checkout's current branch and HEAD (both read locally, free).
 async fn checkout(ctx: &GhCtx) -> (Option<String>, Option<String>) {
     let root = &ctx.project.root;
-    tokio::join!(crate::util::git::current_branch(root), crate::util::git::head_sha(root))
+    tokio::join!(crate::util::git::current_branch_logged(root), crate::util::git::head_sha_logged(root))
 }
 
 /// The summary for the checkout as it is now (the handler reads the checkout

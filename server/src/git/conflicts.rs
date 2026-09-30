@@ -21,7 +21,7 @@ pub struct ConflictVersions {
     /// Their version (stage 3); null when they deleted it.
     pub theirs: Option<String>,
     /// The working-tree file (with conflict markers) as git reads it (LF where git turns
-    /// its CRLFs into LFs, on Windows); '' when deleted.
+    /// its CRLFs into LFs); '' when deleted.
     pub merged: String,
     pub binary: bool,
     pub too_large: bool,
@@ -148,12 +148,10 @@ pub async fn resolve(repo: &Repo, req: &ResolveRequest) -> Result<(), ApiError> 
     }
     if let Some(content) = &req.content {
         let abs = crate::util::paths::resolve_in_root(&repo.top, &p)?;
-        // A file git checks out with CRLF was shown with LF (`versions`; Windows): the CRLFs
-        // go back. Only a file with CRLFs now can be one (LF files write as before, with no
-        // lookup).
-        let has_crlf = eol::FOLLOWS_GIT && worktree_bytes(repo, &p).await.is_ok_and(|s| s.text.contains("\r\n"));
-        let eol = if has_crlf { eol::of(repo, &p).await } else { eol::Eol::default() };
-        let data = eol.write(content.clone()).into_bytes();
+        // A file git checks out with CRLF was shown with LF (`versions`): the CRLFs go back.
+        // Only a file with CRLFs now can be one (LF files write as sent, with no lookup).
+        let now = worktree_bytes(repo, &p).await.map(|s| s.text).unwrap_or_default();
+        let data = eol::of(repo, &p, &now).await.write(content.clone()).into_bytes();
         tokio::task::spawn_blocking(move || crate::util::fs::write_atomic(&abs, &data, 0o644))
             .await
             .map_err(|e| ApiError::internal(e.to_string()))??;

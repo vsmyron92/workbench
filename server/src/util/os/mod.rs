@@ -7,6 +7,7 @@
 pub mod autostart;
 pub mod desktop;
 pub mod dll;
+pub mod env;
 pub mod exe;
 pub mod fs;
 pub mod helper;
@@ -14,6 +15,8 @@ pub mod net;
 pub mod path;
 pub mod perm;
 pub mod proc;
+#[cfg(windows)]
+mod recycle;
 pub mod session;
 pub mod shell;
 pub mod support;

@@ -33,11 +33,35 @@ run on a Windows 10 or 11 desktop yet.
   a restart during an exit's save that left the new process reading as exited (every OS);
   setup messages that named `~/.config/workbench`; `workbench service` from another Windows
   session ("Service"); and Local History after a watcher overflow ("File watching").
+- **After 0.3.0 (unreleased):** Workbench's own Kill, Close and Restart recorded, so such a
+  run ends terminated, not failed ("Signals"); drive paths in the browser ("Paths in the
+  browser"); a repository git refuses reported, and remote failures that needed ssh's
+  questions explained ("Git"); paths other programs write compared as Windows compares them
+  ("Paths", §1.G, "Detected commands") and why `ps_quote` leaves a final `\` alone
+  ("Shells"); the sign-in `PATH` for new terminals and lookups, and the sign-in environment
+  for the supervisor ("Risks" in §5, "Service"); `install.ps1 -Uninstall` (§4, "A zip with
+  `install.ps1`"), which CI runs after the install; and an application manifest in both
+  executables (§1.A): Windows 10 and 11 as supported systems, Common Controls 6 for the
+  message boxes of `workbenchw.exe` and the supervisor, `longPathAware`, and `asInvoker`. A
+  `cfg(windows)` test checks in its own process that Windows applies it (GetVersionExW
+  reports 10, comctl32 loads in version 6). How the message boxes look is left for a desktop
+  check. A terminal whose process exited while what it started ran on learns that its job is
+  empty from a completion port, which one thread reads for every terminal (§1.F), and a path
+  of MAX_PATH characters or more goes to the Recycle Bin through `IFileOperation`, whose
+  progress sink refuses a delete that would not go to the bin (§1.L). Whether the shell
+  and the bin take such a path is what `trash_takes_long_paths_or_says_why` finds out on
+  `windows-latest`; where they do not, a 422 says why and how to delete it instead. Git's
+  line-ending conversions are now followed on every OS, not only here ("Line endings"); on
+  Linux a `\` stays part of a name in the relative paths the server answers with
+  (`os::path::to_slash`, "Paths" in ARCHITECTURE.md); and the dev containers message,
+  getting-started and the Help point to the Linux build inside WSL 2, untested ("Dev
+  containers through WSL" in §5). The new `cfg(windows)` tests have been compiled, not run:
+  the `windows-latest` job runs them first.
 - **Next:** real Windows 10 and 11 desktops (§5): ConPTY terminals with agent CLIs, the
-  service and its Start Menu shortcut, git over SSH and HTTPS, language servers. Until then a
-  tag publishes the Linux archive alone: the release workflow builds the Windows archive on
-  a tag only once the repository variable `RELEASE_WINDOWS` is `true` (by hand it always
-  does).
+  service and its Start Menu shortcut (and the look of its message boxes), git over SSH and
+  HTTPS, language servers. Until then a tag publishes the Linux archive alone: the release
+  workflow builds the Windows archive on a tag only once the repository variable
+  `RELEASE_WINDOWS` is `true` (by hand it always does).
 
 This is the plan for a native `x86_64-pc-windows-msvc` build that works on Windows 10 and
 11, with Linux behaviour unchanged. File and line references are from 0.1.0 (commit
@@ -69,7 +93,13 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   - `dunce` (already in the lock). The Start Menu shortcut is written through the shell's
     ShellLink COM object with windows-sys (`os::autostart`), not `mslnk` (unmaintained since
     2022, bitflags 1, a subset of the format).
-- Build-dependency `winresource` (icon and version resource, a no-op elsewhere). Not done:
+- Build-dependency `winresource` (icon, version resource and the application manifest
+  `packaging/windows/workbench.manifest`, a no-op elsewhere). The manifest declares Windows
+  10 and 11 (`supportedOS`: without it Windows treats the programs as written for Windows
+  8), Common Controls 6 (message boxes in the current style), `longPathAware` (no MAX_PATH
+  limit where `LongPathsEnabled` is set; the Recycle Bin's `SHFileOperationW` keeps it, so
+  `os::fs` sends longer paths to `IFileOperation`, §1.L) and `asInvoker`. It is linked into
+  the test executables too. Not done:
   the Windows dev-dependency `junction`, since the tests make junctions with `cmd /c mklink /J`.
 - Not needed: `if-addrs`, `trash`, `winreg`, `windows` (each replacement is under 80 lines of
   windows-sys).
@@ -144,15 +174,22 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   `signal_session`, `pid_alive`). `terminals/mod.rs`: 863, 1401, 1463 (lingering processes);
   1136, 1175, 1236-1241 (`$SHELL -l`).
 - Windows: a terminal's session is a Job registered under the leader pid, so the existing
-  `i32 sid` keys keep working. Hang-up is `ClosePseudoConsole` (CTRL_CLOSE_EVENT to every
-  attached process), then `TerminateJobObject` after the grace period. The redaction hold-back
-  uses a reader thread feeding a channel with `recv_timeout(HOLD_BACK)`.
+  sid keys keep working (pids are `u32` throughout `os::proc` and `os::session`). Hang-up is
+  `ClosePseudoConsole` (CTRL_CLOSE_EVENT to every attached process), then
+  `TerminateJobObject` after the grace period. The redaction hold-back uses a reader thread
+  feeding a channel with `recv_timeout(HOLD_BACK)`.
 - Done (`util/os/session.rs`): the session registry holds a `ProcGroup` and the closure that
   closes the pseudoconsole (the session owns it until it is over, so a `Pty` dropped early
   does not hang up its background jobs). It stays registered while a `session::Handle` of it
   lives (the `Pty`, the lingering-process watch), so a reused leader pid never makes a
   terminal follow or kill another terminal's session. The pump thread always drains the
-  pipe, also after the reader stopped, so `ClosePseudoConsole` never waits for good. A secret
+  pipe, also after the reader stopped, so `ClosePseudoConsole` never waits for good. The
+  pseudoconsole closes once the job is empty: every terminal's job reports to one I/O
+  completion port (`JOBOBJECT_ASSOCIATE_COMPLETION_PORT`, associated before the leader
+  joins, keyed per session), and one thread (`pty-jobs`) reads it for all of them, so a
+  terminal whose own process exited while what it started runs on costs no thread and gets
+  its EOF with `JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO`. Windows does not guarantee these
+  reports, so that thread also looks at the waiting sessions every second. A secret
   is also masked when ConPTY's repainting puts escape sequences between its characters
   (`session::REPAINTS`). A GUI program started from a terminal joins its job like any other
   process, counts as lingering once the terminal's own process has exited, and ends with the
@@ -184,7 +221,9 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
 - Windows: sysinfo for the process list, cwd, cmdline, parent and start time; the Restart
   Manager (`RmGetList`) for "who holds this rollout file open"; `CheckRemoteDebuggerPresent`
   for `TracerPid`; `ptrace_scope` is `None`. No " (deleted)" fallback: a running exe cannot be
-  replaced on Windows.
+  replaced on Windows. The attach picker guesses a process's language from its image name
+  (`node.exe`, `javaw.exe`), else from the program its command line starts with, `\` paths
+  and unquoted `C:\Program Files\…` included (`debug/procs.rs`).
 
 **H. Shells → `os::shell`**
 
@@ -240,11 +279,28 @@ identical by construction. Windows-only behaviour is always `cfg(windows)`.
   `--app=`, else `ShellExecuteW`; never `cmd /c start` (cmd interprets `&` in a URL).
 - Trash (`files/trash.rs`, `git/ops.rs:182-185`) → `SHFileOperationW(FO_DELETE,
   FOF_ALLOWUNDO | …)`.
-  - What the bin will not take is refused first: no bin on the drive, the bin turned off, a
+  - What the bin will not take is refused first, with `not_recyclable` (422) and a message
+    that says why and how to delete it instead: no bin on the drive, the bin turned off, a
     file larger than the bin.
-  - An item Windows still cannot recycle (a folder larger than the bin) gets Windows' question
-    on the desktop, and the request stops waiting after 60 s. Later: `IFileOperation` with a
-    progress sink that refuses the item instead.
+  - `SHFileOperationW` takes no path of MAX_PATH (260) characters or more (not with the
+    `\\?\` prefix either). Such a path goes through `IFileOperation` (`os::recycle`: a
+    hand-written vtable, COM in a single-threaded apartment on a thread of its own) with
+    `FOFX_RECYCLEONDELETE` and `FOF_NO_UI`. Where Windows would delete the item for good
+    instead, the flags its progress sink's `PreDeleteItem` gets lack
+    `TSF_DELETE_RECYCLE_IF_POSSIBLE` (Qt's `QFile::moveToTrash` relies on this too); the
+    sink then returns an error, which, as documented, cancels the delete and all that
+    follows it.
+    `PostDeleteItem` names the item in the bin, so a delete for good would still be told
+    from a recycle. When the shell cannot open the path or the sink refuses, the answer is
+    the 422, which says to shorten the path. Not yet known: whether the shell opens such a
+    path and the bin takes it, and whether the refusal comes as documented for an item too
+    long for the bin. `trash_takes_long_paths_or_says_why` finds out on `windows-latest`
+    and accepts either outcome, never a delete for good.
+  - An item with a shorter path Windows still cannot recycle (a folder larger than the bin,
+    or one whose contents' paths are too long for it) gets Windows' question on the desktop,
+    and the request stops waiting after 60 s. Later: `IFileOperation` with the refusing
+    progress sink for every item, once `windows-latest` has shown the long-path case works,
+    so this question is gone too.
 - `notify.rs:198` (`notify-send`) reports `desktop: "unavailable"` in the first version.
 
 **M. Service:** `platform/service.rs` (systemd unit, `.desktop` file, `systemctl`) gets a
@@ -273,24 +329,38 @@ or comparisons; uppercase drive letters; compare prefixes case-insensitively in
 streams), reserved device names (`CON`, `NUL`, `COM1`…, also with an extension) and
 components ending in a dot or space. UNC roots (including `\\wsl$`) are refused with a clear
 message. Test that the canonicalize check follows junctions. `expand_tilde` accepts `~\`.
+Folders other programs record compare the same way (`os::path::same_dir`, `below_dir`):
+Claude Code's `~/.claude.json` project keys, Gemini's `projects.json` (lowercased there, as
+Gemini writes it), and a hook's `cwd` that shortens a permission prompt's path. Local
+History keys a file an agent names by its case on disk (`os::path::on_disk_case`), so a
+hook spelling it in another case adds to its one history. Linux compares as before.
 
 **LSP URIs.** Emit `file:///C:/…`; accept `/c:/` and `/C%3A/`; match the project root with a
 case-insensitive drive letter (servers often lowercase it); `lsp-src://pid/C:/…`.
+
+**Paths in the browser.** The web app reads the server's OS from `GET /api/health`
+(`features/files/paths.ts`). On a Windows server a drive path (`C:\…`, `C:/…`) is absolute
+and `\` also separates names (tab titles, breadcrumbs, a debug frame's file, Markdown links
+in a file outside the project); paths the server and a debug adapter wrote compare without
+regard to `/` versus `\` or ASCII case (`samePath`). A file outside the project has the
+model URI `file:///~abs/C%3A%5Cx` and parses back to `C:\x`; a debug stop in such a file
+opens its source; Copy Path and drag and drop join a project path to the root with `\`.
+Linux URIs and paths are unchanged.
 
 **Line endings.** Add `.gitattributes` (`* text=auto eol=lf`, `*.ps1` and `*.cmd`
 `eol=crlf`). In the git slice read `git ls-files --eol <path>`: when the index has LF and the
 working tree CRLF, strip `\r` from the working-tree side for the diff and for the patch given
 to `git apply --cached`, and put CRLF back when rolling lines back into the working tree.
-Done (`git/eol.rs`, on Windows: `eol::FOLLOWS_GIT`): git's own diffs already read such a
-file with LF, so the staging patches were right and `git apply` writes CRLF back by itself;
-what was missing is the diff's `modified` side and a conflict's `merged` text (now LF, like
-the hunks) and a conflict resolved with edited text (written back with CRLF). "Converted"
-follows git: `ls-files --eol` (`i/lf`, `w/crlf`, the `attr/` column) and `core.autocrlf` when
-no attribute decides; anything else keeps its bytes. Local History keeps "Last commit (HEAD)"
-of a file with CRLFs on disk with the line ends a checkout writes (`files/history`). Linux
-keeps every file byte for byte, with no extra git call: following git's conversions there
-too (they matter with `core.autocrlf` or `eol=crlf` attributes) would be a Linux change for
-the owner to decide.
+Done (`git/eol.rs`): git's own diffs already read such a file with LF, so the staging
+patches were right and `git apply` writes CRLF back by itself; what was missing is the
+diff's `modified` side and a conflict's `merged` text (now LF, like the hunks) and a
+conflict resolved with edited text (written back with CRLF). "Converted" follows git:
+`ls-files --eol` (`i/lf`, `w/crlf`, the `attr/` column) and `core.autocrlf` when no attribute
+decides; anything else keeps its bytes. Local History keeps "Last commit (HEAD)" of a file
+with CRLFs on disk with the line ends a checkout writes (`files/history`). This was
+Windows-only at first; it now holds on every OS, since `eol=crlf` attributes (this
+repository's `*.ps1`) and `core.autocrlf` check CRLF out on Linux too. Only a file with a
+CRLF in it is looked up, so an LF repository pays no extra git call.
 
 **Program lookup, `.cmd` shims and BatBadBut.** portable-pty resolves PATHEXT and launches
 `claude.cmd` with MSVCRT quoting (`cmdbuilder.rs:581-606, 702`): command injection through
@@ -317,7 +387,16 @@ gets the variable as every batch file does.
 run's argv; `quote()` follows the choice. (Not done: runs always use PowerShell, `pwsh` else
 Windows PowerShell; there is no `run_shell`.) Add `WT_SESSION` and `WT_PROFILE_ID` to
 `PARENT_TERMINAL_VARS`. (Done: `os::session::PARENT_TERMINAL_VARS`, which terminals clear
-besides their own list.)
+besides their own list.) `quote()` gives a word its value; a native program gets what
+PowerShell makes of it. Only Windows PowerShell 5.1 puts a word with a space in double
+quotes as it is, so a final `\` escapes the closing quote. Every pwsh passes it intact: it
+doubles the trailing `\`s where it writes the command line itself (`Legacy`, every pwsh
+before 7.3, and the `Windows` default for batch files) and quotes by the MSVCRT rules
+elsewhere. A doubled `\` would suit 5.1 and break every pwsh, and the quoting knows neither
+the PowerShell nor the program, so it is left as it is (`os::shell::ps_quote`, tested
+against 5.1 and pwsh in both ways). Workbench's own words never end so, and detection does
+not offer a repository name that does (`native_quoting_safe`): 5.1 runs commands wherever
+pwsh is not installed.
 
 **PowerShell's errors on a pipe.** Started with `-EncodedCommand`, not interactive and with
 stderr redirected (a service's stop command, a local version or health probe: `run_cmd`),
@@ -337,8 +416,9 @@ are unaffected: their stderr is the console.
 /dev/null` (in Windows PowerShell 5.1 `curl` is `Invoke-WebRequest`). Local runs need
 Windows forms: the venv's `Scripts\python.exe`, `os::exe::python()`, `.\bin.exe`, no `&&`
 under 5.1 (or pwsh 7 required); a local via_host probe runs `curl.exe -o NUL`;
-`debug::derive::is_python` accepts `python.exe` and `py`. Deploys and probes for an ssh
-host keep the POSIX forms.
+`debug::derive::is_python` accepts `python.exe` and `py`, and in a Go module a launch
+configuration's `.\cmd\api` is Go like `./cmd/api` (`debug::launch::language_of`). Deploys
+and probes for an ssh host keep the POSIX forms.
 
 **Process trees.** Job Objects replace process groups and the `/proc` session scan;
 `TerminalInfo.lingering` is the job's process count minus one. `KILL_ON_JOB_CLOSE` matches
@@ -346,7 +426,13 @@ Linux, where closing the PTY hangs up its processes.
 
 **Signals.** `\x03` typed in a terminal becomes CTRL_C_EVENT through ConPTY. Non-PTY children
 get a hidden console of their own, so the server's Ctrl-C never reaches them (the
-counterpart of `process_group(0)`). `ExitInfo.signal` is always `None`. Windows keeps
+counterpart of `process_group(0)`). `ExitInfo.signal` is always `None`, and a process ended
+from outside (Task Manager's End task, `taskkill /F`: `TerminateProcess`) only has the exit
+code it was given, 1, like one that exited with 1 itself: its run ends Failed. Kill, Close and
+Restart in Workbench are recorded (`ExitInfo.terminated`, `Pty::note_killed`, read by the
+waiter as the process exits), so a run whose terminal Workbench closed ends Exited and
+terminated, as on Linux, where a hang-up, terminate, kill or interrupt signal from anywhere
+counts too (`os::session::wait`). Windows keeps
 "ignore Ctrl-C" per process and hands it down: a process started with
 `CREATE_NEW_PROCESS_GROUP` has it, so a server below one would start every terminal with
 Ctrl-C dead. `serve` clears it first (`os::proc::enable_ctrl_c`, as Windows Terminal does),
@@ -387,11 +473,17 @@ Remote ops run with `GCM_INTERACTIVE=never`: Credential Manager returns what it 
 but never opens its sign-in window, so an https host it knows nothing about fails at once.
 An ssh key with a passphrase must be loaded in an agent the ssh git uses
 can reach, and a new host must be accepted once in a terminal (`known_hosts`): remote
-operations cannot prompt and fail instead. A repository an administrator created, or one
+operations cannot prompt and fail instead, and their message says so (the OpenSSH
+Authentication Agent service is the agent there; a changed or revoked host key is flagged,
+not offered for acceptance). A repository an administrator created, or one
 on a drive without owners (FAT, exFAT, some network shares), stops with git's
 `safe.directory` message, which names the command that trusts it (`403 unsafe_repository`,
 Windows only: `os::fs::FOREIGN_OWNERS`; on Linux such a folder still reads as "not a git
-repository", a change there being the owner's to decide).
+repository", a change there being the owner's to decide). The git tool windows show the
+message with its line breaks and a button that copies that command, the status bar reads
+"Untrusted repository", the project gets a warning naming the folder and the command, a
+deploy answers `unsafe_repository` too, and the GitLab and GitHub pollers log it once per
+project (`util::git::refuses`, shared with the git slice).
 
 **Agent hooks.** Claude's hooks are HTTP hooks (`agent.rs:175-205`); only the `SessionStart`
 and `statusLine` helpers are commands. On Windows emit `"C:/…/workbench.exe" statusline`
@@ -474,7 +566,9 @@ Linux follows links as it always did.
   them (session 0).
 - Its environment (`WORKBENCH_CONFIG_DIR`, `WORKBENCH_DATA_DIR`, `WORKBENCH_LOG`) lives in
   `%LOCALAPPDATA%\workbench\service.json`; PATH is not captured (a logon process already gets
-  the user's PATH).
+  the user's PATH). `install --enable` and `service open` start the supervisor in the user's
+  sign-in environment (`os::env::user_default`) plus these, as the `Run` entry does, not in
+  the environment of the shell they run in.
 - A Start Menu `Workbench.lnk` runs `workbenchw.exe open`. `workbench service status` also
   reads `StartupApproved\Run` to report an entry disabled in Task Manager.
 - `install --enable` over a running service starts the new supervisor outside its own job
@@ -547,8 +641,10 @@ Each step compiles and passes on Linux. S = under a day, M = 1–3 days, L = 3�
 false`, checkout, setup-python, `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache`
 (workspaces: server; kept when tests fail), `cargo build --locked`, `cargo test --locked
 --no-fail-fast`, then `install.ps1` under Windows PowerShell 5.1 whenever the build
-succeeded. Informational (`continue-on-error`) until step 13; required since (done: see the
-status at the top).
+succeeded: an install, then `-Uninstall`, refused while Workbench runs from the folder (the
+refusal must name the server's pid) and then checked to remove the service's shortcut, the
+folder and the PATH entry (the rest of the user PATH and its type unchanged). Informational (`continue-on-error`) until step 13;
+required since (done: see the status at the top).
 
 **Release.** A `windows` job next to the Linux one: `server/.cargo/config.toml` sets
 `[target.x86_64-pc-windows-msvc] rustflags = ["-C", "target-feature=+crt-static"]` (no VC++
@@ -573,17 +669,45 @@ toolchain (cargo-wix targets WiX 3 and per-machine installs). A winget "portable
 manifest can come later; revisit MSI once the binaries are code-signed. Users run
 `Unblock-File` (Mark of the Web) or `-ExecutionPolicy Bypass`.
 
+`install.ps1 -Uninstall` (same `-Prefix`) is the way back. It changes nothing while a
+program runs from the folder (a process whose executable is there: the server, the
+supervisor, a terminal's `OpenConsole.exe`, a `*.old` still running), and so never runs in a
+terminal of the Workbench it removes. It lists the processes with
+`System.Diagnostics.Process` and reads each one's path with `QueryFullProcessImageNameW`
+(`PROCESS_QUERY_LIMITED_INFORMATION`, which an elevated process's integrity level does not
+block), not WMI. It fails closed: when the processes cannot be listed, or a `workbench.exe`,
+`workbenchw.exe` or `OpenConsole.exe` of the current session has a path it cannot read, it
+changes nothing and says so (another account's processes in other sessions are not
+counted). It runs `workbench service uninstall [--name N]` only for the services whose
+`Run` value or Start Menu shortcut starts that folder's `workbenchw.exe`, so another
+install's service stays. It deletes the files `install.ps1` puts there (the payload,
+`*.old`, `*.new`), removes exactly the PATH entry `install.ps1` added, keeping the value's
+type (`REG_EXPAND_SZ`), and broadcasts `WM_SETTINGCHANGE`, then deletes `workbench.exe`
+and the folder when it is empty then. Until `workbench.exe` goes, a second run finishes an
+interrupted one; a folder that exists without `workbench.exe` is not touched (and when it
+is still on the PATH, it is refused, naming the manual step). The configuration and data
+folders stay, and it prints where they are.
+
 ## 5. Risks, and what the first version leaves out
 
 **Risks.** ConPTY quirks (EOF only when the pseudoconsole closes; `ClosePseudoConsole` can
 block on Windows 10 if output is not drained). A child can start grandchildren in the gap
 before it joins its Job (portable-pty has no suspended start; fork it if that matters).
 `.cmd` injection wherever the resolver is bypassed. CRLF handling in line staging.
-Installers change `PATH` in the registry only: a program installed while Workbench runs
-(Git for Windows, Node.js, Python, rustup) stays unknown to it, its terminals and runs until
-it restarts. The "not found on PATH" messages say so (`os::exe::INSTALLED_SINCE`); building
-new terminals' `PATH` from the `Environment` registry keys, as Windows Terminal does, could
-come later.
+Installers change `PATH` in the registry only, so Workbench's own `PATH` stays the one it
+started with. Done (`os::env`): `CreateEnvironmentBlock` for the process's token, without its
+own variables, gives the environment a new sign-in gets, re-read once HKLM's or HKCU's
+`Environment` key changes (`RegNotifyChangeKeyValue`). New terminals, runs and agents get its
+`Path`, then Workbench's own absolute entries it lacks (a virtual environment it was started
+from); before, portable-pty put the registry's `Path` over Workbench's, dropping those. A
+lookup (`os::exe::which`) that misses tries its folders, and what Workbench starts by itself
+outside a terminal (language servers, debug adapters, secret and service commands) gets them
+after its own `PATH` (`os::exe::program_env`), so a program installed while Workbench runs
+(Node.js, Python, rustup, an agent CLI, a language server) is found without a restart and
+finds what it runs in turn (gopls its `go`). What the server starts by name through std (git,
+and rustc for gdb's pretty printers) keeps its own `PATH` until it restarts; git's "not
+found" message says so (`os::exe::INSTALLED_SINCE`). The other variables an installer sets
+(`JAVA_HOME`) reach new terminals only (portable-pty reads the `Environment` keys).
 `aws-lc-sys` on MSVC: 0.45 builds with its `cc` builder (no CMake) and, without NASM, links
 the prebuilt NASM objects that rustls's `aws_lc_rs` feature enables (`prebuilt-nasm`), so
 no setup-nasm step should be needed; check the first run. Sharing violations on rename and
@@ -595,12 +719,49 @@ run 2–3× slower. (A `keyring` reference `service/account` is the generic cred
 **Left out of the first version:**
 
 - Dev containers: the bridge listener cannot bind the Docker Desktop VM's gateway
-  (`devcontainer/mod.rs:557-565`), and the uid mapping (`ops.rs:156`) has no equivalent.
+  (`devcontainer/mod.rs` `bridge_url`, `bridge.rs` `Bridge::ensure`), and the uid mapping
+  (`ops.rs:156`, `perm::user_ids` is `None`) has no equivalent. Users are pointed to the
+  Linux build inside WSL 2 (below).
 - Desktop notifications (they need an AppUserModelID shortcut).
 - gdb attach hints and rust-gdb pretty printers; attach only through adapters that support it
   on Windows (debugpy, codelldb, lldb-dap).
 - WSL and UNC project roots.
 - The Docker Services tool window is marked experimental (untested).
+
+**Dev containers through WSL** (getting-started's "The Linux build inside WSL", the Help's
+Agents page and the `devcontainer` reason in `util::os::support` say this to users). The
+Linux build inside a WSL 2 distribution is the Linux program: `support::os()` is `linux`,
+so every feature is supported, `os::path::unsupported_root` is `None` (its projects are the
+distribution's own folders, which the Windows build refuses as `\\wsl$` and
+`\\wsl.localhost`), and `perm::user_ids` gives the distribution user's uid for
+`updateRemoteUserUID`. Whether dev containers work then turns on the bridge:
+`docker::parse_inspect` takes the gateway of the container's first network with an address
+(else `docker::network_gateway(docker, "bridge")`), and `Bridge::ensure` binds
+`gateway:<port>`, then `gateway:0`.
+
+- Docker Engine installed in the same distribution creates its bridges (`docker0`,
+  compose's `br-…`) there, so the gateway is a local address and this is the Linux case,
+  except for a browser on Windows. `devcontainer::port_route` gives a port the container
+  does not publish `via: container-ip`, and `apps::runs::container_url` turns a run's
+  `localhost:<port>` URL into `http://<container ip>:<port>` (the run's shown URL, the
+  panel's port links in `ops.rs`). That address is on the distribution's bridge, which
+  WSL 2's localhost forwarding does not carry to Windows; the readiness probe runs in the
+  distribution and still reaches it. Published ports (`127.0.0.1:<hostPort>`: `forwardPorts`
+  and `appPort` under the built-in engine) listen in the distribution and should be
+  forwarded like Workbench's own port, so the docs tell users to publish.
+- With Docker Desktop's WSL integration the engine and its networks are in Docker Desktop's
+  own WSL distribution (`docker-desktop`), apart from the user's, so the gateway need not be
+  an address of the user's distribution. The bind then fails as on Windows: `Bridge::ensure`
+  logs `dev containers: cannot listen on {gateway}` (again at every refresh while the
+  container is in use) and returns `None`, so `ExecTarget::workbench_url` is `None`; shells
+  and runs inside still start, without `WORKBENCH_URL`, and a Claude Code session inside
+  answers 409 ("Workbench cannot listen on the container network's gateway…",
+  `terminals/agent.rs` `launch_claude_in_container`). The container's own address
+  (`ContainerInfo::ip`), which readiness probes of runs inside (`apps::runs::run_port_open`)
+  and unpublished ports (`via: container-ip`) use, is then most likely out of reach too
+  (ARCHITECTURE.md, Dev containers, Limits: Docker Desktop hides container addresses).
+
+None of this has been tried: no test or CI job runs under WSL, with either engine.
 
 **Reporting them.** `ApiError::unsupported(feature, reason)` answers HTTP 501 with `code:
 "unsupported_platform"` and `feature`, shown like `not_configured` as a setup-help panel.

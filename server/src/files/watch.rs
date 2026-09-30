@@ -205,7 +205,7 @@ fn classify(root: &Path, git: Option<&GitDirs>, path: &Path) -> Class {
         }
     }
     let Some(rel) = os::path::strip_prefix(path, root) else { return Class::Noise };
-    let rel_s = rel.to_string_lossy().replace('\\', "/");
+    let rel_s = os::path::to_slash(rel);
     if rel_s.is_empty()
         || rel.components().any(|c| c.as_os_str() == ".git")
         || rel_s.contains(".wb-tmp-")
@@ -503,7 +503,7 @@ impl Inner {
             .new_dirs
             .iter()
             .filter_map(|d| d.strip_prefix(&self.root).ok())
-            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .map(os::path::to_slash)
             .filter(|r| !r.is_empty())
             .collect();
         if !batch.new_dirs.is_empty() || batch.prune {
@@ -738,6 +738,9 @@ mod tests {
         assert_eq!(classify(root, Some(&g), Path::new("/p/vendor/x/.git/HEAD")), Class::Noise);
         assert_eq!(classify(root, Some(&g), Path::new("/elsewhere/x")), Class::Noise);
         assert_eq!(classify(root, None, Path::new("/p")), Class::Noise);
+        // `\` separates on Windows only; elsewhere it is part of the name.
+        let named = if cfg!(windows) { "a/b.txt" } else { r"a\b.txt" };
+        assert_eq!(classify(root, Some(&g), Path::new(r"/p/a\b.txt")), Class::File(named.into()));
     }
 
     #[test]

@@ -4,7 +4,10 @@
 //!
 //! * `%LOCALAPPDATA%\workbench\service.json` (`service-<name>.json`) holds the current
 //!   `WORKBENCH_CONFIG_DIR` / `WORKBENCH_DATA_DIR` / `WORKBENCH_LOG` when set. Not `PATH`: a
-//!   program started at sign-in has the user's.
+//!   program started at sign-in has the user's. The supervisor always starts with the
+//!   user's sign-in environment (`os::env::user_default`) and these, also when `install
+//!   --enable` or `service open` starts it, never with the environment of the shell they
+//!   run in (an activated virtual environment, a `PATH` from before a program was installed).
 //! * The Start Menu shortcut `Workbench.lnk` runs `workbenchw.exe open`: it starts the
 //!   service when it is not running, then opens a signed-in window like `workbench open`.
 //! * `--enable` sets the value `Workbench` of `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
@@ -25,6 +28,7 @@
 //! has it, and the `Run` value only when it runs a `workbenchw.exe`.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -210,6 +214,16 @@ fn carried_vars() -> Vec<(String, String)> {
         .collect()
 }
 
+/// The supervisor's environment: the user's sign-in environment (`os::env::user_default`),
+/// as the `Run` entry starts it at sign-in, with exactly `vars` of `CARRIED_VARS` (the
+/// service's settings). `None`, the caller's environment, when Windows cannot build it.
+fn supervisor_env(vars: &[(String, String)]) -> Option<Vec<(OsString, OsString)>> {
+    let mut env = util::os::env::user_default()?;
+    env.retain(|(k, _)| !CARRIED_VARS.iter().any(|c| k.eq_ignore_ascii_case(c)));
+    env.extend(vars.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))));
+    Some(env)
+}
+
 /// The data dir a server started with `vars` uses (as `config::Paths::from_env`).
 fn data_dir_of(vars: &[(String, String)]) -> anyhow::Result<PathBuf> {
     match vars.iter().find(|(k, _)| k == "WORKBENCH_DATA_DIR") {
@@ -376,10 +390,10 @@ fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
     }
 }
 
-/// Starts the supervisor (`workbench service run`) apart from this process, then waits for
-/// the server to come up.
+/// Starts the supervisor (`workbench service run`) apart from this process, in the
+/// sign-in environment with the settings just written, then waits for the server to come up.
 fn start(env: &Env, name: &str, data_dir: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
-    let apart = autostart::start_detached(&env.exe, &run_args(name), dirs::home_dir().as_deref())
+    let apart = autostart::start_detached(&env.exe, &run_args(name), dirs::home_dir().as_deref(), supervisor_env(&env.vars).as_deref())
         .with_context(|| format!("cannot start {}", env.exe.display()))?;
     if !apart {
         writeln!(out, "note: this terminal keeps what it starts in a job that may end with it; if Workbench stops when it closes, start it from the Start Menu")?;
@@ -396,7 +410,8 @@ fn restart(env: &Env, name: &str, old: &Path, data_dir: &Path, out: &mut dyn Wri
     let old_pid = Runtime::of(old).live_pid();
     let old_arg = old.to_string_lossy();
     let args = [run_args(name), vec!["--replace", &old_arg]].concat();
-    if !autostart::start_apart(&env.exe, &args, dirs::home_dir().as_deref()).with_context(|| format!("cannot start {}", env.exe.display()))? {
+    let started = autostart::start_apart(&env.exe, &args, dirs::home_dir().as_deref(), supervisor_env(&env.vars).as_deref());
+    if !started.with_context(|| format!("cannot start {}", env.exe.display()))? {
         return Ok(false);
     }
     writeln!(out, "restarting Workbench to load the new settings (open Workbench tabs reconnect)")?;
@@ -723,7 +738,7 @@ pub fn open(env: &Env, name: &str) -> anyhow::Result<()> {
             if env.elevated {
                 bail!("Workbench is not running, and started from here it would run as administrator; open it from the Start Menu instead");
             }
-            autostart::start_detached(&env.exe, &run_args(name), dirs::home_dir().as_deref())
+            autostart::start_detached(&env.exe, &run_args(name), dirs::home_dir().as_deref(), supervisor_env(&vars).as_deref())
                 .with_context(|| format!("cannot start {}", env.exe.display()))?;
         }
         if !wait_until(env.start_timeout, || proc::server_running(&data_dir)) {
@@ -1164,6 +1179,27 @@ mod tests {
         assert!(err.contains("administrator"), "{err}");
     }
 
+    /// The supervisor starts as the sign-in entry starts it: in the user's sign-in
+    /// environment, not this shell's, with exactly the settings' `CARRIED_VARS`.
+    #[test]
+    fn the_supervisor_gets_the_sign_in_environment() {
+        let var = util::os::env::UserVar::new("from-the-registry");
+        let only_here = format!("{}_HERE", var.name);
+        // SAFETY: always safe on Windows (std's documentation); the name is this test's own.
+        unsafe { std::env::set_var(&only_here, "from-this-shell") };
+        let vars = vec![("WORKBENCH_DATA_DIR".to_string(), r"C:\wb-test\data".to_string()), ("WORKBENCH_LOG".to_string(), "debug".to_string())];
+        let env = supervisor_env(&vars).expect("the sign-in environment");
+        let get = |k: &str| env.iter().filter(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(get(&var.name), [var.value.clone()]);
+        assert!(get(&only_here).is_empty(), "nothing of this shell's own");
+        assert_eq!(get("WORKBENCH_DATA_DIR"), [r"C:\wb-test\data"]);
+        assert_eq!(get("WORKBENCH_LOG"), ["debug"]);
+        assert!(get("WORKBENCH_CONFIG_DIR").is_empty(), "only the settings' CARRIED_VARS");
+        assert_eq!(get("Path").len(), 1, "{env:?}");
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(&only_here) };
+    }
+
     #[test]
     fn install_refuses_what_is_not_ours() {
         let f = fixture();
@@ -1200,6 +1236,19 @@ mod tests {
         let mut out = vec![];
         uninstall(&f.env, "workbench", false, &mut out).unwrap();
         assert!(text(out).contains("kept"));
+    }
+
+    #[test]
+    fn uninstall_without_a_service_is_fine() {
+        // As `install.ps1 -Uninstall` may run it: nothing is installed, for either name.
+        let f = fixture();
+        for name in ["workbench", "other"] {
+            let mut out = vec![];
+            uninstall(&f.env, name, false, &mut out).unwrap();
+            assert_eq!(text(out), "nothing to remove\n");
+        }
+        assert!(!f.env.state_dir.exists());
+        assert!(std::fs::read_dir(&f.env.programs_dir).unwrap().next().is_none());
     }
 
     #[test]

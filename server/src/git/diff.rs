@@ -10,8 +10,8 @@
 //! client saw (409 when the file moved on — another agent may be editing it), then
 //! build a patch containing only the chosen hunks and feed it to `git apply`.
 //! Patches are built from the raw diff bytes, so files in any encoding round-trip.
-//! On Windows the working-tree side is shown as git reads it (`eol`: a CRLF file git
-//! normalizes shows with LF, like its hunks).
+//! The working-tree side is shown as git reads it (`eol`: a CRLF file git normalizes shows
+//! with LF, like its hunks).
 
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -390,12 +390,12 @@ pub async fn blob_side(repo: &Repo, spec: &str) -> Result<Side, ApiError> {
 }
 
 /// The working-tree file as git reads it: a symlink as its target text (git stores it so),
-/// a file whose CRLFs git turns into LFs with LFs, like the hunks (`eol`; Windows).
+/// a file whose CRLFs git turns into LFs with LFs, like the hunks (`eol`; an LF file costs no
+/// lookup).
 pub async fn worktree_side(repo: &Repo, repo_rel: &str) -> Result<Side, ApiError> {
     let mut side = worktree_bytes(repo, repo_rel).await?;
-    if eol::FOLLOWS_GIT && side.text.contains("\r\n") {
-        side.text = eol::of(repo, repo_rel).await.read(side.text);
-    }
+    let conversion = eol::of(repo, repo_rel, &side.text).await;
+    side.text = conversion.read(side.text);
     Ok(side)
 }
 

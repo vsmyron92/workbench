@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   agentPrompt,
   applyCompletion,
   consoleText,
   defaultConfig,
   expressionAt,
+  frameLocation,
   glyphKind,
   groupConfigs,
   moveLines,
@@ -12,11 +13,13 @@ import {
   rememberedConfig,
   revealFrame,
   sourceLines,
+  sourcePanel,
   sourceViewSession,
   stateLabel,
   toggleLine,
 } from './logic'
 import { inTurn } from './api'
+import { setHealth } from '@/api/health'
 import { modelFile } from '@/features/files/modelAccess'
 import type { DebugSession, Frame, LaunchConfig, LineBreakpoint } from './types'
 
@@ -209,6 +212,59 @@ describe('phase-3 review fixes', () => {
     expect(sourceLines({ sourceReference: 2 }, s, { epoch: 5, frames: [{ id: 1, name: 'f', line: 4, column: 1, source: { path: '<generated>', inProject: false, sourceReference: 2 } }] }, 0)).toEqual([{ line: 4, kind: 'exec' }])
     expect(sourceViewSession({ scheme: 'inmemory', authority: 'debug-source', path: '/d123/usr/include/stdio.h' })).toBe('d123')
     expect(sourceViewSession({ scheme: 'file', authority: '', path: '/app/src/main.c' })).toBeNull()
+  })
+
+  describe('sources outside the project, by the server OS', () => {
+    afterEach(() => setHealth(null))
+    const onOs = (os: string | null) => setHealth(os ? { ok: true, service: 'workbench', version: '0', startedAt: 1, os } : null)
+    const at = (path: string | undefined, inProject = false, sourceReference?: number): Frame => ({ id: 1, name: 'f', line: 12, column: 1, source: { path, inProject, sourceReference } })
+    const s = session()
+
+    it('open a file at an absolute path in the debug.source panel', () => {
+      for (const os of [null, 'linux', 'windows']) {
+        onOs(os)
+        expect(sourcePanel(s, at('/usr/include/stdio.h'))).toEqual({
+          kind: 'debug.source',
+          id: 'debug.source:app:/usr/include/stdio.h',
+          title: 'stdio.h',
+          params: { projectId: 'app', sessionId: 'd1', path: '/usr/include/stdio.h', name: undefined },
+        })
+        // Source the debugger holds, a project file, a relative path, none at all.
+        expect(sourcePanel(s, at('<generated>', false, 4))).toMatchObject({ id: 'debug.source:app:d1:ref4', title: '<generated>' })
+        expect(sourcePanel(s, at('src/main.c', true))).toBeNull()
+        expect(sourcePanel(s, at('lib.c'))).toBeNull()
+        expect(sourcePanel(s, at(undefined))).toBeNull()
+      }
+      // A stop in `C:\…` outside the project: a path under `/` on Linux, not absolute there.
+      const win = at('C:\\Users\\me\\vendor\\lib.c')
+      for (const os of [null, 'linux']) {
+        onOs(os)
+        expect(sourcePanel(s, win)).toBeNull()
+        expect(frameLocation(win)).toBe('C:\\Users\\me\\vendor\\lib.c:12')
+      }
+      onOs('windows')
+      expect(sourcePanel(s, win)).toEqual({
+        kind: 'debug.source',
+        id: 'debug.source:app:C:\\Users\\me\\vendor\\lib.c',
+        title: 'lib.c',
+        params: { projectId: 'app', sessionId: 'd1', path: 'C:\\Users\\me\\vendor\\lib.c', name: undefined },
+      })
+      expect(sourcePanel(s, at('D:/src/dep.rs'))).toMatchObject({ title: 'dep.rs', params: { path: 'D:/src/dep.rs' } })
+      // UNC paths are not roots Workbench serves.
+      expect(sourcePanel(s, at('\\\\server\\share\\x.c'))).toBeNull()
+      expect(frameLocation(win)).toBe('lib.c:12')
+      expect(frameLocation(at('src/main.c', true))).toBe('main.c:12')
+    })
+
+    it('mark the execution point however the adapter spells the file on Windows', () => {
+      const frames = [at('c:/users/me/vendor/lib.c')]
+      const view = { path: 'C:\\Users\\me\\vendor\\lib.c' }
+      onOs('linux')
+      expect(sourceLines(view, s, { epoch: 3, frames }, 0)).toEqual([])
+      onOs('windows')
+      expect(sourceLines(view, s, { epoch: 3, frames }, 0)).toEqual([{ line: 12, kind: 'exec' }])
+      expect(sourceLines({ path: 'C:\\Users\\me\\vendor\\other.c' }, s, { epoch: 3, frames }, 0)).toEqual([])
+    })
   })
 
   it('evaluates watches one at a time', async () => {

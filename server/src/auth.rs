@@ -372,6 +372,12 @@ impl AuthState {
         self.agent_tokens.write().retain(|_, v| v != terminal_id);
     }
 
+    /// Tests: whether an agent token of `terminal_id` is valid.
+    #[cfg(test)]
+    pub fn has_agent_token(&self, terminal_id: &str) -> bool {
+        self.agent_tokens.read().values().any(|v| v == terminal_id)
+    }
+
     /// The terminal an agent token belongs to (from `Authorization: Bearer`).
     pub fn agent_from_headers(&self, headers: &HeaderMap) -> Option<String> {
         let token = bearer(headers)?;

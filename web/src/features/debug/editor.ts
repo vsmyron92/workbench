@@ -14,7 +14,7 @@ import { toast } from '@/shell/actions'
 import { addWatch, breakpointAt, breakpointsMoved, currentSession, removeBreakpoint, runToCursor, toggleBreakpoint, updateBreakpoint, viewBreakpoints } from './actions'
 import { cachedBreakpoints, debugApi, queryClient } from './api'
 import { openBreakpointDialog } from './BreakpointDialog'
-import { modelFile } from '@/features/files/modelAccess'
+import { modelFile, samePath } from '@/features/files/modelAccess'
 import { expressionAt, fileBreakpoints, glyphKind, glyphTitle, isLive, sourceViewSession } from './logic'
 import { sessionsOf, useDebug } from './store'
 import type { Frame } from './types'
@@ -47,10 +47,12 @@ export function lastFocusedEditor(): { editor: editor.ICodeEditor; projectId: st
 
 // ---------------------------------------------------------------- decorations
 
+/** Whether a frame is in the model's file: a project file, or an absolute one (a Windows
+ *  adapter may spell `C:\x` as `c:/x`). */
 function sameSource(e: ModelEntry, pid: string, f: Frame | undefined): boolean {
   const src = f?.source
   if (!src?.path) return false
-  return src.inProject ? e.projectId === pid && e.path === src.path : e.projectId === null && e.path === src.path
+  return (src.inProject ? e.projectId === pid : e.projectId === null) && samePath(e.path, src.path)
 }
 
 /** Apply breakpoint moves the model tracked but nobody saved yet. */

@@ -437,12 +437,7 @@ pub fn find_provider(cfg: &AgentsConfig, id: Option<&str>) -> Result<Provider, A
 fn missing_command(p: &Provider) -> ApiError {
     let key = if p.id == "claude" { "[agents].command".to_string() } else { format!("[agents.providers.{}].command", p.id) };
     let hint = if p.install_hint.is_empty() { String::new() } else { format!(" (`{}`)", p.install_hint) };
-    ApiError::not_configured(format!(
-        "{} ({:?}) was not found. Install it{hint}, or set {key} in config.toml{}",
-        p.label,
-        p.command,
-        util::os::exe::INSTALLED_SINCE
-    ))
+    ApiError::not_configured(format!("{} ({:?}) was not found. Install it{hint}, or set {key} in config.toml", p.label, p.command))
 }
 
 /// Whether `command` runs through cmd.exe, which parses its arguments again: a batch file
@@ -682,16 +677,26 @@ impl Terminals {
         submit_prompt: bool,
         restarted: bool,
     ) -> Result<(), ApiError> {
-        let prep = self.prepare_launch(state, entry).await?;
-        match prep.provider.kind {
-            ProviderKind::Claude => self.launch_claude(state, entry, prep, cont, prompt, submit_prompt).await,
-            // Codex's rollout lives in the container: in one, it is followed like a
-            // plain CLI (output activity), without Workbench's MCP.
-            ProviderKind::Codex if prep.container.is_none() => self.launch_codex(state, entry, prep, cont, prompt, submit_prompt).await,
-            ProviderKind::Codex | ProviderKind::Kimi | ProviderKind::Gemini | ProviderKind::Aider | ProviderKind::Custom => {
-                self.launch_plain(state, entry, prep, cont, prompt, submit_prompt, restarted).await
+        let launched = async {
+            let prep = self.prepare_launch(state, entry).await?;
+            match prep.provider.kind {
+                ProviderKind::Claude => self.launch_claude(state, entry, prep, cont, prompt, submit_prompt).await,
+                // Codex's rollout lives in the container: in one, it is followed like a
+                // plain CLI (output activity), without Workbench's MCP.
+                ProviderKind::Codex if prep.container.is_none() => self.launch_codex(state, entry, prep, cont, prompt, submit_prompt).await,
+                ProviderKind::Codex | ProviderKind::Kimi | ProviderKind::Gemini | ProviderKind::Aider | ProviderKind::Custom => {
+                    self.launch_plain(state, entry, prep, cont, prompt, submit_prompt, restarted).await
+                }
             }
         }
+        .await;
+        // The token `prepare_launch` issued dies with a start that failed (as with an exit),
+        // also one that failed in `prepare_launch` itself: no process holds it, and pruning
+        // forgets the terminal without revoking anything.
+        if launched.is_err() && entry.running_pty().is_none() {
+            state.auth.revoke_agent_tokens(&entry.id);
+        }
+        launched
     }
 
     /// The provider, command, environment, agent token and directories of a launch.
@@ -731,6 +736,12 @@ impl Terminals {
         // Secret values from `${secret:…}` are masked if the session prints them.
         *entry.redact.lock() = secrets;
 
+        // A terminal forgotten while this start waited for the lifecycle lock (a restart, a
+        // restore) gets no token and no directory: nothing would revoke or remove them.
+        // Callers hold that lock, and `close` forgets under it, so this holds to the launch.
+        if !self.is_registered(entry) {
+            return Err(ApiError::not_found(format!("no terminal {:?}", entry.id)));
+        }
         // A fresh token per process; the old one dies here.
         state.auth.revoke_agent_tokens(&entry.id);
         let token = state.auth.issue_agent_token(&entry.id);
@@ -823,15 +834,20 @@ impl Terminals {
         let settings = session_settings(&format!("{base}/api/hooks/claude/{}", entry.id), &token, helper.as_deref(), statusline, permission_wait(&cfg));
         let mcp = mcp_config(&format!("{base}/mcp"), &token, &entry.id);
         {
-            let (sp, mp) = (settings_path.clone(), mcp_path.clone());
-            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                util::fs::write_atomic(&sp, &serde_json::to_vec_pretty(&settings)?, 0o600)?;
-                util::fs::write_atomic(&mp, &serde_json::to_vec_pretty(&mcp)?, 0o600)?;
-                Ok(())
+            let (sp, mp, e) = (settings_path.clone(), mcp_path.clone(), entry.clone());
+            // Like saves, never into the directory of a terminal forgotten meanwhile.
+            tokio::task::spawn_blocking(move || -> anyhow::Result<Option<()>> {
+                e.unless_removed(|| -> anyhow::Result<()> {
+                    util::fs::write_atomic(&sp, &serde_json::to_vec_pretty(&settings)?, 0o600)?;
+                    util::fs::write_atomic(&mp, &serde_json::to_vec_pretty(&mcp)?, 0o600)?;
+                    Ok(())
+                })
+                .transpose()
             })
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?
-            .map_err(ApiError::from)?;
+            .map_err(ApiError::from)?
+            .ok_or_else(|| ApiError::not_found(format!("no terminal {:?}", entry.id)))?;
         }
         env.push(("WORKBENCH_AGENT_TOKEN".into(), Some(token)));
 
@@ -1206,7 +1222,7 @@ impl Terminals {
     /// Hosted sessions of `kind` and CLI home `home` still waiting for their id:
     /// `(pending, leader pid = process session id, entry)`. Sessions of another home
     /// (`CODEX_HOME`, `KIMI_CODE_HOME`) write elsewhere and never compete.
-    fn pending_sessions(&self, kind: ProviderKind, home: &Path) -> Vec<(codex::Pending, i32, Arc<Entry>)> {
+    fn pending_sessions(&self, kind: ProviderKind, home: &Path) -> Vec<(codex::Pending, u32, Arc<Entry>)> {
         self.all()
             .into_iter()
             .filter_map(|e| {
@@ -1229,7 +1245,7 @@ impl Terminals {
     }
 
     /// Process session ids of the running hosted sessions of `kind`.
-    fn agent_sids(&self, kind: ProviderKind) -> HashSet<i32> {
+    fn agent_sids(&self, kind: ProviderKind) -> HashSet<u32> {
         self.all()
             .into_iter()
             .filter(|e| e.rec.lock().info.agent.as_ref().is_some_and(|a| a.provider == kind))
@@ -1252,7 +1268,7 @@ impl Terminals {
     /// Codex in that folder (a Codex in another terminal or an editor writes rollouts
     /// there too). A candidate found to be someone else's is remembered in `w.foreign`.
     async fn codex_discover(&self, entry: &Entry, w: &mut CodexWatch) -> Option<(String, PathBuf)> {
-        let pending: Vec<(codex::Pending, i32)> = self.pending_sessions(ProviderKind::Codex, &w.home).into_iter().map(|(p, pid, _)| (p, pid)).collect();
+        let pending: Vec<(codex::Pending, u32)> = self.pending_sessions(ProviderKind::Codex, &w.home).into_iter().map(|(p, pid, _)| (p, pid)).collect();
         let me = pending.iter().find(|(p, _)| p.terminal_id == entry.id)?.0.clone();
         let claimed = self.claimed_ids(&entry.id);
         let (home, foreign) = (w.home.clone(), w.foreign.clone());
@@ -1262,13 +1278,13 @@ impl Terminals {
             if candidates.is_empty() {
                 return (None, None);
             }
-            let sessions: Vec<(String, i32)> = pending.iter().map(|(p, pid)| (p.terminal_id.clone(), *pid)).collect();
+            let sessions: Vec<(String, u32)> = pending.iter().map(|(p, pid)| (p.terminal_id.clone(), *pid)).collect();
             let paths: Vec<PathBuf> = candidates.iter().map(|c| c.path.clone()).collect();
             let held = codex::holders(&sessions, &paths);
             for c in &mut candidates {
                 c.holders = held.get(&c.path).cloned().unwrap_or_default();
             }
-            let ours: HashSet<i32> = pending.iter().map(|(_, pid)| *pid).collect();
+            let ours: HashSet<u32> = pending.iter().map(|(_, pid)| *pid).collect();
             let all: Vec<codex::Pending> = pending.into_iter().map(|(p, _)| p).collect();
             match codex::choose(&me, &all, &candidates, &claimed) {
                 codex::Choice::Certain(c) => (Some((c.meta.id.clone(), c.path.clone())), None),
@@ -2280,7 +2296,7 @@ impl Terminals {
 
     /// Live Claude sessions on this machine that Workbench does not host.
     pub(crate) async fn external(&self, state: &AppState) -> Vec<transcript::ExternalSession> {
-        let (pids, sessions): (HashSet<i32>, HashSet<String>) = {
+        let (pids, sessions): (HashSet<u32>, HashSet<String>) = {
             let mut pids = HashSet::new();
             let mut sessions = HashSet::new();
             for e in self.all() {
@@ -2295,7 +2311,8 @@ impl Terminals {
         };
         let dir = transcript::claude_dir(None);
         let mut list = tokio::task::spawn_blocking(move || transcript::read_live_sessions(&dir)).await.unwrap_or_default();
-        list.retain(|s| crate::util::os::proc::pid_alive(s.pid) && !pids.contains(&s.pid) && !sessions.contains(&s.session_id));
+        // The pid as the session file has it: a negative one is no process.
+        list.retain(|s| u32::try_from(s.pid).is_ok_and(|p| crate::util::os::proc::pid_alive(p) && !pids.contains(&p)) && !sessions.contains(&s.session_id));
         for s in &mut list {
             s.project_id = state.projects.find_by_path(Path::new(&s.cwd)).map(|p| p.id.clone());
         }
@@ -2629,9 +2646,9 @@ async fn activity_loop(state: AppState, entry: Arc<Entry>, pty: Arc<pty::Pty>, m
 }
 
 /// Remote Control sessions also advertise their bridge in `~/.claude/sessions/<pid>.json`.
-async fn check_bridge(state: &AppState, entry: &Entry, pid: i32) {
+async fn check_bridge(state: &AppState, entry: &Entry, pid: u32) {
     let wants = entry.rec.lock().info.agent.as_ref().is_some_and(|a| a.remote_control && a.remote_url.is_none());
-    if !wants || pid <= 0 {
+    if !wants || pid == 0 {
         return;
     }
     let file = transcript::claude_dir(None).join("sessions").join(format!("{pid}.json"));
@@ -2847,6 +2864,7 @@ mod tests {
             remote: None,
             warnings: vec![],
             repo_secret_names: Default::default(),
+            overlay_error: None,
         }
     }
 

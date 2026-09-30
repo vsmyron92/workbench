@@ -1,24 +1,21 @@
 //! Line endings: a working tree that git checks out with CRLF over an index holding LF
-//! (`core.autocrlf=true`, the default of Git for Windows; `text` or `eol=crlf` attributes).
+//! (`core.autocrlf=true`, the default of Git for Windows; `text` or `eol=crlf` attributes,
+//! which do so on every OS, as a repository's `*.ps1 eol=crlf` does on Linux too).
 //!
 //! Git reads such a file with its CRLFs turned into LFs. Its diffs, and the patches built
 //! from them for `git apply --cached` (staging hunks and lines), therefore already have LF on
 //! the working-tree side, and `git apply` without `--cached` (rolling hunks and lines back)
-//! writes CRLF again. What Workbench reads or writes itself follows git: the working-tree side
-//! of a diff and a conflicted file are shown with LF, like the hunks, and a conflict resolved
-//! with edited text is written back with CRLF. Every other file (LF, CRLF the automatic
-//! conversions leave alone because the index has CRs too, no conversion configured) is read
-//! and written byte for byte.
+//! writes CRLF again. What Workbench reads or writes itself follows git on every OS: the
+//! working-tree side of a diff and a conflicted file are shown with LF, like the hunks, and a
+//! conflict resolved with edited text is written back with CRLF. Every other file (LF, CRLF
+//! the automatic conversions leave alone because the index has CRs too, `-text`, no
+//! conversion configured) is read and written byte for byte.
 //!
-//! Only where checkouts write CRLF by default ([`FOLLOWS_GIT`], Windows). Elsewhere every
-//! file is read and written byte for byte with no lookup, as it always was (following git
-//! there too would be a Linux change for the owner to decide).
+//! Only a file with a CRLF in it can be one git converts ([`of`] asks git about no other),
+//! so an LF file costs no git call.
 
 use super::cmd::{literal, split_z};
 use super::repo::Repo;
-
-/// Whether Workbench reads and writes converted files as git does (see the module).
-pub const FOLLOWS_GIT: bool = crate::util::os::fs::NATIVE_CRLF;
 
 /// How git converts one working-tree file on its way into the index.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -53,10 +50,17 @@ impl Eol {
     }
 }
 
-/// The conversion of `repo_path` (repository-relative, tracked or not): `git ls-files --eol`
-/// tells the line endings of the index and the working tree and the attributes' say;
-/// `core.autocrlf` decides for files no attribute covers. A failing lookup converts nothing.
-pub async fn of(repo: &Repo, repo_path: &str) -> Eol {
+/// The conversion of `repo_path` (repository-relative, tracked or not), whose working-tree
+/// text is `text`: `git ls-files --eol` tells the line endings of the index and the working
+/// tree and the attributes' say; `core.autocrlf` decides for files no attribute covers. Git
+/// converts only a file with a CRLF in it (`w/crlf` or `w/mixed`), so any other file is left
+/// as it is without asking git. A failing lookup converts nothing.
+pub async fn of(repo: &Repo, repo_path: &str, text: &str) -> Eol {
+    if !text.contains("\r\n") {
+        return Eol::default();
+    }
+    #[cfg(test)]
+    LOOKUPS.with(|n| n.set(n.get() + 1));
     let Some(out) = output(repo, &["ls-files", "--eol", "-z", "--cached", "--others", "--", &literal(repo_path)]).await else {
         return Eol::default();
     };
@@ -64,6 +68,12 @@ pub async fn of(repo: &Repo, repo_path: &str) -> Eol {
     let infos: Vec<EolInfo> = records.iter().filter_map(|r| parse(r)).collect();
     let autocrlf = if infos.iter().any(|i| i.attr.is_empty()) { autocrlf(repo).await } else { None };
     decide(&infos, autocrlf.as_deref())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The git lookups [`of`] made on this thread: the tests check that LF files cost none.
+    pub(super) static LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// `core.autocrlf`, when set. A bare `autocrlf` key (true) and `autocrlf =` (false) both

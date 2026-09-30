@@ -15,7 +15,7 @@ import { ApiError } from '@/api/client'
 import { subscribe } from '@/api/events'
 import { toastError } from '@/shell/actions'
 import { filesApi, type FileContent } from './api'
-import { bufferKey } from './paths'
+import { basename, bufferKey, modelUriPath } from './paths'
 import { minimalEdit } from './text'
 
 export type ConflictKind = 'changed' | 'deleted' | 'save'
@@ -115,8 +115,7 @@ async function monacoNs() {
 }
 
 export function modelUri(monaco: Awaited<ReturnType<typeof monacoNs>>, projectId: string | null, path: string) {
-  const rel = path.startsWith('/') ? path : '/' + path
-  return monaco.Uri.from({ scheme: 'file', path: `/${projectId ?? '~abs'}${rel}` })
+  return monaco.Uri.from({ scheme: 'file', path: modelUriPath(projectId, path) })
 }
 
 /**
@@ -141,7 +140,7 @@ export async function acquireBuffer(projectId: string | null, path: string, meta
     const { languageFor } = await import('@/lib/monacoSetup')
     const uri = modelUri(monaco, projectId, path)
     monaco.editor.getModel(uri)?.dispose()
-    const model = monaco.editor.createModel(meta.content ?? '', languageFor(path), uri)
+    const model = monaco.editor.createModel(meta.content ?? '', languageFor(basename(path)), uri)
     const entry: Entry = { model, refs: 0, savedVersion: model.getAlternativeVersionId(), disposables: [], listeners: new Set() }
     const draft = takeDraft(key)
     let restored = false

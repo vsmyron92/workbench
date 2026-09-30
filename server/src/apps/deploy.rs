@@ -157,21 +157,21 @@ async fn git(root: &std::path::Path, args: &[&str]) -> Option<crate::util::proc:
     crate::util::proc::run_cmd(c, Duration::from_secs(10)).await.ok()
 }
 
-/// Full sha of `rev` (hex, possibly abbreviated) or of HEAD.
+/// Full sha of `rev` (hex, possibly abbreviated) or of HEAD. "Unknown commit" and "no
+/// commits" only when git ran and the name resolves to nothing; git failing (not a
+/// repository, a repository it refuses, git missing) answers with why.
 async fn resolve_sha(root: &std::path::Path, rev: Option<&str>) -> Result<String, ApiError> {
     match rev.map(str::trim).filter(|r| !r.is_empty()) {
         Some(r) => {
             if !valid_rev(r) {
                 return Err(ApiError::bad_request(format!("{r:?} is not a commit sha")));
             }
-            let spec = format!("{r}^{{commit}}");
-            let out = git(root, &["rev-parse", "--verify", "--quiet", &spec]).await;
-            match out {
-                Some(o) if o.ok() && valid_rev(o.stdout.trim()) => Ok(o.stdout.trim().to_string()),
+            match crate::util::git::try_commit_sha(root, r).await? {
+                Some(sha) if valid_rev(&sha) => Ok(sha),
                 _ => Err(ApiError::bad_request(format!("unknown commit {r}"))),
             }
         }
-        None => crate::util::git::head_sha(root).await.ok_or_else(|| ApiError::bad_request("the repository has no commits")),
+        None => crate::util::git::try_head_sha(root).await?.ok_or_else(|| ApiError::bad_request("the repository has no commits")),
     }
 }
 

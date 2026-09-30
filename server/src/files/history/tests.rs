@@ -19,6 +19,12 @@ struct Env {
 }
 
 async fn setup() -> Env {
+    setup_with(|_| {}).await
+}
+
+/// `setup`, with `prepare` adding files to the project before its watcher starts (they
+/// have no history).
+async fn setup_with(prepare: impl FnOnce(&std::path::Path)) -> Env {
     let (cfg, data, proj) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let root = crate::util::os::path::canonicalize(proj.path()).unwrap().join("app");
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -27,6 +33,7 @@ async fn setup() -> Env {
     std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::write(root.join(".gitignore"), "ignored/\n*.log\n").unwrap();
     std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    prepare(&root);
     let mut config = GlobalConfig::default();
     config.projects.roots = vec![];
     config.projects.include = vec![root.display().to_string()];
@@ -284,6 +291,10 @@ async fn first_change_of_a_committed_file_keeps_head() {
     // CRLF on disk, LF in the repository: what `core.autocrlf` (Git for Windows' default) leaves.
     std::fs::write(root.join("src/crlf.rs"), "pub fn x() {}\r\npub fn y() {}\r\n").unwrap();
     std::fs::write(root.join("src/same.rs"), "pub fn s() {}\r\n").unwrap();
+    // CRLF on disk, LF in the repository, by an attribute (on every OS).
+    std::fs::write(root.join(".gitattributes"), "*.ps1 text eol=crlf\n").unwrap();
+    std::fs::write(root.join("src/tool.ps1"), "first\r\nsecond\r\n").unwrap();
+    std::fs::write(root.join("src/keep.ps1"), "keep\r\n").unwrap();
     let git = |args: &[&str]| {
         let ok = std::process::Command::new("git")
             .arg("-C")
@@ -334,9 +345,23 @@ async fn first_change_of_a_committed_file_keeps_head() {
     let base = env.api(Method::GET, &format!("/files/history/revision?id={}", h[1]["id"]), None).await.unwrap();
     assert_eq!(base["content"], "pub fn u() {}\n");
 
-    // A CRLF checkout keeps HEAD with its line ends on Windows: the diff shows the line
-    // added… Elsewhere HEAD is kept as committed, as it always was.
-    let crlf = crate::util::os::fs::NATIVE_CRLF;
+    // An `eol=crlf` attribute checks out CRLF whatever the settings: HEAD is kept with its
+    // line ends, so the diff shows the line added…
+    std::fs::write(root.join("src/tool.ps1"), "first\r\nsecond\r\nthird\r\n").unwrap();
+    let h = env.wait_for("src/tool.ps1", 2).await;
+    assert_eq!(kinds(&h), ["disk", "base"]);
+    let base = env.api(Method::GET, &format!("/files/history/revision?id={}", h[1]["id"]), None).await.unwrap();
+    assert_eq!(base["content"], "first\r\nsecond\r\n");
+    let d = env.api(Method::GET, &format!("/files/history/diff?id={}", h[0]["id"]), None).await.unwrap();
+    let diff = d["diff"].as_str().unwrap();
+    assert!(diff.contains("+third\r\n") && !diff.contains("-first") && !diff.contains("-second"), "{diff}");
+    // …and a file that only went through the checkout has no older version to keep.
+    std::fs::write(root.join("src/keep.ps1"), "keep\r\n").unwrap();
+    env.wait_for("src/keep.ps1", 1).await;
+    env.settle().await;
+    assert_eq!(kinds(&env.history("src/keep.ps1").await), ["disk"]);
+
+    // So does `core.autocrlf` (Git for Windows' default).
     git(&["config", "core.autocrlf", "true"]);
     std::fs::write(root.join("src/crlf.rs"), "pub fn x() {}\r\npub fn y() {}\r\npub fn z() {}\r\n").unwrap();
     let hook = json!({ "hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": { "file_path": root.join("src").join("crlf.rs").display().to_string() } });
@@ -344,15 +369,28 @@ async fn first_change_of_a_committed_file_keeps_head() {
     let h = env.wait_for("src/crlf.rs", 2).await;
     assert_eq!(kinds(&h), ["agent", "base"]);
     let base = env.api(Method::GET, &format!("/files/history/revision?id={}", h[1]["id"]), None).await.unwrap();
-    assert_eq!(base["content"], if crlf { "pub fn x() {}\r\npub fn y() {}\r\n" } else { "pub fn x() {}\npub fn y() {}\n" });
+    assert_eq!(base["content"], "pub fn x() {}\r\npub fn y() {}\r\n");
     let d = env.api(Method::GET, &format!("/files/history/diff?id={}", h[0]["id"]), None).await.unwrap();
     let diff = d["diff"].as_str().unwrap();
-    assert!(diff.contains("+pub fn z() {}\r\n") && diff.contains("-pub fn x() {}") != crlf, "{diff}");
-    // …and a file that only went through the checkout has no older version to keep.
+    assert!(diff.contains("+pub fn z() {}\r\n") && !diff.contains("-pub fn x() {}"), "{diff}");
     std::fs::write(root.join("src/same.rs"), "pub fn s() {}\r\n").unwrap();
     env.wait_for("src/same.rs", 1).await;
     env.settle().await;
-    assert_eq!(kinds(&env.history("src/same.rs").await), if crlf { &["disk"][..] } else { &["disk", "base"][..] });
+    assert_eq!(kinds(&env.history("src/same.rs").await), ["disk"]);
+}
+
+/// Only a file with CRLFs on disk and a lone LF in HEAD can be one a checkout converted: no
+/// other asks git (an LF repository pays no git call).
+#[test]
+fn only_crlf_files_ask_git_how_they_are_checked_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut checkout = super::Checkout::new(dir.path());
+    // LF on disk, or no lone LF in HEAD: HEAD as committed.
+    assert_eq!(&*checkout.as_checked_out("a.rs", b"x\ny\n", b"x\nz\n"), b"x\ny\n");
+    assert_eq!(&*checkout.as_checked_out("a.rs", b"x\r\ny\r\n", b"x\r\nz\r\n"), b"x\r\ny\r\n");
+    assert!(checkout.config.is_none(), "no git call");
+    checkout.as_checked_out("a.rs", b"x\ny\n", b"x\r\nz\r\n");
+    assert!(checkout.config.is_some(), "a CRLF file over LF in HEAD asks git");
 }
 
 /// Git's rules for the line ends of a checkout (`convert.c`), from its settings and the
@@ -460,6 +498,83 @@ async fn files_in_a_new_folder_are_recorded() {
     assert_eq!(kinds(&env.wait_for("newmod/deep/a.rs", 2).await), ["deleted", "disk"]);
 }
 
+/// Linux: `a\b.txt` is one file, not `b.txt` in the folder `a` (which exists too). A change
+/// on disk, a save, an agent's edit and the MCP tool keep its history under its own name
+/// and with its own content, and the other file keeps only its own version.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backslash_in_a_name_is_one_file() {
+    const NAME: &str = r"a\b.txt";
+    const QUERY: &str = "a%5Cb.txt";
+    let env = setup().await;
+    std::fs::create_dir_all(env.root.join("a")).unwrap();
+    std::fs::write(env.root.join("a/b.txt"), "other\n").unwrap();
+    assert_eq!(env.wait_for("a/b.txt", 1).await.len(), 1);
+
+    std::fs::write(env.root.join(NAME), "v1\n").unwrap();
+    let h = env.wait_for(QUERY, 1).await;
+    assert_eq!(kinds(&h), ["disk"], "{h:?}");
+    assert_eq!(h[0]["path"], NAME);
+    let read = env.api(Method::GET, &format!("/files/read?path={QUERY}"), None).await.unwrap();
+    assert_eq!(read["content"], "v1\n");
+    env.api(Method::PUT, "/files/write", Some(json!({ "path": NAME, "content": "v2\n", "etag": read["etag"] }))).await.unwrap();
+    assert_eq!(kinds(&env.wait_for(QUERY, 2).await), ["save", "disk"]);
+
+    let abs = env.root.join(NAME).display().to_string();
+    std::fs::write(env.root.join(NAME), "v3\n").unwrap();
+    let hook = json!({ "hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": { "file_path": abs } });
+    super::agent_edit(&env.state, &session("t-agent", Some(&env.pid), &env.root), &hook);
+    env.wait_for(QUERY, 3).await;
+    env.settle().await;
+    let h = env.history(QUERY).await;
+    assert_eq!(kinds(&h), ["agent", "save", "disk"], "{h:?}");
+    let rev = env.api(Method::GET, &format!("/files/history/revision?id={}", h[0]["id"]), None).await.unwrap();
+    assert_eq!(rev["content"], "v3\n");
+
+    let tools = super::tools::tools();
+    let t = tools.iter().find(|t| t.name == "files_local_history").unwrap();
+    let ctx = McpCtx { terminal_id: Some("t1".into()), project_id: Some(env.pid.clone()) };
+    let ToolOutput::Json(v) = (t.handler)(env.state.clone(), ctx, json!({ "path": abs })).await.unwrap() else { panic!("json expected") };
+    assert_eq!((v["path"].as_str(), v["entries"].as_array().map(Vec::len)), (Some(NAME), Some(3)), "{v}");
+
+    let other = env.history("a/b.txt").await;
+    assert_eq!(other.len(), 1, "{other:?}");
+    let rev = env.api(Method::GET, &format!("/files/history/revision?id={}", other[0]["id"]), None).await.unwrap();
+    assert_eq!(rev["content"], "other\n");
+}
+
+/// Linux: a new folder named `n\d` is looked into under its own name. The file written
+/// into it before its watch existed is recorded as `n\d/f.rs`, and `n/d/f.rs` (there
+/// before the watcher, never changed) gets no version from that look.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_folder_with_a_backslash_is_looked_into_by_its_own_name() {
+    const NAME: &str = r"n\d/f.rs";
+    const QUERY: &str = "n%5Cd/f.rs";
+    let env = setup_with(|root| {
+        std::fs::create_dir_all(root.join("n/d")).unwrap();
+        std::fs::write(root.join("n/d/f.rs"), "pub fn other() {}\n").unwrap();
+    })
+    .await;
+    std::fs::create_dir_all(env.root.join(r"n\d")).unwrap();
+    std::fs::write(env.root.join(NAME), "pub fn f() {}\n").unwrap();
+    let h = env.wait_for(QUERY, 1).await;
+    assert_eq!(kinds(&h), ["disk"], "{h:?}");
+    assert_eq!(h[0]["path"], NAME);
+    let rev = env.api(Method::GET, &format!("/files/history/revision?id={}", h[0]["id"]), None).await.unwrap();
+    assert_eq!(rev["content"], "pub fn f() {}\n");
+    env.settle().await;
+    let other = env.history("n/d/f.rs").await;
+    assert!(other.is_empty(), "{other:?}");
+
+    // The folder's own watch sees the file go.
+    std::fs::remove_dir_all(env.root.join(r"n\d")).unwrap();
+    assert_eq!(kinds(&env.wait_for(QUERY, 2).await), ["deleted", "disk"]);
+    env.settle().await;
+    let other = env.history("n/d/f.rs").await;
+    assert!(other.is_empty(), "{other:?}");
+}
+
 /// A folder with more files than one batch takes (a clone, an unpacked archive) is
 /// not snapshotted file by file.
 #[test]
@@ -484,6 +599,7 @@ fn new_folders_stay_within_the_batch_budget() {
         remote: None,
         warnings: vec![],
         repo_secret_names: Default::default(),
+        overlay_error: None,
     };
     let mut paths = vec!["small".to_string(), "small/a.txt".to_string()];
     super::files_in_new_dirs(&project, &["big".into(), "small".into(), "gone".into()], &mut paths);
@@ -576,12 +692,28 @@ fn agent_paths_stay_inside_the_project() {
     assert_eq!(super::rel_in_project(&root, &root.join("src/../../x")), None);
     assert_eq!(super::rel_in_project(&root, &root), None);
     assert_eq!(super::rel_in_project(&root, Path::new("/etc/passwd")), None);
+    // Linux keeps the name as written: another case is another file, and a `\` is part
+    // of a name.
+    #[cfg(unix)]
+    {
+        assert_eq!(super::rel_in_project(&root, &root.join("SRC/a.rs")).as_deref(), Some("SRC/a.rs"));
+        assert_eq!(super::rel_in_project(&root, &root.join(r"src\a.rs")).as_deref(), Some(r"src\a.rs"));
+        assert_eq!(super::rel_in_project(&root, &root.join(r"..\x")).as_deref(), Some(r"..\x"));
+    }
     // Windows: the root spelled in another case is the same folder.
     #[cfg(windows)]
     {
         let lower = std::path::PathBuf::from(root.display().to_string().to_ascii_lowercase());
         assert_eq!(super::rel_in_project(&root, &lower.join("src").join("a.rs")).as_deref(), Some("src/a.rs"));
         assert_eq!(super::rel_in_project(&root, Path::new(r"C:\Windows\win.ini")), None);
+        // So is a file: its key is the case on disk, one history whatever case the agent wrote.
+        std::fs::create_dir(root.join("src").join("Deep")).unwrap();
+        std::fs::write(root.join("src").join("Deep").join("Main.rs"), "fn main() {}\n").unwrap();
+        for spelled in [root.join("SRC").join("deep").join("MAIN.RS"), lower.join("src").join("deep").join("main.rs"), root.join(r"src\Deep/main.RS")] {
+            assert_eq!(super::rel_in_project(&root, &spelled).as_deref(), Some("src/Deep/Main.rs"), "{}", spelled.display());
+        }
+        // A deleted one: its folder as on disk, its name as written.
+        assert_eq!(super::rel_in_project(&root, &root.join("SRC").join("DEEP").join("Gone.rs")).as_deref(), Some("src/Deep/Gone.rs"));
     }
 }
 

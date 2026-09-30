@@ -8,13 +8,14 @@
 //!
 //! Windows: the leader joins a Job Object right after the spawn (what it starts joins too,
 //! unless it asks to leave with `CREATE_BREAKAWAY_FROM_JOB`, as a daemon leaves a Unix
-//! session), registered under the leader's pid, so the same `i32` session ids work (a
+//! session), registered under the leader's pid, so the same session ids (pids) work (a
 //! `Handle` keeps it registered, so its pid is not reused for a later session). The hang-up
 //! closes the pseudoconsole (ConPTY sends CTRL_CLOSE_EVENT to every process attached to
 //! it); `TerminateJobObject` ends what is left after the grace period. ConPTY gives the
-//! reader no EOF when its processes exit: `leader_exited` closes the pseudoconsole once the
-//! job is empty. A process that starts a grandchild before it joined its job (the moment
-//! after the spawn) leaves that grandchild out (docs/windows-port.md §5).
+//! reader no EOF when its processes exit: the pseudoconsole closes once the job is empty,
+//! which every job reports to one completion port that one thread reads for all sessions.
+//! A process that starts a grandchild before it joined its job (the moment after the spawn)
+//! leaves that grandchild out (docs/windows-port.md §5).
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -28,7 +29,7 @@ use portable_pty::MasterPty;
 /// `hang_up` closes the PTY (Windows: the pseudoconsole, which the session then owns until
 /// it is over). Unix does nothing here: the session exists already, and the kernel hangs
 /// it up when the PTY closes.
-pub fn register(pid: i32, hang_up: impl FnOnce() + Send + 'static) -> Handle {
+pub fn register(pid: u32, hang_up: impl FnOnce() + Send + 'static) -> Handle {
     Handle { sid: pid, _hold: imp::register(pid, Box::new(hang_up)).map(Arc::new) }
 }
 
@@ -37,38 +38,69 @@ pub fn register(pid: i32, hang_up: impl FnOnce() + Send + 'static) -> Handle {
 /// its leader exited (lingering processes, their kill) keeps one. Unix: the kernel gives no
 /// process the pid of a session that still has members, and allocates pids in turn. Windows
 /// reuses a pid as soon as its process is gone: the session stays registered, its job
-/// keeping a handle to the leader, until every clone is dropped and `leader_exited` is done.
+/// keeping a handle to the leader, until every clone is dropped and, after `leader_exited`,
+/// its pseudoconsole has closed.
 #[derive(Clone)]
 pub struct Handle {
-    sid: i32,
+    sid: u32,
     _hold: Option<Arc<imp::Hold>>,
 }
 
 impl Handle {
-    pub fn sid(&self) -> i32 {
+    pub fn sid(&self) -> u32 {
         self.sid
     }
 }
 
-/// Blocking, on the thread that saw the leader of session `sid` exit. Unix returns at once
-/// (the reader sees EOF once no process has the PTY open). Windows waits until no process
-/// of the session runs, then closes its pseudoconsole, so the reader sees EOF, and forgets
-/// the session once no `Handle` of it is left.
-pub fn leader_exited(sid: i32) {
+/// How a PTY's leader ended (`wait`).
+#[derive(Debug, Clone)]
+pub struct LeaderExit {
+    /// Its exit code as portable-pty reports it: 1 for a process a signal ended (Unix).
+    pub code: u32,
+    /// The signal that ended it, as portable-pty describes it (`strsignal`, which may be
+    /// translated). Unix only.
+    pub signal: Option<String>,
+    /// A request to end it did, rather than its own exit or a crash: on Unix a hang-up (its
+    /// terminal closed), terminate, kill or interrupt signal; not SIGSEGV, SIGABRT and the
+    /// like. Always false on Windows, where a process ended from outside (`TerminateProcess`,
+    /// as Task Manager's End task does) exits with the code it was given, 1 there, like one
+    /// that exited with that code by itself.
+    pub terminated: bool,
+}
+
+/// Blocking: wait for `child`, a PTY's leader (`SlavePty::spawn_command`), to exit. The code
+/// and signal are portable-pty's, as its own `wait` reports them.
+pub fn wait(child: &mut dyn portable_pty::Child) -> std::io::Result<LeaderExit> {
+    imp::wait(child)
+}
+
+/// A `LeaderExit` with the code and signal of portable-pty's status.
+fn leader_exit(s: portable_pty::ExitStatus, terminated: bool) -> LeaderExit {
+    LeaderExit { code: s.exit_code(), signal: s.signal().map(str::to_owned), terminated }
+}
+
+/// On the thread that saw the leader of session `sid` exit. Unix returns at once (the
+/// reader sees EOF once no process has the PTY open). Windows: once no process of the
+/// session runs, its pseudoconsole closes, so the reader sees EOF, and the session is
+/// forgotten once no `Handle` of it is left. That happens here when nothing else runs;
+/// else this returns at once, and the thread that reads the jobs' reports sees to it when
+/// the job reports it is empty (or finds it empty, at the latest a second later: Windows
+/// does not guarantee the report).
+pub fn leader_exited(sid: u32) {
     imp::leader_exited(sid);
 }
 
 /// `(pid, process group)` of every live process of session `sid`. Unix scans `/proc`,
 /// which also catches jobs an interactive shell put into process groups of their own.
 /// Windows: the processes in the session's job; the group is `sid`.
-pub fn members(sid: i32) -> Vec<(i32, i32)> {
+pub fn members(sid: u32) -> Vec<(u32, u32)> {
     imp::members(sid)
 }
 
 /// Hang up session `sid`, then end whatever is left of it after `grace` (SIGKILL; Windows:
 /// `TerminateJobObject`). Returns once the session is empty and `leader_gone()` holds, or
 /// right after that forced end.
-pub async fn kill(sid: i32, grace: Duration, leader_gone: impl Fn() -> bool) {
+pub async fn kill(sid: u32, grace: Duration, leader_gone: impl Fn() -> bool) {
     if sid <= 1 {
         return;
     }
@@ -91,20 +123,20 @@ pub async fn kill(sid: i32, grace: Duration, leader_gone: impl Fn() -> bool) {
 /// Which of `paths` the processes of the sessions `sids` hold open (blocking): for each
 /// path (as given) held by one of them, those sessions. Unix reads `/proc/<pid>/fd` of the
 /// members; Windows asks the Restart Manager who holds each path.
-pub fn holders(sids: &[i32], paths: &[PathBuf]) -> HashMap<PathBuf, Vec<i32>> {
+pub fn holders(sids: &[u32], paths: &[PathBuf]) -> HashMap<PathBuf, Vec<u32>> {
     imp::holders(sids, paths)
 }
 
 /// Whether a process outside the sessions `ours` holds `path` open (blocking; Unix reads
 /// every readable `/proc/<pid>/fd`, Windows asks the Restart Manager).
-pub fn held_outside(path: &Path, ours: &HashSet<i32>) -> bool {
+pub fn held_outside(path: &Path, ours: &HashSet<u32>) -> bool {
     imp::held_outside(path, ours)
 }
 
 /// Whether a process outside the sessions `ours`, working in the directory `cwd`, has a
 /// command line (its arguments, each followed by a NUL) that `matches` accepts (blocking;
 /// Unix reads `/proc`, Windows this user's processes through sysinfo).
-pub fn runs_outside(cwd: &Path, ours: &HashSet<i32>, matches: impl Fn(&[u8]) -> bool) -> bool {
+pub fn runs_outside(cwd: &Path, ours: &HashSet<u32>, matches: impl Fn(&[u8]) -> bool) -> bool {
     imp::runs_outside(cwd, ours, &matches)
 }
 
@@ -165,30 +197,48 @@ mod imp {
     /// Nothing to hold: the kernel keeps a session's pid while it has members.
     pub enum Hold {}
 
-    pub fn register(_pid: i32, _hang_up: Box<dyn FnOnce() + Send>) -> Option<Hold> {
+    pub fn register(_pid: u32, _hang_up: Box<dyn FnOnce() + Send>) -> Option<Hold> {
         None
     }
 
-    pub fn leader_exited(_sid: i32) {}
+    pub fn leader_exited(_sid: u32) {}
+
+    /// portable-pty's status names the signal but not its number, and reports a code of 1
+    /// with it. Its children are std's (`std::process::Child`), whose status has the number.
+    pub fn wait(child: &mut dyn portable_pty::Child) -> std::io::Result<super::LeaderExit> {
+        use std::os::unix::process::ExitStatusExt;
+        let Some(c) = child.downcast_mut::<std::process::Child>() else {
+            return Ok(super::leader_exit(child.wait()?, false));
+        };
+        let st = c.wait()?;
+        Ok(super::leader_exit(st.into(), st.signal().is_some_and(terminating)))
+    }
+
+    /// Signals that ask a process to end: a hang-up (its terminal closed, or Workbench's
+    /// kill), a terminate or kill request, an interrupt (Ctrl-C). Not those of a crash
+    /// (SIGSEGV, SIGABRT, SIGBUS…) or SIGQUIT's core dump.
+    pub(super) fn terminating(signal: i32) -> bool {
+        matches!(signal, libc::SIGHUP | libc::SIGTERM | libc::SIGKILL | libc::SIGINT)
+    }
 
     /// SIGHUP, and SIGCONT so stopped jobs can receive it, to every process group of the
     /// session. portable-pty's own kill signals the leader only, which leaves background
     /// and HUP-immune jobs behind.
-    pub fn hang_up(sid: i32) {
+    pub fn hang_up(sid: u32) {
         signal_session(sid, libc::SIGHUP);
         signal_session(sid, libc::SIGCONT);
     }
 
-    pub fn force_end(sid: i32) {
+    pub fn force_end(sid: u32) {
         signal_session(sid, libc::SIGKILL);
     }
 
     /// `(pid, pgrp)` of every live process whose session id is `sid` (scans `/proc/*/stat`).
-    pub fn members(sid: i32) -> Vec<(i32, i32)> {
+    pub fn members(sid: u32) -> Vec<(u32, u32)> {
         let mut v = Vec::new();
         let Ok(rd) = std::fs::read_dir("/proc") else { return v };
         for e in rd.flatten() {
-            let Ok(pid) = e.file_name().to_string_lossy().parse::<i32>() else { continue };
+            let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
             let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
             if let Some((state, pgrp, session)) = parse_stat(&stat) {
                 if state != "Z" && session == sid {
@@ -200,11 +250,11 @@ mod imp {
     }
 
     /// Live processes as `(pid, session id)` (zombies left out).
-    fn processes() -> Vec<(i32, i32)> {
+    fn processes() -> Vec<(u32, u32)> {
         let mut v = Vec::new();
         let Ok(rd) = std::fs::read_dir("/proc") else { return v };
         for e in rd.flatten() {
-            let Ok(pid) = e.file_name().to_string_lossy().parse::<i32>() else { continue };
+            let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
             let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
             if let Some((state, _, session)) = parse_stat(&stat) {
                 if state != "Z" {
@@ -217,28 +267,29 @@ mod imp {
 
     /// `(state, pgrp, session)` from a `/proc/<pid>/stat` line. The command name may
     /// contain spaces and parentheses, so fields are parsed after the *last* `)`.
-    pub(super) fn parse_stat(stat: &str) -> Option<(&str, i32, i32)> {
+    pub(super) fn parse_stat(stat: &str) -> Option<(&str, u32, u32)> {
         let rest = stat.rsplit_once(')')?.1;
         let f: Vec<&str> = rest.split_whitespace().collect();
         // f[0]=state f[1]=ppid f[2]=pgrp f[3]=session
         Some((f.first()?, f.get(2)?.parse().ok()?, f.get(3)?.parse().ok()?))
     }
 
-    fn signal_session(sid: i32, sig: i32) {
-        let mut pgrps: Vec<i32> = members(sid).into_iter().map(|(_, g)| g).filter(|g| *g > 1).collect();
+    fn signal_session(sid: u32, sig: i32) {
+        let mut pgrps: Vec<u32> = members(sid).into_iter().map(|(_, g)| g).filter(|g| *g > 1).collect();
         pgrps.push(sid);
         pgrps.sort_unstable();
         pgrps.dedup();
-        for g in pgrps {
+        // As `pid_t`: `-g` is then a group, never 0 or -1 (every process).
+        for g in pgrps.into_iter().filter_map(|g| i32::try_from(g).ok().filter(|g| *g > 1)) {
             // SAFETY: plain syscall; a negative pid signals the process group.
             unsafe { libc::kill(-g, sig) };
         }
     }
 
-    pub fn holders(sids: &[i32], paths: &[PathBuf]) -> HashMap<PathBuf, Vec<i32>> {
+    pub fn holders(sids: &[u32], paths: &[PathBuf]) -> HashMap<PathBuf, Vec<u32>> {
         // `/proc/<pid>/fd` links are canonical paths.
         let wanted: HashMap<PathBuf, &PathBuf> = paths.iter().map(|p| (super::super::path::canonicalize(p).unwrap_or_else(|_| p.clone()), p)).collect();
-        let mut out: HashMap<PathBuf, Vec<i32>> = HashMap::new();
+        let mut out: HashMap<PathBuf, Vec<u32>> = HashMap::new();
         if wanted.is_empty() {
             return out;
         }
@@ -262,14 +313,14 @@ mod imp {
         out
     }
 
-    pub fn held_outside(path: &Path, ours: &HashSet<i32>) -> bool {
+    pub fn held_outside(path: &Path, ours: &HashSet<u32>) -> bool {
         let want = super::super::path::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         processes().into_iter().filter(|(_, sid)| !ours.contains(sid)).any(|(pid, _)| {
             std::fs::read_dir(format!("/proc/{pid}/fd")).is_ok_and(|rd| rd.flatten().any(|fd| std::fs::read_link(fd.path()).is_ok_and(|t| t == want)))
         })
     }
 
-    pub fn runs_outside(cwd: &Path, ours: &HashSet<i32>, matches: &dyn Fn(&[u8]) -> bool) -> bool {
+    pub fn runs_outside(cwd: &Path, ours: &HashSet<u32>, matches: &dyn Fn(&[u8]) -> bool) -> bool {
         let cwd = super::super::path::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
         processes().into_iter().filter(|(_, sid)| !ours.contains(sid)).any(|(pid, _)| {
             std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|d| d == cwd) && std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| matches(&c))
@@ -316,39 +367,44 @@ mod imp {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::sync::{Arc, LazyLock};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use parking_lot::Mutex;
     use portable_pty::MasterPty;
-    use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
+    use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS, GetLastError, INVALID_HANDLE_VALUE, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED, PostQueuedCompletionStatus};
     use windows_sys::Win32::System::RestartManager::{
         CCH_RM_SESSION_KEY, RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
     };
+    use windows_sys::Win32::System::SystemServices::JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO;
+    use windows_sys::Win32::System::Threading::INFINITE;
 
     use crate::util::os::path;
     use crate::util::os::proc::{ProcGroup, own_pid_alive};
-    use crate::util::os::win32::wide_path;
+    use crate::util::os::win32::{Handle, wide_path};
 
     /// A terminal's session: the job its leader joined, and what closes its pseudoconsole.
     struct Session {
         group: ProcGroup,
+        /// What its job's reports to [`JOBS`] carry: unique, unlike a pid.
+        key: usize,
         hang_up: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         /// What keeps it registered: its `Hold` (the `Handle`s) and the waiter, until
-        /// `leader_exited` is done.
+        /// the pseudoconsole closed after the leader exited (`over`).
         holds: AtomicUsize,
     }
 
     /// Sessions by their leader's pid. The job keeps a handle to the leader, so that pid
     /// is not given to another process while its session is registered.
-    static SESSIONS: LazyLock<Mutex<HashMap<i32, Arc<Session>>>> = LazyLock::new(Default::default);
+    static SESSIONS: LazyLock<Mutex<HashMap<u32, Arc<Session>>>> = LazyLock::new(Default::default);
 
-    fn session(sid: i32) -> Option<Arc<Session>> {
+    fn session(sid: u32) -> Option<Arc<Session>> {
         SESSIONS.lock().get(&sid).cloned()
     }
 
     /// The `Handle`s' part in keeping a session registered; dropped with the last of them.
     pub struct Hold {
-        sid: i32,
+        sid: u32,
         session: Arc<Session>,
     }
 
@@ -359,7 +415,7 @@ mod imp {
     }
 
     /// One of what keeps `s` registered lets go; the last one forgets it.
-    fn release(sid: i32, s: &Arc<Session>) {
+    fn release(sid: u32, s: &Arc<Session>) {
         if s.holds.fetch_sub(1, Ordering::AcqRel) == 1 {
             let mut map = SESSIONS.lock();
             if map.get(&sid).is_some_and(|x| Arc::ptr_eq(x, s)) {
@@ -368,16 +424,21 @@ mod imp {
         }
     }
 
-    pub fn register(pid: i32, hang_up: Box<dyn FnOnce() + Send>) -> Option<Hold> {
-        let p = u32::try_from(pid).ok().filter(|p| *p > 1)?;
-        let s = Arc::new(Session { group: ProcGroup::attach_terminal(p), hang_up: Mutex::new(Some(hang_up)), holds: AtomicUsize::new(2) });
+    pub fn register(pid: u32, hang_up: Box<dyn FnOnce() + Send>) -> Option<Hold> {
+        if pid <= 1 {
+            return None;
+        }
+        static KEYS: AtomicUsize = AtomicUsize::new(1);
+        let key = KEYS.fetch_add(1, Ordering::Relaxed);
+        let group = ProcGroup::attach_terminal(pid, JOBS.as_ref().map(|port| (port.0, key)));
+        let s = Arc::new(Session { group, key, hang_up: Mutex::new(Some(hang_up)), holds: AtomicUsize::new(2) });
         SESSIONS.lock().insert(pid, s.clone());
         Some(Hold { sid: pid, session: s })
     }
 
     /// Whether a session is registered under `sid` (tests).
     #[cfg(test)]
-    pub fn registered(sid: i32) -> bool {
+    pub fn registered(sid: u32) -> bool {
         session(sid).is_some()
     }
 
@@ -387,41 +448,151 @@ mod imp {
         s.group.members().into_iter().filter(|p| own_pid_alive(*p)).collect()
     }
 
-    pub fn leader_exited(sid: i32) {
+    // ------------------------------------------------ the jobs' reports
+
+    /// The completion port every session's job reports to (its `key` in each report), and
+    /// the one thread that reads it for all of them ([`read_reports`]); `None` when either
+    /// could not be made. One port and one thread for the whole server, rather than a port
+    /// per session: a session whose leader exited while something it started runs on (a
+    /// background job, a GUI program) then costs no thread while it lingers, only a place
+    /// in [`WAITING`].
+    static JOBS: LazyLock<Option<Arc<Handle>>> = LazyLock::new(|| {
+        // SAFETY: a new completion port, tied to no file; one thread reads it.
+        let port = Arc::new(Handle::new(unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, std::ptr::null_mut(), 0, 1) })?);
+        let reader = port.clone();
+        std::thread::Builder::new().name("pty-jobs".into()).spawn(move || read_reports(&reader)).ok()?;
+        Some(port)
+    });
+
+    /// Sessions whose leader exited while some of their processes ran, by `key`, with their
+    /// sid: [`read_reports`] closes each once its job is empty.
+    static WAITING: LazyLock<Mutex<HashMap<usize, (u32, Arc<Session>)>>> = LazyLock::new(Default::default);
+
+    /// How often [`read_reports`] looks at the sessions in [`WAITING`] itself: Windows does
+    /// not guarantee a job's reports, so a lost "empty" delays the EOF by this at most.
+    pub(super) const RECHECK: Duration = Duration::from_secs(1);
+
+    /// The report `leader_exited` posts for a session it adds to [`WAITING`] (no job
+    /// message has this number): look at it now, its job may have emptied already.
+    const LOOK: u32 = 0;
+
+    pub fn leader_exited(sid: u32) {
         let Some(s) = session(sid) else { return };
-        // A job signals "empty" only through a completion port; its members are few, so poll.
-        let mut pause = Duration::from_millis(20);
-        while !live(&s).is_empty() {
-            std::thread::sleep(pause);
-            pause = (pause * 2).min(Duration::from_millis(500));
+        if !live(&s).is_empty() {
+            if JOBS.as_ref().is_some_and(|port| hand_over(port, sid, &s)) {
+                return;
+            }
+            // Nobody reads the reports: wait here.
+            let mut pause = Duration::from_millis(20);
+            while !live(&s).is_empty() {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_millis(500));
+            }
         }
-        // Already on a thread of its own: the close may wait for the last frame to be read.
+        over(sid, &s);
+    }
+
+    /// Leaves `s` to [`read_reports`] until its job is empty. False when the reader could
+    /// not be told (`s` is then not in [`WAITING`]).
+    fn hand_over(port: &Handle, sid: u32, s: &Arc<Session>) -> bool {
+        WAITING.lock().insert(s.key, (sid, s.clone()));
+        // SAFETY: a completion port; the report carries no OVERLAPPED.
+        if unsafe { PostQueuedCompletionStatus(port.0, LOOK, s.key, std::ptr::null()) } != 0 {
+            return true;
+        }
+        // Taken back, unless the reader has seen to it meanwhile.
+        WAITING.lock().remove(&s.key).is_none()
+    }
+
+    /// Nothing of the session runs any more: its pseudoconsole closes, so the reader sees
+    /// EOF (the close may wait for the console host's last frame to be read), and the
+    /// waiter's part in keeping it registered goes.
+    fn over(sid: u32, s: &Arc<Session>) {
         let close = s.hang_up.lock().take();
         if let Some(close) = close {
             close();
         }
-        release(sid, &s);
+        release(sid, s);
     }
 
-    pub fn members(sid: i32) -> Vec<(i32, i32)> {
-        session(sid).map(|s| live(&s).into_iter().map(|p| (p as i32, sid)).collect()).unwrap_or_default()
+    /// The `pty-jobs` thread: reads the reports of every session's job, and sees to the
+    /// sessions in [`WAITING`] whose job is empty: the one a report (its job's "no process
+    /// left", or `leader_exited`'s look) names at once, and all of them every [`RECHECK`].
+    fn read_reports(port: &Handle) {
+        let mut looked = Instant::now();
+        loop {
+            let wait = if WAITING.lock().is_empty() {
+                INFINITE
+            } else {
+                u32::try_from(RECHECK.saturating_sub(looked.elapsed()).as_millis()).unwrap_or(INFINITE - 1)
+            };
+            let (mut message, mut key, mut overlapped) = (0u32, 0usize, std::ptr::null_mut::<OVERLAPPED>());
+            // SAFETY: a completion port this thread keeps open; the three out-values are
+            // valid for the call.
+            let got = unsafe { GetQueuedCompletionStatus(port.0, &mut message, &mut key, &mut overlapped, wait) } != 0;
+            if got {
+                if message == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO || message == LOOK {
+                    see_to(|k| k == key);
+                }
+            } else {
+                // SAFETY: plain call, right after the failed one.
+                let error = unsafe { GetLastError() };
+                if error != WAIT_TIMEOUT {
+                    // The port failed (never seen): no busy loop, and the sessions are
+                    // still looked at.
+                    std::thread::sleep(RECHECK);
+                }
+            }
+            if looked.elapsed() >= RECHECK {
+                see_to(|_| true);
+                looked = Instant::now();
+            }
+        }
     }
 
-    pub fn hang_up(sid: i32) {
+    /// Closes the sessions in [`WAITING`] that `which` picks (by key) and whose job is
+    /// empty, each on a thread of its own: a close may wait for the reader.
+    fn see_to(which: impl Fn(usize) -> bool) {
+        let picked: Vec<(usize, u32, Arc<Session>)> =
+            WAITING.lock().iter().filter(|(k, _)| which(**k)).map(|(k, (sid, s))| (*k, *sid, s.clone())).collect();
+        for (key, sid, s) in picked {
+            // Removed by whoever sees it empty first (a `hand_over` taking it back too).
+            if !live(&s).is_empty() || WAITING.lock().remove(&key).is_none() {
+                continue;
+            }
+            let closing = s.clone();
+            if std::thread::Builder::new().name(format!("pty-close-{sid}")).spawn(move || over(sid, &closing)).is_err() {
+                over(sid, &s);
+            }
+        }
+    }
+
+    /// Never `terminated`: Task Manager's End task (`TerminateProcess`) leaves exit code 1
+    /// and nothing else, so it cannot be told from a process that exited with 1 itself. Only
+    /// the ends Workbench causes are known as such (the terminals slice notes them).
+    pub fn wait(child: &mut dyn portable_pty::Child) -> std::io::Result<super::LeaderExit> {
+        Ok(super::leader_exit(child.wait()?, false))
+    }
+
+    pub fn members(sid: u32) -> Vec<(u32, u32)> {
+        session(sid).map(|s| live(&s).into_iter().map(|p| (p, sid)).collect()).unwrap_or_default()
+    }
+
+    pub fn hang_up(sid: u32) {
         let Some(close) = session(sid).and_then(|s| s.hang_up.lock().take()) else { return };
         // ClosePseudoConsole can wait until the console host's last frame was read (the
         // reader drains it): not on the caller's thread.
         let _ = std::thread::Builder::new().name(format!("pty-close-{sid}")).spawn(close);
     }
 
-    pub fn force_end(sid: i32) {
+    pub fn force_end(sid: u32) {
         if let Some(s) = session(sid) {
             s.group.kill();
         }
     }
 
     /// Pids of the processes in the sessions `sids`.
-    fn pids_of(sids: impl IntoIterator<Item = i32>) -> HashSet<u32> {
+    fn pids_of(sids: impl IntoIterator<Item = u32>) -> HashSet<u32> {
         sids.into_iter().filter_map(session).flat_map(|s| live(&s)).collect()
     }
 
@@ -468,9 +639,9 @@ mod imp {
         None
     }
 
-    pub fn holders(sids: &[i32], paths: &[PathBuf]) -> HashMap<PathBuf, Vec<i32>> {
-        let mut out: HashMap<PathBuf, Vec<i32>> = HashMap::new();
-        let owners: Vec<(i32, HashSet<u32>)> =
+    pub fn holders(sids: &[u32], paths: &[PathBuf]) -> HashMap<PathBuf, Vec<u32>> {
+        let mut out: HashMap<PathBuf, Vec<u32>> = HashMap::new();
+        let owners: Vec<(u32, HashSet<u32>)> =
             sids.iter().filter(|s| **s > 1).map(|s| (*s, pids_of([*s]))).filter(|(_, pids)| !pids.is_empty()).collect();
         if owners.is_empty() {
             return out;
@@ -489,7 +660,7 @@ mod imp {
         out
     }
 
-    pub fn held_outside(path: &Path, ours: &HashSet<i32>) -> bool {
+    pub fn held_outside(path: &Path, ours: &HashSet<u32>) -> bool {
         let Some(pids) = holding(path).filter(|p| !p.is_empty()) else { return false };
         let own = pids_of(ours.iter().copied());
         pids.iter().any(|p| !own.contains(p))
@@ -511,7 +682,7 @@ mod imp {
         may_be && path::canonicalize(a).is_ok_and(|c| equal(&c))
     }
 
-    pub fn runs_outside(cwd: &Path, ours: &HashSet<i32>, matches: &dyn Fn(&[u8]) -> bool) -> bool {
+    pub fn runs_outside(cwd: &Path, ours: &HashSet<u32>, matches: &dyn Fn(&[u8]) -> bool) -> bool {
         use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
         let want = path::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
         let own = pids_of(ours.iter().copied());
@@ -619,12 +790,25 @@ mod tests {
         assert_eq!(imp::parse_stat("garbage"), None);
     }
 
+    /// Signals that ask a process to end make its exit `terminated`; a crash's do not (they
+    /// dump core, so `pty::tests` does not raise them).
+    #[cfg(unix)]
+    #[test]
+    fn only_requests_to_end_are_terminating_signals() {
+        for sig in [libc::SIGHUP, libc::SIGTERM, libc::SIGKILL, libc::SIGINT] {
+            assert!(imp::terminating(sig), "{sig}");
+        }
+        for sig in [libc::SIGSEGV, libc::SIGABRT, libc::SIGBUS, libc::SIGFPE, libc::SIGILL, libc::SIGQUIT, libc::SIGUSR1, libc::SIGPIPE] {
+            assert!(!imp::terminating(sig), "{sig}");
+        }
+    }
+
     #[test]
     fn nothing_is_known_of_sessions_never_registered() {
         // Pid 1 is never a terminal's (and 0 and below are ignored).
         assert!(holders(&[0, 1], &[PathBuf::from("x")]).is_empty());
         #[cfg(windows)]
-        assert!(members(i32::MAX - 7).is_empty());
+        assert!(members(u32::MAX - 7).is_empty());
     }
 
     #[test]
@@ -633,6 +817,17 @@ mod tests {
         assert_eq!(wt.iter().all(|v| PARENT_TERMINAL_VARS.contains(v)), cfg!(windows));
         #[cfg(unix)]
         assert!(PARENT_TERMINAL_VARS.is_empty());
+    }
+
+    #[cfg(windows)]
+    async fn eventually(mut f: impl FnMut() -> bool) -> bool {
+        for _ in 0..400 {
+            if f() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
     }
 
     /// Windows: a session is a job that holds what its leader starts (a grandchild
@@ -645,16 +840,6 @@ mod tests {
         use std::process::Stdio;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
-
-        async fn eventually(mut f: impl FnMut() -> bool) -> bool {
-            for _ in 0..400 {
-                if f() {
-                    return true;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            false
-        }
 
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("held.txt");
@@ -672,7 +857,7 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let sid = child.id() as i32;
+        let sid = child.id();
         let hung_up = Arc::new(AtomicBool::new(false));
         let h = hung_up.clone();
         let handle = register(sid, move || h.store(true, Ordering::Release));
@@ -684,13 +869,13 @@ mod tests {
         assert!(!held_outside(&file, &[sid].into()));
         assert!(held_outside(&file, &HashSet::new()));
         assert!(!held_outside(&other, &HashSet::new()));
-        let pids: Vec<u32> = members(sid).into_iter().map(|(p, _)| p as u32).collect();
+        let pids: Vec<u32> = members(sid).into_iter().map(|(p, _)| p).collect();
         // cmd ignores CTRL_CLOSE_EVENT here (no pseudoconsole): the grace period ends it.
         kill(sid, Duration::from_millis(300), || false).await;
         assert!(eventually(|| hung_up.load(Ordering::Acquire)).await, "the hang-up ran");
         let status = child.wait().unwrap();
         assert!(!status.success());
-        assert!(eventually(|| pids.iter().all(|p| !crate::util::os::proc::pid_alive(*p as i32))).await, "{pids:?} outlived the kill");
+        assert!(eventually(|| pids.iter().all(|p| !crate::util::os::proc::pid_alive(*p))).await, "{pids:?} outlived the kill");
         assert!(members(sid).is_empty());
         // The waiter's part: the pseudoconsole closes. The session is forgotten only once
         // no handle is left: until then, its pid cannot be another session's.
@@ -701,5 +886,52 @@ mod tests {
         assert!(imp::registered(sid), "a handle is left");
         drop(copy);
         assert!(!imp::registered(sid));
+    }
+
+    /// Windows: a session whose leader exited while something it started runs on keeps no
+    /// thread waiting: `leader_exited` returns at once, the pseudoconsole stays open while
+    /// that process runs (the jobs thread's own looks included), and closes as soon as the
+    /// job reports that it is empty, well within the 500 ms the poll it replaces stepped
+    /// up to.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_lingering_session_closes_once_its_job_is_empty() {
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        // The first ping gives the leader time to join its job; `start /b` leaves the second
+        // running in it once cmd has exited.
+        let mut leader = std::process::Command::new("cmd")
+            .args(["/d", "/c"])
+            .raw_arg("ping -n 2 127.0.0.1 >nul & start /b ping -n 60 127.0.0.1 >nul")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let sid = leader.id();
+        let closed = Arc::new(parking_lot::Mutex::new(None::<Instant>));
+        let c = closed.clone();
+        let handle = register(sid, move || *c.lock() = Some(Instant::now()));
+        assert!(leader.wait().unwrap().success());
+        let lingering = members(sid);
+        assert!(!lingering.is_empty(), "the second ping lingers");
+        let at = Instant::now();
+        tokio::task::spawn_blocking(move || leader_exited(sid)).await.unwrap();
+        assert!(at.elapsed() < Duration::from_millis(500), "leader_exited waited {:?} for the lingering ping", at.elapsed());
+        tokio::time::sleep(imp::RECHECK + Duration::from_millis(500)).await;
+        assert!(closed.lock().is_none(), "closed while the ping ran");
+        let ended = Instant::now();
+        for (pid, _) in lingering {
+            crate::util::os::proc::kill_pid(pid);
+        }
+        assert!(eventually(|| closed.lock().is_some()).await, "not closed once the job was empty");
+        let took = closed.lock().expect("closed").saturating_duration_since(ended);
+        assert!(took < Duration::from_millis(400), "closed {took:?} after the last process ended");
+        // Forgotten with its last handle (the close runs on a thread of its own).
+        drop(handle);
+        assert!(eventually(|| !imp::registered(sid)).await);
     }
 }

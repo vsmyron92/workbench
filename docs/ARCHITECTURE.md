@@ -81,7 +81,7 @@ web/               React 19 + TS + Vite 8
   src/features/<slice>/   one folder per slice; index.ts exports a FeatureModule
 docs/              this file
 packaging/linux/   install.sh shipped in the Linux release archive
-packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows release archive; workbench.ico, embedded in the Windows executables (from web/scripts/icons.mjs)
+packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows release archive; workbench.ico (from web/scripts/icons.mjs) and workbench.manifest, embedded in the Windows executables
 .github/workflows/ ci.yml (web and server build + tests, Linux and Windows), release.yml (tag → Linux archive, Windows zip when `RELEASE_WINDOWS` is set, + GitHub release)
 ```
 
@@ -114,6 +114,7 @@ packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows rele
   - Values are resolved in the backend (`AppState::secret(project, name)`).
   - They never go to the browser, never go into argv, and are never logged.
   - Text streamed to the UI can be passed through `secrets::redact`.
+  - A machine overlay that does not parse is left out whole (a project warning). A secret missing for that reason answers with the overlay's error in one line (`Project::overlay_error`), not with advice to add it there.
 - **Environment overrides:**
   - `WORKBENCH_CONFIG_DIR` and `WORKBENCH_DATA_DIR` isolate instances. Every test or dev run that is not the owner's real instance must set both.
   - `WORKBENCH_LOG` sets the tracing filter.
@@ -149,7 +150,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
   - A hosted session is confined to its own project over MCP. Tools resolve the project with `McpCtx::project_for`, which refuses a `projectId` naming another project; terminal tools show only what `McpCtx::may_see_project` allows. Only a caller that is not a session (the master token without `X-Workbench-Terminal`) may name any project.
 - **Git credentials** (`git::askpass`): remote ops (fetch, pull, push, rebase) let git ask `workbench askpass`, which answers only for the GitLab host Workbench has a token for (the project's `[repo.gitlab]` with its own token, else `[gitlab]`), only over https, and only when the prompt names that host unambiguously: git before its CVE-2024-50349 fix prints user names decoded, so `Password for 'https://gitlab.com/@evil.example': ` (user `gitlab.com/`) is refused. For that host the ops also empty git's credential helper list (`-c credential.https://<host>.helper=`, `askpass::reset_helpers_key`), so no helper (Git Credential Manager, `store`, `cache`, a keychain) is asked for it or handed the token to store; other hosts keep the user's helpers.
 - **Paths:** every client path goes through `util::paths::resolve_in_root`, or through `resolve_absolute_in` for extra roots. These reject `..` escapes and symlinks leaving the root.
-  - Whether a string is an absolute path, and the Windows rules, live in `util::os::path`. On Windows client paths use `/` only (a `\` could slip past checks that split on `/`), and names that alias another file or a device are refused (`:`, device names like `NUL` or `com1.txt`, a trailing dot or space, 8.3 short names like `GIT~1`); roots compare without regard to ASCII case; UNC roots (`\\server\share`, `\\wsl$`, also spelled `\\?\UNC\…` or `\??\UNC\…`) are refused: adding one as a project answers `unsupported_platform` (`networkRoots`), so does a path that resolves to one (a mapped network drive), and config.toml entries naming one are skipped at reload before anything opens them. Canonical paths drop `\\?\` wherever a plain path names the same file and have an uppercase drive letter; comparisons take `\\?\C:\` for `C:\`. Linux keeps its rules.
+  - Whether a string is an absolute path, and the Windows rules, live in `util::os::path`. On Windows client paths use `/` only (a `\` could slip past checks that split on `/`), and names that alias another file or a device are refused (`:`, device names like `NUL` or `com1.txt`, a trailing dot or space, 8.3 short names like `GIT~1`); roots compare without regard to ASCII case; UNC roots (`\\server\share`, `\\wsl$`, also spelled `\\?\UNC\…` or `\??\UNC\…`) are refused: adding one as a project answers `unsupported_platform` (`networkRoots`), so does a path that resolves to one (a mapped network drive), and config.toml entries naming one are skipped at reload before anything opens them. Canonical paths drop `\\?\` wherever a plain path names the same file and have an uppercase drive letter; comparisons take `\\?\C:\` for `C:\`. Linux keeps its rules: a `\` is part of a name, in the paths clients send and in the relative paths the server answers with, which `os::path::to_slash` writes with `/` on Windows only (`util::paths::relative_to`, listings, search, quick open, the watcher).
   - **Links to other computers are never followed** (Windows): opening a link to `\\host\share` signs in to that host with the user's credentials, and repositories can hold such links. `os::path::canonicalize` resolves links one at a time, reading each target before following it, and refuses UNC, device and NT targets (`is_refused_link`: `resolve_in_root` answers 403, a listing shows a broken link); `os::path::leaves_machine` / `leaves_machine_below` check a path before Workbench opens it by itself (detection, `.workbench.toml`, ignore files and walks, the watcher, run and debug configurations, the project's MCP files, the projects under a root). Linux follows links as before.
 - **PTY input is code execution.** Every authenticated device is fully trusted, so remote exposure requires pairing and should use TLS (a proxy such as `tailscale serve` or Caddy, or `[server.tls]`).
 - **Dev containers:** a `devcontainer.json` (with its Dockerfile and compose files) is repository content that runs code on the host's Docker. Nothing builds or starts without the user's approval of the exact plan (a sha256 the server checks); agents can only read the status. The bridge listener on a container network's gateway serves only `/api/hooks/**` and `/mcp`, only with agent tokens. See "Dev containers".
@@ -182,7 +183,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 | `<slice>::mcp_tools() -> Vec<McpTool>` | each slice | platform (`/mcp` server via `mcp::all_tools`) |
 | `<slice>::{router, start}`, `terminals::shutdown`, `apps::shutdown`, `lsp::shutdown`, `debug::shutdown` | each slice | app.rs |
 | `git::{cli_askpass, cli_git_editor}`, `terminals::cli_statusline`, `platform::service::cli` | git, terminals, platform | main.rs (`askpass`, `git-editor`, `statusline`, `service`; `cli_askpass` also for `util::os::helper::askpass_prompt`) |
-| `mcp::call_api(state, method, path, body, ctx)` | core | any MCP tool that reuses a REST route |
+| `mcp::call_api(state, method, path, body, ctx)` (a route's error keeps its status and message, and its code when it is one of Workbench's own, `error::CODES`: `not_configured`, `unsupported_platform` with its `feature`…; any other is `upstream`) | core | any MCP tool that reuses a REST route |
 | `McpCtx::{project_for, may_see_project}` | core | every MCP tool that takes a project or reads another terminal |
 | `AppState::secret`, `events.emit/ui_open/ui_open_id/notify`, `projects.require/find_by_path` | core | everyone |
 | `Project::{gitlab, github}() -> Option<(host, path)>` | core | gitlab, github, forge, apps, UI (`ProjectSummary.gitlab/github`) |
@@ -194,13 +195,14 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 - `spawn_redacted(state, spec, secrets)` masks the given secret values (`${secret:…}` in a run's env) in the output at the source: the screen, saved screens, the WebSocket, `screen_text` and MCP never see them. On Windows a value is also masked when ConPTY's repainting puts escape sequences between its characters.
 - `POST /api/terminals/{id}/restart` re-runs a run/command terminal only when that is safe without its owner: log follows (`meta.action = "logs"`), Remote Control servers, or `meta.restartable = true`. Run configurations restart through apps; deploys and env commands only from their environment, so gates and confirmation run again. Others get `409 not_restartable`.
 - `TerminalInfo.lingering` counts processes the exited process left running in its session; kill, close and restart end them.
-- A terminal's processes are a session of `util::os::session`, keyed by the leader's pid: a Unix session (hang-up: SIGHUP and SIGCONT to its process groups, SIGKILL after the grace period), on Windows a Job Object the leader joins right after the spawn (a process that asks to leave it may: `JOB_OBJECT_LIMIT_BREAKAWAY_OK`), in a pseudoconsole (ConPTY). There the hang-up closes the pseudoconsole (CTRL_CLOSE_EVENT to every attached process) and `TerminateJobObject` ends the rest; the pseudoconsole also closes once the leader has exited and the job is empty, since ConPTY gives no EOF of its own; `lingering` counts the job's live processes. A GUI program is a member like any other: a browser or editor that a terminal's program starts when it was not running yet ends with the terminal, where on Linux its launcher usually puts it in a session of its own (a known Windows difference, windows-port.md §1.F). `Pty::spawn` always hands portable-pty an absolute program (`util::os::exe::launch`: a relative path from the terminal's cwd, a bare name from its own `PATH` first): npm shims run as node and their script, a batch file only with a path and arguments cmd.exe reads as they are and with `NoDefaultCurrentDirectoryInExePath=1`, and an agent's initial prompt is pasted instead of passed to a batch file when it holds `% ! ^ & | < > "` or a line break. Every terminal but an interactive shell's (runs, pre-launch steps, commands, agent CLIs) gets `util::os::exe::child_env` last, so a cmd.exe among its processes never runs a program from the current directory; a shell keeps the lookup its user types commands for (in cmd.exe `build` runs the `build.bat` there).
+- A terminal's processes are a session of `util::os::session`, keyed by the leader's pid: a Unix session (hang-up: SIGHUP and SIGCONT to its process groups, SIGKILL after the grace period), on Windows a Job Object the leader joins right after the spawn (a process that asks to leave it may: `JOB_OBJECT_LIMIT_BREAKAWAY_OK`), in a pseudoconsole (ConPTY). There the hang-up closes the pseudoconsole (CTRL_CLOSE_EVENT to every attached process) and `TerminateJobObject` ends the rest; the pseudoconsole also closes once the leader has exited and the job is empty, since ConPTY gives no EOF of its own; `lingering` counts the job's live processes. A GUI program is a member like any other: a browser or editor that a terminal's program starts when it was not running yet ends with the terminal, where on Linux its launcher usually puts it in a session of its own (a known Windows difference, windows-port.md §1.F). `Pty::spawn` always hands portable-pty an absolute program (`util::os::exe::launch`: a relative path from the terminal's cwd, a bare name from its own `PATH` first): npm shims run as node and their script, a batch file only with a path and arguments cmd.exe reads as they are and with `NoDefaultCurrentDirectoryInExePath=1`, and an agent's initial prompt is pasted instead of passed to a batch file when it holds `% ! ^ & | < > "` or a line break. Every terminal but an interactive shell's (runs, pre-launch steps, commands, agent CLIs) gets `util::os::exe::child_env` last, so a cmd.exe among its processes never runs a program from the current directory; a shell keeps the lookup its user types commands for (in cmd.exe `build` runs the `build.bat` there). Every terminal's `PATH` is `util::os::env::fresh_path()` (`base_env`; a spec's own `PATH` wins): the one a new sign-in gets, then Workbench's own absolute entries it lacks, so a program installed since Workbench started is found (portable-pty lays the registry's `Environment` values over Workbench's environment anyway).
 
 **Handlers:**
 - Return `ApiResult<Json<T>>`. JSON is camelCase (`#[serde(rename_all = "camelCase")]`).
 - Errors come from the `ApiError` constructors. Use `not_configured` for a missing token, site or similar, which makes the UI show setup help.
 - A feature the OS leaves out answers `ApiError::unsupported(feature, reason)`: HTTP 501, `{error: {code: "unsupported_platform", message, feature}}`. The table of such features is `util::os::support` (`Feature`, `unsupported(f)`, `require(f)`, `require_root(path)`); everything is supported on Linux. MCP tools return the same reason.
 - Use `conflict` for optimistic-concurrency failures and `upstream` for remote failures.
+- A slice's own code (`ApiError::new(status, code, …)`, such as `port_in_use`) is also listed in `error::CODES`, so an MCP tool that calls the route through `mcp::call_api` gets it too; a test checks the list against the source.
 
 ### Operating-system layer (util::os)
 
@@ -215,18 +217,19 @@ The plan and its status are in [windows-port.md](windows-port.md).
 | Area | What callers get | Where Windows differs |
 |---|---|---|
 | `perm` | private files and directories: `apply(path, mode)`, `create_dir_private`, `open_new`, `open_append`, `set_len` (use it, not `File::set_len`, on a file opened for appending), `privacy`, `owned_by_me`; `util::fs::write_atomic` sits on it | A mode without group or other bits (0600, 0700) is a protected DACL for the user and SYSTEM, set at creation and inherited inside a directory; other modes inherit the folder's ACL. `privacy` reads the DACL; a replacement gets the replaced file's DACL. An append handle may not truncate (std's `set_len` on it is access denied): `set_len` reopens it for writing. |
-| `fs` | `rename_noreplace`, `rename_exchange`, symlinks, `trash`, `read_text` (a text file the user wrote), `NATIVE_CRLF`, `FOREIGN_OWNERS` | `MoveFileExW` without replacing; no atomic exchange (`rename_unsupported`, callers fall back); creating a symlink needs Developer Mode or an administrator; the Recycle Bin; `read_text` also decodes UTF-16LE and UTF-8 with a byte order mark (Windows PowerShell 5.1's files). |
+| `fs` | `rename_noreplace`, `rename_exchange`, symlinks, `trash`, `read_text` (a text file the user wrote), `NATIVE_CRLF`, `FOREIGN_OWNERS` | `MoveFileExW` without replacing; no atomic exchange (`rename_unsupported`, callers fall back); creating a symlink needs Developer Mode or an administrator; the Recycle Bin (`SHFileOperationW`; a path of MAX_PATH characters or more through `IFileOperation`, whose progress sink refuses a delete for good), which `trash` answers `not_recyclable` (422, with why and how to delete it instead) for what it does not take (no bin on the drive, the bin off, a file larger than it, a long path the shell cannot open or the bin does not take); `read_text` also decodes UTF-16LE and UTF-8 with a byte order mark (Windows PowerShell 5.1's files). |
 | `proc` | `ProcGroup` (a child and what it starts), `pid_alive`, `kill_pid`, `exit_text`, `current_exe`, `user_processes`, `debugger_attached`, `shutdown_signal(data_dir)`, `enable_ctrl_c` | Job Objects instead of process groups: a child gets a hidden console of its own and joins a job with `KILL_ON_JOB_CLOSE`; `terminate` and `kill` both end the job (the graceful step is the protocol's: LSP exit, DAP disconnect). Process lists through sysinfo. The server stops on Ctrl-C, Ctrl-Break, the console closing or the event `Local\workbench-<hash of data_dir>` (`request_stop`; one per Windows session, `session_of`). `serve` clears the inherited "ignore Ctrl-C" first (`enable_ctrl_c`), so Ctrl-C works in its terminals however it was started. |
 | `shell` | `interactive()` (terminals), `run_argv` / `run_command` (runs, pre-launch steps, service commands), `plain_command` (the notify command), `quote` for that shell, `posix_quote` for POSIX shells elsewhere (ssh hosts, containers), `helper_command` | PowerShell: `pwsh`, else Windows PowerShell. Commands run as `-NoProfile -EncodedCommand` (UTF-16LE, base64), which no argv quoting can alter, and keep the failing program's exit code (127 when not found). `readable_stderr` (what `util::proc::run_cmd` keeps) turns the CLIXML PowerShell writes its own records in on a pipe (errors, warnings, progress) into the console's text, without colour escapes. No `-OutputFormat Text`: pwsh would then write warnings to stdout. |
-| `exe` | `resolve` / `which`, `is_executable`, `configured(argv)` (a config.toml command), `launch(argv, cwd, env) -> Result<Launch, String>` (a terminal's argv and what its environment gets on top; on Windows `Err` when the program is not found or is a batch file cmd.exe would misread), `python()`, `rustup_proxy`, `child_env`, `INSTALLED_SINCE` (the end of a "not found on PATH" message) | Lookup over `PATH` × `PATHEXT`, then `%USERPROFILE%\.local\bin` and `%APPDATA%\npm`, never the current directory. An npm `.cmd` shim starts as `node.exe <script>` (`Kind::NpmShim`); another batch file only when `batch_args_safe` (BatBadBut). `child_env` (`NoDefaultCurrentDirectoryInExePath=1`) goes to what `run_cmd`, `command`, `configured` and `shell::command` start, language servers and every terminal but an interactive shell's. A program installed after the server started stays off its `PATH` until it restarts; the messages say so. |
+| `exe` | `resolve` / `which`, `is_executable`, `configured(argv)` (a config.toml command), `launch(argv, cwd, env) -> Result<Launch, String>` (a terminal's argv and what its environment gets on top; on Windows `Err` when the program is not found or is a batch file cmd.exe would misread), `python()`, `rustup_proxy`, `child_env`, `program_env` (what a program the server starts by itself gets), `INSTALLED_SINCE` (the end of a "not found on PATH" message) | Lookup over `PATH` × `PATHEXT`, then `%USERPROFILE%\.local\bin` and `%APPDATA%\npm`, never the current directory. An npm `.cmd` shim starts as `node.exe <script>` (`Kind::NpmShim`); another batch file only when `batch_args_safe` (BatBadBut). `child_env` (`NoDefaultCurrentDirectoryInExePath=1`) goes to what `run_cmd`, `command`, `configured` and `shell::command` start, language servers and every terminal but an interactive shell's. A lookup that misses then tries the folders only a new sign-in's `PATH` has (`env::path_added`), so a program installed after the server started is found. What `command`, `configured` and `shell::command` start and language servers get those folders after the server's own `PATH` (`program_env`: `child_env` and `env::child_path`, before the caller's variables), so such a program finds what it runs in turn (gopls its `go`). git, started by name through std, keeps the server's own `PATH`, and its message says to restart (`INSTALLED_SINCE`). |
+| `env` | `user_default()` (the environment a new sign-in of the user gets), `fresh_path()` (a terminal's `PATH`), `child_path()` (the `PATH` of a program the server starts by itself, `exe::program_env`) | `CreateEnvironmentBlock` for the process's token without its own variables, re-read once HKLM's or HKCU's `Environment` key changes (`RegNotifyChangeKeyValue`); `fresh_path` is its `Path`, then the process's own absolute entries it lacks; `child_path` is the process's own `PATH`, then that `Path`'s absolute entries it lacks (`None` when there are none). `None` on Unix: terminals, the programs the server starts and the service keep the process's environment. |
 | `path` | `is_absolute_str`, `check_component` / `check_relative`, `stays_inside`, `to_slash`, `canonicalize`, `leaves_machine` / `leaves_machine_below` / `ancestors_leave`, `is_refused_link`, `strip_prefix`, file-URI helpers, `data_home`, `private_dirs`, `pgpass_file` | Drive letters and `\`; device names, `:` streams, 8.3 names and trailing dots refused; UNC roots unsupported; links followed one at a time and never to a network path or a device; dunce and an uppercase drive letter; case-insensitive comparisons (see "Paths" in the security model). Data in `%LOCALAPPDATA%`, config in `%APPDATA%`. |
 | `net` | `interfaces`, `bind` (the server's socket), `kill_port_holders` | `GetAdaptersAddresses`; `[::]` made dual-stack; port owners from `GetExtendedTcpTable`, only the same user's processes. |
 | `desktop` | `open_url`, `notify_send` | A Chromium browser from App Paths with `--app=`, else `ShellExecuteW`, for http(s) URLs only; no desktop notifications yet. |
-| `session` | a terminal's processes: `register` (its `Handle` keeps the sid naming that session while a clone lives: the lingering processes follow it), `leader_exited`, `members`, `kill(sid, grace, leader_gone)` (returns once the session is empty and `leader_gone()` holds, or right after the forced end), `holders` (who holds a file open), `held_outside`, `runs_outside`, the PTY's `Output` (the redaction hold-back), and `PARENT_TERMINAL_VARS` (this OS's variables of the terminal Workbench was started from, cleared in its terminals) | Windows Terminal's `WT_SESSION` and `WT_PROFILE_ID` are cleared; a Job Object per terminal (`ProcGroup::attach_terminal`: what it starts may leave on request, `JOB_OBJECT_LIMIT_BREAKAWAY_OK`) in a pseudoconsole; hang-up is `ClosePseudoConsole`, then `TerminateJobObject`; the reader gets EOF once the job is empty; the session stays registered, its job holding the leader's pid, until that and every `Handle` are over (Windows reuses pids at once); `RmGetList` for open files; sysinfo for cwd and command lines. |
+| `session` | a terminal's processes: `register` (its `Handle` keeps the sid naming that session while a clone lives: the lingering processes follow it), `wait` (the leader's exit: portable-pty's code and signal, and `terminated` when a hang-up, terminate, kill or interrupt signal ended it, whatever code portable-pty adds; `ExitInfo::terminated`, with Workbench's own kills), `leader_exited`, `members`, `kill(sid, grace, leader_gone)` (returns once the session is empty and `leader_gone()` holds, or right after the forced end), `holders` (who holds a file open), `held_outside`, `runs_outside`, the PTY's `Output` (the redaction hold-back), and `PARENT_TERMINAL_VARS` (this OS's variables of the terminal Workbench was started from, cleared in its terminals) | Windows Terminal's `WT_SESSION` and `WT_PROFILE_ID` are cleared; a Job Object per terminal (`ProcGroup::attach_terminal`: what it starts may leave on request, `JOB_OBJECT_LIMIT_BREAKAWAY_OK`) in a pseudoconsole; hang-up is `ClosePseudoConsole`, then `TerminateJobObject`; the reader gets EOF once the job is empty (every job reports that to one completion port, read by one `pty-jobs` thread for all terminals, which also looks every second: the reports are not guaranteed), so `leader_exited` returns at once while something the leader started runs on; `wait` never says `terminated` (Task Manager's End task leaves exit code 1, like a program that exits with 1), so only Workbench's own kills count; the session stays registered, its job holding the leader's pid, until that and every `Handle` are over (Windows reuses pids at once); `RmGetList` for open files; sysinfo for cwd and command lines. |
 | `watch` | `debouncer` (the files, config and Workspace watchers), `RECURSIVE`, `FOLDERS_MODIFY`, `RESCAN_IS_OVERFLOW` | Our own `ReadDirectoryChangesW` watcher, one recursive watch per root, overflow as `Flag::Rescan`, no file-id cache. |
 | `helper` | `askpass_env` (the environment that makes git ask Workbench for credentials: `GIT_ASKPASS`, a `#!/bin/sh` wrapper on Unix), `askpass_prompt` (main.rs, before clap) | No script: `GIT_ASKPASS` and ssh's `SSH_ASKPASS` name `workbench.exe`, with `WORKBENCH_HELPER=askpass`, `SSH_ASKPASS_REQUIRE=force` and `GCM_INTERACTIVE=never`. |
 | `support` | `Feature`, `unsupported`, `require`, `require_root`, `require_local_root` (a root the user names, links on the way included): what this OS leaves out (`/api/health`, `unsupported_platform`) | Dev containers, desktop notifications, gdb attach, rust-gdb's printers and network or WSL roots are unsupported; Services is experimental. Everything is supported on Linux. |
-| `autostart` (Windows only) | the `Run` value, `StartupApproved`, Start Menu shortcuts, `start_detached` / `start_apart`, `elevated`, `interactive`, `message_box` | `workbench service` on Windows (`platform/service_windows.rs`, "Service install"). |
+| `autostart` (Windows only) | the `Run` value, `StartupApproved`, Start Menu shortcuts, `start_detached` / `start_apart` (in the caller's environment or a given one), `elevated`, `interactive`, `message_box` | `workbench service` on Windows (`platform/service_windows.rs`, "Service install"). |
 | `dll` | `restrict_search()`, called at the start of `serve` | `SetDefaultDllDirectories`: a DLL loaded by name (portable-pty's `conpty.dll`) comes only from the executable's folder or System32, never the current directory or `PATH`. A no-op on Unix. |
 
 Windows builds use the MSVC target with a static C runtime (`server/.cargo/config.toml`). The
@@ -254,7 +257,7 @@ release archive adds `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY 
 - Data comes from `api` (`api/client.ts`; `api.upload(path, blob, query, onProgress, signal)` streams a raw-body upload with progress; `getDeviceKey()` hands the device key to the service worker) and `useEvent` / `useInvalidateOn` (`api/events.ts`). After a reconnect or `lagged`, `installResync` (mounted once in `App.tsx`) refetches every active query once; `useInvalidateOn` only handles its own event types.
 - Shared queries: `useProjects`, `useProject` and `useTerminals`; `installProjectsSync` (once) keeps the first two fresh from `projects.changed` and `git.changed`. The terminals slice keeps the `['terminals']` cache fresh.
 - The theme preference is applied to `<html data-theme>` synchronously by the store (`state/store.ts`), before React re-renders, so xterm and Monaco effects read the new CSS variables. Highlighted code outside Monaco uses the `--syn-*` tokens.
-- **Editor models** (files contract, `features/files/modelAccess.ts`): a project file's Monaco model is `file:///<projectId>/<path>` (`~abs` for absolute paths), created only by the files slice's buffers. Other features use `modelUriString` / `parseModelUri` / `modelFile(uri, projectOnly?)` (the file an editor shows; lsp, debug and git all parse model URIs with it), `peekModel`, `readText`, `ensureModel` (+ `release`), `saveModel`, `isDirty`, `onBuffersChange`, `onBufferRevision`. Other schemes: `lsp-src://<pid>/<abs>` (lsp's read-only library files), `inmemory://debug-source/<sid>/…` (debug), `inmemory://git-diff/…` (git's diff sides). Features hooking every editor (lsp, debug, git) guard against hooking one twice and add their actions a microtask after `onDidCreateEditor`.
+- **Editor models** (files contract, `features/files/modelAccess.ts`): a project file's Monaco model is `file:///<projectId>/<path>` (`~abs` for absolute paths: `file:///~abs/etc/hosts`, and on a Windows server `file:///~abs/C%3A%5Cx` for `C:\x`, which `parseModelUri` gives back as `C:\x`), created only by the files slice's buffers. Other features use `modelUriString` / `parseModelUri` / `modelFile(uri, projectOnly?)` (the file an editor shows; lsp, debug and git all parse model URIs with it), `peekModel`, `readText`, `ensureModel` (+ `release`), `saveModel`, `isDirty`, `onBuffersChange`, `onBufferRevision`, and for the paths models carry `isAbsolutePath` (`/…`, and `C:\…` or `C:/…` on a Windows server, from `api/health.ts`), `basename` (also at `\` on Windows) and `samePath` (on Windows without regard to `/` versus `\` or ASCII case). Project-relative paths use `/` on every OS; Copy Path and drag and drop join them to the root with its own separator (`joinAbsolute`). Other schemes: `lsp-src://<pid>/<abs>` (lsp's read-only library files), `inmemory://debug-source/<sid>/…` (debug), `inmemory://git-diff/…` (git's diff sides). Features hooking every editor (lsp, debug, git) guard against hooking one twice and add their actions a microtask after `onDidCreateEditor`.
 - **The editor gutter is shared.** The glyph margin (on in the files slice's editor) carries debug breakpoints and execution point, and Monaco's code-action lightbulb when a line leaves it no room (lsp quick fixes): debug ignores clicks on the lightbulb. VCS change bars are line decorations (files), blame is in the line numbers, diagnostics are markers (lsp), git's line checkboxes live in the glyph margins of its own diff editors (`inmemory:` models, which debug does not decorate). Context menu groups: `navigation` (Ask Agent), `1_lsp`, Monaco's `1_modification`, `9_cutcopypaste`, `9_git`, `y_debug`, `z_workbench`.
 - **UI:** use `@/ui` components and the design tokens. Features must not introduce new colour literals. Monaco comes through `MonacoEditor` / `MonacoDiffEditor`, logs through `AnsiLog`, markdown through `Markdown`.
 
@@ -382,7 +385,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `debug.session` | `SessionInfo`; `{id, projectId, removed: true}` when an ended session is forgotten | debug |
 | `debug.output` | `{sessionId, lines}` (a flood sends 500 lines; the UI fetches the rest) | debug |
 | `debug.breakpoints` | the whole breakpoints view (lines, functions, exception filters, muted, watches) | debug |
-| `run.state` | `{name, state, port?, url?, terminalId?, startedAt?, readyAt?, exit?, result?, error?, phase?, inContainer?, reach?}` | apps |
+| `run.state` | `{name, state, port?, url?, terminalId?, startedAt?, readyAt?, exit?, result?, error?, terminated?, phase?, inContainer?, reach?}` | apps |
 | `devcontainer.state` | `{projectId, state, containerId?, inContainer}` (`none`, `stopped`, `running`, `building`, `error`) | devcontainer |
 | `docker.changed` | `{kinds: ('container' \| 'image')[]}` (a container or image changed; `docker events`, 300 ms debounce, `exec_*` ignored; also after each Services action) | devcontainer |
 | `env.health` | `{env, status, httpStatus?, latencyMs?, version?, checkedAt, error?, sample?}`; partial updates `{env, previewChanged}`, `{env, deploying}`, `{env, versionInfo}` | apps |
@@ -453,8 +456,8 @@ interface GitStatus {
 // git — GET /api/projects/{pid}/git/diff?path=&mode=working|staged|commit|compare&sha=&base=&head=
 interface GitFileDiff {
   path: string; oldPath?: string
-  original: string; modified: string          // full texts ('' when absent); on Windows the working tree as git
-                                               // reads it (LF where git turns its CRLFs into LFs, like the hunks)
+  original: string; modified: string          // full texts ('' when absent); the working tree as git reads it
+                                               // (LF where git turns its CRLFs into LFs, like the hunks)
   binary: boolean; tooLarge: boolean
   hunks: { header: string; oldStart: number; oldLines: number; newStart: number; newLines: number }[]
   fingerprint: string                          // pass back when staging hunks or lines
@@ -542,8 +545,10 @@ npm test           # vitest (src/**/*.test.ts)
   `windows-latest` job builds the server (`cargo build --locked`), runs `cargo test --locked
   --no-fail-fast` (with Python for the test fakes and `core.autocrlf false`; its Rust cache is
   kept when tests fail) and then, once the build has succeeded and whether the tests passed or
-  not, `install.ps1` under Windows PowerShell 5.1. It counts like the other two jobs: a failed
-  step fails the run (no `continue-on-error`).
+  not, `install.ps1` under Windows PowerShell 5.1: an install, then `-Uninstall`, refused
+  (naming the server's pid) while the installed server runs and then checked to remove the
+  service's Start Menu shortcut, the folder and exactly the PATH entry it added. It counts
+  like the other two jobs: a failed step fails the run (no `continue-on-error`).
 - **Releases** (`release.yml`): bump `version` in `server/Cargo.toml` (and `web/package.json`),
   give CHANGELOG.md a `## X.Y.Z - date` section, commit, then push a `vX.Y.Z` tag. The
   workflow refuses a tag that does not match the crate version, builds the UI and the
@@ -571,7 +576,17 @@ npm test           # vitest (src/**/*.test.ts)
   existing one lets others write), adds it to the user PATH (`HKCU\Environment`, then
   `WM_SETTINGCHANGE`), renames files in use aside (`*.old`, removed by the next install,
   renames retried on sharing violations), removes the Mark of the Web from what it installs
-  and exits non-zero on failure.
+  and exits non-zero on failure. `install.ps1 -Uninstall` (same `-Prefix`) changes nothing
+  while a program runs from the folder, or when it cannot tell (processes by executable
+  path through `QueryFullProcessImageNameW`, no WMI; a `workbench.exe`, `workbenchw.exe` or
+  `OpenConsole.exe` of the current session whose path cannot be read counts as running),
+  runs `workbench service uninstall [--name N]` for the services whose `Run` value or Start
+  Menu shortcut starts that folder's `workbenchw.exe` (another folder's stay), deletes the
+  files `install.ps1` puts there, removes exactly the PATH entry it added (the value keeps
+  its type; `WM_SETTINGCHANGE`), then deletes `workbench.exe` (so running it again finishes
+  an interrupted run) and the folder when nothing else is left in it, leaves a folder
+  without `workbench.exe` alone, and keeps the configuration and data folders, printing
+  where they are.
 
 ## Second phase (2026-09-26): Workspace, agent providers, GitHub, broader detection
 
@@ -1104,7 +1119,12 @@ gateway inside Docker Desktop's VM, and there is no uid mapping): `/api/projects
 and `devcontainer_status` answer 501 `unsupported_platform`, `summary` is `None`, `running_target`
 gives the reason and no container is polled. What asks for the container explicitly (a container
 terminal or agent session, language servers' `container` mode) checks `require_supported` and
-answers the same. Services works there and is marked experimental.
+answers the same. Services works there and is marked experimental. The reason, getting-started
+and Help point Windows users to the Linux build inside a WSL 2 distribution with Docker Engine
+installed in it, where the gateway is a local address (a browser on Windows then opens only
+published ports: `container-ip` links stay inside the distribution); with Docker Desktop's WSL
+integration it may not be, and the bridge fails as on Windows (docs/windows-port.md §5;
+neither is tested).
 
 ## Third phase (2026-09-27): code intelligence, debugger, CLion VCS, Confluence authoring, push, approvals, local history
 
@@ -1301,7 +1321,9 @@ too), `modelUriFor`,
 `peekModel` (open model, no loading), `readText` (buffer text with unsaved edits, else
 disk), `ensureModel(pid, path) → {model, release}` (a buffer of the files slice; edits make
 it dirty like any edit), `saveModel`, `isDirty`, `isReadOnly`, `onBuffersChange`,
-`onBufferRevision` (saved or reloaded), `hasOpenBuffers`. `buffers.ts` exports `modelUri`.
+`onBufferRevision` (saved or reloaded), `hasOpenBuffers`, and the path helpers
+`isAbsolutePath`, `basename`, `samePath` (Windows drive paths, see "Editor models" under
+TypeScript). `buffers.ts` exports `modelUri`.
 
 **UI** (`features/lsp`). Providers are registered once for `file:` and `lsp-src:` models and
 route each call to the model's server by capability (anything else answers nothing, so
@@ -1712,11 +1734,16 @@ context would put lines after it, the change is kept and a copy with a newline i
 emitted (the smallest valid patch). Lines are raw bytes (CRLF and any encoding
 round-trip). A working tree git checks out with CRLF over an LF index (`core.autocrlf`,
 `text`/`eol=crlf` attributes): git's diffs already show it with LF, so the staging patches
-are LF and `git apply` writes CRLF back when rolling back. On Windows (`eol::FOLLOWS_GIT`;
-`eol.rs` reads `git ls-files --eol` and `core.autocrlf`) Workbench also shows the
-working-tree side (`modified`, a conflict's `merged`) with LF and writes a conflict resolved
-with edited text back with CRLF; files git does not convert keep their bytes, and on Linux
-every file does. Part of an untracked file becomes a `new file` patch; an intent-to-add
+are LF and `git apply` writes CRLF back when rolling back. On every OS Workbench follows git
+for any file git reads with LF although it has CRLF on disk: the working-tree side
+(`modified`, a conflict's `merged`) is shown with LF and a conflict resolved with edited
+text is written back with CRLF (`eol.rs` reads `git ls-files --eol` and `core.autocrlf`,
+only for a file with a CRLF in it: an LF file costs no git call). Besides the checkouts
+above, that is a file saved with CRLF over an LF index under `text`, `text=auto` or
+`core.autocrlf=input`, and CRLF committed as is under a `text` or `eol` attribute (git shows
+every line changed until it is renormalized). Files git does not convert (`-text`, CRLF
+committed as is under the automatic conversions, no conversion configured) keep their
+bytes. Part of an untracked file becomes a `new file` patch; an intent-to-add
 entry gets a modification patch; renames patch the new path; every line of a new/deleted
 file becomes the file-level operation; partial roll back of a deleted file and partial
 unstage of a staged deletion are refused. Binary, LFS, symlink, submodule and conflicted diffs offer no lines.
@@ -1839,6 +1866,25 @@ separators (`rebase_i::sh_path`; Git for Windows runs them with its sh). On Wind
 (`os::fs::FOREIGN_OWNERS`) a repository git refuses for its owner (`safe.directory`,
 "detected dubious ownership") answers `403 unsafe_repository` with git's message verbatim
 (it names the owners and the command that trusts the folder) instead of `not_a_repo`.
+The check is core's `util::git::refuses`, which the other readers of a checkout share:
+`util::git`'s `try_` queries say why git gave no answer (`Failure`: not installed, timed
+out, refused, git's message, or a working folder that is gone, which is not a missing git
+although the spawn fails with `NotFound`). `From<Failure> for ApiError` answers a missing
+git, a timeout and a refusal as this slice does (`not_configured`, `timeout`,
+`403 unsafe_repository`); every other failure, a folder that is no repository among them
+(this slice's `404 not_a_repo`), is `422 git_error` with git's message. So a project summary
+warns about a refused folder with the command that trusts it
+(`util::git::refused_warning`), a deploy reports git's failure instead of "no commits", and
+the forge pollers and CI summaries (`…_logged`) still leave the branch out but log a
+refusal, a missing git or a timeout once per folder instead of dropping it silently. The UI
+keeps the message's line breaks (`ErrorBox`), copies git's `git config --global --add
+safe.directory …` line (`trustCommand`, through `@/ui`'s `copyText`, which falls back to
+`execCommand` on plain HTTP), and the status bar shows "Untrusted repository" where the
+branch would be.
+Remote ops that fail because ssh would have had to ask (an unknown host key, a key with a
+passphrase: `Permission denied (publickey)`) get a hint for doing that once in a terminal or
+loading the key into an agent; a changed host key gets a warning to check its fingerprint
+first, and a revoked one a warning not to trust it again (`remote::explain_failure`).
 
 **UI.** Commit tool window: tabs **Changes / Stash / Shelf**; Changes groups by the
 staging area (as before) or by **changelists** (toolbar ▸ Group by), with a checkbox per
@@ -2070,7 +2116,10 @@ favicon's) by `node web/scripts/icons.mjs` (no dependencies; generated PNGs are 
 circle), `apple-touch-icon.png` (180, full bleed), `badge-96.png` (monochrome notification badge),
 and, outside the web bundle, `packaging/windows/workbench.ico` (PNG images of 16–256 px: the icon
 `server/build.rs` embeds in the Windows executables with a version resource, through the
-build-dependency `winresource`; a build without a resource compiler only warns).
+build-dependency `winresource`; a build without a resource compiler only warns). The same
+resource holds the application manifest `packaging/windows/workbench.manifest`: Windows 10/11
+as `supportedOS`, Common Controls 6 (message boxes), `longPathAware` and `asInvoker`, in the test
+executables too, where a `cfg(windows)` test in `os::autostart` checks that Windows applies it.
 `spa.rs` serves `/sw.js` as `text/javascript` with `no-cache` and its own CSP (`spa::SW_CSP`:
 `default-src 'self'`, same-origin fetches only) and the manifest as `application/manifest+json`
 with `no-cache`; the SPA's CSP is unchanged (`worker-src 'self'` covers the registration). A launch
@@ -2248,7 +2297,9 @@ panel is narrow.
   shortcut and detached starts in `util::os::autostart`): no Windows service (it would lose
   the desktop and Credential Manager and need admin), a per-user sign-in entry instead.
   `install` writes `%LOCALAPPDATA%\workbench\service.json` (`service-<name>.json`: a marker
-  `note` and the set `WORKBENCH_CONFIG_DIR`/`DATA_DIR`/`LOG`; not `PATH`) and the Start Menu
+  `note` and the set `WORKBENCH_CONFIG_DIR`/`DATA_DIR`/`LOG`; not `PATH`: whoever starts the
+  supervisor, `install --enable` and `service open` included, starts it in the user's sign-in
+  environment, `os::env::user_default`, with these) and the Start Menu
   shortcut `Workbench.lnk` (`Workbench-<name>.lnk`; written by the shell's ShellLink object,
   the marker in its description) running `workbenchw.exe [--name <name>] open`. `--enable`
   sets `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `Workbench`
@@ -2576,9 +2627,9 @@ sees, per project in `data_dir/local-history/<pid>/`.
   an agent's shell commands carry no path and stay "Changed on disk" (no guessing).
   `base` "Opened in Workbench" (the first version the editor read) and "Last commit
   (HEAD)" (before the first recorded change of a git-tracked file with no history, its
-  committed version from a bounded `git cat-file`; on Windows, for a file with CRLFs on
-  disk, with the line ends a checkout writes by git's rules (`core.autocrlf`, `core.eol`,
-  the `text`/`eol`/`crlf` attributes, read with bounded `git config`/`git check-attr`);
+  committed version from a bounded `git cat-file`; for a file with CRLFs on disk, with the
+  line ends a checkout writes by git's rules on every OS (`core.autocrlf`, `core.eol`, the
+  `text`/`eol`/`crlf` attributes, read with bounded `git config`/`git check-attr`);
   watcher batches of up to 20 files and hooks only). `deleted` (a tracked path, or
   everything tracked below a folder, is gone), `label` (Put Label…) and `auto` ("Before
   git pull": the first `git.op` line of any op but fetch, push and remote-branch deletion).

@@ -1,5 +1,5 @@
-# LF in the repository and in working trees on every OS (the git slice's diffs and line
-# staging compare the index with the working tree byte for byte).
+# LF in the repository and in working trees on every OS; the scripts Windows runs keep CRLF
+# in working trees (Workbench's diffs and line staging read them as git does, with LF).
 * text=auto eol=lf
 *.ps1 text eol=crlf
 *.cmd text eol=crlf

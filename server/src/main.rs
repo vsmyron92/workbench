@@ -105,13 +105,22 @@ fn is_command(word: &str) -> bool {
     word.starts_with('-') || word == "help" || Cli::command().find_subcommand(word).is_some()
 }
 
+/// Whether the log (on stdout) gets colour escapes: only on a terminal, never in a file
+/// or a pipe (the Windows service's `service.log`, a systemd journal, a redirect), and
+/// not when `NO_COLOR` is set to anything but an empty value (<https://no-color.org>).
+fn log_in_colour(stdout_is_terminal: bool, no_color: Option<&std::ffi::OsStr>) -> bool {
+    stdout_is_terminal && no_color.is_none_or(|v| v.is_empty())
+}
+
 fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {
+    let colour = log_in_colour(std::io::IsTerminal::is_terminal(&std::io::stdout()), std::env::var_os("NO_COLOR").as_deref());
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("WORKBENCH_LOG")
                 .unwrap_or_else(|_| "workbench=info,tower_http=warn".into()),
         )
         .with_target(false)
+        .with_ansi(colour)
         .init();
 
     // A Workbench started from inside a Claude Code session must not leak that
@@ -209,4 +218,17 @@ fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    #[test]
+    fn the_log_is_in_colour_only_on_a_terminal_without_no_color() {
+        assert!(super::log_in_colour(true, None));
+        assert!(super::log_in_colour(true, Some(OsStr::new(""))), "an empty NO_COLOR does not count");
+        assert!(!super::log_in_colour(true, Some(OsStr::new("1"))));
+        assert!(!super::log_in_colour(false, None), "a file or a pipe (service.log, the journal)");
+    }
 }

@@ -430,12 +430,10 @@ fn seed_from_head(store: &mut Store, checkout: &mut Checkout, rel: &str, now: &[
 
 /// Committed files as a checkout of `root` writes them: with CRLF line ends where git's
 /// rules say so (`core.autocrlf`, the default of Git for Windows, or the `text`/`eol`
-/// attributes), else as committed. Compared as committed, every line of such a file would
-/// differ. The settings are read from git once (bounded, like `head_blob`), the
+/// attributes, on every OS), else as committed. Compared as committed, every line of such a
+/// file would differ. The settings are read from git once (bounded, like `head_blob`), the
 /// attributes per file, and only for a file with a line end to convert that has CRLFs on
-/// disk. Only where checkouts write CRLF by default (Windows): elsewhere HEAD is kept as
-/// committed with no lookup, as it always was (following git there too would be a Linux
-/// change for the owner to decide, like the git slice's `eol`).
+/// disk: any other file is kept as committed with no lookup (like the git slice's `eol`).
 struct Checkout<'a> {
     root: &'a Path,
     config: Option<EolConfig>,
@@ -448,7 +446,7 @@ impl<'a> Checkout<'a> {
 
     /// `head` as the checkout that wrote `now`, the file on disk, would have written it.
     fn as_checked_out<'b>(&mut self, rel: &str, head: &'b [u8], now: &[u8]) -> Cow<'b, [u8]> {
-        if !crate::util::os::fs::NATIVE_CRLF || !now.windows(2).any(|w| w == b"\r\n") || !has_lone_lf(head) {
+        if !now.windows(2).any(|w| w == b"\r\n") || !has_lone_lf(head) {
             return Cow::Borrowed(head);
         }
         let root = self.root;
@@ -758,13 +756,18 @@ fn host_file(file: &str, cwd: &Path, container: Option<Option<&(PathBuf, String)
 
 /// `abs` as a path in the project at `root` (which it must stay inside, also
 /// through symlinks), trying the canonical folder when the plain path is not under
-/// `root` (a session started in a symlinked checkout).
+/// `root` (a session started in a symlinked checkout). Spelled as the disk spells it
+/// (`os::path::on_disk_case`), so the store keys a file one way whatever case an agent
+/// wrote it in (Windows).
 fn rel_in_project(root: &Path, abs: &Path) -> Option<String> {
     let rel = util::paths::relative_to(root, abs).or_else(|| {
         let canon = util::os::path::canonicalize(abs.parent()?).ok()?.join(abs.file_name()?);
         util::paths::relative_to(root, &canon)
     })?;
     let checked = util::paths::resolve_in_root(root, &rel).ok()?;
+    let disk = util::os::path::on_disk_case(root, &checked);
+    // Another spelling is checked like the first.
+    let checked = if disk == checked { checked } else { util::paths::resolve_in_root(root, &util::paths::relative_to(root, &disk)?).ok()? };
     util::paths::relative_to(root, &checked).filter(|r| !r.is_empty())
 }
 

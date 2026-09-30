@@ -175,7 +175,7 @@ async fn wait_for(mut f: impl FnMut() -> bool) {
 }
 
 fn alive(pid: u32) -> bool {
-    crate::util::os::proc::pid_alive(pid as i32)
+    crate::util::os::proc::pid_alive(pid)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -181,6 +181,11 @@
   background: var(--warning-bg);
   border-color: color-mix(in srgb, var(--warning) 40%, transparent);
 }
+/* Messages keep their line breaks (git's run to several lines, the last one a command). */
+.wb-error-message {
+  white-space: pre-wrap;
+  tab-size: 2;
+}
 
 .wb-badge {
   display: inline-flex;

@@ -123,23 +123,32 @@ impl AppState {
     /// then the global ones. A name that repository config refers to
     /// (`Project::repo_secret_names`) never reaches the global secrets, so a
     /// repository cannot send config.toml's tokens where it likes.
+    ///
+    /// When the machine overlay was left out (it does not parse, or cannot be read), a
+    /// missing secret's message gives its error: the secret may well be written there.
     pub fn secret(&self, project: Option<&Project>, name: &str) -> Result<Secret, ApiError> {
+        let mut overlay_note = String::new();
         if let Some(p) = project {
             if let Some(r) = p.config.secrets.get(name) {
                 return self.secrets.resolve_ref(&format!("{}/{name}", p.id), r);
             }
+            let overlay = || crate::config::contract_tilde(&self.paths.project_overlay(&p.id));
             if p.repo_secret_names.contains(name) {
-                return Err(ApiError::not_configured(format!(
-                    "secret {name:?} is named by this repository's own config, so Workbench takes it only from the machine overlay: add it under [secrets] in {}",
-                    crate::config::contract_tilde(&self.paths.project_overlay(&p.id))
-                )));
+                let why = format!("secret {name:?} is named by this repository's own config, so Workbench takes it only from the machine overlay");
+                return Err(ApiError::not_configured(match &p.overlay_error {
+                    Some(e) => format!("{why}, and {} could not be loaded: {e}", overlay()),
+                    None => format!("{why}: add it under [secrets] in {}", overlay()),
+                }));
+            }
+            if let Some(e) = &p.overlay_error {
+                overlay_note = format!(" (or in this project's machine overlay, {}, which could not be loaded: {e})", overlay());
             }
         }
         let r: Option<SecretRef> = self.config.read().secrets.get(name).cloned();
         match r {
             Some(r) => self.secrets.resolve_ref(name, &r),
             None => Err(ApiError::not_configured(format!(
-                "no secret named {name:?}; add it under [secrets] in config.toml"
+                "no secret named {name:?}; add it under [secrets] in config.toml{overlay_note}"
             ))),
         }
     }
@@ -267,6 +276,55 @@ mod tests {
         assert_eq!(extra("192.168.1.5:7777").as_deref(), Some("127.0.0.1:7777"));
         assert_eq!(extra("127.0.0.2:7868").as_deref(), Some("127.0.0.1:7868"));
         assert_eq!(extra("[::1]:7777").as_deref(), Some("127.0.0.1:7777"));
+    }
+
+    /// A machine overlay that does not parse (here a Windows path pasted into a TOML basic
+    /// string, where `\U` starts an escape) is left out whole. A secret it would hold gets
+    /// the overlay's error, not advice to add the secret to the file that already has it.
+    #[tokio::test]
+    async fn a_secret_missing_because_the_overlay_does_not_parse_names_its_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("proj");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".workbench.toml"), "[repo.github]\npath = \"mock/proj\"\ntoken = \"mock\"\n").unwrap();
+        let token = dir.path().join("token");
+        crate::util::fs::write_atomic(&token, b"s3cret", 0o600).unwrap();
+        let mut cfg = crate::config::GlobalConfig::default();
+        cfg.projects.roots = vec![];
+        cfg.projects.include = vec![repo.display().to_string()];
+        cfg.notify.desktop = false;
+        let app = crate::platform::testutil::app_with(cfg).await;
+        let state = &app.state;
+        let overlay = state.paths.project_overlay("proj");
+        std::fs::create_dir_all(overlay.parent().unwrap()).unwrap();
+        // Write the overlay and reload the project.
+        async fn load(state: &super::AppState, overlay: &std::path::Path, text: &str) -> std::sync::Arc<crate::projects::Project> {
+            std::fs::write(overlay, text).unwrap();
+            state.projects.reload(state).await;
+            state.projects.require("proj").unwrap()
+        }
+
+        let p = load(state, &overlay, "[secrets]\nmock = { file = \"C:\\Users\\me\\token\" }\n").await;
+        assert!(p.overlay_error.is_some(), "{:?}", p.warnings);
+        let e = state.secret(Some(&p), "mock").unwrap_err();
+        assert_eq!(e.code, "not_configured");
+        assert!(e.message.contains("could not be loaded") && e.message.contains("line 2"), "{}", e.message);
+        assert!(!e.message.contains("add it under"), "{}", e.message);
+        // A name config.toml may hold: the overlay could have held it too.
+        let e = state.secret(Some(&p), "gitlab").unwrap_err();
+        assert!(e.message.contains("config.toml") && e.message.contains("could not be loaded") && e.message.contains("line 2"), "{}", e.message);
+
+        // The same kind of path in a literal string parses, and the secret resolves.
+        let p = load(state, &overlay, &format!("[secrets]\nmock = {{ file = '{}' }}\n", token.display())).await;
+        assert_eq!(p.overlay_error, None);
+        assert_eq!(state.secret(Some(&p), "mock").unwrap().expose(), "s3cret");
+
+        // An overlay that loads but lacks the secret: add it there.
+        let p = load(state, &overlay, "[secrets]\n").await;
+        let e = state.secret(Some(&p), "mock").unwrap_err();
+        assert!(e.message.ends_with(&format!("add it under [secrets] in {}", crate::config::contract_tilde(&overlay))), "{}", e.message);
+        let e = state.secret(Some(&p), "gitlab").unwrap_err();
+        assert!(!e.message.contains("overlay"), "{}", e.message);
     }
 
     /// Public, and names the OS and what it leaves out: nothing on Linux.

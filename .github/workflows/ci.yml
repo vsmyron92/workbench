@@ -72,13 +72,77 @@ jobs:
         run: cargo build --locked
       - run: cargo test --locked --no-fail-fast
       # The release archive's installer under Windows PowerShell 5.1, as users run it (the
-      # release job also installs over a running server); it runs when tests fail too.
+      # release job also installs over a running server), then its -Uninstall: refused, naming
+      # the server, while Workbench runs from the folder, then the service, the folder and the
+      # PATH entry go. It runs when tests fail too.
       - name: install.ps1
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           $stage = (New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'wb-stage')).FullName
           Copy-Item -LiteralPath ../packaging/windows/install.ps1, target/debug/workbench.exe, target/debug/workbenchw.exe -Destination $stage
+          $installer = Join-Path $stage 'install.ps1'
           $prefix = Join-Path $env:RUNNER_TEMP 'wb-install'
-          powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stage 'install.ps1') -Prefix $prefix
+          # The user PATH as stored (type and raw text; install.ps1 drops a trailing ;).
+          function Get-UserPath {
+            $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+            try {
+              if ($key.GetValueNames() -notcontains 'Path') { return '' }
+              '{0}: {1}' -f $key.GetValueKind('Path'), $key.GetValue('Path', '', 'DoNotExpandEnvironmentNames').TrimEnd(';')
+            } finally {
+              $key.Close()
+            }
+          }
+          $pathBefore = Get-UserPath
+          powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Prefix $prefix
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          & (Join-Path $prefix 'workbench.exe') --version
+          $bin = Join-Path $prefix 'workbench.exe'
+          & $bin --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Get-UserPath).Contains($prefix)) { Write-Output '::error::install.ps1 did not add its folder to the user PATH'; exit 1 }
+          # A service of this folder (its Start Menu shortcut; nothing starts), on scratch directories.
+          $scratch = (New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'wb-uninstall')).FullName
+          $env:WORKBENCH_CONFIG_DIR = Join-Path $scratch 'config'
+          $env:WORKBENCH_DATA_DIR = Join-Path $scratch 'data'
+          & $bin service install
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'Workbench.lnk'
+          if (-not (Test-Path -LiteralPath $lnk)) { Write-Output '::error::workbench service install wrote no Start Menu shortcut'; exit 1 }
+          # -Uninstall changes nothing while Workbench runs from the folder.
+          $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $probe.Start(); $port = $probe.LocalEndpoint.Port; $probe.Stop()
+          $server = Start-Process -FilePath $bin -ArgumentList 'serve', '--bind', "127.0.0.1:$port" -NoNewWindow -PassThru `
+            -RedirectStandardOutput (Join-Path $scratch 'out.log') -RedirectStandardError (Join-Path $scratch 'err.log')
+          $serverId = $server.Id
+          # Its output (stderr included), to check that it names the server.
+          $said = @(powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Uninstall -Prefix $prefix 2>&1) -join "`n"
+          $refused = $LASTEXITCODE
+          Write-Output $said
+          $running = -not $server.HasExited
+          if ($running) { Stop-Process -Id $server.Id -Force }
+          $server.WaitForExit()
+          $server.Dispose()
+          if (-not $running) {
+            Get-Content -LiteralPath (Join-Path $scratch 'out.log'), (Join-Path $scratch 'err.log')
+            Write-Output '::error::the server stopped'
+            exit 1
+          }
+          if ($refused -eq 0 -or -not (Test-Path -LiteralPath $bin) -or -not (Test-Path -LiteralPath $lnk) -or -not (Get-UserPath).Contains($prefix)) {
+            Write-Output '::error::install.ps1 -Uninstall changed something while Workbench ran from the folder'
+            exit 1
+          }
+          if (-not $said.Contains("Workbench is running from ${prefix}:") -or -not $said.Contains("workbench.exe (pid $serverId)")) {
+            Write-Output "::error::install.ps1 -Uninstall stopped without naming the running server (pid $serverId)"
+            exit 1
+          }
+          powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Uninstall -Prefix $prefix
+          if ($LASTEXITCODE -ne 0) { Write-Output '::error::install.ps1 -Uninstall failed'; exit 1 }
+          if (Test-Path -LiteralPath $prefix) { Write-Output '::error::install.ps1 -Uninstall left the folder'; exit 1 }
+          if (Test-Path -LiteralPath $lnk) { Write-Output '::error::install.ps1 -Uninstall left the Start Menu shortcut'; exit 1 }
+          $pathAfter = Get-UserPath
+          if ($pathAfter -cne $pathBefore) {
+            Write-Output "::error::the user PATH was '$pathBefore' before the install and is '$pathAfter' after the uninstall"
+            exit 1
+          }
+          # Once more: nothing left to do.
+          powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Uninstall -Prefix $prefix
+          if ($LASTEXITCODE -ne 0) { Write-Output '::error::install.ps1 -Uninstall failed with nothing installed'; exit 1 }

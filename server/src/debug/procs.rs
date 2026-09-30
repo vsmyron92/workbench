@@ -49,18 +49,71 @@ pub fn ptrace_hint(scope: Option<u8>) -> Option<String> {
     }
 }
 
+/// A guess of a process's language: by its image name (`node`, `node.exe`), else by the
+/// program its command line starts with (a process may name itself anything).
 fn language_of(name: &str, command: &str) -> &'static str {
-    let first = command.split_whitespace().next().unwrap_or(name);
-    let base = first.rsplit('/').next().unwrap_or(first);
-    if base.starts_with("python") || name.starts_with("python") {
+    match language_of_program(name) {
+        "native" => language_of_program(program_name(command)),
+        known => known,
+    }
+}
+
+/// The language of the program file `file` (`python3`, `node.exe`, `javaw.exe`).
+fn language_of_program(file: &str) -> &'static str {
+    let base = without_exe(file).unwrap_or(file);
+    if base.starts_with("python") {
         "python"
-    } else if base == "node" || base == "deno" || base == "bun" {
+    } else if matches!(base, "node" | "deno" | "bun") {
         "javascript"
-    } else if base == "java" {
+    } else if matches!(base, "java" | "javaw") {
         "java"
     } else {
         "native"
     }
+}
+
+/// The file name of the program a command line starts with (the process's arguments
+/// joined with spaces, as listed): `/usr/bin/python3 app.py`, `"C:\Program Files\x\y.exe" a`,
+/// or a Windows path with spaces unquoted, which ends at the first word ending in `.exe`
+/// before anything that starts another argument (`C:\Program Files\nodejs\node.exe
+/// app.js`). Both `/` and `\` separate: a guess from text, the same on every OS.
+fn program_name(command: &str) -> &str {
+    let command = command.trim_start();
+    let path = match command.strip_prefix('"') {
+        Some(rest) => rest.split('"').next().unwrap_or(rest),
+        None => {
+            let first = command.split_whitespace().next().unwrap_or("");
+            let b = first.as_bytes();
+            let drive_path = (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/')) || first.starts_with(r"\\");
+            if drive_path && without_exe(first).is_none() { unquoted_exe(command).unwrap_or(first) } else { first }
+        }
+    };
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// `s` without its final `.exe` (in any case), when it has one.
+fn without_exe(s: &str) -> Option<&str> {
+    let i = s.len().checked_sub(4)?;
+    s.get(i..).filter(|ext| ext.eq_ignore_ascii_case(".exe")).map(|_| &s[..i])
+}
+
+/// The start of `command` up to the first word ending in `.exe`, taken as one path with
+/// spaces; `None` when a word that starts another argument (`-x`, `/x`, a drive, a quote)
+/// comes first.
+fn unquoted_exe(command: &str) -> Option<&str> {
+    let mut end = 0;
+    for (i, word) in command.split_whitespace().enumerate() {
+        let b = word.as_bytes();
+        if i > 0 && (matches!(b[0], b'-' | b'/' | b'"') || (b.len() > 1 && b[0].is_ascii_alphabetic() && b[1] == b':')) {
+            return None;
+        }
+        // The word's end: past the whitespace before it and the word itself.
+        end += command[end..].find(word)? + word.len();
+        if without_exe(word).is_some() {
+            return Some(&command[..end]);
+        }
+    }
+    None
 }
 
 /// This user's processes, newest first (Workbench itself and kernel threads left out).
@@ -120,6 +173,27 @@ mod tests {
     #[test]
     fn languages_and_hints() {
         assert_eq!(language_of("python3", "/usr/bin/python3 app.py"), "python");
+        assert_eq!(language_of("node", "node server.js"), "javascript");
+        assert_eq!(language_of("java", "/usr/lib/jvm/bin/java -jar app.jar"), "java");
+        assert_eq!(language_of("sleep", "sleep 30"), "native");
+        // A process that names its main thread: the command line decides.
+        assert_eq!(language_of("MainThread", "/usr/bin/node server.js"), "javascript");
+        assert_eq!(language_of("MainThread", "/usr/bin/bun x"), "javascript");
+        // Windows image names, whatever the command line holds.
+        assert_eq!(language_of("node.exe", r"C:\Program Files\nodejs\node.exe app.js"), "javascript");
+        assert_eq!(language_of("deno.EXE", ""), "javascript");
+        assert_eq!(language_of("java.exe", "java -jar app.jar"), "java");
+        assert_eq!(language_of("javaw.exe", r"C:\jdk\bin\javaw.exe -jar ide.jar"), "java");
+        assert_eq!(language_of("python.exe", r"C:\Python312\python.exe -m http.server"), "python");
+        // Unknown image names: the program the command line starts with, `\` paths and spaces included.
+        assert_eq!(language_of("", r"C:\Program Files\nodejs\node.exe app.js"), "javascript");
+        assert_eq!(language_of("", r#""C:\Program Files\Java\bin\java.exe" -jar app.jar"#), "java");
+        assert_eq!(language_of("", r"C:\Python312\python.exe"), "python");
+        assert_eq!(language_of("", r"\\server\tools\deno.exe run x"), "javascript");
+        assert_eq!(language_of("", r"C:\tools\run --out C:\x\node.exe"), "native");
+        assert_eq!(language_of("", r"C:\tools\run C:\x\node.exe"), "native");
+        assert_eq!(language_of("", r"C:\tools\run\node"), "javascript");
+        assert_eq!(language_of("", ""), "native");
         assert!(ptrace_hint(Some(1)).unwrap().contains("ptrace_scope = 1"));
         assert_eq!(ptrace_hint(Some(0)), None);
         assert_eq!(ptrace_hint(None), None);

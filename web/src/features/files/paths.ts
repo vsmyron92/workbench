@@ -1,18 +1,83 @@
 // Pure path helpers for the files slice. Project-relative paths use `/` and no
-// leading slash (`''` is the project root); absolute paths (extra roots) start with `/`.
+// leading slash (`''` is the project root) on every OS. Absolute paths (extra roots,
+// files outside the project) are the server's: they start with `/`, and on a Windows
+// server they are drive paths (`C:\…`, `C:/…`) that also separate with `\`. The
+// server's OS comes from `GET /api/health`; until it arrives the Linux rules apply.
 
+import { getHealth } from '@/api/health'
 import type { FileContent } from './api'
 
-export function basename(p: string): string {
-  return p.slice(p.lastIndexOf('/') + 1)
+const onWindows = () => getHealth()?.os === 'windows'
+
+/** `C:\…` or `C:/…` (a drive's root included). */
+const DRIVE_PATH = /^[A-Za-z]:[\\/]/
+
+/**
+ * Whether `p` is a Windows drive path (`C:\x`, `C:/x`): on a Windows server only. UNC
+ * paths (`\\server\share`) are not: the server refuses network roots.
+ */
+export function isDrivePath(p: string): boolean {
+  return onWindows() && DRIVE_PATH.test(p)
 }
 
-/** `a/b/c.rs` → `a/b`; `c.rs` → `''`; `/abs/x` → `/abs`; `/x` → `/`. */
-export function dirname(p: string): string {
+/** Whether `p` is absolute on the server: `/…` everywhere, a drive path on Windows. */
+export function isAbsolutePath(p: string): boolean {
+  return p.startsWith('/') || isDrivePath(p)
+}
+
+/** Index of the last separator: `/`, and on a Windows server also `\`. */
+function lastSeparator(p: string): number {
   const i = p.lastIndexOf('/')
+  return onWindows() ? Math.max(i, p.lastIndexOf('\\')) : i
+}
+
+export function basename(p: string): string {
+  return p.slice(lastSeparator(p) + 1)
+}
+
+/** `a/b/c.rs` → `a/b`; `c.rs` → `''`; `/abs/x` → `/abs`; `/x` → `/`; on Windows `C:\x` → `C:\`. */
+export function dirname(p: string): string {
+  const i = lastSeparator(p)
   if (i < 0) return ''
   if (i === 0) return '/'
+  if (i === 2 && isDrivePath(p)) return p.slice(0, 3)
   return p.slice(0, i)
+}
+
+/** The names of a path, root first (`/a/b` and `a/b` → `a`, `b`; on Windows `C:\a` → `C:`, `a`). */
+export function segments(p: string): string[] {
+  return p.split(onWindows() ? /[\\/]/ : '/').filter(Boolean)
+}
+
+/**
+ * The project-relative `rel` (`/`-separated) under the absolute `root`, with the root's
+ * own separator: `/home/u/p` + `src/a.rs` → `/home/u/p/src/a.rs`; on a Windows server
+ * `C:\p` + `src/a.rs` → `C:\p\src\a.rs`.
+ */
+export function joinAbsolute(root: string, rel: string): string {
+  if (!rel) return root
+  if (onWindows() && (root.includes('\\') || !root.includes('/'))) return `${root.replace(/[\\/]$/, '')}\\${rel.replaceAll('/', '\\')}`
+  return `${root.replace(/\/$/, '')}/${rel}`
+}
+
+/**
+ * Whether two paths the server wrote name the same file: equal, or on a Windows server
+ * equal up to `/` versus `\` and ASCII case (as the server compares them, `util::os::path`).
+ */
+export function samePath(a: string, b: string): boolean {
+  if (a === b) return true
+  if (!onWindows()) return false
+  const norm = (p: string) => p.replaceAll('/', '\\').replace(/[A-Z]/g, (c) => c.toLowerCase())
+  return norm(a) === norm(b)
+}
+
+/**
+ * The path of a file's model URI (docs/ARCHITECTURE.md "Editor models"):
+ * `/<projectId>/<path>`, or `/~abs<path>` for an absolute path. A drive path gets a `/`
+ * before it (`/~abs/C:\x`); `parseModelUri` takes it off again.
+ */
+export function modelUriPath(projectId: string | null, path: string): string {
+  return `/${projectId ?? '~abs'}${path.startsWith('/') ? path : '/' + path}`
 }
 
 export function joinPath(dir: string, name: string): string {
@@ -43,13 +108,16 @@ export function ancestors(path: string): string[] {
 /**
  * Resolve a link found in a document at `fromFile` (relative to the project root,
  * or absolute). `/x` means the project root for relative documents. Returns null
- * for links that would climb above the root.
+ * for links that would climb above the root. A document at a drive path keeps its
+ * drive and separator (`C:\notes\plan.md` + `img/a.png` → `C:\notes\img\a.png`).
  */
 export function resolveLink(fromFile: string, href: string): string | null {
-  const absolute = fromFile.startsWith('/')
+  const absolute = isAbsolutePath(fromFile)
+  const root = isDrivePath(fromFile) ? fromFile.slice(0, 3) : absolute ? '/' : ''
+  const sep = root.endsWith('\\') ? '\\' : '/'
   let parts: string[]
   if (href.startsWith('/') && !absolute) parts = []
-  else parts = dirname(fromFile).split('/').filter(Boolean)
+  else parts = segments(dirname(fromFile).slice(root.length))
   for (const seg of href.split('/')) {
     if (seg === '' || seg === '.') continue
     if (seg === '..') {
@@ -59,8 +127,7 @@ export function resolveLink(fromFile: string, href: string): string | null {
       parts.push(decodeURIComponentSafe(seg))
     }
   }
-  const joined = parts.join('/')
-  return absolute ? '/' + joined : joined
+  return root + parts.join(sep)
 }
 
 function decodeURIComponentSafe(s: string): string {

@@ -42,7 +42,8 @@ pub fn tools() -> Vec<McpTool> {
         tool(
             "run_list",
             "Run configurations of a project (dev servers, tests, builds, tasks) with their live state \
-             (stopped|starting|running|ready|failed|exited), port, URL and test results.",
+             (stopped|starting|running|ready|failed|exited), port, URL and test results. terminated: an exited run \
+             was cut short (its terminal closed or its process killed) and did not finish.",
             json!({ "type": "object", "properties": { "projectId": project_prop() } }),
             false,
             |state, ctx, args| async move {
@@ -53,8 +54,9 @@ pub fn tools() -> Vec<McpTool> {
                     .map(|r| {
                         json!({
                             "name": r.name, "kind": r.config.kind, "command": r.config.command, "cwd": r.config.cwd,
-                            "group": r.config.group, "state": r.live.state, "port": r.live.port.or(r.config.port),
-                            "url": r.live.url, "error": r.live.error, "result": r.live.result, "problems": r.problems,
+                            "group": r.config.group, "state": r.live.state, "terminated": r.live.terminated,
+                            "port": r.live.port.or(r.config.port), "url": r.live.url, "error": r.live.error,
+                            "result": r.live.result, "problems": r.problems,
                             "portInUse": r.port_in_use, "needsConfirm": r.needs_confirm,
                         })
                     })

@@ -178,9 +178,11 @@ pub fn language_of(l: &DebugLaunch, root: &Path) -> String {
         let p = root.join(name);
         !crate::util::os::path::leaves_machine_below(root, &p) && p.is_file()
     };
+    // A package path in the project: `.`, `./cmd/api` (on Windows also `.\cmd\api`).
+    let package = crate::util::os::path::segments(program).next() == Some(".");
     if l.module.is_some() || program.ends_with(".py") {
         "python".into()
-    } else if program.ends_with(".go") || (has("go.mod") && !has("Cargo.toml") && (program.starts_with("./") || program == ".")) {
+    } else if program.ends_with(".go") || (has("go.mod") && !has("Cargo.toml") && package) {
         "go".into()
     } else if has("Cargo.toml") {
         "rust".into()
@@ -665,6 +667,7 @@ mod tests {
             remote: None,
             warnings: vec![],
             repo_secret_names: Default::default(),
+            overlay_error: None,
         }
     }
 
@@ -720,6 +723,27 @@ mod tests {
         assert_eq!(language_of(&all[1].launch, d.path()), "python");
         assert_eq!(language_of(&DebugLaunch { program: Some("build/app".into()), ..Default::default() }, d.path()), "rust");
         assert_eq!(language_of(&DebugLaunch { language: Some("C++".into()), ..Default::default() }, d.path()), "cpp");
+    }
+
+    /// In a Go module a package path is Go's: `./cmd/api`, and on Windows `.\cmd\api`.
+    #[test]
+    fn go_packages_are_go_in_either_spelling() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("go.mod"), "module example.com/app\n").unwrap();
+        let lang = |program: &str| language_of(&DebugLaunch { program: Some(program.into()), ..Default::default() }, d.path());
+        for go in [".", "./", "./cmd/api", "cmd/api/main.go"] {
+            assert_eq!(lang(go), "go", "{go}");
+        }
+        for other in ["", "..", "../x", "build/app", ".x"] {
+            assert_eq!(lang(other), "cpp", "{other}");
+        }
+        // `\` separates only on Windows: elsewhere `.\cmd\api` is one odd file name.
+        assert_eq!(lang(r".\cmd\api"), if cfg!(windows) { "go" } else { "cpp" });
+        assert_eq!(lang(r".\"), if cfg!(windows) { "go" } else { "cpp" });
+        // A Cargo project stays Rust.
+        std::fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+        assert_eq!(lang(r".\cmd\api"), "rust");
+        assert_eq!(lang("./cmd/api"), "rust");
     }
 
     #[test]

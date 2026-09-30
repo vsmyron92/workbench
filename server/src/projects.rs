@@ -56,6 +56,9 @@ pub struct Project {
     /// Secret names that repository config (detection, `.workbench.toml`) refers to:
     /// `AppState::secret` resolves them only from the machine overlay.
     pub repo_secret_names: BTreeSet<String>,
+    /// Why the machine overlay was left out (it does not parse, or cannot be read), when
+    /// it was: `AppState::secret` names it for a secret the overlay would have held.
+    pub overlay_error: Option<String>,
 }
 
 impl Project {
@@ -306,6 +309,7 @@ fn scratch_project(state: &AppState) -> anyhow::Result<Project> {
         remote: None,
         warnings: vec![],
         repo_secret_names: BTreeSet::new(),
+        overlay_error: None,
     })
 }
 
@@ -313,7 +317,7 @@ async fn load_project(state: &AppState, id: &str, root: &Path) -> Project {
     let global_site = state.config.read().atlassian.as_ref().map(|a| a.site.clone());
     let detected = crate::apps::detect(root);
     let layered = project::load_layers(detected, root, &state.paths.project_overlay(id), global_site.as_deref());
-    let (mut config, warnings, repo_secret_names) = (layered.config, layered.warnings, layered.repo_secret_names);
+    let project::Layered { mut config, warnings, repo_secret_names, overlay_error } = layered;
     let name = if config.project.name.is_empty() {
         root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| id.to_string())
     } else {
@@ -339,7 +343,7 @@ async fn load_project(state: &AppState, id: &str, root: &Path) -> Project {
         };
         adopt_configured_forge(&mut config, r, gitlab_host.as_deref(), github_host.as_deref());
     }
-    Project { id: id.to_string(), name, root: root.to_path_buf(), config, remote, warnings, repo_secret_names }
+    Project { id: id.to_string(), name, root: root.to_path_buf(), config, remote, warnings, repo_secret_names, overlay_error }
 }
 
 /// `git.corp.example` from a configured forge host (`git.corp.example`,
@@ -398,8 +402,24 @@ fn strip_credentials(url: &str) -> String {
     }
 }
 
+/// A summary's branch. A repository git refuses (`util::git::refuses`, Windows) has none,
+/// and a warning names the folder and the command that trusts it; other failures (no
+/// repository, no git) leave the branch out quietly, as before.
+fn summary_branch(root: &Path, answer: Result<Option<String>, util::git::Failure>, warnings: &mut Vec<String>) -> Option<String> {
+    match answer {
+        Ok(b) => b,
+        Err(util::git::Failure::Refused(msg)) => {
+            warnings.push(util::git::refused_warning(root, &msg));
+            None
+        }
+        Err(_) => None,
+    }
+}
+
 async fn summary(state: &AppState, p: &Project) -> ProjectSummary {
     let has_global_atlassian = state.config.read().atlassian.as_ref().is_some_and(|a| !a.site.is_empty());
+    let mut warnings = p.warnings.clone();
+    let branch = summary_branch(&p.root, util::git::try_current_branch(&p.root).await, &mut warnings);
     ProjectSummary {
         id: p.id.clone(),
         name: p.name.clone(),
@@ -407,14 +427,14 @@ async fn summary(state: &AppState, p: &Project) -> ProjectSummary {
         root_abs: p.root.display().to_string(),
         tags: p.config.project.tags.clone(),
         docs: p.config.project.docs.clone(),
-        branch: util::git::current_branch(&p.root).await,
+        branch,
         gitlab: p.gitlab().map(|(host, path)| json!({ "host": host, "path": path })),
         github: p.github().map(|(host, path)| json!({ "host": host, "path": path })),
         has_confluence: p.config.links.confluence.is_some() || has_global_atlassian,
         has_jira: p.config.links.jira.is_some(),
         runs: p.config.runs.len(),
         envs: p.config.envs.iter().map(|e| e.name.clone()).collect(),
-        warnings: p.warnings.clone(),
+        warnings,
         devcontainer: crate::devcontainer::summary(state, p),
     }
 }
@@ -693,6 +713,25 @@ mod tests {
         let app = testutil::app_with(cfg).await;
         let roots: Vec<std::path::PathBuf> = app.state.projects.list().iter().map(|p| p.root.clone()).collect();
         assert_eq!(roots, [crate::util::os::path::canonicalize(&local).unwrap()]);
+    }
+
+    /// A repository git refuses (`util::git::Failure::Refused`, which only Windows reports)
+    /// gets a warning with the command that trusts it; other failures stay quiet.
+    #[test]
+    fn a_refused_repository_warns_with_the_command_that_trusts_it() {
+        use crate::util::git::Failure;
+        let root = std::path::Path::new("/srv/shop");
+        let refusal = "fatal: detected dubious ownership in repository at '/srv/shop'\nTo add an exception for this directory, call:\n\n\tgit config --global --add safe.directory /srv/shop";
+        let mut warnings = vec!["earlier".to_string()];
+        assert_eq!(super::summary_branch(root, Err(Failure::Refused(refusal.into())), &mut warnings), None);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[1].contains("/srv/shop") && warnings[1].ends_with("git config --global --add safe.directory /srv/shop"), "{warnings:?}");
+        for quiet in [Failure::NotInstalled, Failure::TimedOut, Failure::Failed("fatal: not a git repository".into())] {
+            assert_eq!(super::summary_branch(root, Err(quiet), &mut warnings), None);
+        }
+        assert_eq!(super::summary_branch(root, Ok(Some("main".into())), &mut warnings).as_deref(), Some("main"));
+        assert_eq!(super::summary_branch(root, Ok(None), &mut warnings), None, "detached");
+        assert_eq!(warnings.len(), 2);
     }
 
     #[test]

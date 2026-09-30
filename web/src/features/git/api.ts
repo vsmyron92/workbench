@@ -54,6 +54,11 @@ export function isNotRepo(e: unknown) {
   return e instanceof ApiError && e.code === 'not_a_repo'
 }
 
+/** Git refuses the repository because another user owns the folder (`safe.directory`; the server reports it on Windows). */
+export function isUnsafeRepo(e: unknown): e is ApiError {
+  return e instanceof ApiError && e.code === 'unsafe_repository'
+}
+
 export const gitApi = {
   post: <T = { ok: boolean }>(pid: string, p: string, body?: unknown) => api.post<T>(gitUrl(pid, p), body ?? {}),
   status: (pid: string) => api.get<GitStatus>(gitUrl(pid, 'status')),
@@ -77,7 +82,7 @@ export function useGitStatus(pid: string | null) {
     enabled: !!pid,
     staleTime: 5_000,
     refetchOnWindowFocus: true,
-    retry: (n, e) => !isNotRepo(e) && n < 1,
+    retry: (n, e) => !isNotRepo(e) && !isUnsafeRepo(e) && n < 1,
   })
 }
 

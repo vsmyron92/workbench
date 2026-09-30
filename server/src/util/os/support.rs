@@ -119,8 +119,10 @@ pub fn experimental_all() -> BTreeMap<&'static str, &'static str> {
         .collect()
 }
 
+// The pointer to WSL: docs/windows-port.md §5, "Dev containers through WSL" (untested).
 const WIN_DEVCONTAINER: &str = "dev containers are not supported on Windows yet: Workbench cannot reach agents inside Docker Desktop's VM \
-     (a container network's gateway is not on this computer), and the workspace mount has no user-id mapping";
+     (a container network's gateway is not on this computer), and the workspace mount has no user-id mapping; for them, run the \
+     Linux Workbench inside a WSL 2 distribution with Docker Engine installed in it";
 const WIN_NOTIFICATIONS: &str = "desktop notifications are not supported on Windows yet (they need a Start Menu shortcut with an \
      AppUserModelID): turn on browser notifications (Settings › General) or push instead";
 const WIN_GDB_ATTACH: &str = "attaching gdb to a running process is not supported on Windows yet: native programs attach with \
@@ -178,6 +180,8 @@ mod tests {
             }
         }
         assert!(matches!(support_on("windows", Feature::NetworkRoots), Support::Unsupported(w) if w.contains(r"(\\server\share)") && w.contains(r"(\\wsl$)")));
+        // Dev containers point to the Linux build inside WSL 2, with the engine inside too.
+        assert!(matches!(support_on("windows", Feature::Devcontainer), Support::Unsupported(w) if w.contains("Linux Workbench inside a WSL 2 distribution with Docker Engine installed in it")));
         // Keys are distinct (they are JSON keys).
         let mut keys: Vec<&str> = Feature::ALL.into_iter().map(Feature::key).collect();
         keys.sort();

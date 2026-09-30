@@ -307,13 +307,17 @@ pub fn scan(loc: &Locations, root: Option<&Path>) -> Overview {
     ov.account_connectors_used = claude_json.get("claudeAiMcpEverConnected").and_then(Value::as_bool).unwrap_or(false);
     let project_entry = root.and_then(|r| {
         let projects = claude_json.get("projects")?.as_object()?;
-        // Claude Code writes Windows keys with `/` (`C:/Users/me/proj`).
-        let key = crate::util::os::path::to_slash(r);
-        let canon = crate::util::os::path::canonicalize(r).ok().map(|c| crate::util::os::path::to_slash(&c));
+        use crate::util::os::path::{canonicalize, same_dir, to_slash};
+        // Claude Code writes Windows keys with `/` (`C:/Users/me/proj`), in the case of the
+        // folder it was started in (`c:/users/me/proj` too): exact keys first, then any key
+        // naming the same folder (Windows: without regard to case or separators).
+        let key = to_slash(r);
+        let canon = canonicalize(r).ok().map(|c| to_slash(&c));
         projects
             .get(key.as_str())
             .or_else(|| canon.as_deref().and_then(|c| projects.get(c)))
             .or_else(|| projects.get(format!("{}/", key.trim_end_matches('/')).as_str()))
+            .or_else(|| projects.iter().find(|(k, _)| same_dir(k, &key) || canon.as_deref().is_some_and(|c| same_dir(k, c))).map(|(_, v)| v))
             .cloned()
     });
 
@@ -540,6 +544,27 @@ mod tests {
         // Without a project only user-level servers (and plugins) appear.
         let ov = scan(&loc, None);
         assert!(!ov.servers.iter().any(|s| s.scope == "project" || s.scope == "local"));
+    }
+
+    /// A `~/.claude.json` project key names the project's folder as this OS compares paths:
+    /// on Windows in any case, with `/` or `\` and a trailing separator; on Linux exactly.
+    #[test]
+    fn project_keys_match_as_this_os_compares_folders() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let root = crate::util::os::path::canonicalize(repo.path()).unwrap();
+        let loc = Locations {
+            claude_json: home.path().join(".claude.json"),
+            claude_dir: home.path().join(".claude"),
+            managed_dir: home.path().join("managed"),
+        };
+        let upper = crate::util::os::path::to_slash(&root).to_ascii_uppercase();
+        let lower_backslashed = format!("{}\\", root.display()).to_ascii_lowercase();
+        for key in [upper, lower_backslashed] {
+            write(&loc.claude_json, &json!({ "projects": { key.clone(): { "mcpServers": { "local-one": { "command": "x" } } } } }));
+            let found = scan(&loc, Some(&root)).servers.iter().any(|s| s.name == "local-one" && s.scope == "local");
+            assert_eq!(found, cfg!(windows), "{key}");
+        }
     }
 
     #[test]
