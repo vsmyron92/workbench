@@ -1,8 +1,9 @@
 # Porting the server to Windows
 
 **Status: experimental.** The server builds with MSVC and its whole test suite passes on
-GitHub's `windows-latest` (Windows Server 2025), which is now a required CI job. It has not
-run on a Windows 10 or 11 desktop yet.
+GitHub's `windows-latest` (Windows Server 2025), which is now a required CI job. The release
+archive has been installed and run on a Windows desktop; its features have
+not been gone through one by one there.
 
 - **Phase A (merged):** `.gitattributes`, the CI job, and the `util::os` areas `perm`, `fs`,
   `proc`, `shell`, `exe`, `path`, `net` and `desktop` with their Windows bodies (their shared

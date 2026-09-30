@@ -87,8 +87,8 @@ whole setup.
 
 ## Run on Windows (experimental)
 
-The Windows port is in progress and has not been tested on a real Windows machine yet
-([status](docs/windows-port.md)). A release that includes
+The Windows port is experimental ([status](docs/windows-port.md)): it installs and runs on a
+Windows desktop, but not every feature has been exercised there yet. A release that includes
 `workbench-<version>-x86_64-pc-windows-msvc.zip` (Windows 10 1809 or newer, or 11; x86_64)
 installs from PowerShell:
 
@@ -168,9 +168,9 @@ more; you add or override them in `.workbench.toml` or a machine-local overlay. 
 [keyboard shortcuts](docs/keyboard-shortcuts.md).
 
 Developed and tested on Linux (x86_64). The UI runs in any current browser, phones
-included. A Windows port of the server is in progress and experimental: it has not been
-tested on a real Windows machine yet ([status](docs/windows-port.md)). macOS is not
-supported.
+included. A Windows port of the server is experimental: it installs and runs on a
+Windows desktop, but not every feature has been exercised there yet
+([status](docs/windows-port.md)). macOS is not supported.
 
 For how it is built (the slices, contracts, events and the full security model), read
 [the architecture](docs/ARCHITECTURE.md). To work on Workbench itself, open the
