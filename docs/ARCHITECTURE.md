@@ -247,6 +247,7 @@ release archive adds `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY 
   - `mobileTabs`, each with an optional `when(project)` (like tool windows: the phone shows only the tabs that apply, and a saved tab that does not apply falls back to the first one) and an optional `openPanel(panel) → boolean`: on a phone, `openPanel` selects the first visible tab that takes the panel (agents takes `terminal` and `agents.home`); panels no tab takes are not opened there;
   - `providers`: global components (listeners, dialog hosts). They wrap the app (`App.tsx` nests them around the shell), so each must render its `children`.
   - `searchProviders`: tabs of **Search Everywhere** (double Shift, `shell/SearchEverywhere.tsx`), each `{id, title, order, minQuery?, inAll?, when?, search(query, ctx, signal) → SearchItem[], hint?}`. Files (10) and Text (40, Find in Files) come from files, Symbols (20, `workspace/symbol` of running language servers; it never enables code intelligence) from lsp, and Actions (30, the palette's commands) from the shell. "All" shows the best few of each; Tab / Shift+Tab switch tabs, Enter opens, Shift+Enter opens to the side. Double Shift is two quick taps of Shift alone, watched in the capture phase without consuming anything, so it works in terminals and editors too.
+- **Tabs per project** (`shell/Dock.tsx`): the dock keeps one layout (tabs and splits) per project in localStorage, `wb.layout.v2.<projectId>`. Switching project saves the layout being left, clears the dock and restores the other one, so each project keeps its own tabs. `wb.layout.v1`, the single layout of earlier versions, is restored once, for the first project that loads. Panels tied to no project (Settings, Help) belong to the layout they were opened in. The top bar starts with the Settings button (`openSettings`, Ctrl+,), then the logo and the project switcher; the status bar no longer has one.
 - Panels, tool windows and mobile tabs may be `React.lazy` components: the dock, `ToolWindowArea` and the phone shell wrap them in `Suspense`. Both shells are lazy chunks, and so are `AnsiLog`, `Markdown` and Monaco.
 - **Keyboard shortcuts** (`shell/CommandPalette.tsx`, `shell/paletteSearch.ts`) run in the bubble phase: a terminal keeps every key typed into it (Ctrl+T, Ctrl+K, Ctrl+P mean something to bash and Claude Code, like CLion's "Override IDE shortcuts"), and keys a focused widget handled (Monaco's own bindings) are not taken. Ctrl+K opens the palette elsewhere; Ctrl+Shift+P opens it from anywhere. Editor keys are Monaco *actions* added per editor (never `addCommand`, whose keybinding is global); features that hook every editor add theirs a microtask after `onDidCreateEditor` (see "Editor models"). The only capture-phase keys are the debugger's F7/F8/F9/Ctrl+F2 while the current project has a live session; a widget that handles one of them itself declares it with `data-wb-keys="F7 …"` on an ancestor (the git diff viewer's F7 = Next Difference), and terminals keep every key. The full list, with who owns each key, is under "Keyboard shortcuts" below.
 - Shell actions (`web/src/shell/actions.ts`): `openPanel`, `closePanel`, `focusPanel`, `showToolWindow`, `toast` (options `actions: ToastAction[]` for several buttons and `code` for a monospace block, e.g. a permission request's command), `toastError`, `confirmDialog` (supports `typed` confirmation), `promptDialog`, `openSettings(section?)`, `addProjectInteractive`.
@@ -412,7 +413,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 
 | prefix | owner |
 |---|---|
-| `/api/health`, `/api/auth/**`, `/api/projects` (list/add/reload/detail/delete), `/api/events/ws` | core |
+| `/api/health`, `/api/auth/**`, `/api/projects` (list/add/reload/detail/delete; `POST {path, create?}`: a missing directory answers `not_found` unless `create: true` makes it, and the UI asks first), `/api/events/ws` | core |
 | `/api/terminals/**`, `/api/agents/**` (incl. `POST /api/agents/{id}/permission`, devices only), `/api/hooks/**` | terminals |
 | `/api/projects/{pid}/files/**` (incl. `files/history/**`: Local History), `/api/projects/{pid}/search`, `/api/fs/**` | files |
 | `/api/projects/{pid}/lsp/**` (incl. the `lsp/ws` editor socket) | lsp |
@@ -599,8 +600,16 @@ repositories work, unauthenticated. Repository layers follow the same trust rule
 an empty `repo.github.token` means the global token, used only when the host matches.
 
 **Workspace (deliverable cards).** Adapted from Mr. Mak Workspace (MIT) for any project. A scope is
-a project id or `home` (not tied to a project). No project gets the id `home` or `all` (the home panel's
-"All" view): the registry reserves them, so a directory called `home` is project `home-2`.
+a project id, `home` or `wb-sandbox` (neither is tied to a project). No project gets the id `home`, `wb-sandbox`
+or `all` (the home panel's "All" view): the registry reserves them, so a directory called `home` is project `home-2`.
+- **Sandbox** (`wb-sandbox`, `projects::SANDBOX_ID`, shown as "Sandbox"): a playground scope for documents,
+  reports and agent experiments, in `data_dir/workspace/wb-sandbox/` like Home. It is listed in `GET scopes` and
+  the trash, but its cards stay out of the "All" view. A first start (no registry) adds one `sample` card, the
+  guide with a playground report that checks live what a sandboxed report can reach (inline script yes; cookies,
+  storage, the parent page and `/api` no). `POST /api/workspace/wb-sandbox/reset` (any other scope: 400) moves every
+  card to the trash (Restore works) and adds the guide card again. Agents of any project may name it as `scope`
+  (`scope_for`). The UI: a Sandbox tab beside Project and Home in the tool window and the phone list, in the home
+  panel's scope bar and in the New card dialog, with Reset (confirmed) in the toolbar.
 - **Where cards live.** `data_dir/workspace/<scope>/workspace.json` in Mr. Mak's schema
   (`{entities:[{id,title,description,icon?,type,category,created,updated?,folder,steps:[{name,path,viewer?}],
   defaultStep?,status,pinned?,sample?}]}`); files in `data_dir/workspace/<scope>/<YYYY-MM-DD_slug>/`, so
@@ -625,7 +634,7 @@ a project id or `home` (not tied to a project). No project gets the id `home` or
   The files are written first and the registry last, only while it still has no entries (else the
   folders are removed again). Once Home has a registry, even an empty one, nothing is added, so an
   archived or deleted example stays that way.
-- **REST** `/api/workspace/`: `GET scopes`; `GET cards` (every scope); `GET|POST {scope}/cards`;
+- **REST** `/api/workspace/`: `GET scopes`; `GET cards` (every scope); `GET|POST {scope}/cards`; `POST wb-sandbox/reset`;
   `GET|PATCH|DELETE {scope}/cards/{id}` (delete moves the folder to `data_dir/workspace-trash/`);
   `POST …/steps`, `PATCH|DELETE …/steps/{index}` (with the expected path: 409 when steps moved);
   `GET …/files?path=&offset=` (folders first, then natural name order; 2000 entries a page, with

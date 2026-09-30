@@ -1,10 +1,11 @@
 //! Example cards: what a first start puts into the Home workspace, like Mr. Mak
-//! Workspace's samples (MIT). They are marked `sample`, so the seven-day archive leaves
-//! them alone until the user archives or deletes them.
+//! Workspace's samples (MIT), and the Sandbox's guide. They are marked `sample`, so the
+//! seven-day archive leaves them alone until the user archives or deletes them.
 //!
-//! They are added only while Home has no registry (a first start, or a data directory
-//! from before the examples), so an example the user archived or deleted never comes
-//! back. Their files are compiled in; the screenshots are the ones in `docs/assets`.
+//! They are added only while the scope has no registry (a first start, or a data
+//! directory from before the examples), so an example the user archived or deleted never
+//! comes back. The Sandbox's Reset brings its guide back (`reseed`). Their files are
+//! compiled in; the screenshots are the ones in `docs/assets`.
 
 use chrono::Utc;
 
@@ -101,10 +102,42 @@ const EXAMPLES: &[Example] = &[
     },
 ];
 
-/// Add the examples to Home (see the module docs). Returns how many were added: none
-/// once Home has a registry, even an empty one.
+/// The Sandbox's guide, and a report that shows what a sandboxed report can reach.
+const SANDBOX_EXAMPLES: &[Example] = &[Example {
+    id: "sandbox-playground",
+    title: "Sandbox playground",
+    description: "Try documents, reports and agent-made cards here. Reset empties the Sandbox and brings this card back.",
+    category: "guide",
+    icon: None,
+    pinned: true,
+    steps: &[("Guide", "guide.md"), ("Playground report", "playground.html")],
+    files: &[card_file!("sandbox", "guide.md"), card_file!("sandbox", "playground.html")],
+}];
+
+fn examples_for(scope: &Scope) -> &'static [Example] {
+    match scope.id.as_str() {
+        store::HOME => EXAMPLES,
+        store::SANDBOX => SANDBOX_EXAMPLES,
+        _ => &[],
+    }
+}
+
+/// Add the scope's examples (see the module docs). Returns how many were added: none
+/// once the scope has a registry, even an empty one.
 pub fn seed(scope: &Scope) -> ApiResult<usize> {
     if std::fs::symlink_metadata(scope.registry()).is_ok() {
+        return Ok(0);
+    }
+    seed_into(scope, examples_for(scope))
+}
+
+/// Add the examples again to a scope whose cards were all removed (the Sandbox's Reset).
+pub fn reseed(scope: &Scope) -> ApiResult<usize> {
+    seed_into(scope, examples_for(scope))
+}
+
+fn seed_into(scope: &Scope, examples: &[Example]) -> ApiResult<usize> {
+    if examples.is_empty() {
         return Ok(0);
     }
     store::ensure_scope_dir(scope)?;
@@ -113,7 +146,7 @@ pub fn seed(scope: &Scope) -> ApiResult<usize> {
     let mut folders = vec![];
     let result = (|| -> ApiResult<usize> {
         let mut entries = vec![];
-        for (i, ex) in EXAMPLES.iter().enumerate() {
+        for (i, ex) in examples.iter().enumerate() {
             let folder = model::unique(&format!("{day}_{}", ex.id), |f| store::taken(&scope.dir, f));
             let dir = scope.dir.join(&folder);
             std::fs::create_dir(&dir)?;
@@ -128,7 +161,7 @@ pub fn seed(scope: &Scope) -> ApiResult<usize> {
             let list = model::entities_mut(doc).ok_or_else(|| ApiError::internal("registry without entities"))?;
             if !list.is_empty() {
                 // Someone made a card meanwhile: this is not a first start after all.
-                return Err(ApiError::conflict("Home already has cards"));
+                return Err(ApiError::conflict(format!("{} already has cards", scope.name)));
             }
             list.extend(entries.iter().cloned());
             Ok(entries.len())
@@ -169,7 +202,7 @@ mod tests {
 
     #[test]
     fn every_step_and_link_is_a_file_of_its_card() {
-        for ex in EXAMPLES {
+        for ex in EXAMPLES.iter().chain(SANDBOX_EXAMPLES) {
             let has = |p: &str| ex.files.iter().any(|(f, _)| *f == p || f.starts_with(&format!("{p}/")));
             for (name, path) in ex.steps {
                 assert!(has(path), "{}: step {name:?} has no file {path}", ex.id);

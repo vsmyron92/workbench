@@ -85,7 +85,8 @@ pub async fn all_cards(State(state): State<AppState>) -> ApiResult<Json<CardList
     let (cards, warnings) = blocking(move || {
         let mut cards = vec![];
         let mut warnings = vec![];
-        for s in store::all_scopes(&st) {
+        // The Sandbox is a playground: its throwaway cards stay out of the All view.
+        for s in store::all_scopes(&st).into_iter().filter(|s| s.id != store::SANDBOX) {
             match store::scope_cards(&st, &s) {
                 Ok((c, w)) => {
                     cards.extend(c);
@@ -207,6 +208,30 @@ pub async fn delete(State(state): State<AppState>, UrlPath((scope, id)): CardPat
     emit_trash(&state, &scope, project.as_deref());
     // `trashItem` restores it (`POST …/trash/{item}/restore`).
     Ok(Json(json!({ "ok": true, "trashItem": item })))
+}
+
+/// Empty the Sandbox: every card goes to the trash (Restore works) and the guide card
+/// comes back.
+pub async fn reset(State(state): State<AppState>, UrlPath(scope): UrlPath<String>) -> ApiResult<Json<Value>> {
+    if scope != store::SANDBOX {
+        return Err(ApiError::bad_request("only the sandbox can be reset"));
+    }
+    let s = store::scope(&state, &scope)?;
+    let _w = state.workspace.write_lock.lock().await;
+    let trash = store::trash_dir(&state);
+    let removed = blocking(move || {
+        let mut n = 0;
+        for loc in store::load(&s)?.cards {
+            store::delete_card(&trash, &s, &loc)?;
+            n += 1;
+        }
+        super::examples::reseed(&s)?;
+        Ok(n)
+    })
+    .await?;
+    emit_changed(&state, &scope, None, None);
+    emit_trash(&state, &scope, None);
+    Ok(Json(json!({ "ok": true, "removed": removed })))
 }
 
 #[derive(Deserialize)]

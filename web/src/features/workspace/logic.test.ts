@@ -6,6 +6,8 @@ import {
   fileUrl,
   groupCards,
   headingSlug,
+  isProjectless,
+  listedScope,
   manifestMode,
   relativeDay,
   repoLinkPath,
@@ -187,5 +189,31 @@ describe('markdown drafts', () => {
     s.put(draftKey('home', 'd', 'notes.md'), { text: 'x', base: 'r', baseText: 'x' })
     s.dropCard('home', 'c')
     expect(Object.keys(useWsDrafts.getState().drafts)).toEqual([draftKey('home', 'd', 'notes.md')])
+  })
+})
+
+describe('scopes', () => {
+  it('lists the Sandbox on request, else the project or Home', () => {
+    expect(listedScope('sandbox', 'shop')).toBe('wb-sandbox')
+    expect(listedScope('sandbox', null)).toBe('wb-sandbox')
+    expect(listedScope('project', 'shop')).toBe('shop')
+    expect(listedScope('project', null)).toBe('home')
+    expect(listedScope('home', 'shop')).toBe('home')
+  })
+  it('knows which scopes belong to no project', () => {
+    expect([isProjectless('home'), isProjectless('wb-sandbox'), isProjectless('shop')]).toEqual([true, true, false])
+  })
+})
+
+describe('draft cleanup', () => {
+  it('dropScope forgets every draft of one scope only', () => {
+    const s = useWsDrafts.getState()
+    s.put(draftKey('wb-sandbox', 'a', 'x.md'), { text: 'x', base: 'r', baseText: 'x' })
+    s.put(draftKey('wb-sandbox', 'b', 'y.md'), { text: 'y', base: 'r', baseText: 'y' })
+    s.put(draftKey('home', 'a', 'x.md'), { text: 'x', base: 'r', baseText: 'x' })
+    s.dropScope('wb-sandbox')
+    const keys = Object.keys(useWsDrafts.getState().drafts)
+    expect(keys).toContain(draftKey('home', 'a', 'x.md'))
+    expect(keys.filter((k) => k.startsWith('wb-sandbox\n'))).toEqual([])
   })
 })

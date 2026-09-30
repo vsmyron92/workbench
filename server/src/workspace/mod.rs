@@ -64,6 +64,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/workspace/{scope}/cards/{id}/upload", post(routes::upload).layer(DefaultBodyLimit::disable()))
         .route("/api/workspace/{scope}/cards/{id}/grant", post(routes::grant))
+        .route("/api/workspace/{scope}/reset", post(routes::reset))
         .route("/api/workspace/{scope}/trash", get(routes::trash_list).delete(routes::trash_empty))
         .route("/api/workspace/{scope}/trash/{item}", axum::routing::delete(routes::trash_delete))
         .route("/api/workspace/{scope}/trash/{item}/restore", post(routes::trash_restore))
@@ -75,15 +76,17 @@ pub fn router() -> Router<AppState> {
 }
 
 pub async fn start(state: &AppState) {
-    let added = {
-        let _w = state.workspace.write_lock.lock().await;
-        let st = state.clone();
-        blocking(move || examples::seed(&store::scope(&st, store::HOME)?)).await
-    };
-    match added {
-        Ok(0) => {}
-        Ok(n) => tracing::info!("workspace: added {n} example cards to Home"),
-        Err(e) => tracing::warn!("workspace: cannot add the example cards to Home: {}", e.message),
+    for id in [store::HOME, store::SANDBOX] {
+        let added = {
+            let _w = state.workspace.write_lock.lock().await;
+            let st = state.clone();
+            blocking(move || examples::seed(&store::scope(&st, id)?)).await
+        };
+        match added {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("workspace: added {n} example cards to {id}"),
+            Err(e) => tracing::warn!("workspace: cannot add the example cards to {id}: {}", e.message),
+        }
     }
     watch::start(state).await;
 }

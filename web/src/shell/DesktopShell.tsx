@@ -2,13 +2,13 @@
 // with a bottom tool-window area, and the status bar.
 
 import { Suspense, useEffect, useRef, useState } from 'react'
-import { ChevronDown, Command as CommandIcon, FolderGit2, FolderPlus, Minus, Plug, Unplug } from 'lucide-react'
+import { ChevronDown, Command as CommandIcon, FolderGit2, FolderPlus, Minus, Plug, Settings, Unplug } from 'lucide-react'
 import { isEventsConnected, onEventsConnection } from '@/api/events'
 import { useProjects } from '@/api/queries'
 import type { ProjectSummary } from '@/api/types'
 import { useUi } from '@/state/store'
 import { IconButton, Loading, showMenuAt, Splitter, MenuHost, type MenuEntry } from '@/ui'
-import { addProjectInteractive } from './actions'
+import { addProjectInteractive, openSettings } from './actions'
 import { CommandPalette, openPalette } from './CommandPalette'
 import { SearchEverywhere } from './SearchEverywhere'
 import { Dock } from './Dock'
@@ -118,15 +118,25 @@ function ConnectionIndicator() {
 }
 
 export function DesktopShell() {
-  const { data: projects } = useProjects()
+  const { data: projects, refetch } = useProjects()
   const projectId = useUi((s) => s.projectId)
   const setProject = useUi((s) => s.setProject)
   const sides = useUi((s) => s.sides)
   const project = projects?.find((p) => p.id === projectId) ?? null
 
+  // A project id the list does not have is stale, or just added (Add project…): fetch the list
+  // again before falling back to the first project.
   useEffect(() => {
-    if (projects && projects.length && !projects.some((p) => p.id === projectId)) setProject(projects[0].id)
-  }, [projects, projectId, setProject])
+    if (!projects || !projects.length || projects.some((p) => p.id === projectId)) return
+    let cancelled = false
+    void refetch().then((r) => {
+      const list = r.data
+      if (!cancelled && list?.length && !list.some((p) => p.id === projectId)) setProject(list[0].id)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [projects, projectId, setProject, refetch])
 
   const pid = project?.id ?? null
   const hasLeft = !!visibleToolWindows('left', project).find((t) => t.id === sides.left.active)
@@ -136,6 +146,7 @@ export function DesktopShell() {
   return (
     <div className="wb-shell">
       <header className="wb-topbar">
+        <IconButton icon={Settings} label="Settings (Ctrl+,)" onClick={() => openSettings()} />
         <img src="/favicon.svg" alt="" width={20} height={20} className="wb-logo" />
         <ProjectSwitcher projects={projects ?? []} current={project} />
         {topbarWidgets.map((W, i) => (

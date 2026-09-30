@@ -111,7 +111,7 @@ fn sync_repos(state: &AppState) {
         .projects
         .list()
         .iter()
-        .filter(|p| p.id != store::HOME)
+        .filter(|p| !store::is_projectless(&p.id))
         .map(|p| (p.root.join("workspace"), p.id.clone()))
         .filter(|(dir, _)| dir.join("workspace.json").is_file())
         .collect();
@@ -186,7 +186,7 @@ fn dispatch(state: &AppState, paths: &[PathBuf]) {
     for scope in scopes {
         let cards: Vec<&String> = changed.iter().filter(|(s, _)| s == scope).filter_map(|(_, c)| c.as_ref()).collect();
         let whole = changed.contains(&(scope.clone(), None)) || cards.len() > MAX_CARDS_PER_BATCH;
-        let project = if scope == store::HOME { None } else { Some(scope.as_str()) };
+        let project = if store::is_projectless(scope) { None } else { Some(scope.as_str()) };
         if whole {
             super::emit_changed(state, scope, project, None);
         } else {

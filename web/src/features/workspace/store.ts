@@ -56,6 +56,7 @@ interface WsDrafts {
   saved: (key: string, base: string, baseText: string) => void
   drop: (key: string) => void
   dropCard: (scope: string, cardId: string) => void
+  dropScope: (scope: string) => void
 }
 
 /**
@@ -111,6 +112,8 @@ export const useWsDrafts = create<WsDrafts>()((set) => ({
       delete drafts[key]
       return { drafts }
     }),
+  dropScope: (scope) =>
+    set((s) => ({ drafts: Object.fromEntries(Object.entries(s.drafts).filter(([k]) => !k.startsWith(`${scope}\n`))) })),
   dropCard: (scope, cardId) =>
     set((s) => {
       const prefix = draftKey(scope, cardId, '')
@@ -136,10 +139,10 @@ if (typeof window !== 'undefined') {
 }
 
 interface WsPrefs {
-  /** Tool window and phone list: the project's cards or Home's. */
-  listScope: 'project' | 'home'
+  /** Tool window and phone list: the project's cards, Home's or the Sandbox's. */
+  listScope: 'project' | 'home' | 'sandbox'
   showArchived: boolean
-  setListScope: (s: 'project' | 'home') => void
+  setListScope: (s: 'project' | 'home' | 'sandbox') => void
   setShowArchived: (v: boolean) => void
 }
 

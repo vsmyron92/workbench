@@ -3,7 +3,7 @@
 
 import type { DockviewApi, DockviewGroupPanel } from 'dockview-react'
 import { create } from 'zustand'
-import { api as http } from '@/api/client'
+import { api as http, ApiError } from '@/api/client'
 import { useUi } from '@/state/store'
 import type { Side } from './types'
 
@@ -267,12 +267,20 @@ export function openSettings(section?: string) {
   openPanel({ kind: 'settings', id: 'settings', title: 'Settings', params: section ? { section } : {} })
 }
 
-/** Ask for a directory and add it as a project (project switcher, palette, first-run banner). */
+/** Ask for a directory and add it as a project (project switcher, palette, first-run banner). A missing directory is created after a confirmation. */
 export async function addProjectInteractive() {
-  const path = await promptDialog({ title: 'Add project', label: 'Directory (absolute or ~/…)', placeholder: '~/workspace/my-app' })
+  const path = await promptDialog({ title: 'Add project', label: 'Directory (absolute or ~/…). A new one is created.', placeholder: '~/workspace/my-app' })
   if (!path) return
   try {
-    const r = await http.post<{ id: string | null }>('/api/projects', { path })
+    let r: { id: string | null }
+    try {
+      r = await http.post<{ id: string | null }>('/api/projects', { path })
+    } catch (e) {
+      if (!(e instanceof ApiError) || e.code !== 'not_found') throw e
+      const ok = await confirmDialog({ title: 'Create directory?', message: `${path} does not exist. Create it and add it as a project?`, confirmLabel: 'Create' })
+      if (!ok) return
+      r = await http.post<{ id: string | null }>('/api/projects', { path, create: true })
+    }
     if (r.id) useUi.getState().setProject(r.id)
     toast('success', 'Project added')
   } catch (e) {

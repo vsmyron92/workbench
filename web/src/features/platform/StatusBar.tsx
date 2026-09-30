@@ -1,6 +1,6 @@
 // Status bar widgets: remote-access indicator and the settings gear.
 
-import { AlertTriangle, MonitorSmartphone, Settings } from 'lucide-react'
+import { AlertTriangle, MonitorSmartphone } from 'lucide-react'
 import { openPanel } from '@/shell/actions'
 import { useRemote } from './api'
 import { restartText } from './lib'
@@ -31,13 +31,5 @@ export function RemoteIndicator() {
         </button>
       )}
     </>
-  )
-}
-
-export function SettingsButton() {
-  return (
-    <button className="wb-status-item" onClick={() => openSettings()} title="Settings (Ctrl+,)" aria-label="Settings">
-      <Settings size={13} />
-    </button>
   )
 }

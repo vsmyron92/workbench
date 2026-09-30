@@ -163,6 +163,8 @@ export const wsApi = {
   trash: (scope: string, signal?: AbortSignal) => api.get<{ scope: string; items: TrashItem[] }>(`/api/workspace/${e(scope)}/trash`, undefined, signal),
   restore: (scope: string, item: string) => api.post<WorkspaceCard>(`/api/workspace/${e(scope)}/trash/${e(item)}/restore`),
   purge: (scope: string, item: string) => api.del<{ ok: boolean }>(`/api/workspace/${e(scope)}/trash/${e(item)}`),
+  /** The Sandbox only: every card to the trash, the guide card back. */
+  resetSandbox: () => api.post<{ ok: boolean; removed: number }>(`/api/workspace/${e('wb-sandbox')}/reset`),
   emptyTrash: (scope: string) => api.del<{ ok: boolean; removed: number }>(`/api/workspace/${e(scope)}/trash`),
 }
 

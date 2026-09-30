@@ -5,12 +5,12 @@ import type { QueryClient } from '@tanstack/react-query'
 import { Archive, ArchiveRestore, Bot, CheckCircle2, CircleDot, Copy, ExternalLink, Pin, PinOff, SquareTerminal, Trash2 } from 'lucide-react'
 import { api } from '@/api/client'
 import type { TerminalInfo } from '@/api/types'
-import { closePanel, confirmDialog, openPanel, toast, toastError } from '@/shell/actions'
+import { closePanel, confirmDialog, getDockApi, openPanel, toast, toastError } from '@/shell/actions'
 import { askAgent } from '@/shell/agentBridge'
 import { useUi } from '@/state/store'
 import type { MenuEntry } from '@/ui'
 import { type CardPatch, type WorkspaceCard, type WorkspaceStep, wk, wsApi } from './api'
-import { askPrompt, basename, cardPanelId, HOME } from './logic'
+import { askPrompt, basename, cardPanelId, HOME, isProjectless, SANDBOX } from './logic'
 import { useWsDrafts } from './store'
 
 /** Drag payload of the files tree (docs/ARCHITECTURE.md, "Drag and drop"). */
@@ -93,8 +93,29 @@ export async function restoreFromTrash(qc: QueryClient, scope: string, item: str
   }
 }
 
+/** Empty the Sandbox (every card to the trash) after a confirmation. */
+export async function resetSandbox(qc: QueryClient) {
+  const ok = await confirmDialog({
+    title: 'Reset the Sandbox?',
+    message: 'Every card in the Sandbox moves to the Workspace trash and the guide card comes back. Restore cards from Trash until you empty it.',
+    confirmLabel: 'Reset',
+    danger: true,
+  })
+  if (!ok) return
+  try {
+    const r = await wsApi.resetSandbox()
+    // Open cards of the Sandbox are gone, and so are their unsaved drafts.
+    for (const p of getDockApi()?.panels ?? []) if (p.id.startsWith(`card:${SANDBOX}:`)) closePanel(p.id)
+    useWsDrafts.getState().dropScope(SANDBOX)
+    void qc.invalidateQueries({ queryKey: wk.all })
+    toast('success', r.removed ? `Sandbox reset: ${r.removed} card${r.removed === 1 ? '' : 's'} moved to the trash` : 'Sandbox reset')
+  } catch (e) {
+    toastError(e, 'Could not reset the Sandbox')
+  }
+}
+
 export function askAboutCard(card: WorkspaceCard, step?: WorkspaceStep) {
-  const projectId = card.scope !== HOME ? card.scope : useUi.getState().projectId
+  const projectId = !isProjectless(card.scope) ? card.scope : useUi.getState().projectId
   if (!projectId) {
     toast('info', 'Open a project first: agents run inside a project')
     return
@@ -104,7 +125,7 @@ export function askAboutCard(card: WorkspaceCard, step?: WorkspaceStep) {
 
 export async function openTerminalIn(card: WorkspaceCard) {
   try {
-    const projectId = card.scope !== HOME ? card.scope : null
+    const projectId = !isProjectless(card.scope) ? card.scope : null
     const t = await api.post<TerminalInfo>('/api/terminals', { kind: 'shell', projectId, cwd: card.folderPath })
     openPanel({ kind: 'terminal', id: `terminal:${t.id}`, title: t.title, params: { terminalId: t.id } })
   } catch (e) {
