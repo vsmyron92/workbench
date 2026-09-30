@@ -19,6 +19,12 @@ struct Env {
 }
 
 async fn setup() -> Env {
+    setup_with(|_| {}).await
+}
+
+/// `setup`, with `prepare` adding files to the project before its watcher starts (they
+/// have no history).
+async fn setup_with(prepare: impl FnOnce(&std::path::Path)) -> Env {
     let (cfg, data, proj) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let root = crate::util::os::path::canonicalize(proj.path()).unwrap().join("app");
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -27,6 +33,7 @@ async fn setup() -> Env {
     std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::write(root.join(".gitignore"), "ignored/\n*.log\n").unwrap();
     std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    prepare(&root);
     let mut config = GlobalConfig::default();
     config.projects.roots = vec![];
     config.projects.include = vec![root.display().to_string()];
@@ -503,6 +510,38 @@ async fn a_backslash_in_a_name_is_one_file() {
     assert_eq!(other.len(), 1, "{other:?}");
     let rev = env.api(Method::GET, &format!("/files/history/revision?id={}", other[0]["id"]), None).await.unwrap();
     assert_eq!(rev["content"], "other\n");
+}
+
+/// Linux: a new folder named `n\d` is looked into under its own name. The file written
+/// into it before its watch existed is recorded as `n\d/f.rs`, and `n/d/f.rs` (there
+/// before the watcher, never changed) gets no version from that look.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_folder_with_a_backslash_is_looked_into_by_its_own_name() {
+    const NAME: &str = r"n\d/f.rs";
+    const QUERY: &str = "n%5Cd/f.rs";
+    let env = setup_with(|root| {
+        std::fs::create_dir_all(root.join("n/d")).unwrap();
+        std::fs::write(root.join("n/d/f.rs"), "pub fn other() {}\n").unwrap();
+    })
+    .await;
+    std::fs::create_dir_all(env.root.join(r"n\d")).unwrap();
+    std::fs::write(env.root.join(NAME), "pub fn f() {}\n").unwrap();
+    let h = env.wait_for(QUERY, 1).await;
+    assert_eq!(kinds(&h), ["disk"], "{h:?}");
+    assert_eq!(h[0]["path"], NAME);
+    let rev = env.api(Method::GET, &format!("/files/history/revision?id={}", h[0]["id"]), None).await.unwrap();
+    assert_eq!(rev["content"], "pub fn f() {}\n");
+    env.settle().await;
+    let other = env.history("n/d/f.rs").await;
+    assert!(other.is_empty(), "{other:?}");
+
+    // The folder's own watch sees the file go.
+    std::fs::remove_dir_all(env.root.join(r"n\d")).unwrap();
+    assert_eq!(kinds(&env.wait_for(QUERY, 2).await), ["deleted", "disk"]);
+    env.settle().await;
+    let other = env.history("n/d/f.rs").await;
+    assert!(other.is_empty(), "{other:?}");
 }
 
 /// A folder with more files than one batch takes (a clone, an unpacked archive) is
