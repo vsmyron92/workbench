@@ -344,14 +344,11 @@ pub fn git_error(out: &GitOutput) -> ApiError {
 /// message verbatim, which names the owners and the command that trusts the folder. Only
 /// where such folders are common (`os::fs::FOREIGN_OWNERS`, Windows); elsewhere the refusal
 /// reads as it always did (reporting it there too would be a Linux change for the owner to
-/// decide).
+/// decide). The check is `util::git::refuses`, which the project summaries, forge pollers
+/// and deploys share.
 pub fn unsafe_repository(out: &GitOutput) -> Option<ApiError> {
-    if !crate::util::os::fs::FOREIGN_OWNERS {
-        return None;
-    }
     let text = out.stderr.trim();
-    (text.contains("detected dubious ownership") || text.contains("fatal: unsafe repository"))
-        .then(|| ApiError::new(StatusCode::FORBIDDEN, "unsafe_repository", text.to_string()))
+    crate::util::git::refuses(text).then(|| crate::util::git::refused_error(text))
 }
 
 /// Files listed after "Your local changes to the following files would be overwritten by …:".

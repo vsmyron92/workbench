@@ -1,8 +1,9 @@
 // Top bar branch button, status bar branch/sync/state item, stripe badge.
 
-import { ChevronDown, GitBranch } from 'lucide-react'
+import { ChevronDown, GitBranch, ShieldAlert } from 'lucide-react'
+import { showToolWindow } from '@/shell/actions'
 import { Spinner, StatusDot } from '@/ui'
-import { useGitStatus } from './api'
+import { isUnsafeRepo, useGitStatus } from './api'
 import { shortSha, stateLabel } from './logic'
 import { useGitUi, useRunningOp } from './store'
 import type { GitStatus } from './types'
@@ -54,11 +55,25 @@ export function BranchTopbarWidget({ projectId }: { projectId: string | null }) 
   )
 }
 
+/**
+ * Git refuses the repository (another user owns the folder): say so where the branch would
+ * be. The Commit tool window shows git's message and copies the command that trusts it.
+ */
+function UntrustedStatusItem({ message }: { message: string }) {
+  return (
+    <button className="wb-status-item" title={`${message}\n\nClick to show it in the Commit tool window.`} onClick={() => showToolWindow('commit')}>
+      <ShieldAlert size={13} className="wb-warning" />
+      <span className="wb-warning">Untrusted repository</span>
+    </button>
+  )
+}
+
 /** Branch, sync and repository state in the status bar; a running fetch/pull/push. */
 export function GitStatusbarWidget({ projectId }: { projectId: string | null }) {
   const st = useGitStatus(projectId)
   const running = useRunningOp(projectId)
   const s = st.data
+  if (projectId && !s && isUnsafeRepo(st.error)) return <UntrustedStatusItem message={st.error.message} />
   if (!projectId || !s) return null
   return (
     <>

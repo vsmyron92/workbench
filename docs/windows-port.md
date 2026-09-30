@@ -387,11 +387,17 @@ Remote ops run with `GCM_INTERACTIVE=never`: Credential Manager returns what it 
 but never opens its sign-in window, so an https host it knows nothing about fails at once.
 An ssh key with a passphrase must be loaded in an agent the ssh git uses
 can reach, and a new host must be accepted once in a terminal (`known_hosts`): remote
-operations cannot prompt and fail instead. A repository an administrator created, or one
+operations cannot prompt and fail instead, and their message says so (the OpenSSH
+Authentication Agent service is the agent there; a changed host key is flagged, not
+offered for acceptance). A repository an administrator created, or one
 on a drive without owners (FAT, exFAT, some network shares), stops with git's
 `safe.directory` message, which names the command that trusts it (`403 unsafe_repository`,
 Windows only: `os::fs::FOREIGN_OWNERS`; on Linux such a folder still reads as "not a git
-repository", a change there being the owner's to decide).
+repository", a change there being the owner's to decide). The git tool windows show the
+message with its line breaks and a button that copies that command, the status bar reads
+"Untrusted repository", the project gets a warning naming the folder and the command, a
+deploy answers `unsafe_repository` too, and the GitLab and GitHub pollers log it once per
+project (`util::git::refuses`, shared with the git slice).
 
 **Agent hooks.** Claude's hooks are HTTP hooks (`agent.rs:175-205`); only the `SessionStart`
 and `statusLine` helpers are commands. On Windows emit `"C:/…/workbench.exe" statusline`
