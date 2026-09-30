@@ -241,6 +241,8 @@ export interface PromptOptions {
   placeholder?: string
   multiline?: boolean
   confirmLabel?: string
+  /** Offer a folder browser that fills the field (a directory on the Workbench computer). */
+  browse?: boolean
 }
 
 type Dialog =
@@ -269,7 +271,12 @@ export function openSettings(section?: string) {
 
 /** Ask for a directory and add it as a project (project switcher, palette, first-run banner). A missing directory is created after a confirmation. */
 export async function addProjectInteractive() {
-  const path = await promptDialog({ title: 'Add project', label: 'Directory (absolute or ~/…). A new one is created.', placeholder: '~/workspace/my-app' })
+  const path = await promptDialog({
+    title: 'Add project',
+    label: 'Directory (absolute or ~/…). A new one is created.',
+    placeholder: '~/workspace/my-app',
+    browse: true,
+  })
   if (!path) return
   try {
     let r: { id: string | null }

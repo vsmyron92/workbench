@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react'
+import { FolderOpen } from 'lucide-react'
 import { Button, Input, Modal, TextArea } from '@/ui'
+import { FolderBrowser } from './FolderBrowser'
 import { useDialogs, useToasts, type ToastLevel } from './actions'
 
 const toastIcon: Record<ToastLevel, typeof Info> = {
@@ -67,11 +69,13 @@ export function Toasts() {
 export function Dialogs() {
   const { current, set } = useDialogs()
   const [value, setValue] = useState('')
+  const [browsing, setBrowsing] = useState(false)
   const inputRef = useRef<HTMLInputElement & HTMLTextAreaElement>(null)
 
   useEffect(() => {
     if (current?.kind === 'prompt') setValue(current.opts.initial ?? '')
     else setValue('')
+    setBrowsing(false)
     window.setTimeout(() => inputRef.current?.focus(), 0)
   }, [current])
 
@@ -127,6 +131,11 @@ export function Dialogs() {
       footer={
         <>
           <Button onClick={() => close(null)}>Cancel</Button>
+          {opts.browse && (
+            <Button icon={FolderOpen} onClick={() => setBrowsing((b) => !b)}>
+              Browse…
+            </Button>
+          )}
           <Button variant="primary" onClick={() => close(value)}>
             {opts.confirmLabel ?? 'OK'}
           </Button>
@@ -150,6 +159,15 @@ export function Dialogs() {
           placeholder={opts.placeholder}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && close(value)}
+        />
+      )}
+      {opts.browse && browsing && (
+        <FolderBrowser
+          start={value.trim() || '~'}
+          onPick={(p) => {
+            setValue(p)
+            setBrowsing(false)
+          }}
         />
       )}
     </Modal>

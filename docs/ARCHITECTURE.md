@@ -414,6 +414,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | prefix | owner |
 |---|---|
 | `/api/health`, `/api/auth/**`, `/api/projects` (list/add/reload/detail/delete; `POST {path, create?}`: a missing directory answers `not_found` unless `create: true` makes it, and the UI asks first), `/api/events/ws` | core |
+| `/api/fs/dirs?path=&hidden=` (subfolder names of any readable folder, empty path: home; the folder picker of Add project; devices only, since agent tokens are not valid under `/api`) | files |
 | `/api/terminals/**`, `/api/agents/**` (incl. `POST /api/agents/{id}/permission`, devices only), `/api/hooks/**` | terminals |
 | `/api/projects/{pid}/files/**` (incl. `files/history/**`: Local History), `/api/projects/{pid}/search`, `/api/fs/**` | files |
 | `/api/projects/{pid}/lsp/**` (incl. the `lsp/ws` editor socket) | lsp |

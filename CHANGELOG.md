@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 - 2026-09-30
+
+- **Add project** has a **Browse…** button: a folder picker on the Workbench computer (subfolders only, hidden ones on request) that fills the path field.
+
 ## 0.4.0 - 2026-09-30
 
 - **Sandbox:** the Workspace has a Sandbox scope (`wb-sandbox`) for throwaway documents,
