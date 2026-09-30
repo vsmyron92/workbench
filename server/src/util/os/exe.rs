@@ -272,18 +272,30 @@ pub fn child_env() -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// A process starting `r`: its program and `prefix_args`, with `child_env`. The caller
+/// What a program Workbench starts by itself outside a terminal gets on top of this
+/// process's environment, before the caller's own variables (which win): `child_env`, and
+/// on Windows a `PATH` that goes on to the folders only a new sign-in's has
+/// (`os::env::child_path`), where [`which`] looks after a miss. A program found there (a
+/// language server or debug adapter installed since Workbench started) then finds what it
+/// runs in turn: gopls its `go`. It goes to what [`command`], [`configured`] and
+/// `shell::command` start and to language servers. Unix: `child_env`, which is empty.
+pub fn program_env() -> Vec<(&'static str, String)> {
+    let own = child_env().iter().map(|&(k, v)| (k, v.to_string()));
+    own.chain(super::env::child_path().map(|p| ("PATH", p))).collect()
+}
+
+/// A process starting `r`: its program and `prefix_args`, with `program_env`. The caller
 /// adds its own arguments.
 pub fn command(r: &Resolved) -> tokio::process::Command {
     let mut c = tokio::process::Command::new(&r.program);
-    c.args(&r.prefix_args).envs(child_env().iter().copied());
+    c.args(&r.prefix_args).envs(program_env());
     c
 }
 
 /// A process running `argv`, a command line from config.toml (a secret's `command`). Unix:
 /// `argv[0]` as it is, looked up on `PATH` by the OS. Windows: resolved as `launch` does
 /// (in Workbench's own directory), so an npm shim or a batch file (`bw.cmd`) starts too,
-/// with `child_env`.
+/// with `program_env`.
 pub fn configured(argv: &[String]) -> std::io::Result<std::process::Command> {
     #[cfg(unix)]
     {
@@ -296,7 +308,7 @@ pub fn configured(argv: &[String]) -> std::io::Result<std::process::Command> {
     {
         let argv = win::launch(argv.to_vec(), None, None).map_err(std::io::Error::other)?.argv;
         let mut c = std::process::Command::new(&argv[0]);
-        c.args(&argv[1..]).envs(child_env().iter().copied());
+        c.args(&argv[1..]).envs(program_env());
         Ok(c)
     }
 }
@@ -642,6 +654,23 @@ exit $ret
         assert_eq!(r.argv(&["--version"]), vec!["node", "cli.js", "--version"]);
     }
 
+    /// A program Workbench starts gets `program_env` (on Unix nothing: it keeps this
+    /// process's environment as it is).
+    #[test]
+    fn started_programs_get_the_program_env() {
+        let r = Resolved { program: PathBuf::from("node"), prefix_args: vec!["cli.js".into()], kind: Kind::NpmShim };
+        let mut set: Vec<(String, Option<String>)> =
+            command(&r).as_std().get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
+        let mut want: Vec<(String, Option<String>)> = program_env().into_iter().map(|(k, v)| (k.to_string(), Some(v))).collect();
+        set.sort();
+        want.sort();
+        assert_eq!(set, want);
+        #[cfg(unix)]
+        assert!(want.is_empty());
+        #[cfg(windows)]
+        assert!(want.contains(&("NoDefaultCurrentDirectoryInExePath".to_string(), Some("1".to_string()))));
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_lookup_rules() {
@@ -718,6 +747,39 @@ exit $ret
         // yet, every one of them, Windows' own among them.
         let cmd = find_in(&super::super::env::path_added(&[]), "cmd").expect("cmd.exe on the sign-in's PATH");
         assert!(cmd.file_name().is_some_and(|n| n.eq_ignore_ascii_case("cmd.exe")), "{}", cmd.display());
+    }
+
+    /// A program found only in a folder of a new sign-in's `PATH` (installed since Workbench
+    /// started) starts with that folder on its `PATH`, after Workbench's own, so it finds
+    /// what it runs in turn (gopls its `go`). The test runs again in a process whose `PATH`
+    /// is one empty folder: Windows' own folders are then the sign-in's alone.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn programs_found_after_a_miss_start_with_the_sign_in_folders() {
+        const CHILD: &str = "WB_CHILD_PATH_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let own = std::env::var("PATH").unwrap();
+            let r = resolve("cmd").expect("cmd.exe on the sign-in's PATH");
+            assert!(r.program.file_name().is_some_and(|n| n.eq_ignore_ascii_case("cmd.exe")), "{}", r.program.display());
+            let path = super::super::env::child_path().expect("the sign-in's folders");
+            assert!(path.starts_with(&format!("{own};")), "{path}");
+            assert!(program_env().contains(&("PATH", path.clone())));
+            // `/u`: cmd.exe writes what `set` prints as UTF-16LE, whatever the code page.
+            let out = command(&r).args(["/d", "/u", "/c", "set", "PATH"]).stdin(std::process::Stdio::null()).output().await.unwrap();
+            let text = String::from_utf16_lossy(&out.stdout.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect::<Vec<u16>>());
+            let got = text.lines().find_map(|l| l.get(..5).filter(|k| k.eq_ignore_ascii_case("PATH=")).map(|_| &l[5..]));
+            assert_eq!(got, Some(path.as_str()), "{text}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "--quiet", "--test-threads=1", "util::os::exe::tests::programs_found_after_a_miss_start_with_the_sign_in_folders"])
+            .env(CHILD, "1")
+            .env("PATH", std::path::absolute(dir.path()).unwrap())
+            .output()
+            .unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && text.contains("1 passed"), "{text}");
     }
 
     #[cfg(windows)]

@@ -4,8 +4,9 @@
 //! nothing else, so a running program keeps the variables it started with: Workbench would
 //! not find a program installed since, and neither would what it starts. Windows builds the
 //! sign-in environment with `CreateEnvironmentBlock`, which Workbench calls too: for the
-//! `PATH` of its terminals and the folders its lookups try after a miss (`exe::which`), and
-//! for the environment `workbench service` starts its supervisor with. Unix has no such
+//! `PATH` of its terminals, the folders its lookups try after a miss (`exe::which`) and the
+//! `PATH` of the programs it starts by itself (`exe::program_env`), and for the environment
+//! `workbench service` starts its supervisor with. Unix has no such
 //! split (a login shell's profile is not something a running program can read back):
 //! nothing here applies there, and terminals and services keep this process's environment.
 
@@ -44,6 +45,25 @@ pub fn fresh_path() -> Option<String> {
         let fresh = win::with_default(|vars| win::path_of(vars).map(|p| p.to_string_lossy().into_owned()))??;
         let own = std::env::var_os("PATH").unwrap_or_default();
         Some(merge_path(&fresh, &own.to_string_lossy()))
+    }
+}
+
+/// The `PATH` of a program Workbench starts by itself outside a terminal (a language server,
+/// a debug adapter: `exe::program_env`), when it is not this process's: on Windows this
+/// process's `PATH`, then the folders of [`user_default`]'s `Path` it lacks, the ones
+/// `exe::which` tries after a miss. A program found there (gopls, installed since Workbench
+/// started) then finds what it runs in turn (`go`), and what the program found before still
+/// comes first. `None` when a new sign-in adds no folder, on Unix, and when Windows cannot
+/// build the sign-in environment: the program keeps this process's `PATH`.
+pub fn child_path() -> Option<String> {
+    #[cfg(unix)]
+    {
+        None
+    }
+    #[cfg(windows)]
+    {
+        let fresh = win::with_default(|vars| win::path_of(vars).map(|p| p.to_string_lossy().into_owned()))??;
+        extend_path(&std::env::var_os("PATH").unwrap_or_default().to_string_lossy(), &fresh)
     }
 }
 
@@ -98,6 +118,21 @@ fn merge_path(fresh: &str, own: &str) -> String {
     let fresh = entries(fresh).into_iter().map(|e| (e, true));
     let own = entries(own).into_iter().map(|e| (e, windows_absolute(e)));
     fresh.chain(own).filter(|&(e, keep)| keep && !e.trim().is_empty() && seen.insert(path_key(e))).map(|(e, _)| e).collect::<Vec<_>>().join(";")
+}
+
+/// `own` as it is, then the absolute entries of `fresh` whose folders it lacks, each once
+/// (Windows `PATH`s; entries compare as [`path_key`]s). `None` when `fresh` adds none. A
+/// relative entry of `fresh` is left out, as by [`merge_path`]; `own`'s stay, since a
+/// program started with `own` has them today.
+#[cfg(any(windows, test))]
+fn extend_path(own: &str, fresh: &str) -> Option<String> {
+    let mut seen: std::collections::HashSet<String> = entries(own).into_iter().map(path_key).collect();
+    let added: Vec<&str> = entries(fresh).into_iter().filter(|e| windows_absolute(e) && seen.insert(path_key(e))).collect();
+    if added.is_empty() {
+        return None;
+    }
+    let sep = if own.is_empty() || own.ends_with(';') { "" } else { ";" };
+    Some(format!("{own}{sep}{}", added.join(";")))
 }
 
 #[cfg(windows)]
@@ -362,11 +397,33 @@ mod tests {
         assert!(!windows_absolute(r"\x") && !windows_absolute("C:x") && !windows_absolute("x") && !windows_absolute(""));
     }
 
+    #[test]
+    fn a_child_path_is_this_process_then_the_folders_it_lacks() {
+        let own = r"C:\work\.venv\Scripts;C:\Windows\system32;bin;C:\Windows\system32";
+        let fresh = concat!(
+            r"c:\windows\System32\;C:\Program Files\Go\bin;%GOROOT%\bin;;C:\Users\me\go\bin;",
+            r"C:/Program Files/Go/bin;\usr\bin;\\server\share\bin;C:\Users\me\go\bin\"
+        );
+        assert_eq!(
+            extend_path(own, fresh).as_deref(),
+            Some(concat!(r"C:\work\.venv\Scripts;C:\Windows\system32;bin;C:\Windows\system32;", r"C:\Program Files\Go\bin;C:\Users\me\go\bin;\\server\share\bin")),
+            "this process's PATH as it is, then the sign-in's absolute folders it lacks, each once"
+        );
+        // Nothing new: the program keeps this process's PATH.
+        assert_eq!(extend_path(own, r"C:\WINDOWS\System32;C:\work\.venv\Scripts\;bin;\x"), None);
+        assert_eq!(extend_path(r"C:\a;", r"C:\b").as_deref(), Some(r"C:\a;C:\b"));
+        assert_eq!(extend_path("", r"C:\b;C:\B\").as_deref(), Some(r"C:\b"));
+        // A `;` inside quotes belongs to its entry.
+        assert_eq!(extend_path(r"C:\x", r#""C:\b;c";C:\b"#).as_deref(), Some(r#"C:\x;"C:\b;c";C:\b"#));
+        assert_eq!(extend_path(r#""C:\b;c""#, r#""c:\B;C\""#), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_keeps_this_process_environment() {
         assert_eq!(user_default(), None);
         assert_eq!(fresh_path(), None);
+        assert_eq!(child_path(), None);
     }
 
     #[cfg(windows)]
@@ -399,6 +456,8 @@ mod tests {
         for own in entries(&std::env::var("PATH").unwrap()).into_iter().filter(|e| windows_absolute(e)) {
             assert!(keys.contains(&path_key(own)), "{own} is missing from {path}");
         }
+        // What Workbench starts itself: this process's PATH, then the sign-in's folders it lacks.
+        assert_eq!(child_path(), extend_path(&std::env::var("PATH").unwrap(), &fresh));
         // A lookup that missed tries the sign-in's folders it has not searched.
         let fresh_dirs: Vec<PathBuf> = std::env::split_paths(&fresh).filter(|d| !d.as_os_str().is_empty()).collect();
         assert!(path_added(&fresh_dirs).is_empty());

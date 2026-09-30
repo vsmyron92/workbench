@@ -127,7 +127,9 @@ pub fn launch(project: &Project, spec: &ServerSpec, placement: Placement) -> Res
         Placement::Host(path) => {
             // An npm shim (Windows) runs as node and its script, not through cmd.exe; another
             // batch file's cmd.exe never takes a program from the project (`child_env`), nor
-            // gets an argument it would reparse.
+            // gets an argument it would reparse. A server found only on a new sign-in's `PATH`
+            // (installed since Workbench started) gets those folders too (`program_env`), so
+            // it finds what it runs in turn (gopls its `go`); the spec's own `env` wins.
             let r = crate::util::os::exe::classify(path);
             if r.kind == crate::util::os::exe::Kind::Batch && !crate::util::os::exe::batch_args_safe(&spec.args) {
                 return Err(format!(
@@ -136,7 +138,7 @@ pub fn launch(project: &Project, spec: &ServerSpec, placement: Placement) -> Res
                     spec.id
                 ));
             }
-            let own = crate::util::os::exe::child_env().iter().map(|(k, v)| (k.to_string(), Some(v.to_string())));
+            let own = crate::util::os::exe::program_env().into_iter().map(|(k, v)| (k.to_string(), Some(v)));
             Ok(Launch {
                 program: r.program.to_string_lossy().into_owned(),
                 args: r.prefix_args.into_iter().chain(spec.args.iter().cloned()).collect(),
@@ -303,13 +305,21 @@ mod tests {
         let bin = PathBuf::from("/opt/ls/bin/typescript-language-server");
         let l = launch(&project(), ts, Placement::Host(bin.clone())).unwrap();
         // Unix: the file itself; Windows: made absolute (`C:\opt\…`).
-        assert_eq!(l.program, crate::util::os::exe::classify(bin).program.to_string_lossy());
+        assert_eq!(l.program, crate::util::os::exe::classify(bin.clone()).program.to_string_lossy());
         #[cfg(unix)]
         assert_eq!(l.program, "/opt/ls/bin/typescript-language-server");
         assert_eq!(l.args, vec!["--stdio"]);
         assert_eq!(l.cwd, PathBuf::from("/home/u/ws/api"));
         assert_eq!(l.root_server, "/home/u/ws/api");
         assert!(l.container.is_none());
+        // What Workbench gives the programs it starts (on Windows a `PATH` with the folders a
+        // new sign-in's has; nothing on Unix), then the spec's own variables, which win.
+        let mut own_path = ts.clone();
+        own_path.env = [("PATH".to_string(), "/opt/ls/bin".to_string())].into();
+        let l = launch(&project(), &own_path, Placement::Host(bin)).unwrap();
+        let program_env: Vec<(String, Option<String>)> = crate::util::os::exe::program_env().into_iter().map(|(k, v)| (k.to_string(), Some(v))).collect();
+        assert_eq!(l.env[..program_env.len()], program_env[..]);
+        assert_eq!(l.env[program_env.len()..], [("PATH".to_string(), Some("/opt/ls/bin".to_string()))]);
     }
 
     /// npm's `.cmd` shim (Windows) runs as node and the package script, never through cmd.exe.

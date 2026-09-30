@@ -587,11 +587,14 @@ own variables, gives the environment a new sign-in gets, re-read once HKLM's or 
 `Environment` key changes (`RegNotifyChangeKeyValue`). New terminals, runs and agents get its
 `Path`, then Workbench's own absolute entries it lacks (a virtual environment it was started
 from); before, portable-pty put the registry's `Path` over Workbench's, dropping those. A
-lookup (`os::exe::which`) that misses tries its folders, so a program installed while
-Workbench runs (Node.js, Python, rustup, an agent CLI, a language server) is found without a
-restart. What the server starts by name through std (git, gh, glab, docker, rustc) and the
-children it starts outside terminals (language servers, debug adapters) keep its own `PATH`
-until it restarts; git's "not found" message says so (`os::exe::INSTALLED_SINCE`).
+lookup (`os::exe::which`) that misses tries its folders, and what Workbench starts by itself
+outside a terminal (language servers, debug adapters, secret and service commands) gets them
+after its own `PATH` (`os::exe::program_env`), so a program installed while Workbench runs
+(Node.js, Python, rustup, an agent CLI, a language server) is found without a restart and
+finds what it runs in turn (gopls its `go`). What the server starts by name through std (git,
+and rustc for gdb's pretty printers) keeps its own `PATH` until it restarts; git's "not
+found" message says so (`os::exe::INSTALLED_SINCE`). The other variables an installer sets
+(`JAVA_HOME`) reach new terminals only (portable-pty reads the `Environment` keys).
 `aws-lc-sys` on MSVC: 0.45 builds with its `cc` builder (no CMake) and, without NASM, links
 the prebuilt NASM objects that rustls's `aws_lc_rs` feature enables (`prebuilt-nasm`), so
 no setup-nasm step should be needed; check the first run. Sharing violations on rename and

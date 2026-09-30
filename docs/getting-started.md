@@ -109,10 +109,10 @@ Good to know:
 - Version control needs [Git for Windows](https://git-scm.com/download/win).
 - Installers put their programs on PATH for programs started afterwards. Workbench's new
   terminals, runs and agent sessions get the PATH a new sign-in gets, and its own lookups
-  (language servers, debug adapters, agent CLIs) try it too, so Node.js, Python or rustup
-  installed while it runs are found at once. The Git features find Git for Windows only once
-  Workbench restarts (`workbench service stop`, then Workbench from the Start Menu, or
-  `workbench serve` in a new terminal).
+  (language servers, debug adapters, agent CLIs) try it too and pass its folders on to what
+  they start, so Node.js, Python or rustup installed while it runs are found at once. The
+  Git features find Git for Windows only once Workbench restarts (`workbench service stop`,
+  then Workbench from the Start Menu, or `workbench serve` in a new terminal).
 - A `keyring` secret reference reads Windows Credential Manager: `{ keyring =
   "workbench/atlassian" }` is the generic credential named `atlassian.workbench`.
 - The binaries are not code-signed, so SmartScreen or an antivirus may warn about
