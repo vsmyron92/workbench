@@ -4,7 +4,7 @@ An **agent session** is a CLI such as Claude Code running in a terminal inside W
 
 ## Starting a session
 
-Open the **Agents** tool window, or press **Ctrl+K** and run *New agent session*. Choose the provider and the project.
+Use the **Agents** tab, the first tab of the agents column on the left, or press **Ctrl+K** and run *New agent session*. Choose the provider and the project. The session becomes a tab of that column, and **+** after the last tab starts another session or a shell.
 
 - **Claude Code** works without setup.
 - **Codex**, **Kimi Code**, **Gemini CLI** and **Aider** are presets that appear once the program is installed.
@@ -24,7 +24,7 @@ Claude's own prompt in the terminal keeps working. **Whichever answer comes firs
 
 ## Remote Control
 
-Claude Code's Remote Control can be switched on per session, or run as a server per project, from the Agents panel.
+Claude Code's Remote Control can be switched on per session, or run as a server per project, from the Agents tab of the column.
 
 ## Dev containers
 

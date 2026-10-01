@@ -1,6 +1,6 @@
 # Projects and files
 
-A **project** is a git repository. Switch between them with the project switcher in the top bar. Every tool window follows the current project.
+A **project** is a git repository. Switch between them with the project switcher at the top of the agents window. Every tool window follows the current project.
 
 ## Adding and removing projects
 
@@ -10,7 +10,7 @@ Workbench lists each repository directly under the folders in `[projects] roots`
 
 From a project's files Workbench works out:
 
-- **Run configurations:** Cargo, package.json, Python, Go, CMake, Gradle and Maven, Ruby, PHP, Elixir, Make, just, Taskfile, Procfile, compose files, Unity and .NET. They appear in the Run tool window.
+- **Run configurations:** Cargo, package.json, Python, Go, CMake, Gradle and Maven, Ruby, PHP, Elixir, Make, just, Taskfile, Procfile, compose files, Unity and .NET. They appear in the workspace window's top bar and in the Run tool window (Alt+4); a run's output is a tab of the agents column.
 - **Environments:** from a Caddyfile and deploy scripts. They appear in the Apps tool window.
 
 ## Adjusting a project

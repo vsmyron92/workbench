@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1 - 2026-10-01
+
+- **Docs:** the tour card's screenshots (CI tests, a Workspace card, Services, Database), the
+  help pages, the welcome card and the README describe the agents column: sessions start
+  from the first tab of the column, the project switcher sits over it, Alt+F12 collapses the
+  workspace window.
+
 ## 0.5.0 - 2026-09-30
 
 - **Layout:** agents and terminals are a column on the left of the window, no longer tabs
