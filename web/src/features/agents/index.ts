@@ -10,6 +10,7 @@ import { MobileAgents } from './MobileAgents'
 import { AgentDialogs, AttentionNotifier, TerminalsSync } from './providers'
 import { useAgentsUi } from './store'
 import { TerminalPanel } from './TerminalPanel'
+import { TerminalToolWindow } from './TerminalToolWindow'
 import { AgentsBadge, AgentStatus, AttentionPill } from './widgets'
 
 const feature: FeatureModule = {
@@ -20,6 +21,8 @@ const feature: FeatureModule = {
     terminal: { component: TerminalPanel, keepAlive: true, icon: SquareTerminal },
   },
   column: AgentColumn,
+  // Shells under the dock, beside the column (CLion's Terminal, at the foot of the left stripe).
+  toolWindows: [{ id: 'terminal', title: 'Terminal', icon: SquareTerminal, side: 'bottom', order: 10, component: TerminalToolWindow }],
   commands: agentCommands,
   columnbar: [AttentionPill],
   statusbar: [AgentStatus],
