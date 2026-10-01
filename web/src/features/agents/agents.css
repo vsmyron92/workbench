@@ -886,7 +886,17 @@
   color: var(--warning);
 }
 
-/* ---------------------------------------------------------------- terminal tabs (the agents column's) */
+/* ---------------------------------------------------------------- terminal tabs (the agents column's and the Terminal tool window's) */
+.wb-ag-tabs {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 30px;
+  padding: 0 4px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  flex: none;
+}
 .wb-ag-tab {
   display: inline-flex;
   align-items: center;
@@ -926,6 +936,14 @@
 .wb-ag-tab-close:hover {
   background: var(--bg-active-muted);
   color: var(--fg);
+}
+
+/* The Terminal tool window's shell, under its tabs. */
+.wb-ag-bottom-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ---------------------------------------------------------------- top bar / status bar */

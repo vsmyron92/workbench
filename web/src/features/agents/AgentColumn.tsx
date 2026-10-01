@@ -2,7 +2,8 @@
 // workspace area. The first tab is the agents home (the prompt for a new session, the
 // project's sessions, the history); "+" starts an agent session or a shell. Panels of
 // kind `terminal` and `agents.home` open here, not in the dock, whoever asks: a run's
-// output, a deploy, a container shell, "Ask agent" (shell/actions `setColumnHost`).
+// output, a deploy, a container shell, "Ask agent" (shell/actions `setColumnHost`). The
+// shells of the Terminal tool window (under the dock) are the exception: they stay there.
 
 import { useEffect, useMemo, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -20,6 +21,7 @@ import { ContainerBadge, ProviderBadge, StateDot } from './parts'
 import { cachedTerminals } from './queryAccess'
 import { useAgentsUi } from './store'
 import { TerminalPanel } from './TerminalPanel'
+import { showBottomTerminal } from './TerminalToolWindow'
 
 const NO_EXTRAS: string[] = []
 /** Terminals kept mounted (their screens stay as they are when their tab is shown again). */
@@ -31,6 +33,14 @@ const requested = new Map<string, number>()
 const projectKey = () => useUi.getState().projectId ?? ''
 const terminalOf = (panelId: string) => (panelId.startsWith('terminal:') ? panelId.slice('terminal:'.length) : null)
 const noop = () => {}
+/** A shell of the Terminal tool window (under the dock) of the current project. */
+const isBottom = (id: string) => (useAgentsUi.getState().bottomTerminals[projectKey()] ?? NO_EXTRAS).includes(id)
+/** The column's tabs of the current project, from the caches. */
+const currentTabs = () => {
+  const pid = useUi.getState().projectId
+  const ui = useAgentsUi.getState()
+  return columnTabs(cachedTerminals(), pid, ui.columnExtras[pid ?? ''], ui.bottomTerminals[pid ?? ''])
+}
 
 const host: ColumnHost = {
   open: (p) => {
@@ -42,18 +52,24 @@ const host: ColumnHost = {
     }
     const id = typeof p.params.terminalId === 'string' ? p.params.terminalId : ''
     if (!id) return
+    if (isBottom(id)) {
+      if (p.focus) showBottomTerminal(useUi.getState().projectId, id)
+      return
+    }
     requested.set(id, Date.now())
     ui.addColumnExtra(key, id)
     if (p.focus) ui.selectColumnTab(key, id)
   },
   close: (panelId) => {
     const id = terminalOf(panelId)
-    if (id) useAgentsUi.getState().removeColumnExtra(projectKey(), id)
+    if (!id) return
+    const ui = useAgentsUi.getState()
+    ui.removeColumnExtra(projectKey(), id)
+    ui.removeBottomTerminal(projectKey(), id)
   },
   isOpen: (panelId) => {
     const id = terminalOf(panelId)
-    const pid = useUi.getState().projectId
-    return !!id && columnTabs(cachedTerminals(), pid, useAgentsUi.getState().columnExtras[pid ?? '']).some((t) => t.id === id)
+    return !!id && (isBottom(id) || currentTabs().some((t) => t.id === id))
   },
 }
 
@@ -100,12 +116,14 @@ function ProjectColumn({ projectId }: { projectId: string | null }) {
   const shown = true
   const selected = useAgentsUi((s) => s.columnTab[key] ?? null)
   const extras = useAgentsUi((s) => s.columnExtras[key] ?? NO_EXTRAS)
+  // The Terminal tool window's shells are its tabs, not the column's.
+  const bottom = useAgentsUi((s) => s.bottomTerminals[key] ?? NO_EXTRAS)
   const select = useAgentsUi((s) => s.selectColumnTab)
   const openDialog = useAgentsUi((s) => s.openDialog)
   const projects = useProjects()
   const dc = projects.data?.find((p) => p.id === projectId)?.devcontainer
 
-  const tabs = useMemo(() => columnTabs(data, projectId, extras), [data, projectId, extras])
+  const tabs = useMemo(() => columnTabs(data, projectId, extras, bottom), [data, projectId, extras, bottom])
   const current = tabs.find((t) => t.id === selected) ?? null
   const currentId = current?.id ?? null
   // Asked for a moment ago and not in the list yet: its `terminal.created` is on the way.

@@ -22,6 +22,13 @@ interface AgentsUi {
    * ones (another project's session, a closed one's saved screen), per project.
    */
   columnExtras: Record<string, string[]>
+  /**
+   * Shells started from the Terminal tool window (under the dock), per project. They are
+   * its tabs, not the agents column's.
+   */
+  bottomTerminals: Record<string, string[]>
+  /** The Terminal tool window's selected tab per project. */
+  bottomTab: Record<string, string | null>
   /** Bumped to put the caret into the home tab's prompt. */
   composerFocus: number
   /** The provider the composer used last (the next session starts with it). */
@@ -35,6 +42,9 @@ interface AgentsUi {
   selectColumnTab: (project: string, terminalId: string | null) => void
   addColumnExtra: (project: string, terminalId: string) => void
   removeColumnExtra: (project: string, terminalId: string) => void
+  addBottomTerminal: (project: string, terminalId: string) => void
+  removeBottomTerminal: (project: string, terminalId: string) => void
+  setBottomTab: (project: string, terminalId: string | null) => void
   focusComposer: () => void
   setLastProvider: (id: string) => void
   setHistoryProvider: (id: string) => void
@@ -48,6 +58,8 @@ export const useAgentsUi = create<AgentsUi>()(
       allProjects: false,
       columnTab: {},
       columnExtras: {},
+      bottomTerminals: {},
+      bottomTab: {},
       composerFocus: 0,
       lastProvider: null,
       historyProvider: null,
@@ -66,6 +78,18 @@ export const useAgentsUi = create<AgentsUi>()(
           const list = s.columnExtras[project]
           return list?.includes(terminalId) ? { columnExtras: { ...s.columnExtras, [project]: list.filter((x) => x !== terminalId) } } : s
         }),
+      addBottomTerminal: (project, terminalId) =>
+        set((s) => {
+          const list = s.bottomTerminals[project] ?? []
+          return list.includes(terminalId) ? s : { bottomTerminals: { ...s.bottomTerminals, [project]: [...list, terminalId] } }
+        }),
+      removeBottomTerminal: (project, terminalId) =>
+        set((s) => {
+          const list = s.bottomTerminals[project]
+          return list?.includes(terminalId) ? { bottomTerminals: { ...s.bottomTerminals, [project]: list.filter((x) => x !== terminalId) } } : s
+        }),
+      setBottomTab: (project, terminalId) =>
+        set((s) => (s.bottomTab[project] === terminalId ? s : { bottomTab: { ...s.bottomTab, [project]: terminalId } })),
       focusComposer: () => set((s) => ({ composerFocus: s.composerFocus + 1 })),
       setLastProvider: (lastProvider) => set({ lastProvider }),
       setHistoryProvider: (historyProvider) => set({ historyProvider }),
@@ -78,6 +102,8 @@ export const useAgentsUi = create<AgentsUi>()(
         allProjects: s.allProjects,
         columnTab: s.columnTab,
         columnExtras: s.columnExtras,
+        bottomTerminals: s.bottomTerminals,
+        bottomTab: s.bottomTab,
         lastProvider: s.lastProvider,
         historyProvider: s.historyProvider,
       }),

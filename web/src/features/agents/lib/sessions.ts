@@ -139,12 +139,13 @@ export function agentSessions(list: TerminalInfo[] | undefined, projectId: strin
  * The tabs of the agents column for a project: its open terminals (agent sessions,
  * shells, runs, commands) in a stable order, pinned first, then the `extras` opened on
  * request (another project's session, a closed one's saved screen) in the order they
- * were opened. Terminals that no longer exist are left out.
+ * were opened. Terminals that no longer exist are left out, and so are the `exclude`d
+ * ones (the Terminal tool window's shells).
  */
-export function columnTabs(list: TerminalInfo[] | undefined, projectId: string | null, extras: string[] = []): TerminalInfo[] {
+export function columnTabs(list: TerminalInfo[] | undefined, projectId: string | null, extras: string[] = [], exclude: string[] = []): TerminalInfo[] {
   const all = list ?? []
   const own = all
-    .filter((t) => t.open && t.projectId === projectId)
+    .filter((t) => t.open && t.projectId === projectId && !exclude.includes(t.id))
     .sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.order - b.order || a.createdAt - b.createdAt || a.id.localeCompare(b.id))
   const seen = new Set(own.map((t) => t.id))
   const more: TerminalInfo[] = []
@@ -155,6 +156,21 @@ export function columnTabs(list: TerminalInfo[] | undefined, projectId: string |
     more.push(t)
   }
   return [...own, ...more]
+}
+
+/**
+ * The tabs of the Terminal tool window for a project: the project's open terminals among
+ * `ids` (the shells started there), in the order they were started. Ones that are gone
+ * or closed are left out.
+ */
+export function bottomTabs(list: TerminalInfo[] | undefined, projectId: string | null, ids: string[]): TerminalInfo[] {
+  const all = list ?? []
+  const out: TerminalInfo[] = []
+  for (const id of ids) {
+    const t = all.find((x) => x.id === id)
+    if (t && t.open && t.projectId === projectId) out.push(t)
+  }
+  return out
 }
 
 /** The tab to show once `closing` goes away: its right neighbour, else its left one, else the home tab (null). */

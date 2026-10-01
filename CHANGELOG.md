@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.2 - 2026-10-01
+
+- **Terminal tool window:** the **Terminal** button is back at the foot of the left stripe,
+  first of the bottom group. It opens shells under the editor, as tabs, beside whatever the
+  agents column shows; **+** starts one (in the dev container or on the host when one runs).
+  Those shells are the tool window's own: the agents column leaves them out, and opening one
+  of them from anywhere shows it there. Shells started from the column stay in the column.
+
 ## 0.5.1 - 2026-10-01
 
 - **Docs:** the tour card's screenshots (CI tests, a Workspace card, Services, Database), the

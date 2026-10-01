@@ -5,6 +5,7 @@ import {
   agentMeta,
   canKill,
   colorCss,
+  bottomTabs,
   columnTabs,
   counts,
   formatCost,
@@ -165,6 +166,13 @@ describe('agents column tabs', () => {
   it('adds the terminals opened on request after them, once each, and only while they exist', () => {
     // A closed session's saved screen, another project's session, one that is gone, and one that is a tab anyway.
     expect(ids(columnTabs(list, 'shop', ['other', 'closed', 'gone', 'a2', 'other']))).toEqual(['pin', 'sh', 'a2', 'run', 'other', 'closed'])
+  })
+
+  it("leaves the Terminal tool window's shells to it", () => {
+    expect(ids(columnTabs(list, 'shop', [], ['sh', 'gone']))).toEqual(['pin', 'a2', 'run'])
+    // Its tabs: the project's open terminals among its ids, in the order they were started.
+    expect(ids(bottomTabs(list, 'shop', ['sh', 'closed', 'other', 'gone', 'a2']))).toEqual(['sh', 'a2'])
+    expect(bottomTabs(undefined, 'shop', ['sh'])).toEqual([])
   })
 
   it('shows the neighbour of a tab that closes, the home tab after the last one', () => {

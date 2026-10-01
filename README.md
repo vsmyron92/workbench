@@ -122,7 +122,7 @@ as a service, and `config.toml`. The pages are Markdown in `web/src/features/hel
 | **Run** / **Debug** | Alt+4 / Alt+5 | Run configurations and their output; the debugger |
 | **Problems** / **Structure** | Alt+6 / Alt+7 | Diagnostics from language servers; the file's symbols |
 | **Services** | Alt+8 | Docker containers, compose projects and images |
-| **Terminals** | | Shells, on the host or in the dev container, as tabs of the Agents column; Alt+F12 collapses the workspace window beside it |
+| **Terminal** | | Shells under the editor, on the host or in the dev container; shells started from the Agents column are tabs there instead. Alt+F12 collapses the workspace window beside the column |
 | **Workspace** | | Deliverable cards: reports, galleries, PDFs, 3D comparisons |
 | **GitLab** / **GitHub** | | Merge and pull requests, pipelines and Actions, issues |
 | **Confluence** / **Jira** | | Pages, comments and boards |
