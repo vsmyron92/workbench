@@ -31,7 +31,7 @@ in the card's header. Archiving keeps its files.
 | Left stripe | Workspace, Files, Commit, Find; Settings at its foot |
 | Right stripe | GitLab, GitHub, Confluence, Jira, Apps, Database |
 | Bottom stripe | Problems, TODO, Git Log, Debug, Run, Services |
-| Top bar | The project and branch switchers, run configurations |
+| Top bars | The project switcher over the agents column; the branch switcher and run configurations over the workspace |
 | Status bar | The language server, the branch, CI status, the dev container |
 
 Double Shift searches files, symbols, text and actions. Ctrl+K lists every command.
