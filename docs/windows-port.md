@@ -769,7 +769,9 @@ None of this has been tried: no test or CI job runs under WSL, with either engin
 `GET /api/health` gains `os` and `unsupported: {feature: reason}`, so the UI hides or greys
 out the Dev Containers tool window and "Attach to process…". MCP tools return the same text.
 Done (`util::os::support`): the keys are `devcontainer`, `desktopNotifications`, `gdbAttach`,
-`rustGdbPrettyPrinters`, `networkRoots`, plus `experimental: {services}`. The dev container
+`rustGdbPrettyPrinters`, `networkRoots`, `selfUpdate` (Workbench finds a newer release but
+does not install it or restart by itself: `install.ps1` does, see "Updates" in
+ARCHITECTURE.md), plus `experimental: {services}`. The dev container
 chip, status item and commands are hidden; "Attach to Process…" stays (attach works through
 lldb-dap, CodeLLDB and debugpy, which an attach by language picks over gdb) and its picker
 shows the gdb note; the local browser notifies in place of the desktop.

@@ -18,6 +18,7 @@ import type {
   RemoteInfo,
   SecretsInfo,
   SettingsInfo,
+  UpdateStatus,
 } from './types'
 
 /** Every platform query lives under ['platform', …] so `settings.changed` can refresh them all. */
@@ -31,6 +32,14 @@ export const pk = {
   mcp: (projectId: string | null) => ['platform', 'mcp', projectId ?? ''] as const,
   activity: ['platform-activity'] as const,
   push: ['platform', 'push'] as const,
+  update: ['platform', 'update'] as const,
+}
+
+/** The running version, the latest release and an install's progress; `platform.update` keeps it live. */
+export function useUpdate() {
+  const qc = useQueryClient()
+  useEvent<UpdateStatus>('platform.update', (ev) => qc.setQueryData(pk.update, ev.data))
+  return useQuery({ queryKey: pk.update, queryFn: () => api.get<UpdateStatus>('/api/platform/update'), staleTime: 60_000 })
 }
 
 /** The VAPID key and the devices with push; `push.changed` keeps it fresh on every device. */

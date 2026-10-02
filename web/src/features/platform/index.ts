@@ -1,15 +1,15 @@
 // Feature slice: platform — settings, remote access and pairing, notifications,
-// the MCP overview and the activity log. See docs/ARCHITECTURE.md.
+// updates, the MCP overview and the activity log. See docs/ARCHITECTURE.md.
 
 import { lazy } from 'react'
-import { Activity, Bell, Cable, Ellipsis, FileCode, KeyRound, MonitorSmartphone, QrCode, Settings } from 'lucide-react'
+import { Activity, Bell, Cable, CircleArrowUp, Ellipsis, FileCode, KeyRound, MonitorSmartphone, QrCode, Settings } from 'lucide-react'
 import type { FeatureModule } from '@/shell/types'
 import { useMobileHelp } from '@/features/help/mobile'
 import { ActivityToolWindow } from './Activity'
 import { MobileMore } from './MobileMore'
 import { openPairDialog } from './PairDialog'
 import { PlatformProvider } from './Provider'
-import { openSettings, RemoteIndicator } from './StatusBar'
+import { openSettings, RemoteIndicator, UpdateIndicator } from './StatusBar'
 
 const SettingsPanel = lazy(() => import('./SettingsPanel').then((m) => ({ default: m.SettingsPanel })))
 
@@ -42,9 +42,10 @@ const feature: FeatureModule = {
       keywords: ['push', 'phone', 'mobile', 'alerts'],
       run: () => openSettings('notifications'),
     },
+    { id: 'platform.updates', title: 'Check for updates', group: 'Workbench', icon: CircleArrowUp, keywords: ['upgrade', 'version', 'release', 'restart'], run: () => openSettings('updates') },
     { id: 'platform.rawConfig', title: 'Edit config.toml', group: 'Workbench', icon: FileCode, keywords: ['raw', 'toml'], run: () => openSettings('raw') },
   ],
-  statusbar: [RemoteIndicator],
+  statusbar: [RemoteIndicator, UpdateIndicator],
   mobileTabs: [
     {
       id: 'more',

@@ -33,6 +33,8 @@ export interface GlobalConfig {
   notify?: { desktop: boolean; command?: string | null }
   /** Web Push: the VAPID contact and extra push service hosts. */
   push?: { subject?: string | null; extra_endpoint_hosts?: string[] }
+  /** Updates: the daily look, and the GitHub repository (and API) releases come from. */
+  update?: { check?: boolean; repo?: string | null; api?: string | null }
   extra_roots: string[]
   secrets: Record<string, SecretRef>
 }
@@ -286,6 +288,45 @@ export interface PushInfo {
   publicKey: string
   subscriptions: PushSubscriptionInfo[]
   sessionId: string | null
+}
+
+/** update/mod.rs ReleaseInfo */
+export interface ReleaseInfo {
+  version: string
+  /** Markdown. */
+  notes: string
+  url: string | null
+  publishedAt: number | null
+  /** The release has an archive for the server's OS and CPU. */
+  archive: boolean
+}
+
+export type UpdatePhase = 'idle' | 'checking' | 'downloading' | 'verifying' | 'installing' | 'restarting'
+
+/** GET /api/platform/update and the `platform.update` event (update/mod.rs Status). */
+export interface UpdateStatus {
+  current: string
+  /** `owner/name` of the GitHub repository releases come from; null: this build has none. */
+  source: string | null
+  sourceError: string | null
+  /** Looking once a day is on. */
+  check: boolean
+  checkedAt: number | null
+  /** Why the last look failed. */
+  error: string | null
+  latest: ReleaseInfo | null
+  available: boolean
+  canInstall: boolean
+  /** Why this Workbench cannot install `latest` by itself. */
+  installNote: string | null
+  phase: UpdatePhase
+  progress: { received: number; total: number } | null
+  /** Why the last install failed. */
+  failure: string | null
+  /** The version installed over the running one; a restart runs it. */
+  installed: string | null
+  restartPending: boolean
+  canRestart: boolean
 }
 
 /** POST /api/push/test */

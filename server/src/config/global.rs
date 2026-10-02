@@ -43,6 +43,9 @@ pub struct GlobalConfig {
     /// Web Push to phones and other devices.
     #[serde(skip_serializing_if = "is_default")]
     pub push: crate::platform::push::PushConfig,
+    /// Updates: the daily look for a newer release, and where releases come from.
+    #[serde(skip_serializing_if = "is_default")]
+    pub update: crate::platform::update::UpdateConfig,
     /// Directories outside any project that the editor may open read-only
     /// (Claude scratchpads, `~/.claude`). Project roots are always allowed.
     pub extra_roots: Vec<String>,

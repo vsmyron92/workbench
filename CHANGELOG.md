@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.0 - 2026-10-02
+
+- **Updates:** Workbench updates itself. A Workbench installed from a release looks for a
+  newer one once a day and shows **Update X.Y.Z** in the status bar; **Settings › Updates**
+  has the release notes, **Check now** and **Update and restart**, which downloads the
+  release, compares its SHA-256 with the release's checksum, replaces the program and
+  restarts into it. The server restarts in place (the same process, a fraction of a second)
+  and the page reloads by itself; other open tabs and devices are offered a reload. Before
+  it starts it says what the restart stops: agent sessions resume afterwards, shells start
+  again under their last screen, runs do not. The replaced version stays as
+  `workbench.prev`. The phone's More tab offers the same.
+- **`workbench update`** does it from a terminal: `--check` only looks, `--restart` also
+  restarts the running Workbench.
+- **Restart now** (Settings › Updates) restarts a Workbench whose program was replaced by
+  hand, with `install.sh` or `workbench update`.
+- Nothing is installed without your click, and agents cannot update or restart Workbench.
+  Looking is one request a day to GitHub without a token; `[update] check = false` turns
+  it off. A build from source has no release to look for until `[update] repo =
+  "owner/name"` names a repository. On Windows, and where Workbench cannot write to its
+  own folder, it tells you about the new version and leaves installing to the archive's
+  installer.
+
 ## 0.5.3 - 2026-10-02
 
 - **Agents column:** a session opened from an attention toast, the history, a Workspace card

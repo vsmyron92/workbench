@@ -25,11 +25,21 @@ pub enum Feature {
     NetworkRoots,
     /// The Services tool window (this computer's Docker containers and images).
     Services,
+    /// Workbench installing a newer release over itself and restarting into it
+    /// (`platform::update`); looking for one works everywhere.
+    SelfUpdate,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 6] =
-        [Feature::Devcontainer, Feature::DesktopNotifications, Feature::GdbAttach, Feature::RustGdbPrettyPrinters, Feature::NetworkRoots, Feature::Services];
+    pub const ALL: [Feature; 7] = [
+        Feature::Devcontainer,
+        Feature::DesktopNotifications,
+        Feature::GdbAttach,
+        Feature::RustGdbPrettyPrinters,
+        Feature::NetworkRoots,
+        Feature::Services,
+        Feature::SelfUpdate,
+    ];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -39,6 +49,7 @@ impl Feature {
             Feature::RustGdbPrettyPrinters => "rustGdbPrettyPrinters",
             Feature::NetworkRoots => "networkRoots",
             Feature::Services => "services",
+            Feature::SelfUpdate => "selfUpdate",
         }
     }
 }
@@ -133,6 +144,8 @@ const WIN_RUST_GDB: &str =
 const WIN_NETWORK_ROOTS: &str = "projects on network paths (\\\\server\\share) or inside WSL (\\\\wsl$) are not supported on Windows: \
      clone the repository to a local drive, or run Workbench inside WSL for them";
 const WIN_SERVICES: &str = "the Services tool window is experimental on Windows: it has not been tested with Docker Desktop yet";
+const WIN_SELF_UPDATE: &str = "Workbench does not install updates by itself on Windows yet: download the new release's zip, unpack it and \
+     run its install.ps1, then restart Workbench";
 
 /// The table, by OS name, so every OS's entries can be tested anywhere.
 fn support_on(os: &str, f: Feature) -> Support {
@@ -144,6 +157,7 @@ fn support_on(os: &str, f: Feature) -> Support {
         ("windows", RustGdbPrettyPrinters) => Support::Unsupported(WIN_RUST_GDB),
         ("windows", NetworkRoots) => Support::Unsupported(WIN_NETWORK_ROOTS),
         ("windows", Services) => Support::Experimental(WIN_SERVICES),
+        ("windows", SelfUpdate) => Support::Unsupported(WIN_SELF_UPDATE),
         _ => Support::Supported,
     }
 }
@@ -171,7 +185,7 @@ mod tests {
             .filter(|f| matches!(support_on("windows", *f), Support::Unsupported(_)))
             .map(Feature::key)
             .collect();
-        assert_eq!(unsupported, ["devcontainer", "desktopNotifications", "gdbAttach", "rustGdbPrettyPrinters", "networkRoots"]);
+        assert_eq!(unsupported, ["devcontainer", "desktopNotifications", "gdbAttach", "rustGdbPrettyPrinters", "networkRoots", "selfUpdate"]);
         assert!(matches!(support_on("windows", Feature::Services), Support::Experimental(n) if n.contains("experimental")));
         // Each reason says what does not work on Windows, in one line.
         for f in Feature::ALL {
@@ -219,7 +233,7 @@ mod tests {
     #[test]
     fn this_windows_build_reports_them() {
         assert_eq!(os(), "windows");
-        assert_eq!(unsupported_all().len(), 5);
+        assert_eq!(unsupported_all().len(), 6);
         assert_eq!(experimental_all().keys().copied().collect::<Vec<_>>(), ["services"]);
         let e = require(Feature::Devcontainer).unwrap_err();
         assert_eq!((e.status.as_u16(), e.code, e.feature), (501, "unsupported_platform", Some("devcontainer")));

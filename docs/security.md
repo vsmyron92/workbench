@@ -23,8 +23,8 @@ model is in [the architecture](ARCHITECTURE.md#security-model).
 - A hosted session gets its own token, valid only for Workbench's hooks and MCP endpoint,
   and every MCP tool is confined to the session's project.
 - Agents never answer permission requests, deploy, run destructive git operations, start
-  a debugger or language server, or query a database through Workbench. Run configurations
-  that deploy or release are refused to them.
+  a debugger or language server, query a database, or update or restart Workbench through
+  Workbench. Run configurations that deploy or release are refused to them.
 - Workspace reports an agent writes are served sandboxed: they cannot read Workbench's
   cookies, storage or API.
 
@@ -40,7 +40,9 @@ may come from someone else's branch or a clone, so they are untrusted:
   on your click, like any IDE's run configurations;
 - a dev container is built only after you approve its exact plan; any change asks again;
 - language servers and debug adapters come only from your `config.toml` and start only
-  after you enable them.
+  after you enable them;
+- they never say where Workbench's own updates come from: only the release build and your
+  `config.toml` do.
 
 ## Your secrets
 

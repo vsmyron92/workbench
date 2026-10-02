@@ -342,7 +342,7 @@ mod tests {
             assert_eq!((&v["unsupported"], &v["experimental"]), (&serde_json::json!({}), &serde_json::json!({})), "{v}");
         }
         if cfg!(windows) {
-            for key in ["devcontainer", "desktopNotifications", "gdbAttach", "rustGdbPrettyPrinters", "networkRoots"] {
+            for key in ["devcontainer", "desktopNotifications", "gdbAttach", "rustGdbPrettyPrinters", "networkRoots", "selfUpdate"] {
                 assert!(v["unsupported"][key].as_str().is_some_and(|why| why.contains("Windows")), "{key}: {v}");
             }
             assert!(v["experimental"]["services"].is_string(), "{v}");
@@ -351,7 +351,7 @@ mod tests {
 }
 
 /// The running server's local URL and the master token.
-fn running_server() -> anyhow::Result<(String, String)> {
+pub(crate) fn running_server() -> anyhow::Result<(String, String)> {
     let paths = Paths::from_env()?;
     let rt: serde_json::Value = util::fs::read_json(&paths.data_dir.join("runtime.json"))?
         .ok_or_else(|| anyhow::anyhow!("Workbench is not running (no runtime.json); start it with `workbench`"))?;

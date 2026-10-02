@@ -15,6 +15,8 @@
 //!   runs (`service_windows.rs`).
 //! * A read-only overview of the Claude Code MCP servers configured on disk
 //!   (`claude_mcp.rs`).
+//! * Updates: looking for a newer release, installing it over this binary and
+//!   restarting into it (`update/`), also as `workbench update`.
 //!
 //! Routes: `/mcp`, `/api/platform/**`, `/api/settings/**`, `/api/push/**`.
 
@@ -31,6 +33,7 @@ pub mod service;
 pub mod settings;
 pub mod tls;
 pub mod tools;
+pub mod update;
 
 use std::sync::{Arc, OnceLock};
 
@@ -56,6 +59,7 @@ pub struct PlatformState {
     pub activity: activity::ActivityLog,
     pub notifier: notify::Notifier,
     pub push: push::PushState,
+    pub update: update::UpdateState,
     /// Serializes writes to `config.toml` and the project config layers.
     pub save_lock: tokio::sync::Mutex<()>,
     /// Hash of the last `config.toml` text edited outside Workbench that could not be
@@ -123,6 +127,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/platform/notify-test", post(notify::test_route))
         .route("/api/platform/remote", get(remote::get_remote).put(remote::put_remote))
         .route("/api/platform/pair", post(remote::pair))
+        .route("/api/platform/update", get(update::get_status))
+        .route("/api/platform/update/check", post(update::post_check))
+        .route("/api/platform/update/install", post(update::post_install))
+        .route("/api/platform/restart", post(update::post_restart))
         .route("/api/settings", get(settings::get_settings).patch(settings::patch_settings))
         .route("/api/settings/raw", get(settings::get_raw).put(settings::put_raw))
         .route("/api/settings/validate", post(settings::validate))
@@ -143,6 +151,7 @@ pub async fn start(state: &AppState) {
     push::start(state).await;
     notify::spawn_listener(state.clone());
     settings::watch_config(state);
+    update::start(state);
 }
 
 pub fn mcp_tools() -> Vec<McpTool> {

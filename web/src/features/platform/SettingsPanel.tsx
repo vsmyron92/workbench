@@ -1,10 +1,10 @@
 // The 'settings' panel: section navigation on the left, one section at a time.
 
 import { useEffect, type ComponentType } from 'react'
-import { AlertTriangle, Bell, Bot, Cable, FileCode, FolderGit2, KeyRound, MonitorSmartphone, Palette, Plug } from 'lucide-react'
+import { AlertTriangle, Bell, Bot, Cable, CircleArrowUp, FileCode, FolderGit2, KeyRound, MonitorSmartphone, Palette, Plug } from 'lucide-react'
 import type { PanelProps } from '@/shell/types'
 import { Badge } from '@/ui'
-import { useSecrets, useSettings } from './api'
+import { useSecrets, useSettings, useUpdate } from './api'
 import { restartText } from './lib'
 import { AgentsSection } from './sections/Agents'
 import { GeneralSection } from './sections/General'
@@ -15,6 +15,7 @@ import { ProjectsSection } from './sections/Projects'
 import { RawConfigSection } from './sections/RawConfig'
 import { RemoteSection } from './sections/Remote'
 import { SecretsSection } from './sections/Secrets'
+import { UpdatesSection } from './sections/Updates'
 import './platform.css'
 
 export const SECTIONS: { id: string; label: string; icon: ComponentType<{ size?: number }> }[] = [
@@ -26,6 +27,7 @@ export const SECTIONS: { id: string; label: string; icon: ComponentType<{ size?:
   { id: 'remote', label: 'Remote access', icon: MonitorSmartphone },
   { id: 'mcp', label: 'MCP', icon: Cable },
   { id: 'notifications', label: 'Notifications', icon: Bell },
+  { id: 'updates', label: 'Updates', icon: CircleArrowUp },
   { id: 'raw', label: 'Raw config', icon: FileCode },
 ]
 
@@ -34,6 +36,12 @@ function SecretsBadge() {
   const { data } = useSecrets()
   const n = (data?.secrets.filter((s) => !s.resolved || s.fixable).length ?? 0) + (data?.missing.length ?? 0)
   return n ? <Badge tone="warning">{n}</Badge> : null
+}
+
+/** The version next to "Updates" while a newer release waits. */
+function UpdateBadge() {
+  const { data } = useUpdate()
+  return data?.available && data.latest ? <Badge tone="accent">{data.latest.version}</Badge> : null
 }
 
 export function SettingsPanel({ params, setParams, setTitle }: PanelProps<{ section?: string }>) {
@@ -66,6 +74,9 @@ export function SettingsPanel({ params, setParams, setTitle }: PanelProps<{ sect
     case 'notifications':
       body = <NotificationsSection />
       break
+    case 'updates':
+      body = <UpdatesSection />
+      break
     case 'raw':
       body = <RawConfigSection />
       break
@@ -81,6 +92,7 @@ export function SettingsPanel({ params, setParams, setTitle }: PanelProps<{ sect
             <s.icon size={15} />
             <span>{s.label}</span>
             {s.id === 'secrets' && <SecretsBadge />}
+            {s.id === 'updates' && <UpdateBadge />}
           </button>
         ))}
       </nav>

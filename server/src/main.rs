@@ -71,6 +71,8 @@ enum Command {
     // Linux: a systemd user service; Windows: a sign-in entry (platform::service).
     #[command(about = platform::service::ABOUT)]
     Service(platform::service::ServiceArgs),
+    #[command(about = platform::update::ABOUT)]
+    Update(platform::update::UpdateArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -95,6 +97,7 @@ fn main() -> anyhow::Result<()> {
         Command::GitEditor { mode, dir, file } => git::cli_git_editor(&mode, &dir, &file),
         Command::Statusline => terminals::cli_statusline(),
         Command::Service(args) => platform::service::cli(args),
+        Command::Update(args) => platform::update::cli(args),
     }
 }
 
@@ -131,8 +134,12 @@ fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {
     // Ctrl-C works in the terminals whoever started the server (Windows).
     util::os::proc::enable_ctrl_c();
 
+    // What a restart into a new version runs again: the same address, no second window.
+    let again: Vec<std::ffi::OsString> =
+        std::iter::once("serve".into()).chain(bind.iter().flat_map(|b| ["--bind".into(), b.into()])).collect();
+
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(async move {
+    let restart = rt.block_on(async move {
         let paths = config::Paths::from_env()?;
         let cfg = config::GlobalConfig::load_or_init(&paths)?;
         let bind = bind.unwrap_or_else(|| cfg.server.bind.clone());
@@ -180,11 +187,20 @@ fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {
         }
 
         let stop = tokio_util::sync::CancellationToken::new();
+        // Set when the server stops in order to start again, not because it was told to
+        // stop: a stop signal that comes first wins over a restart asked for meanwhile.
+        let restart = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
-            let (state, stop) = (state.clone(), stop.clone());
+            let (state, stop, restart) = (state.clone(), stop.clone(), restart.clone());
             tokio::spawn(async move {
-                util::os::proc::shutdown_signal(&state.paths.data_dir).await;
-                tracing::info!("shutting down");
+                tokio::select! {
+                    _ = util::os::proc::shutdown_signal(&state.paths.data_dir) => tracing::info!("shutting down"),
+                    // An update was installed, or the user asked for a restart (platform::update).
+                    _ = state.platform.update.restart_requested() => {
+                        tracing::info!("shutting down to restart");
+                        restart.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
                 app::shutdown(&state).await;
                 stop.cancel();
             });
@@ -201,23 +217,46 @@ fn serve(bind: Option<String>, open: bool) -> anyhow::Result<()> {
                 }
             });
         }
-        match tls {
-            None => {
-                axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
-                    .with_graceful_shutdown(stop.cancelled_owned())
-                    .await?
+        let served = async {
+            match tls {
+                None => {
+                    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
+                        .with_graceful_shutdown(stop.clone().cancelled_owned())
+                        .await
+                }
+                Some(acceptor) => {
+                    use axum::serve::ListenerExt;
+                    // `tap_io` gives the listener axum's `ConnectInfo<SocketAddr>` support.
+                    let listener = platform::tls::TlsListener::new(listener, acceptor)?.tap_io(|_| {});
+                    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
+                        .with_graceful_shutdown(stop.clone().cancelled_owned())
+                        .await
+                }
             }
-            Some(acceptor) => {
-                use axum::serve::ListenerExt;
-                // `tap_io` gives the listener axum's `ConnectInfo<SocketAddr>` support.
-                let listener = platform::tls::TlsListener::new(listener, acceptor)?.tap_io(|_| {});
-                axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
-                    .with_graceful_shutdown(stop.cancelled_owned())
-                    .await?
+        };
+        // A restart does not wait for requests that are still open: the new process
+        // answers the next ones, and replacing this one closes their connections.
+        let restart_now = async {
+            stop.cancelled().await;
+            if !restart.load(std::sync::atomic::Ordering::SeqCst) {
+                std::future::pending::<()>().await;
             }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        };
+        tokio::select! {
+            served = served => served?,
+            _ = restart_now => {}
         }
-        Ok(())
-    })
+        anyhow::Ok(restart.load(std::sync::atomic::Ordering::SeqCst))
+    })?;
+    if restart {
+        // Before the runtime is dropped: this process becomes the binary now on disk.
+        let exe = util::os::proc::current_exe().context("cannot find this executable to restart it")?;
+        tracing::info!("restarting {}", exe.display());
+        let failed = util::os::proc::reexec(&exe, &again);
+        return Err(failed).with_context(|| format!("cannot restart {}", exe.display()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

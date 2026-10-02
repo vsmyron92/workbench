@@ -1,22 +1,67 @@
-// Phone "More" tab: theme, push notifications, devices (pair / revoke), recent activity, sign out.
+// Phone "More" tab: theme, updates, push notifications, devices (pair / revoke), recent activity, sign out.
 
 import { lazy, Suspense, useState } from 'react'
-import { ArrowLeft, CircleHelp, LogOut, Moon, QrCode, Sun } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
+import { ArrowLeft, CircleHelp, Download, LogOut, Moon, QrCode, RotateCw, Sun } from 'lucide-react'
 import { api } from '@/api/client'
 import { useMobileHelp } from '@/features/help/mobile'
 import { toastError } from '@/shell/actions'
 import { useUi } from '@/state/store'
 import { Button, ErrorBox, Loading } from '@/ui'
 import { ActivityList } from './Activity'
-import { useRemote, useSettings } from './api'
+import { useRemote, useSettings, useUpdate } from './api'
 import { Segmented } from './common'
 import { openPairDialog } from './PairDialog'
 import { clearWorkerKeys } from './push'
 import { PushMobile } from './sections/Push'
+import { UpdateProgress } from './sections/Updates'
+import { installUpdate, restartWorkbench } from './update'
 import { DevicesList } from './sections/Remote'
 import './platform.css'
 
 const HelpView = lazy(() => import('@/features/help/HelpPanel').then((m) => ({ default: m.HelpView })))
+
+/** A newer release, an update under way or a pending restart; nothing otherwise. */
+function UpdateMobile() {
+  const qc = useQueryClient()
+  const { data: s } = useUpdate()
+  if (!s) return null
+  const busy = s.phase !== 'idle' && s.phase !== 'checking'
+  const restart = !busy && s.restartPending && s.canRestart
+  const latest = s.available ? s.latest : null
+  if (!busy && !restart && !latest) return null
+  return (
+    <section>
+      <h3 className="wb-more-title">Update</h3>
+      <div className="wb-set-box" style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {busy ? (
+          <UpdateProgress status={s} />
+        ) : restart ? (
+          <>
+            <span>Workbench {s.installed ?? 'on disk'} is installed. Restart to use it.</span>
+            <Button variant="primary" icon={RotateCw} onClick={() => void restartWorkbench(qc, s.installed)}>
+              Restart now
+            </Button>
+          </>
+        ) : latest ? (
+          <>
+            <span>
+              Workbench {latest.version} is available (this is {s.current}).
+            </span>
+            {s.canInstall ? (
+              <Button variant="primary" icon={Download} onClick={() => void installUpdate(qc, latest.version)}>
+                Update and restart
+              </Button>
+            ) : (
+              <span className="wb-small wb-muted">{s.installNote}</span>
+            )}
+          </>
+        ) : null}
+        {!busy && s.failure && <span className="wb-small wb-warning">The update was not installed: {s.failure}</span>}
+      </div>
+    </section>
+  )
+}
 
 export function MobileMore({ projectId }: { projectId: string | null }) {
   const theme = useUi((s) => s.prefs.theme)
@@ -76,6 +121,8 @@ export function MobileMore({ projectId }: { projectId: string | null }) {
           </div>
         </div>
       </section>
+
+      <UpdateMobile />
 
       <section>
         <h3 className="wb-more-title">Notifications</h3>

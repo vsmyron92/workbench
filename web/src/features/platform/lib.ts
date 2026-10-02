@@ -1,6 +1,6 @@
 // Pure helpers for the platform feature (tested in lib.test.ts).
 
-import type { ActivityEvent, McpCall, SecretRef } from './types'
+import type { ActivityEvent, McpCall, SecretRef, UpdateStatus } from './types'
 
 type Params = Record<string, unknown>
 
@@ -210,6 +210,60 @@ export const SECRET_NAME_RE = /^[A-Za-z0-9_.-]+$/
 export function restartText(keys: string[]): string {
   const names: Record<string, string> = { 'server.bind': 'bind address', 'server.tls': 'TLS certificate' }
   return keys.map((k) => names[k] ?? k).join(' and ')
+}
+
+const MB = 1024 * 1024
+
+/** What an update is doing right now, or null while nothing runs. */
+export function updatePhaseText(phase: UpdateStatus['phase'], progress: UpdateStatus['progress'], version?: string | null): string | null {
+  switch (phase) {
+    case 'checking':
+      return 'Looking for a newer release…'
+    case 'downloading': {
+      const what = version ? `Downloading ${version}` : 'Downloading'
+      if (!progress || progress.total <= 0) return `${what}…`
+      return `${what}: ${(progress.received / MB).toFixed(1)} of ${(progress.total / MB).toFixed(1)} MB`
+    }
+    case 'verifying':
+      return 'Checking the download (SHA-256)…'
+    case 'installing':
+      return 'Installing…'
+    case 'restarting':
+      return 'Restarting Workbench…'
+    default:
+      return null
+  }
+}
+
+/** How far the download is, 0 to 1; null when there is nothing to measure. */
+export function updateFraction(phase: UpdateStatus['phase'], progress: UpdateStatus['progress']): number | null {
+  if (phase !== 'downloading' || !progress || progress.total <= 0) return null
+  return Math.min(1, Math.max(0, progress.received / progress.total))
+}
+
+/**
+ * What restarting the server costs, for the confirmation: `terminals` are the running
+ * ones (`working`: an agent in the middle of a turn), `restore` is
+ * `agents.restore_on_start`. As the server restores them (`terminals::agent::restore`):
+ * agent sessions resume, shells start again under their last screen, runs do not.
+ */
+export function restartImpact(terminals: { kind: 'agent' | 'shell' | 'run' | 'command'; working: boolean }[], restore: boolean): string {
+  if (!terminals.length) return 'Nothing is running in its terminals. Workbench is back in a few seconds.'
+  const agents = terminals.filter((t) => t.kind === 'agent').length
+  const shells = terminals.filter((t) => t.kind === 'shell').length
+  const runs = terminals.length - agents - shells
+  const working = terminals.filter((t) => t.working).length
+  const count = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`
+  const list = (items: string[]) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items.join(''))
+  const stopping = [agents && count(agents, 'agent session'), shells && count(shells, 'shell'), runs && count(runs, 'run')].filter((s): s is string => !!s)
+  const after = [
+    agents && (restore ? 'agent sessions resume after the restart' : 'agent sessions are not resumed (agents.restore_on_start is off) but stay in the history'),
+    shells && 'shells start again under their last screen, without what ran in them',
+    runs && 'runs are not started again',
+  ].filter((s): s is string => !!s)
+  const now = working ? ` (${working === 1 ? '1 agent is' : `${working} agents are`} working right now)` : ''
+  const then = after.join('; ')
+  return `${list(stopping)} will stop${now}. ${then[0].toUpperCase()}${then.slice(1)}.`
 }
 
 /** `HH:MM:SS` (24 h) in local time. */
