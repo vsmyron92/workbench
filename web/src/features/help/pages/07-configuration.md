@@ -60,7 +60,7 @@ check = true                       # look for a newer release once a day
 # repo = "owner/name"              # the GitHub repository to update from
 ```
 
-`docs/ARCHITECTURE.md` in the Workbench repository is the complete reference, including `[github]`, `[push]`, `[lsp.servers.*]`, `[debug.adapters.*]` and `[devcontainer]`.
+`docs/ARCHITECTURE.md` in the Workbench repository is the complete reference, including `[github]`, `[push]`, `[lsp.servers.*]`, `[debug.adapters.*]`, `[debug.servers.*]` (the debug servers of embedded targets) and `[devcontainer]`.
 
 ## Needs a restart
 

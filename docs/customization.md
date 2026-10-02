@@ -93,6 +93,16 @@ name = "api (gdb)"
 adapter = "gdb"
 program = "target/debug/api"
 pre_launch = "cargo build -p api"
+
+[[debug]]                        # firmware on a board: gdb through a debug server
+name = "firmware (OpenOCD)"
+program = "build/firmware.elf"
+pre_launch = "cmake --build build"
+stop_on_entry = true             # stop at main
+
+[debug.remote]
+server = "openocd"
+server_args = ["-f", "interface/stlink.cfg", "-f", "target/stm32f4x.cfg"]
 ```
 
 An environment with a `host` runs its logs, commands and deploys over ssh on that host;
@@ -129,6 +139,9 @@ command = "~/.cargo/bin/rust-analyzer"
 [debug.adapters.lldb-dap]
 command = "/usr/bin/lldb-dap"
 
+[debug.servers.openocd]            # the debug server of embedded targets (jlink, pyocd, st-util, qemu-arm…)
+command = "~/xpacks/openocd/bin/openocd"
+
 [devcontainer]
 docker = "docker"                  # or podman's docker-compatible CLI
 cli = ""                           # devcontainer CLI, for configs with features
@@ -137,8 +150,10 @@ cli = ""                           # devcontainer CLI, for configs with features
 shell = ["/bin/zsh", "-l"]         # new shells (default: $SHELL -l; PowerShell on Windows)
 ```
 
-Language servers and debug adapters run project code, so they start only after you
-enable code intelligence for a project (its first source file offers it) or press Debug.
+Language servers, debug adapters and debug servers run project code, so they start only
+after you enable code intelligence for a project (its first source file offers it) or press
+Debug. [Embedded debugging](embedded-debugging.md) explains `[debug.remote]` and
+`[debug.servers.*]`.
 
 On Windows (experimental) run commands go to PowerShell, and detected ones are
 written for it: `python` or `py -3` and the virtualenv's `Scripts\python.exe`,

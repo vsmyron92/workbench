@@ -133,7 +133,7 @@ export function ConsoleView({ s }: { s: DebugSession }) {
           className="wb-dbg-repl-input"
           value={text}
           disabled={!canEval}
-          placeholder={canEval ? (s.adapter === 'gdb' ? 'gdb command or expression (Tab completes, ↑ history)' : 'Evaluate in the selected frame (↑ history)') : 'The session has ended'}
+          placeholder={canEval ? (s.adapterKind === 'gdb' ? (s.remote ? 'gdb command (monitor reset halt, info registers…) or expression (Tab completes, ↑ history)' : 'gdb command or expression (Tab completes, ↑ history)') : 'Evaluate in the selected frame (↑ history)') : 'The session has ended'}
           spellCheck={false}
           onChange={(e) => {
             setText(e.target.value)

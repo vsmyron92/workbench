@@ -63,6 +63,12 @@ export interface DebugSession {
   outputSeq: number
   /** The user stopped it (Stop, Rerun): "Stopped" or "Detached", not an exit code. */
   stopRequested?: boolean
+  /** gdb, lldb, codelldb, debugpy, delve or generic. */
+  adapterKind: string
+  /** A remote target (embedded): the debug server and where gdb connected. */
+  remote?: { server?: string; target?: string }
+  /** The configuration names an SVD file: the Peripherals tab has a register map. */
+  peripherals?: boolean
 }
 
 export interface OutputLine {
@@ -161,7 +167,98 @@ export interface LaunchConfig {
   cwd?: string
   preLaunch?: string
   stopOnEntry: boolean
+  /** A remote target (embedded): what Workbench starts and sends to it. */
+  remote?: RemoteConfig
   problems: string[]
+}
+
+export interface RemoteConfig {
+  server?: string
+  serverLabel?: string
+  serverAvailable: boolean
+  /** The debug server's command line as it will run (`{port}` unexpanded). */
+  commandLine?: string
+  connect?: string
+  init: string[]
+  reset: string[]
+  download: boolean
+  /** `main`, `reset` or a gdb location. */
+  stopAt: string
+  /** `target extended-remote`: the stub runs the program, or `attach` names the target. */
+  extended: boolean
+  attach?: number
+  /** Output channels: `name (port)`. */
+  channels: string[]
+  svd?: string
+  /** The project works in its dev container: built there, debugged here. */
+  inContainer: boolean
+}
+
+export type RegisterAccess = 'read-write' | 'read-only' | 'write-only'
+
+export interface SvdField {
+  name: string
+  bitOffset: number
+  bitWidth: number
+  access: RegisterAccess
+  description?: string | null
+  values: { value: number; name: string; description?: string }[]
+  /** Only with the register's value. */
+  value?: number | null
+  valueName?: string | null
+}
+
+export interface SvdRegister {
+  name: string
+  offset: number
+  address: number
+  size: number
+  access: RegisterAccess
+  resetValue?: string | null
+  description?: string | null
+  readAction: boolean
+  /** `0x…`, when the register was read. */
+  value?: string | null
+  error?: string | null
+  /** Why a register was not read: write-only, or reading it changes the chip. */
+  skipped?: string | null
+  fields: SvdField[]
+}
+
+export interface SvdPeripheralSummary {
+  name: string
+  base: number
+  description?: string | null
+  group?: string | null
+  registers: number
+}
+
+export interface SvdList {
+  device: string
+  description?: string | null
+  peripherals: SvdPeripheralSummary[]
+}
+
+export interface SvdPeripheral {
+  name: string
+  base: number
+  description?: string | null
+  read: boolean
+  registers: SvdRegister[]
+}
+
+export interface ServerView {
+  id: string
+  label: string
+  command: string
+  args: string[]
+  enabled: boolean
+  builtin: boolean
+  init: string[]
+  reset: string[]
+  download: boolean
+  installHint: string
+  availability: { available: boolean; path?: string; version?: string; problem?: string }
 }
 
 export interface AdapterView {

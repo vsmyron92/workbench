@@ -278,9 +278,128 @@ pub struct DebugLaunch {
     /// Adapter-specific launch/attach arguments, merged last.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
+    /// A program on a microcontroller or another machine: gdb connects to a remote
+    /// stub instead of starting `program`, usually through a debug server Workbench
+    /// starts first. Makes the configuration an attach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteTarget>,
     /// Provenance: which layer defined it (`.workbench.toml`); none for the overlay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+}
+
+/// `[debug.remote]` of a launch configuration: debugging through a gdb remote stub
+/// (embedded targets: OpenOCD, J-Link, pyOCD, ST-LINK, QEMU…). Like `pre_launch`, its
+/// server arguments and gdb commands run only when the user starts the configuration;
+/// the server's *command* is an id that only config.toml and the presets define
+/// (`[debug.servers.<id>]`).
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemoteTarget {
+    /// The debug server to start first: a preset (`openocd`, `jlink`, `pyocd`,
+    /// `st-util`, `qemu-arm`) or a `[debug.servers.<id>]` of config.toml. Without one
+    /// the stub is already running and `connect` says where.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// Arguments after the server's own (the board, the probe, the device).
+    #[serde(default, alias = "serverArgs", skip_serializing_if = "Vec::is_empty")]
+    pub server_args: Vec<String>,
+    /// gdb's `target remote` argument: `host:port` or a serial device. Default: the
+    /// server's port on this computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect: Option<String>,
+    /// The port the server's gdb stub listens on (`{port}` in its arguments); default:
+    /// the port of a loopback `connect`, else a free one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// gdb commands once connected, before the download (the server's default: halt
+    /// the target). One command or a list.
+    #[serde(default, alias = "initCommands", deserialize_with = "one_or_many", skip_serializing_if = "Option::is_none")]
+    pub init: Option<Vec<String>>,
+    /// gdb commands that reset and halt the target, run before and after the download
+    /// (the server's default: `monitor reset halt`).
+    #[serde(default, deserialize_with = "one_or_many", skip_serializing_if = "Option::is_none")]
+    pub reset: Option<Vec<String>>,
+    /// Download the program to the target (`load`) before running it. Default: yes for
+    /// a server that has a flash to program, no otherwise (QEMU loads the image).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download: Option<bool>,
+    /// Where the program's source was when it was built, as `[from, to]` pairs: the paths in
+    /// the ELF's debug information to where the files are on this computer (`to` takes
+    /// `{root}`). gdb's `set substitute-path`. A project whose builds run in its dev container
+    /// needs none for the workspace: Workbench adds that pair itself.
+    #[serde(default, alias = "sourceMap", skip_serializing_if = "Vec::is_empty")]
+    pub source_map: Vec<[String; 2]>,
+    /// A CMSIS-SVD file (the chip vendor's register map): the Debug window's Peripherals view
+    /// names the chip's memory-mapped registers and their bit fields with it, reads them while
+    /// the target is halted and writes them. Project-relative, absolute or `~/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svd: Option<String>,
+    /// Text the program streams out of band (RTT, SWO, a UART on a socket): TCP ports on this
+    /// computer whose bytes go to the debug console. `[[debug.remote.channels]]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<OutputChannel>,
+    /// Connect with `target extended-remote` instead of `target remote`: `gdbserver --multi`
+    /// (which then runs the program, unless `attach` names a process) and Black Magic Probe
+    /// (`init = ["monitor swdp_scan"]`, `attach = 1`). The commands in `init` run before
+    /// the attach.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub extended: bool,
+    /// Extended: attach to this target (a process id, or the number the probe's scan lists)
+    /// instead of running the program on the remote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach: Option<u32>,
+    /// Extended, running the program: its path on the remote (default: `program`).
+    #[serde(default, alias = "execFile", skip_serializing_if = "Option::is_none")]
+    pub exec_file: Option<String>,
+    /// Where the program stops first: `main` (what `stop_on_entry` alone means), `reset`
+    /// (halted at the reset vector) or any gdb location (`app_main`, `file.c:42`).
+    /// Naming a place stops there without `stop_on_entry`.
+    #[serde(default, alias = "stopAt", skip_serializing_if = "Option::is_none")]
+    pub stop_at: Option<String>,
+}
+
+/// One `[[debug.remote.channels]]`: a port the target's text arrives on.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OutputChannel {
+    /// Shown when it connects, and before each line when there are several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A loopback port, or `"{port4}"` (…`{port9}`): one of the free ports the debug server's
+    /// arguments use too (`-RTTTelnetPort {port4}`, `-serial tcp:127.0.0.1:{port5},server=on`).
+    pub port: ChannelPort,
+    /// `text` (default), or `itm`: an SWO stream, decoded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// `itm`: the stimulus port whose bytes are text (default 0).
+    #[serde(default, alias = "itmPort", skip_serializing_if = "Option::is_none")]
+    pub itm_port: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ChannelPort {
+    Number(u16),
+    Reference(String),
+}
+
+impl Default for ChannelPort {
+    fn default() -> Self {
+        ChannelPort::Number(0)
+    }
+}
+
+/// A string or a list of strings (`reset = "monitor reset halt"`).
+fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(Option::<Either>::deserialize(d)?.map(|e| match e {
+        Either::One(s) => vec![s],
+        Either::Many(v) => v,
+    }))
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -1042,6 +1161,66 @@ mod tests {
         assert!(l.repo_secret_names.contains("gitlab"));
         assert!(!l.repo_secret_names.contains("mine"), "overlay entries are the owner's");
         assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+    }
+
+    #[test]
+    fn remote_targets_parse_merge_and_round_trip() {
+        let repo = pf(r#"
+            [[debug]]
+            name = "board"
+            program = "build/fw.elf"
+            stopOnEntry = true
+            [debug.remote]
+            server = "openocd"
+            serverArgs = ["-f", "interface/stlink.cfg", "-f", "target/stm32f4x.cfg"]
+            init = "monitor adapter speed 4000"
+            reset = ["monitor reset halt", "monitor sleep 100"]
+            stopAt = "reset"
+
+            [[debug]]
+            name = "hand started"
+            [debug.remote]
+            connect = "localhost:3333"
+            download = false
+            port = 3333
+        "#);
+        let overlay = pf(r#"
+            [[debug]]
+            name = "board"
+            program = "build/fw.elf"
+            [debug.remote]
+            server = "jlink"
+            reset = []
+        "#);
+        let l = merge_layers(ProjectFile::default(), Some(repo.clone()), Some(overlay), "o.toml", None);
+        let d = &l.config.debugs;
+        assert_eq!(d.len(), 2);
+        // The overlay replaces the whole entry, `remote` with it.
+        let board = d[0].remote.as_ref().unwrap();
+        assert_eq!((board.server.as_deref(), board.server_args.len(), board.stop_at.as_deref()), (Some("jlink"), 0, None));
+        assert_eq!(board.reset, Some(vec![]), "an empty list overrides the server's default reset");
+        assert_eq!(board.init, None, "absent: the server's default");
+        let hand = d[1].remote.as_ref().unwrap();
+        assert_eq!((hand.connect.as_deref(), hand.port, hand.download, hand.server.as_deref()), (Some("localhost:3333"), Some(3333), Some(false), None));
+        assert_eq!(d[1].source.as_deref(), Some(".workbench.toml"), "provenance of a repository entry");
+
+        // From the repository alone: camelCase aliases, one command or a list.
+        let l = merge_layers(ProjectFile::default(), Some(repo), None, "o.toml", None);
+        let r = l.config.debugs[0].remote.clone().unwrap();
+        assert_eq!(r.server_args, ["-f", "interface/stlink.cfg", "-f", "target/stm32f4x.cfg"]);
+        assert_eq!(r.init, Some(vec!["monitor adapter speed 4000".to_string()]));
+        assert_eq!(r.reset, Some(vec!["monitor reset halt".to_string(), "monitor sleep 100".to_string()]));
+        assert_eq!(r.stop_at.as_deref(), Some("reset"));
+        assert!(l.config.debugs[0].stop_on_entry);
+        // Nothing is stripped from a repository's layer: the command of a server is an id,
+        // and what it runs comes from config.toml.
+        assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+        // The overlay file is rewritten by Settings and by tools: it survives a round trip.
+        let text = toml::to_string(&l.config.debugs[0]).unwrap();
+        assert_eq!(toml::from_str::<DebugLaunch>(&text).unwrap(), l.config.debugs[0]);
+        // A wrong type is an error that names the field, not silently ignored.
+        let bad = toml::from_str::<ProjectFile>("[[debug]]\nname = \"x\"\n[debug.remote]\nreset = 5\n");
+        assert!(bad.is_err());
     }
 
     #[test]

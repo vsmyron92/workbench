@@ -2,35 +2,47 @@
 //!
 //! Debug sessions through the Debug Adapter Protocol (gdb's built-in DAP, lldb-dap,
 //! CodeLLDB, debugpy, delve, any other adapter from config.toml): launch or attach,
+//! remote targets (embedded: gdb through OpenOCD, J-Link, pyOCD, QEMU…),
 //! breakpoints (line, conditional, hit counts, logpoints, functions, exceptions),
 //! stepping, threads and call stacks, variables, watches, a debug console.
 //!
 //! **Trust.** Adapters come from `config.toml` presets and `[debug.adapters.<id>]`
-//! only. Launch configurations may come from repository config (`[[debug]]`, like
+//! only, debug servers from presets and `[debug.servers.<id>]`. Launch configurations may come from repository config (`[[debug]]`, like
 //! run configurations: they run only on a click) and name adapters by id. Nothing
-//! starts by itself; agents (MCP) can read the state of a session but never start,
-//! step, evaluate in or stop one: every write route refuses in-process callers.
+//! starts by itself. Every write route refuses in-process callers; agents (MCP) read a
+//! session (`debug_state`) and steer one the user started (`debug_control`,
+//! `debug_breakpoints`: continue, pause, step, stop, plain breakpoints), and never start,
+//! attach, rerun or evaluate (`agent`).
 //!
 //! Modules: `protocol` (DAP framing), `client` (requests with timeouts, events,
 //! reverse requests), `process` (adapter processes: host or dev container, stdio or
 //! TCP), `adapters` (presets, config, availability), `launch` (launch
-//! configurations, plans, adapter dialects), `derive` (Cargo, CMake, Python, Go),
+//! configurations, plans, adapter dialects), `servers` (debug servers for remote
+//! targets), `elf` (a program's architecture), `derive` (Cargo, CMake, Python, Go),
 //! `breakpoints` (the per-project store), `session` (session manager and event
-//! loop), `procs` (attach picker), `routes`, `tools` (MCP `debug_state`).
+//! loop), `procs` (attach picker), `routes`, `tools` (MCP `debug_state`), `agent` (MCP `debug_control`,
+//! `debug_breakpoints`).
 //!
 //! Routes: `/api/projects/{pid}/debug/**` (see `routes`). Events: `debug.session`,
 //! `debug.output`, `debug.breakpoints`.
 
 pub mod adapters;
+mod agent;
 pub mod breakpoints;
+pub mod channels;
 pub mod client;
 pub mod derive;
+pub mod elf;
+pub mod itm;
 pub mod launch;
+mod peripherals;
 pub mod process;
 pub mod procs;
 pub mod protocol;
 mod routes;
+pub mod servers;
 pub mod session;
+pub mod svd;
 #[cfg(test)]
 mod tests;
 mod tools;
@@ -111,5 +123,7 @@ pub async fn shutdown(state: &AppState) {
 }
 
 pub fn mcp_tools() -> Vec<McpTool> {
-    tools::tools()
+    let mut v = tools::tools();
+    v.extend(agent::tools());
+    v
 }

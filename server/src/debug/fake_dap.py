@@ -8,12 +8,24 @@ with 3. A `TOKEN` in the launch env is what the program "read": a variable `tok`
 the expression `tok`, and the stop's text. Evaluating `crash()` makes the adapter
 die (exit code 9) after a line on stderr. Every request is appended to $FAKE_LOG as
 a JSON line (a child connection's with `"_child": true`).
+
+An `attach` with a `target` is gdb's `target remote`: after `configurationDone` the
+answer comes first, and the connecting stop (`reason: "attach"`) follows a moment later.
+The console commands of a remote target work: `load` takes $FAKE_SLOW_LOAD seconds,
+`thbreak X` makes the next `continue` stop there (`thbreak nope` fails), `monitor fail`
+fails, anything else `monitor ...` is answered with `ran: <command>`.
+
+`target extended-remote X` (a console command, sent before the launch or attach) is answered
+with "Remote debugging using X" (a host with "refuse" in it with "Connection refused."); an
+attach after it behaves like gdb's attach to a remote target.
 """
+import base64
 import json
 import os
 import socket
 import sys
 import threading
+import time
 
 inp = sys.stdin.buffer
 out = sys.stdout.buffer
@@ -107,6 +119,9 @@ def child_server(listener):
     conn.close()
 
 
+if log:
+    log.write(json.dumps({"_argv": sys.argv[1:]}) + "\n")
+    log.flush()
 sys.stderr.write("fake adapter ready\n")
 sys.stderr.flush()
 out.write(b"fake adapter banner (not DAP)\n")
@@ -114,6 +129,27 @@ out.flush()
 
 def token():
     return (((launch or {}).get("arguments") or {}).get("env") or {}).get("TOKEN")
+
+
+extended = False  # `target extended-remote` was issued
+
+
+def remote_target():
+    """gdb's `target remote` argument, for an attach that names one; for an attach after
+    `target extended-remote` any value (the connection was made through the console)."""
+    l = launch or {}
+    if l.get("command") != "attach":
+        return None
+    return (l.get("arguments") or {}).get("target") or ("extended" if extended else None)
+
+
+def main_c():
+    program = ((launch or {}).get("arguments") or {}).get("program") or "/nonexistent/prog"
+    return os.path.join(os.path.dirname(program), "src", "main.c")
+
+
+memory = {}  # written bytes; the rest reads as ((address * 7) + 3) & 0xFF, and 0xDEAD0000 and up faults
+tb = None  # a temporary breakpoint (thbreak): the line the next `continue` stops at
 
 
 bps = {}
@@ -143,6 +179,8 @@ while True:
             "supportsSetVariable": True,
             "supportsTerminateRequest": True,
             "supportsCompletionsRequest": True,
+            "supportsReadMemoryRequest": True,
+            "supportsWriteMemoryRequest": True,
             "exceptionBreakpointFilters": [{"filter": "throw", "label": "C++ throw", "default": True}, {"filter": "catch", "label": "C++ catch"}],
         })
         event("initialized")
@@ -182,6 +220,14 @@ while True:
         respond(m)
         if launch is not None:
             respond(launch)
+        if remote_target():
+            # Like gdb: connecting halts the target; the event follows the answer.
+            event("process", {"name": main_c(), "isLocalProcess": False, "startMethod": "attach"})
+            event("thread", {"reason": "started", "threadId": 1})
+            time.sleep(0.15)
+            cur = (main_c(), 1, None)
+            event("stopped", {"reason": "attach", "threadId": 1, "allThreadsStopped": True})
+            continue
         event("process", {"name": a.get("program", "fake"), "isLocalProcess": True, "startMethod": "launch"})
         event("thread", {"reason": "started", "threadId": 1})
         event("output", {"category": "stdout", "output": "hello from the debuggee\n"})
@@ -239,12 +285,45 @@ while True:
             os._exit(9)
         elif e == "boom":
             respond(m, success=False, message='No symbol "boom" in current context.')
+        elif e.startswith("target extended-remote "):
+            if "refuse" in e:
+                respond(m, success=False, message="Connection refused.")
+            else:
+                extended = True
+                respond(m, {"result": "Remote debugging using " + e.split(None, 2)[2] + "\n", "variablesReference": 0})
+        elif e.startswith("set remote exec-file "):
+            respond(m, {"result": "", "variablesReference": 0})
+        elif e == "load":
+            time.sleep(float(os.environ.get("FAKE_SLOW_LOAD", "0")))
+            respond(m, {"result": "Loading section .text, size 0xf4 lma 0x0\r\nTransfer rate: 1984 bits in <1 sec.\r\n", "variablesReference": 0})
+        elif e.startswith("thbreak "):
+            if e.split(None, 1)[1] == "nope":
+                respond(m, success=False, message='Function "nope" not defined.')
+            else:
+                tb = 2
+                respond(m, {"result": "Temporary breakpoint 1 at 0x8: file src/main.c, line 2.\n", "variablesReference": 0})
+        elif e == "monitor fail":
+            respond(m, success=False, message="Remote communication error.  Target disconnected.")
+        elif e.startswith("monitor "):
+            respond(m, {"result": "ran: " + e + "\r\n", "variablesReference": 0})
         elif e == "call_stop()":
             # Like gdb when a called function hits a breakpoint.
             event("stopped", {"reason": "breakpoint", "threadId": 1, "allThreadsStopped": True})
             respond(m, success=False, message="The program being debugged stopped while in a function called from GDB.")
         else:
             respond(m, {"result": "eval:" + e, "variablesReference": 0})
+    elif cmd == "readMemory":
+        addr = int(a["memoryReference"], 0) + a.get("offset", 0)
+        if addr >= 0xDEAD0000:
+            respond(m, success=False, message="Out of memory")
+        else:
+            data = bytes(memory.get(addr + i, ((addr + i) * 7 + 3) & 0xFF) for i in range(a["count"]))
+            respond(m, {"address": hex(addr), "data": base64.b64encode(data).decode()})
+    elif cmd == "writeMemory":
+        addr = int(a["memoryReference"], 0) + a.get("offset", 0)
+        for i, b in enumerate(base64.b64decode(a["data"])):
+            memory[addr + i] = b
+        respond(m, {"bytesWritten": len(base64.b64decode(a["data"]))})
     elif cmd == "completions":
         respond(m, {"targets": [{"label": "xylophone"}]})
     elif cmd == "setVariable":
@@ -257,7 +336,11 @@ while True:
     elif cmd == "continue":
         respond(m, {"allThreadsContinued": True})
         later = [(line, bid) for line, bid in bps.get(cur[0], []) if line > cur[1]]
-        if later:
+        if tb:
+            cur = (cur[0], tb, None)
+            tb = None
+            event("stopped", {"reason": "breakpoint", "threadId": 1, "allThreadsStopped": True, "description": "Temporary breakpoint 1, main ()"})
+        elif later:
             line, bid = min(later)
             cur = (cur[0], line, bid)
             event("stopped", {"reason": "breakpoint", "threadId": 1, "allThreadsStopped": True, "hitBreakpointIds": [bid]})

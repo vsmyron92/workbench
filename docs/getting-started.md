@@ -19,7 +19,9 @@ CLI can be added in `config.toml`.
 - git. To build from source: [Rust](https://rustup.rs) 1.97 or newer and
   [Node.js](https://nodejs.org) 22.
 - Optional, for the features that use them: Docker (dev containers and Services),
-  language servers (code intelligence), GDB / lldb-dap / debugpy / delve (debugging).
+  language servers (code intelligence), GDB / lldb-dap / debugpy / delve (debugging), and for
+  firmware a GDB 14+ with Python (`gdb-multiarch`) plus OpenOCD, J-Link, pyOCD or QEMU
+  ([embedded debugging](embedded-debugging.md)).
 
 ## Install a release
 

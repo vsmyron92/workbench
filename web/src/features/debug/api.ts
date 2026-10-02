@@ -3,7 +3,7 @@
 
 import { useQuery, type QueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
-import type { AdapterView, BreakpointsView, CompletionItem, DebugSession, Frame, FunctionBreakpoint, LaunchConfig, LineBreakpoint, OutputLine, ProcessList, Scope, Variable } from './types'
+import type { AdapterView, BreakpointsView, CompletionItem, DebugSession, Frame, FunctionBreakpoint, LaunchConfig, LineBreakpoint, OutputLine, ProcessList, Scope, ServerView, SvdList, SvdPeripheral, SvdRegister, Variable } from './types'
 
 const enc = encodeURIComponent
 export const base = (pid: string) => `/api/projects/${enc(pid)}/debug`
@@ -12,6 +12,7 @@ const sbase = (pid: string, sid: string) => `${base(pid)}/sessions/${enc(sid)}`
 export const debugKeys = {
   configs: (pid: string) => ['debug', 'configs', pid] as const,
   adapters: (pid: string) => ['debug', 'adapters', pid] as const,
+  servers: (pid: string) => ['debug', 'servers', pid] as const,
   breakpoints: (pid: string) => ['debug', 'breakpoints', pid] as const,
   sessions: (pid: string) => ['debug', 'sessions', pid] as const,
   processes: (pid: string) => ['debug', 'processes', pid] as const,
@@ -47,6 +48,15 @@ export function useAdapters(pid: string | null, enabled = true) {
   return useQuery({
     queryKey: debugKeys.adapters(pid ?? ''),
     queryFn: ({ signal }) => api.get<{ adapters: AdapterView[]; warnings: string[] }>(`${base(pid!)}/adapters`, undefined, signal),
+    enabled: !!pid && enabled,
+    staleTime: 30_000,
+  })
+}
+
+export function useServers(pid: string | null, enabled = true) {
+  return useQuery({
+    queryKey: debugKeys.servers(pid ?? ''),
+    queryFn: ({ signal }) => api.get<{ servers: ServerView[]; warnings: string[] }>(`${base(pid!)}/servers`, undefined, signal),
     enabled: !!pid && enabled,
     staleTime: 30_000,
   })
@@ -90,6 +100,15 @@ export const debugApi = {
     api.post<Variable>(`${sbase(pid, sid)}/evaluate`, { expression, context, frameId }),
   setVariable: (pid: string, sid: string, variablesReference: number, name: string, value: string) =>
     api.post<Variable>(`${sbase(pid, sid)}/set-variable`, { variablesReference, name, value }),
+  /** The chip's register map (the configuration's `svd`). */
+  svd: (pid: string, sid: string, signal?: AbortSignal) => api.get<SvdList>(`${sbase(pid, sid)}/svd`, undefined, signal),
+  /** A peripheral's registers; `read` reads them (the program must be suspended), `force` names
+   *  registers that are read although reading them changes the chip. */
+  svdPeripheral: (pid: string, sid: string, name: string, read: boolean, force?: string[], signal?: AbortSignal) =>
+    api.get<SvdPeripheral>(`${sbase(pid, sid)}/svd/${enc(name)}`, { read, registers: force?.length ? force.join(',') : undefined }, signal),
+  /** Write a register, or one field (a number, or the field's value name). */
+  svdWrite: (pid: string, sid: string, peripheral: string, register: string, body: { value: string | number; field?: string }) =>
+    api.put<SvdRegister>(`${sbase(pid, sid)}/svd/${enc(peripheral)}/${enc(register)}`, body),
   completions: (pid: string, sid: string, text: string, column: number, frameId?: number) =>
     api.post<{ targets: CompletionItem[] }>(`${sbase(pid, sid)}/completions`, { text, column, frameId }),
   output: (pid: string, sid: string, after = 0) => api.get<{ lines: OutputLine[]; dropped: boolean; seq: number }>(`${sbase(pid, sid)}/output`, { after }),

@@ -7,7 +7,7 @@ import { FEATURES, useUnsupported } from '@/api/health'
 import { Kbd, Spinner } from '@/ui'
 import { attachTo, startDebug } from './actions'
 import { useConfigs, useProcesses } from './api'
-import { ORIGIN_ICON } from './icons'
+import { configIcon } from './icons'
 import { groupConfigs } from './logic'
 import { usePicker } from './store'
 
@@ -27,12 +27,12 @@ function DebugPicker({ pid, close }: { pid: string; close: () => void }) {
         {groups.map((g) => (
           <Cmdk.Group key={g.title} heading={g.title}>
             {g.items.map((c) => {
-              const I = ORIGIN_ICON[c.origin]
+              const I = configIcon(c)
               return (
                 <Cmdk.Item
                   key={c.name}
                   value={c.name}
-                  keywords={[c.adapterLabel ?? '', c.program ?? '', c.module ?? '', c.preLaunch ?? '']}
+                  keywords={[c.adapterLabel ?? '', c.program ?? '', c.module ?? '', c.preLaunch ?? '', c.remote?.server ?? '', c.remote?.serverLabel ?? '']}
                   onSelect={() => {
                     close()
                     void startDebug(pid, c.name)
@@ -41,7 +41,7 @@ function DebugPicker({ pid, close }: { pid: string; close: () => void }) {
                   <I size={15} />
                   <span className="wb-grow wb-ellipsis">{c.name}</span>
                   {c.problems.length > 0 && <AlertTriangle size={13} className="wb-warning" aria-label={c.problems.join('\n')} />}
-                  <span className="wb-muted wb-small">{c.adapterLabel ?? 'no adapter'}</span>
+                  <span className="wb-muted wb-small">{[c.adapterLabel ?? 'no adapter', c.remote?.serverLabel ? `via ${c.remote.serverLabel}` : ''].filter(Boolean).join(' · ')}</span>
                 </Cmdk.Item>
               )
             })}

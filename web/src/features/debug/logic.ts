@@ -1,7 +1,7 @@
 // Pure helpers of the debug feature (unit-tested in logic.test.ts).
 
 import { basename, isAbsolutePath, samePath } from '@/features/files/modelAccess'
-import type { BpStatus, CompletionItem, DebugSession, Frame, LaunchConfig, LineBreakpoint, OutputLine, Variable } from './types'
+import type { BpStatus, CompletionItem, DebugSession, Frame, LaunchConfig, LineBreakpoint, OutputLine, RemoteConfig, SvdField, SvdPeripheralSummary, SvdRegister, Variable } from './types'
 
 export function isLive(s: Pick<DebugSession, 'state'> | undefined | null): boolean {
   return !!s && (s.state === 'starting' || s.state === 'running' || s.state === 'stopped')
@@ -98,7 +98,7 @@ export function stateLabel(s: DebugSession): string {
     case 'stopped': {
       const r = s.stopped?.reason ?? 'pause'
       if (r === 'exception') return s.stopped?.description ? `Exception: ${s.stopped.description}` : 'Exception'
-      const why: Record<string, string> = { breakpoint: 'breakpoint', 'function breakpoint': 'breakpoint', 'data breakpoint': 'watchpoint', 'instruction breakpoint': 'breakpoint', pause: '' }
+      const why: Record<string, string> = { breakpoint: 'breakpoint', 'function breakpoint': 'breakpoint', 'data breakpoint': 'watchpoint', 'instruction breakpoint': 'breakpoint', pause: '', entry: 'at the reset vector' }
       const w = why[r] ?? r
       return w ? `Paused (${w})` : 'Paused'
     }
@@ -131,6 +131,98 @@ export function stateTone(s: DebugSession): 'success' | 'warning' | 'danger' | '
     default:
       return 'muted'
   }
+}
+
+/** What starting a remote-target configuration runs and sends, one line each: the
+ *  server's command line, what gdb connects to and the commands in the order they run.
+ *  Shown in tooltips, so nothing a configuration does happens unseen. */
+export function remoteLines(r: RemoteConfig, stopOnEntry: boolean): string[] {
+  const out: string[] = []
+  if (r.inContainer) out.push('Built in the dev container; the debugger and the debug server run on this computer')
+  out.push(r.server ? `Debug server: ${r.commandLine ?? r.serverLabel ?? r.server}` : 'No debug server: gdb connects to a stub that is already running')
+  out.push(`gdb connects${r.extended ? ' (target extended-remote)' : ''} to: ${r.connect ?? 'the server on this computer'}`)
+  const runsProgram = r.extended && r.attach == null
+  if (r.extended) out.push(runsProgram ? 'The stub runs the program' : `Attaches to target ${r.attach}`)
+  const steps = [...r.init, ...r.reset]
+  if (steps.length) out.push(`Then: ${r.init.length ? r.init.join('; ') : ''}${r.init.length && r.reset.length ? '; ' : ''}${r.reset.join('; ')}`)
+  if (r.download) out.push(`Download the program (load)${r.reset.length ? ', then ' + r.reset.join('; ') : ''}`)
+  out.push(stopOnEntry ? `Stops at ${runsProgram ? 'main' : r.stopAt === 'reset' ? 'the reset vector' : r.stopAt}` : 'Runs')
+  if (r.channels.length) out.push(`Target output: ${r.channels.join(', ')}`)
+  if (r.svd) out.push(`Register map: ${r.svd}`)
+  return out
+}
+
+// ---------------------------------------------------------------- peripherals (SVD)
+
+/** `0x40020000`: an address or an offset, upper case, 8 digits (wider when it needs them). */
+export function hexAddress(n: number): string {
+  return `0x${n.toString(16).toUpperCase().padStart(8, '0')}`
+}
+
+/** `[7:4]`, or `[3]` for one bit. */
+export function fieldRange(f: Pick<SvdField, 'bitOffset' | 'bitWidth'>): string {
+  return f.bitWidth === 1 ? `[${f.bitOffset}]` : `[${f.bitOffset + f.bitWidth - 1}:${f.bitOffset}]`
+}
+
+/** A field's value as the view shows it: `Down (1)`, a plain number, hex for wide fields. */
+export function fieldValueText(f: Pick<SvdField, 'bitWidth' | 'value' | 'valueName'>): string {
+  if (f.value == null) return ''
+  const n = f.bitWidth > 8 ? `0x${f.value.toString(16).toUpperCase()}` : String(f.value)
+  return f.valueName ? `${f.valueName} (${n})` : n
+}
+
+/** Peripherals matching `query` (words, all of which must appear in name, group or description). */
+export function filterPeripherals(list: SvdPeripheralSummary[], query: string): SvdPeripheralSummary[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean)
+  if (!words.length) return list
+  return list.filter((p) => {
+    const hay = `${p.name} ${p.group ?? ''} ${p.description ?? ''}`.toLowerCase()
+    return words.every((w) => hay.includes(w))
+  })
+}
+
+/** Registers matching `query` by name or description; all of them for an empty query. */
+export function filterRegisters(list: SvdRegister[], query: string): SvdRegister[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean)
+  if (!words.length) return list
+  return list.filter((r) => {
+    const hay = `${r.name} ${r.description ?? ''}`.toLowerCase()
+    return words.every((w) => hay.includes(w))
+  })
+}
+
+/** What to say where a register has no value: why it was not read, or the debugger's error. */
+export function registerNote(r: Pick<SvdRegister, 'value' | 'error' | 'skipped' | 'access'>): string {
+  if (r.value) return ''
+  if (r.error) return r.error
+  if (r.skipped) return r.skipped
+  return r.access === 'write-only' ? 'write-only' : ''
+}
+
+/** The tooltip of a launch configuration: its program, what runs before, a remote
+ *  target's server and commands, and its problems. */
+export function configTitle(c: LaunchConfig): string {
+  return [
+    c.program ?? c.module ?? '',
+    c.preLaunch ? `before: ${c.preLaunch}` : '',
+    ...(c.remote ? remoteLines(c.remote, c.stopOnEntry) : []),
+    ...c.problems.map((p) => `⚠ ${p}`),
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+/** The muted text after a configuration's name: its debugger, and for a remote target
+ *  the server it goes through. */
+export function configSubtitle(c: LaunchConfig): string {
+  const via = c.remote ? (c.remote.serverLabel ? `via ${c.remote.serverLabel}` : c.remote.connect ? `at ${c.remote.connect}` : '') : ''
+  return [c.adapterLabel ?? '', via, c.preLaunch ?? ''].filter(Boolean).join(' · ')
+}
+
+/** "OpenOCD · 127.0.0.1:3333": the debug server of a remote session and where gdb is connected. */
+export function remoteChip(s: Pick<DebugSession, 'remote'>): string | null {
+  if (!s.remote) return null
+  return [s.remote.server, s.remote.target].filter(Boolean).join(' · ') || 'remote target'
 }
 
 const ORIGIN_TITLE: Record<LaunchConfig['origin'], string> = {
@@ -292,7 +384,8 @@ export function agentPrompt(o: {
     }
   }
   const tail = o.console
-    .filter((l) => l.category === 'stdout' || l.category === 'stderr' || l.category === 'console' || l.category === 'important')
+    // `target`: a microcontroller's own output (UART, SWO), the program's output there.
+    .filter((l) => l.category === 'stdout' || l.category === 'stderr' || l.category === 'console' || l.category === 'important' || l.category === 'target')
     .slice(-15)
     .map((l) => l.text)
     .join('')

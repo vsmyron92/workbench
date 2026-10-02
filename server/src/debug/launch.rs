@@ -13,8 +13,11 @@ use serde_json::{Map, Value, json};
 
 use super::adapters::{self, Adapter, AdapterKind};
 use super::derive::{self, CargoTarget, CmakeTarget};
+use super::elf;
+use super::servers::{self, Server};
 use crate::app::AppState;
-use crate::config::project::{DebugLaunch, DebugRequest};
+use super::channels::{self, Channel};
+use crate::config::project::{ChannelPort, DebugLaunch, DebugRequest, RemoteTarget};
 use crate::devcontainer::ExecTarget;
 use crate::error::ApiError;
 use crate::projects::Project;
@@ -59,7 +62,43 @@ pub struct LaunchConfigView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_launch: Option<String>,
     pub stop_on_entry: bool,
+    /// A remote target (embedded): what Workbench starts and sends to it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteView>,
     pub problems: Vec<String>,
+}
+
+/// What a remote-target configuration runs, for the Start view: nothing in it is
+/// hidden from the person who is about to click Debug.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_label: Option<String>,
+    pub server_available: bool,
+    /// The server's command line as it will run (`{port}` still unexpanded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_line: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect: Option<String>,
+    pub init: Vec<String>,
+    pub reset: Vec<String>,
+    pub download: bool,
+    pub stop_at: String,
+    /// `target extended-remote`: the stub runs the program (`attach` empty) or the
+    /// configuration attaches to this target.
+    pub extended: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attach: Option<u32>,
+    /// The output channels: `name (port)`.
+    pub channels: Vec<String>,
+    /// The SVD file as the configuration names it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub svd: Option<String>,
+    /// The project works in its dev container: this configuration builds there and debugs here.
+    pub in_container: bool,
 }
 
 fn build_command(b: &Build) -> String {
@@ -213,6 +252,315 @@ pub async fn adapter_for(state: &AppState, l: &DebugLaunch, language: &str) -> R
     }
 }
 
+// ---------------------------------------------------------------- remote targets
+
+/// Where the program stops first when a remote configuration says `stop_on_entry`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopAt {
+    /// `main`, run to by a temporary hardware breakpoint.
+    Main,
+    /// The reset vector: the target stays halted after the reset.
+    Reset,
+    /// Any gdb location (`app_main`, `src/main.c:42`).
+    Location(String),
+}
+
+impl StopAt {
+    fn parse(s: Option<&str>) -> StopAt {
+        match s.map(str::trim).filter(|s| !s.is_empty()) {
+            None => StopAt::Main,
+            Some(x) if x.eq_ignore_ascii_case("main") => StopAt::Main,
+            Some(x) if x.eq_ignore_ascii_case("reset") => StopAt::Reset,
+            Some(x) => StopAt::Location(x.to_string()),
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            StopAt::Main => "main".into(),
+            StopAt::Reset => "reset".into(),
+            StopAt::Location(l) => l.clone(),
+        }
+    }
+}
+
+/// A remote-target configuration resolved: the debug server to start (if any), where
+/// gdb connects and what it does there.
+#[derive(Debug, Clone)]
+pub struct RemotePlan {
+    pub server: Option<Server>,
+    /// The server's whole argument list (its own, then the configuration's) with
+    /// `{root}`, `{program}`, toolchains and `${workspaceFolder}` expanded; the ports
+    /// (`{port}`, `{port2}`…) are picked when the server starts.
+    pub server_args: Vec<String>,
+    /// `target remote` argument, when the configuration names one.
+    pub connect: Option<String>,
+    /// The fixed gdb port: the configuration's `port`, else the port of a loopback `connect`.
+    pub port: Option<u16>,
+    pub init: Vec<String>,
+    pub reset: Vec<String>,
+    pub download: bool,
+    pub stop_at: StopAt,
+    /// The chip's SVD file on this computer (the Peripherals view).
+    pub svd: Option<PathBuf>,
+    /// `[from, to]`: where the source was when built, and where it is here (gdb `substitute-path`).
+    pub source_map: Vec<(String, String)>,
+    /// Output channels: text the program streams to ports on this computer.
+    pub channels: Vec<ChannelPlan>,
+    /// `target extended-remote` (see `RemoteTarget::extended`).
+    pub extended: bool,
+    /// Extended: the target to attach to; none: the stub runs the program.
+    pub attach: Option<u32>,
+    /// Extended, running the program: its path on the remote.
+    pub exec_file: Option<String>,
+}
+
+/// One output channel, its port possibly one of the server's free ports.
+#[derive(Debug, Clone)]
+pub struct ChannelPlan {
+    pub name: String,
+    pub port: ChannelPortRef,
+    pub format: channels::Format,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelPortRef {
+    Fixed(u16),
+    /// The n-th (0-based) free port of the server (`{port4}` is 3).
+    Free(usize),
+}
+
+impl ChannelPlan {
+    /// The channel with its port known: `ports` are the server's free ports.
+    pub fn resolve(&self, ports: &[u16]) -> Option<Channel> {
+        let port = match self.port {
+            ChannelPortRef::Fixed(p) => p,
+            ChannelPortRef::Free(i) => *ports.get(i)?,
+        };
+        Some(Channel { name: self.name.clone(), port, format: self.format })
+    }
+
+    /// How many free ports the channel needs (0 for a fixed one).
+    fn ports_needed(&self) -> usize {
+        match self.port {
+            ChannelPortRef::Fixed(_) => 0,
+            ChannelPortRef::Free(i) => i + 1,
+        }
+    }
+}
+
+impl RemotePlan {
+    /// Free ports the server's arguments and the channels ask for.
+    pub fn ports_needed(&self) -> usize {
+        self.channels.iter().map(ChannelPlan::ports_needed).chain([servers::ports_needed(&self.server_args)]).max().unwrap_or(0)
+    }
+
+    /// An extended stub that runs the program itself (`gdbserver --multi`): a launch, not an
+    /// attach. Nothing is downloaded or reset, and gdb's own `start` stops at `main`.
+    pub fn runs_program(&self) -> bool {
+        self.extended && self.attach.is_none()
+    }
+}
+
+/// The port of a loopback `target remote` argument (`localhost:3333`, `tcp:127.0.0.1:2331`,
+/// `[::1]:3333`); none for a serial device, a pipe or another computer.
+pub fn connect_loopback_port(connect: &str) -> Option<u16> {
+    let c = connect.trim();
+    let c = ["tcp4:", "tcp6:", "tcp:"].iter().find_map(|p| c.strip_prefix(p)).unwrap_or(c);
+    let (host, port) = c.rsplit_once(':')?;
+    super::process::loopback_host(host)?;
+    port.parse().ok()
+}
+
+const MAX_CHANNELS: usize = 8;
+
+fn channel_plans(l: &DebugLaunch, r: &RemoteTarget, has_server: bool) -> Result<Vec<ChannelPlan>, ApiError> {
+    if r.channels.len() > MAX_CHANNELS {
+        return Err(ApiError::bad_request(format!("{:?}: at most {MAX_CHANNELS} output channels", l.name)));
+    }
+    let mut out = vec![];
+    for (i, c) in r.channels.iter().enumerate() {
+        let format = match (c.format.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref(), c.itm_port) {
+            (None | Some("") | Some("text"), None) => channels::Format::Text,
+            (None | Some("") | Some("text"), Some(_)) => return Err(ApiError::bad_request(format!("{:?}: channel {}: `itm_port` is for `format = \"itm\"`", l.name, i + 1))),
+            (Some("itm"), p) => match p.unwrap_or(0) {
+                p @ 0..=31 => channels::Format::Itm(p),
+                p => return Err(ApiError::bad_request(format!("{:?}: channel {}: ITM stimulus ports are 0 to 31, not {p}", l.name, i + 1))),
+            },
+            (Some(other), _) => return Err(ApiError::bad_request(format!("{:?}: channel {}: format {other:?} is not `text` or `itm`", l.name, i + 1))),
+        };
+        let port = match &c.port {
+            ChannelPort::Number(0) => return Err(ApiError::bad_request(format!("{:?}: channel {}: `port` is a TCP port number, or {{port2}} … {{port9}}", l.name, i + 1))),
+            ChannelPort::Number(p) => ChannelPortRef::Fixed(*p),
+            ChannelPort::Reference(text) => match servers::port_index(text) {
+                // `{port}` is the gdb stub's: a channel on it would read gdb's protocol.
+                Some(n) if n >= 1 && has_server => ChannelPortRef::Free(n),
+                Some(n) if n >= 1 => return Err(ApiError::bad_request(format!("{:?}: channel {}: {text} names a free port of a debug server, and the configuration starts none", l.name, i + 1))),
+                _ => return Err(ApiError::bad_request(format!("{:?}: channel {}: `port` is a TCP port number, or {{port2}} … {{port9}}, not {text:?}", l.name, i + 1))),
+            },
+        };
+        let name = c.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| match format {
+            channels::Format::Text => "Target output".to_string(),
+            channels::Format::Itm(_) => "SWO".to_string(),
+        });
+        one_line("name", &name)?;
+        out.push(ChannelPlan { name, port, format });
+    }
+    Ok(out)
+}
+
+/// gdb gets these as one line of its command language: no line breaks.
+fn one_line(what: &str, v: &str) -> Result<(), ApiError> {
+    if v.trim().is_empty() || v.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(format!("`{what}` must be one non-empty line without control characters")));
+    }
+    Ok(())
+}
+
+/// The program path for placeholders in a remote configuration, as the server sees it.
+fn remote_vars(project: &Project, program: Option<&Path>) -> crate::apps::expand::Vars {
+    let mut vars = crate::apps::expand::base_vars(project);
+    if let Some(p) = program {
+        vars.insert("program".into(), p.display().to_string());
+    }
+    vars
+}
+
+fn expand_server_arg(project: &Project, vars: &crate::apps::expand::Vars, arg: &str) -> String {
+    crate::apps::expand::placeholders(arg, vars).replace("${workspaceFolder}", &project.root.display().to_string())
+}
+
+/// Resolve a launch configuration's `[debug.remote]` against the debug servers of
+/// config.toml and the presets. Runs nothing.
+pub fn remote_plan(state: &AppState, project: &Project, l: &DebugLaunch, r: &RemoteTarget, program: Option<&Path>) -> Result<RemotePlan, ApiError> {
+    let id = r.server.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let server = match id {
+        Some(id) => {
+            let configured = state.config.read().debug.servers.clone();
+            Some(servers::find(&configured, id).ok_or_else(|| {
+                ApiError::not_configured(format!("launch configuration {:?} names debug server {id:?}, which is not a preset: define [debug.servers.{id}] in config.toml", l.name))
+            })?)
+        }
+        None => None,
+    };
+    let connect = r.connect.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+    if let Some(c) = &connect {
+        one_line("connect", c)?;
+    }
+    if server.is_none() {
+        if connect.is_none() {
+            return Err(ApiError::bad_request(format!("{:?}: `remote` needs a `server` to start or a `connect` address of a stub that is already running", l.name)));
+        }
+        if !r.server_args.is_empty() {
+            return Err(ApiError::bad_request(format!("{:?}: `server_args` without a `server`", l.name)));
+        }
+    }
+    let port = r.port.filter(|p| *p != 0).or_else(|| connect.as_deref().and_then(connect_loopback_port));
+    let vars = remote_vars(project, program);
+    let own = server.as_ref().map(|s| s.args.as_slice()).unwrap_or_default();
+    let server_args: Vec<String> = own.iter().chain(&r.server_args).map(|a| expand_server_arg(project, &vars, a)).collect();
+    let mut plan = RemotePlan {
+        init: r.init.clone().or_else(|| server.as_ref().map(|s| s.init.clone())).unwrap_or_default(),
+        reset: r.reset.clone().or_else(|| server.as_ref().map(|s| s.reset.clone())).unwrap_or_default(),
+        download: r.download.or_else(|| server.as_ref().map(|s| s.download)).unwrap_or(false),
+        stop_at: StopAt::parse(r.stop_at.as_deref()),
+        source_map: {
+            let mut pairs = vec![];
+            for [from, to] in &r.source_map {
+                one_line("source_map", from)?;
+                one_line("source_map", to)?;
+                pairs.push((from.trim().to_string(), expand_server_arg(project, &vars, to.trim())));
+            }
+            pairs
+        },
+        svd: match r.svd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(s) => Some(host_program(project, s).map_err(|e| ApiError::bad_request(format!("{:?}: svd: {}", l.name, e.message)))?),
+            None => None,
+        },
+        channels: channel_plans(l, r, server.is_some())?,
+        extended: r.extended,
+        attach: r.attach,
+        exec_file: r.exec_file.as_deref().map(str::trim).filter(|f| !f.is_empty()).map(str::to_string),
+        server,
+        server_args,
+        connect,
+        port,
+    };
+    for (what, list) in [("init", &plan.init), ("reset", &plan.reset)] {
+        for c in list {
+            one_line(what, c)?;
+        }
+    }
+    if let StopAt::Location(l) = &plan.stop_at {
+        one_line("stop_at", l)?;
+    }
+    if plan.server.is_some() && servers::ports_needed(&plan.server_args) == 0 && plan.port.is_none() {
+        return Err(ApiError::bad_request(format!(
+            "{:?}: Workbench cannot tell when the debug server is ready: its arguments have no {{port}}, and the configuration names neither a `port` nor a loopback `connect`",
+            l.name
+        )));
+    }
+    for c in &plan.channels {
+        if let ChannelPortRef::Free(i) = c.port {
+            let name = if i == 0 { "{port}".to_string() } else { format!("{{port{}}}", i + 1) };
+            if !plan.server_args.iter().any(|a| a.contains(&name)) {
+                return Err(ApiError::bad_request(format!("{:?}: channel {:?} is on {name}, which no argument of the debug server uses: nothing would listen there", l.name, c.name)));
+            }
+        }
+    }
+    if plan.attach.is_some() && !plan.extended {
+        return Err(ApiError::bad_request(format!("{:?}: `attach` names a target of an extended-remote stub: set `extended = true`", l.name)));
+    }
+    if plan.exec_file.is_some() && !plan.runs_program() {
+        return Err(ApiError::bad_request(format!("{:?}: `exec_file` is the program's path on a stub that runs it: set `extended = true` and no `attach`", l.name)));
+    }
+    if let Some(f) = &plan.exec_file {
+        one_line("exec_file", f)?;
+    }
+    if plan.runs_program() {
+        // gdb's `run` starts the program on the remote: nothing to flash, nothing to reset.
+        if program.is_none() {
+            return Err(ApiError::bad_request(format!("{:?}: an extended-remote stub runs the `program`: name it (or set `attach` to attach to a target)", l.name)));
+        }
+        if r.download == Some(true) || r.reset.as_ref().is_some_and(|c| !c.is_empty()) || !matches!(plan.stop_at, StopAt::Main) {
+            return Err(ApiError::bad_request(format!("{:?}: `download`, `reset` and `stop_at` apply to attaching: an extended-remote stub that runs the program stops at main with stop_on_entry", l.name)));
+        }
+        plan.download = false;
+        plan.reset = vec![];
+    } else if plan.download && program.is_none() {
+        return Err(ApiError::bad_request(format!("{:?}: downloading to the target needs a `program`", l.name)));
+    }
+    Ok(plan)
+}
+
+/// Whether the configuration stops at the program's entry: `stop_on_entry`, or a remote
+/// target that says where (`stop_at`).
+fn stops_at_entry(l: &DebugLaunch) -> bool {
+    l.stop_on_entry || l.remote.as_ref().and_then(|r| r.stop_at.as_deref()).is_some_and(|s| !s.trim().is_empty())
+}
+
+/// The GDB for a remote target: the adapter the configuration names (it must be a gdb),
+/// else the one for the program's architecture.
+pub async fn remote_adapter(state: &AppState, project: &Project, l: &DebugLaunch) -> Result<Adapter, ApiError> {
+    let cfg = state.config.read().debug.clone();
+    let adapter = match l.adapter.as_deref().filter(|a| !a.trim().is_empty()) {
+        Some(id) => adapters::find(&cfg, id.trim()).ok_or_else(|| {
+            ApiError::not_configured(format!("launch configuration {:?} names adapter {id:?}, which is not a preset: define [debug.adapters.{id}] in config.toml", l.name))
+        })?,
+        None => {
+            let arch = l.program.as_deref().filter(|p| !p.trim().is_empty()).and_then(|p| host_program(project, p).ok()).and_then(|p| elf::arch(&p));
+            adapters::for_remote(state, arch).await
+        }
+    };
+    if adapter.kind != AdapterKind::Gdb {
+        return Err(ApiError::bad_request(format!(
+            "{:?} debugs a remote target through gdb, and {} is not a gdb adapter (name a gdb: gdb-multiarch, arm-none-eabi-gdb… or leave `adapter` out)",
+            l.name, adapter.label
+        )));
+    }
+    Ok(adapter)
+}
+
 fn run_named<'a>(project: &'a Project, name: &str) -> Option<&'a crate::config::project::RunConfig> {
     project.config.runs.iter().find(|r| r.name == name)
 }
@@ -233,17 +581,63 @@ pub fn host_program(project: &Project, program: &str) -> Result<PathBuf, ApiErro
 /// Views for the UI, with problems found without running anything.
 pub async fn views(state: &AppState, project: &Project) -> Vec<LaunchConfigView> {
     let mut out = vec![];
+    let in_container = project.config.debugs.iter().any(|d| d.remote.is_some()) && crate::devcontainer::exec_target(state, &project.id).await.is_some();
     for d in defs(project) {
         let l = &d.launch;
         let language = language_of(l, &project.root);
         let mut problems = vec![];
-        let adapter = match adapter_for(state, l, &language).await {
+        let adapter = match &l.remote {
+            Some(_) => remote_adapter(state, project, l).await,
+            None => adapter_for(state, l, &language).await,
+        };
+        let adapter = match adapter {
             Ok(a) => Some(a),
             Err(e) => {
                 problems.push(e.message);
                 None
             }
         };
+        let remote = l.remote.as_ref().map(|r| {
+            let program = l.program.as_deref().filter(|p| !p.trim().is_empty()).and_then(|p| host_program(project, p).ok());
+            match remote_plan(state, project, l, r, program.as_deref()) {
+                Ok(rp) => {
+                    let av = rp.server.as_ref().map(|s| servers::probe(state, s));
+                    if let Some(p) = av.as_ref().and_then(|a| a.problem.clone()) {
+                        problems.push(format!("{}: {p}. {}", rp.server.as_ref().map(|s| s.label.as_str()).unwrap_or(""), rp.server.as_ref().map(|s| s.install_hint.as_str()).unwrap_or("")));
+                    }
+                    if let Some(path) = rp.svd.as_ref().filter(|p| !p.is_file()) {
+                        problems.push(format!("the SVD file {} does not exist: the Peripherals view has nothing to show", path.display()));
+                    }
+                    RemoteView {
+                        server: rp.server.as_ref().map(|s| s.id.clone()),
+                        server_label: rp.server.as_ref().map(|s| s.label.clone()),
+                        server_available: av.as_ref().is_some_and(|a| a.available),
+                        command_line: rp.server.as_ref().map(|s| std::iter::once(s.command.clone()).chain(rp.server_args.iter().cloned()).collect::<Vec<_>>().join(" ")),
+                        connect: rp.connect.clone(),
+                        init: rp.init.clone(),
+                        reset: rp.reset.clone(),
+                        download: rp.download,
+                        stop_at: rp.stop_at.describe(),
+                        extended: rp.extended,
+                        attach: rp.attach,
+                        svd: r.svd.clone(),
+                        in_container,
+                        channels: rp
+                            .channels
+                            .iter()
+                            .map(|c| match c.port {
+                                ChannelPortRef::Fixed(p) => format!("{} (port {p})", c.name),
+                                ChannelPortRef::Free(i) => format!("{} ({})", c.name, if i == 0 { "{port}".to_string() } else { format!("{{port{}}}", i + 1) }),
+                            })
+                            .collect(),
+                    }
+                }
+                Err(e) => {
+                    problems.push(e.message);
+                    RemoteView { server: r.server.clone(), server_label: None, server_available: false, command_line: None, connect: r.connect.clone(), init: vec![], reset: vec![], download: false, stop_at: "main".into(), extended: r.extended, attach: r.attach, channels: vec![], svd: r.svd.clone(), in_container }
+                }
+            }
+        });
         let mut available = false;
         if let Some(a) = &adapter {
             let av = adapters::probe(state, a).await;
@@ -264,8 +658,9 @@ pub async fn views(state: &AppState, project: &Project) -> Vec<LaunchConfigView>
                 }
             }
         }
-        if l.request == DebugRequest::Launch && d.build.is_none() {
+        if (l.request == DebugRequest::Launch || l.remote.is_some()) && d.build.is_none() {
             match (&l.program, &l.module) {
+                (None, None) if l.remote.is_some() => {}
                 (None, None) => problems.push("no `program` to launch".into()),
                 (Some(p), _) if l.pre_launch.is_none() && d.origin == "config" && !crate::util::os::path::is_absolute_str(p) && !p.contains('{') => {
                     if let Ok(path) = host_program(project, p) {
@@ -281,7 +676,11 @@ pub async fn views(state: &AppState, project: &Project) -> Vec<LaunchConfigView>
             name: l.name.clone(),
             origin: d.origin,
             source: l.source.clone().or_else(|| (d.origin == "config").then(|| "machine overlay".to_string())),
-            request: l.request,
+            request: match &l.remote {
+                Some(r) if r.extended && r.attach.is_none() => DebugRequest::Launch,
+                Some(_) => DebugRequest::Attach,
+                None => l.request,
+            },
             adapter: adapter.as_ref().map(|a| a.id.clone()),
             adapter_label: adapter.as_ref().map(|a| a.label.clone()),
             adapter_available: available,
@@ -291,7 +690,8 @@ pub async fn views(state: &AppState, project: &Project) -> Vec<LaunchConfigView>
             args: l.args.clone(),
             cwd: l.cwd.clone(),
             pre_launch,
-            stop_on_entry: l.stop_on_entry,
+            stop_on_entry: stops_at_entry(l),
+            remote,
             problems,
         });
     }
@@ -340,6 +740,16 @@ pub struct Plan {
     pub inside_command: Option<String>,
     pub pid: Option<u32>,
     pub stop_on_entry: bool,
+    /// A remote target (embedded): the debug server to start and what gdb does once
+    /// connected. `request` is then an attach.
+    pub remote: Option<RemotePlan>,
+    /// A remote target of a project that works in its dev container: the build step runs
+    /// there (its toolchain is there) while gdb and the debug server run on this computer
+    /// (the probe is plugged in here), so `target` stays none.
+    pub build_target: Option<ExecTarget>,
+    /// `[from, to]` pairs for gdb's `set substitute-path`: the workspace as the container
+    /// built it, then the configuration's `source_map`.
+    pub substitute_paths: Vec<(String, String)>,
     /// `startDebugging`: the child's configuration, sent as-is.
     pub raw_arguments: Option<Value>,
     /// A child session talks to its parent's adapter over a new loopback connection
@@ -390,7 +800,16 @@ pub fn attach_target_known(kind: AdapterKind, l: &DebugLaunch) -> bool {
 pub async fn plan_config(state: &AppState, project: &Project, name: &str, stop_on_entry: Option<bool>, pid: Option<u32>) -> Result<Plan, ApiError> {
     let d = find(project, name)?;
     let mut l = d.launch.clone();
-    if l.request == DebugRequest::Attach {
+    // A remote target is an attach to a gdb stub, never to a process.
+    let remote_cfg = l.remote.clone();
+    if let Some(r) = &remote_cfg {
+        // gdb connects to a stub: an attach to its target (or a launch of the program on an
+        // extended stub), never to a process of this computer.
+        let runs = r.extended && r.attach.is_none();
+        l.request = if runs { DebugRequest::Launch } else { DebugRequest::Attach };
+        l.pid = r.attach.filter(|_| r.extended);
+    }
+    if l.request == DebugRequest::Attach && remote_cfg.is_none() {
         if let Some(p) = pid {
             if p <= 1 || p == std::process::id() {
                 return Err(ApiError::bad_request("pick another process"));
@@ -399,15 +818,24 @@ pub async fn plan_config(state: &AppState, project: &Project, name: &str, stop_o
         }
     }
     let language = language_of(&l, &project.root);
-    let adapter = adapter_for(state, &l, &language).await?;
-    if l.request == DebugRequest::Attach && !attach_target_known(adapter.kind, &l) {
+    let adapter = match remote_cfg {
+        Some(_) => remote_adapter(state, project, &l).await?,
+        None => adapter_for(state, &l, &language).await?,
+    };
+    if l.request == DebugRequest::Attach && remote_cfg.is_none() && !attach_target_known(adapter.kind, &l) {
         return Err(ApiError::new(
             axum::http::StatusCode::BAD_REQUEST,
             "pid_required",
             format!("{name:?} attaches to a process: pick one (or give the configuration a `pid`)"),
         ));
     }
-    let (target, inside_command) = container(state, project, &adapter).await?;
+    // A remote target is debugged from this computer even when the project works in its dev
+    // container: the probe is plugged in here. Only the build step goes to the container.
+    let build_target = match remote_cfg {
+        Some(_) => crate::devcontainer::exec_target(state, &project.id).await,
+        None => None,
+    };
+    let (target, inside_command) = if remote_cfg.is_some() { (None, None) } else { container(state, project, &adapter).await? };
     if target.is_none() {
         let av = adapters::probe(state, &adapter).await;
         if !av.available {
@@ -451,7 +879,11 @@ pub async fn plan_config(state: &AppState, project: &Project, name: &str, stop_o
             l.extra.insert("python".into(), json!(abs.display().to_string()));
         }
     }
-    if l.request == DebugRequest::Launch && d.build.is_none() && pre.is_none() && target.is_none() {
+    let remote = match &remote_cfg {
+        Some(r) => Some(remote_plan(state, project, &l, r, program.as_deref())?),
+        None => None,
+    };
+    if (l.request == DebugRequest::Launch || remote.is_some()) && d.build.is_none() && pre.is_none() && target.is_none() {
         if let Some(p) = &program {
             if adapter.kind != AdapterKind::Delve && !p.exists() {
                 return Err(ApiError::bad_request(format!(
@@ -469,7 +901,7 @@ pub async fn plan_config(state: &AppState, project: &Project, name: &str, stop_o
         config: Some(l.name.clone()),
         adapter,
         request: l.request,
-        stop_on_entry: stop_on_entry.unwrap_or(l.stop_on_entry),
+        stop_on_entry: stop_on_entry.unwrap_or(stops_at_entry(&l)),
         pid: l.pid,
         launched: l.request == DebugRequest::Launch,
         launch: l,
@@ -480,9 +912,27 @@ pub async fn plan_config(state: &AppState, project: &Project, name: &str, stop_o
         secrets,
         target,
         inside_command,
+        substitute_paths: substitute_paths(build_target.as_ref(), remote.as_ref()),
+        build_target,
+        remote,
         raw_arguments: None,
         connect: None,
     })
+}
+
+/// gdb's `set substitute-path` pairs for a remote target: the workspace of a dev container the
+/// program was built in (its path there → its path here), then the configuration's own.
+pub fn substitute_paths(build: Option<&ExecTarget>, remote: Option<&RemotePlan>) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = build.and_then(|t| t.map.as_ref()).map(|(host, container)| vec![(container.trim_end_matches('/').to_string(), host.display().to_string())]).unwrap_or_default();
+    pairs.extend(remote.map(|r| r.source_map.clone()).unwrap_or_default());
+    pairs
+}
+
+/// `set substitute-path` commands as gdb's `-iex` arguments (one per pair: quoted, so a space
+/// in a path stays in it).
+pub fn substitute_path_args(pairs: &[(String, String)]) -> Vec<String> {
+    let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    pairs.iter().flat_map(|(from, to)| ["-iex".to_string(), format!("set substitute-path {} {}", quote(from), quote(to))]).collect()
 }
 
 /// The plan to attach to process `pid`.
@@ -526,6 +976,9 @@ pub async fn plan_attach(state: &AppState, project: &Project, pid: u32, adapter:
         inside_command,
         pid: Some(pid),
         stop_on_entry: false,
+        remote: None,
+        build_target: None,
+        substitute_paths: vec![],
         raw_arguments: None,
         connect: None,
         launched: false,
@@ -541,8 +994,9 @@ pub fn adapter_path(target: Option<&ExecTarget>, host: &Path) -> String {
 }
 
 /// Launch or attach arguments for `plan`'s adapter. `program` is the adapter-side
-/// path (after the build resolved it).
-pub fn arguments(plan: &Plan, program: Option<&str>, terminal: bool) -> Value {
+/// path (after the build resolved it); `remote_target` is what gdb connects to (the
+/// debug server's port is only known once it runs).
+pub fn arguments(plan: &Plan, program: Option<&str>, terminal: bool, remote_target: Option<&str>) -> Value {
     if let Some(raw) = &plan.raw_arguments {
         return raw.clone();
     }
@@ -576,6 +1030,9 @@ pub fn arguments(plan: &Plan, program: Option<&str>, terminal: bool) -> Value {
                         m.insert("pid".into(), json!(pid));
                     }
                 }
+            }
+            if let Some(t) = remote_target {
+                m.insert("target".into(), json!(t));
             }
             if let Some(p) = program {
                 m.insert("program".into(), json!(p));
@@ -687,6 +1144,9 @@ mod tests {
             secrets: vec![],
             target: None,
             inside_command: None,
+            remote: None,
+            build_target: None,
+            substitute_paths: vec![],
             raw_arguments: None,
             connect: None,
             launched: true,
@@ -757,19 +1217,19 @@ mod tests {
             extra: [("setupCommands".to_string(), json!(["x"]))].into(),
             ..Default::default()
         };
-        let gdb = arguments(&plan(adapters::find(&cfg, "gdb").unwrap(), launch.clone(), d.path()), Some("/w/app"), true);
+        let gdb = arguments(&plan(adapters::find(&cfg, "gdb").unwrap(), launch.clone(), d.path()), Some("/w/app"), true, None);
         assert_eq!(gdb["program"], "/w/app");
         assert_eq!(gdb["stopAtBeginningOfMainSubprogram"], true);
         assert_eq!(gdb["env"]["RUST_LOG"], "debug");
         assert_eq!(gdb["setupCommands"], json!(["x"]), "extra is merged last");
         assert_eq!(gdb["request"], "launch");
-        let lldb = arguments(&plan(adapters::find(&cfg, "lldb-dap").unwrap(), launch.clone(), d.path()), Some("/w/app"), true);
+        let lldb = arguments(&plan(adapters::find(&cfg, "lldb-dap").unwrap(), launch.clone(), d.path()), Some("/w/app"), true, None);
         assert_eq!(lldb["env"], json!(["RUST_LOG=debug"]));
         assert_eq!(lldb["runInTerminal"], true);
         let mut py = launch.clone();
         py.module = Some("api.main".into());
         py.extra.insert("python".into(), json!("/usr/bin/python3"));
-        let dp = arguments(&plan(adapters::find(&cfg, "debugpy").unwrap(), py, d.path()), None, true);
+        let dp = arguments(&plan(adapters::find(&cfg, "debugpy").unwrap(), py, d.path()), None, true, None);
         assert_eq!(dp["module"], "api.main");
         assert_eq!(dp["console"], "integratedTerminal");
         assert_eq!(dp["python"], "/usr/bin/python3");
@@ -777,14 +1237,139 @@ mod tests {
         let mut attach = launch;
         attach.request = DebugRequest::Attach;
         attach.pid = Some(4242);
-        let at = arguments(&plan(adapters::find(&cfg, "gdb").unwrap(), attach.clone(), d.path()), None, false);
+        let at = arguments(&plan(adapters::find(&cfg, "gdb").unwrap(), attach.clone(), d.path()), None, false, None);
         assert_eq!((at["pid"].clone(), at["request"].clone()), (json!(4242), json!("attach")));
-        let at = arguments(&plan(adapters::find(&cfg, "debugpy").unwrap(), attach.clone(), d.path()), None, false);
+        let at = arguments(&plan(adapters::find(&cfg, "debugpy").unwrap(), attach.clone(), d.path()), None, false, None);
         assert_eq!(at["processId"], 4242);
         // No pid: none is invented (gdb would "attach" to pid 0 and debug nothing).
         attach.pid = None;
-        let at = arguments(&plan(adapters::find(&cfg, "gdb").unwrap(), attach, d.path()), None, false);
+        let at = arguments(&plan(adapters::find(&cfg, "gdb").unwrap(), attach, d.path()), None, false, None);
         assert!(at.get("pid").is_none() && at.get("processId").is_none(), "{at}");
+    }
+
+    #[test]
+    fn a_loopback_connect_names_the_port_of_our_server() {
+        for (connect, port) in [
+            ("localhost:3333", Some(3333)),
+            ("127.0.0.1:2331", Some(2331)),
+            ("tcp:localhost:3333", Some(3333)),
+            ("tcp4:127.0.0.1:50000", Some(50000)),
+            ("[::1]:3333", Some(3333)),
+            (" localhost:3333 ", Some(3333)),
+            // Another computer, a serial device, a pipe, a bad port: ours to start nothing on.
+            ("192.168.1.9:3333", None),
+            ("board.local:3333", None),
+            ("/dev/ttyACM0", None),
+            ("COM3", None),
+            ("| ssh board gdbserver - prog", None),
+            ("localhost:notaport", None),
+            ("localhost:99999", None),
+        ] {
+            assert_eq!(connect_loopback_port(connect), port, "{connect}");
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_plans_take_the_servers_defaults_and_the_configurations_overrides() {
+        let t = crate::platform::testutil::app().await;
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("fw.elf"), b"").unwrap();
+        let p = project(d.path(), "");
+        let plan = |toml_text: &str| {
+            let l: DebugLaunch = toml::from_str(toml_text).unwrap();
+            let program = l.program.as_deref().map(|x| d.path().join(x));
+            remote_plan(&t.state, &p, &l, l.remote.as_ref().unwrap(), program.as_deref())
+        };
+        // OpenOCD's defaults: halt, download, halt again; run to `main` when asked to stop.
+        let r = plan("name = \"a\"\nprogram = \"fw.elf\"\n[remote]\nserver = \"openocd\"\nserver_args = [\"-f\", \"{root}/board.cfg\", \"-c\", \"x {program}\", \"-c\", \"y ${workspaceFolder}\"]").unwrap();
+        assert_eq!((r.init.clone(), r.reset.clone(), r.download, r.stop_at.clone()), (vec![], vec!["monitor reset halt".to_string()], true, StopAt::Main));
+        let root = d.path().display().to_string();
+        let fw = d.path().join("fw.elf").display().to_string();
+        let all = &r.server_args;
+        assert!(all[..6].iter().any(|a| a == "gdb_port {port}"), "the preset's arguments come first, the ports left for the server: {all:?}");
+        assert_eq!(all[6..], ["-f".to_string(), format!("{root}/board.cfg"), "-c".into(), format!("x {fw}"), "-c".into(), format!("y {root}")], "{{root}}, {{program}} and ${{workspaceFolder}} expand");
+        // Overrides: an explicit empty list, no download, another place to stop.
+        let r = plan("name = \"a\"\nprogram = \"fw.elf\"\n[remote]\nserver = \"openocd\"\nreset = []\ndownload = false\nstop_at = \"app_main\"").unwrap();
+        assert_eq!((r.reset, r.download, r.stop_at), (vec![], false, StopAt::Location("app_main".into())));
+        assert_eq!(plan("name = \"a\"\nprogram = \"fw.elf\"\n[remote]\nserver = \"qemu-arm\"").unwrap().download, false, "QEMU loads the image itself");
+        assert_eq!(plan("name = \"a\"\nprogram = \"fw.elf\"\n[remote]\nserver = \"qemu-arm\"\nstop_at = \" Reset \"").unwrap().stop_at, StopAt::Reset);
+        // A loopback `connect` fixes the port the server must listen on.
+        let r = plan("name = \"a\"\nprogram = \"fw.elf\"\n[remote]\nserver = \"jlink\"\nconnect = \"localhost:2331\"").unwrap();
+        assert_eq!((r.port, r.connect.as_deref()), (Some(2331), Some("localhost:2331")));
+        // Mistakes.
+        let err = |toml_text: &str| plan(toml_text).unwrap_err().message;
+        assert!(err("name = \"a\"\n[remote]\nserver = \"mystery\"").contains("[debug.servers.mystery]"));
+        assert!(err("name = \"a\"\n[remote]\ndownload = true").contains("`server` to start or a `connect`"));
+        assert!(err("name = \"a\"\n[remote]\nserver = \"openocd\"").contains("needs a `program`"));
+        assert!(err("name = \"a\"\nprogram = \"fw.elf\"\n[remote]\nserver = \"openocd\"\ninit = \"a\\nb\"").contains("without control characters"));
+        assert!(err("name = \"a\"\nprogram = \"fw.elf\"\n[remote]\nconnect = \"a\\nb\"").contains("`connect`"));
+        assert!(err("name = \"a\"\nprogram = \"fw.elf\"\n[remote]\nserver = \"openocd\"\nstop_at = \"main\\rx\"").contains("`stop_at`"));
+    }
+
+    #[test]
+    fn source_paths_are_translated_for_gdb_with_quoting() {
+        let pairs = vec![("/workspaces/my proj".to_string(), "/home/u/my proj".to_string()), (r#"/ci/"x""#.to_string(), r"/tmp\y".to_string())];
+        assert_eq!(
+            substitute_path_args(&pairs),
+            [
+                "-iex",
+                r#"set substitute-path "/workspaces/my proj" "/home/u/my proj""#,
+                "-iex",
+                r#"set substitute-path "/ci/\"x\"" "/tmp\\y""#,
+            ]
+        );
+        assert!(substitute_path_args(&[]).is_empty());
+        // The workspace of a dev container the program was built in comes first, then the configuration's own pairs.
+        let target = ExecTarget {
+            project_id: "p".into(),
+            container_id: "c".into(),
+            container_name: "c".into(),
+            user: None,
+            map: Some((PathBuf::from("/home/u/proj"), "/workspaces/proj/".into())),
+            folder: "/workspaces/proj".into(),
+            remote_env: vec![],
+            workbench_url: None,
+            docker: "docker".into(),
+            shell: "/bin/sh".into(),
+            has_bash: false,
+        };
+        let remote = RemotePlan {
+            server: None,
+            server_args: vec![],
+            connect: Some("localhost:1".into()),
+            port: None,
+            init: vec![],
+            reset: vec![],
+            download: false,
+            stop_at: StopAt::Main,
+            source_map: vec![("/ci/build".into(), "/home/u/proj".into())],
+            svd: None,
+            channels: vec![],
+            extended: false,
+            attach: None,
+            exec_file: None,
+        };
+        assert_eq!(
+            substitute_paths(Some(&target), Some(&remote)),
+            [("/workspaces/proj".to_string(), "/home/u/proj".to_string()), ("/ci/build".to_string(), "/home/u/proj".to_string())]
+        );
+        assert_eq!(substitute_paths(None, Some(&remote)), [("/ci/build".to_string(), "/home/u/proj".to_string())]);
+        assert!(substitute_paths(None, None).is_empty());
+    }
+
+    #[test]
+    fn a_remote_attach_names_its_target_and_never_a_pid() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = adapters::DebugConfig::default();
+        let launch = DebugLaunch { name: "board".into(), request: DebugRequest::Attach, program: Some("fw.elf".into()), extra: [("setupCommands".to_string(), json!(["x"]))].into(), ..Default::default() };
+        let mut pl = plan(adapters::find(&cfg, "gdb-multiarch").unwrap(), launch, d.path());
+        pl.launched = false;
+        let a = arguments(&pl, Some("/w/fw.elf"), false, Some("127.0.0.1:3333"));
+        assert_eq!((a["request"].clone(), a["target"].clone(), a["program"].clone()), (json!("attach"), json!("127.0.0.1:3333"), json!("/w/fw.elf")));
+        assert!(a.get("pid").is_none() && a.get("processId").is_none(), "{a}");
+        assert_eq!(a["setupCommands"], json!(["x"]), "extra is merged last, as ever");
+        // A plain attach has no `target`.
+        assert!(arguments(&pl, Some("/w/fw.elf"), false, None).get("target").is_none());
     }
 
     #[test]
