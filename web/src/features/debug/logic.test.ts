@@ -8,9 +8,19 @@ import {
   frameLocation,
   glyphKind,
   groupConfigs,
+  configSubtitle,
+  configTitle,
   moveLines,
   patchLine,
   rememberedConfig,
+  remoteChip,
+  remoteLines,
+  fieldRange,
+  fieldValueText,
+  filterPeripherals,
+  filterRegisters,
+  hexAddress,
+  registerNote,
   revealFrame,
   sourceLines,
   sourcePanel,
@@ -21,7 +31,7 @@ import {
 import { inTurn } from './api'
 import { setHealth } from '@/api/health'
 import { modelFile } from '@/features/files/modelAccess'
-import type { DebugSession, Frame, LaunchConfig, LineBreakpoint } from './types'
+import type { DebugSession, Frame, LaunchConfig, LineBreakpoint, RemoteConfig, SvdRegister } from './types'
 
 const bp = (line: number, extra: Partial<LineBreakpoint> = {}): LineBreakpoint => ({ id: `b${line}`, path: 'src/main.c', line, enabled: true, ...extra })
 
@@ -31,6 +41,7 @@ const session = (over: Partial<DebugSession> = {}): DebugSession => ({
   name: 'server',
   adapter: 'gdb',
   adapterLabel: 'GDB',
+  adapterKind: 'gdb',
   request: 'launch',
   state: 'stopped',
   stopEpoch: 3,
@@ -161,6 +172,21 @@ describe('sessions', () => {
     expect(p).toContain('buf: char * = 0x0')
     expect(p).toContain('reading input')
   })
+
+  it('includes a microcontroller\'s own output channel but not the debug server\'s chatter', () => {
+    const p = agentPrompt({
+      session: session(),
+      frames: [{ id: 1, name: 'main', line: 7, column: 1, source: { path: 'src/main.c', inProject: true } }],
+      frameIndex: 0,
+      locals: [],
+      console: [
+        { seq: 1, category: 'server', text: 'Info : Listening on port 3333 for gdb connections\n', at: 0 },
+        { seq: 2, category: 'target', text: 'boot: sensor ok\n', at: 0 },
+      ],
+    })
+    expect(p).toContain('boot: sensor ok')
+    expect(p).not.toContain('Listening on port')
+  })
 })
 
 describe('phase-3 review fixes', () => {
@@ -287,5 +313,172 @@ describe('phase-3 review fixes', () => {
     expect(most).toBe(1)
     expect(order).toEqual(['start a', 'end a', 'start b', 'end b', 'start c', 'end c'])
     expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected', 'fulfilled'])
+  })
+})
+
+describe('remote targets (embedded)', () => {
+  const remote = (over: Partial<RemoteConfig> = {}): RemoteConfig => ({
+    server: 'openocd',
+    serverLabel: 'OpenOCD',
+    serverAvailable: true,
+    commandLine: 'openocd -c gdb_port {port} -f board.cfg',
+    init: [],
+    reset: ['monitor reset halt'],
+    download: true,
+    stopAt: 'main',
+    extended: false,
+    channels: [],
+    inContainer: false,
+    ...over,
+  })
+  const config = (over: Partial<LaunchConfig> = {}): LaunchConfig => ({
+    name: 'board',
+    origin: 'config',
+    request: 'attach',
+    adapterAvailable: true,
+    adapterLabel: 'GDB (multi-architecture)',
+    language: 'cpp',
+    program: 'build/fw.elf',
+    args: [],
+    stopOnEntry: true,
+    problems: [],
+    remote: remote(),
+    ...over,
+  })
+
+  it('spells out what starting one runs, in the order it runs', () => {
+    expect(remoteLines(remote(), true)).toEqual([
+      'Debug server: openocd -c gdb_port {port} -f board.cfg',
+      'gdb connects to: the server on this computer',
+      'Then: monitor reset halt',
+      'Download the program (load), then monitor reset halt',
+      'Stops at main',
+    ])
+    // Init commands first, then the reset; nothing to download; runs freely.
+    expect(remoteLines(remote({ init: ['monitor adapter speed 4000'], download: false }), false)).toEqual([
+      'Debug server: openocd -c gdb_port {port} -f board.cfg',
+      'gdb connects to: the server on this computer',
+      'Then: monitor adapter speed 4000; monitor reset halt',
+      'Runs',
+    ])
+    // A stub that already runs: no server line to hide behind.
+    expect(remoteLines(remote({ server: undefined, commandLine: undefined, connect: 'localhost:3333', reset: [], download: false, stopAt: 'reset' }), true)).toEqual([
+      'No debug server: gdb connects to a stub that is already running',
+      'gdb connects to: localhost:3333',
+      'Stops at the reset vector',
+    ])
+  })
+
+  it('says what is different about an extended-remote stub, a container build, channels and a register map', () => {
+    // The stub runs the program; the stop is at its main.
+    expect(remoteLines(remote({ server: undefined, commandLine: undefined, connect: 'localhost:2331', extended: true, reset: [], download: false }), true)).toEqual([
+      'No debug server: gdb connects to a stub that is already running',
+      'gdb connects (target extended-remote) to: localhost:2331',
+      'The stub runs the program',
+      'Stops at main',
+    ])
+    expect(remoteLines(remote({ server: undefined, commandLine: undefined, connect: 'bmp:2000', extended: true, attach: 1, reset: [], download: false, stopAt: 'reset' }), true)).toContain('Attaches to target 1')
+    // The build runs in the dev container; the output channels and the SVD file are listed last.
+    const lines = remoteLines(remote({ inContainer: true, channels: ['uart (5000)', 'swo (5001)'], svd: 'STM32F407.svd' }), true)
+    expect(lines[0]).toBe('Built in the dev container; the debugger and the debug server run on this computer')
+    expect(lines.slice(-2)).toEqual(['Target output: uart (5000), swo (5001)', 'Register map: STM32F407.svd'])
+  })
+
+  it('shows the commands in the tooltip and the server in the subtitle', () => {
+    const c = config({ preLaunch: 'make' })
+    const title = configTitle(c)
+    expect(title.split('\n')).toEqual([
+      'build/fw.elf',
+      'before: make',
+      'Debug server: openocd -c gdb_port {port} -f board.cfg',
+      'gdb connects to: the server on this computer',
+      'Then: monitor reset halt',
+      'Download the program (load), then monitor reset halt',
+      'Stops at main',
+    ])
+    expect(configTitle(config({ problems: ['OpenOCD: `openocd` was not found on PATH'] }))).toMatch(/⚠ OpenOCD: `openocd` was not found on PATH$/)
+    expect(configSubtitle(c)).toBe('GDB (multi-architecture) · via OpenOCD · make')
+    expect(configSubtitle(config({ remote: remote({ server: undefined, serverLabel: undefined, connect: 'board.local:2345' }) }))).toBe('GDB (multi-architecture) · at board.local:2345')
+    // An ordinary configuration is unchanged.
+    const plain = config({ remote: undefined, adapterLabel: 'GDB', preLaunch: 'cargo build' })
+    expect(configSubtitle(plain)).toBe('GDB · cargo build')
+    expect(configTitle(plain).split('\n')).toEqual(['build/fw.elf', 'before: cargo build'])
+  })
+
+  it('names the server and target of a session, and what a halt at reset is', () => {
+    expect(remoteChip(session())).toBeNull()
+    expect(remoteChip(session({ remote: { server: 'OpenOCD', target: '127.0.0.1:3333' } }))).toBe('OpenOCD · 127.0.0.1:3333')
+    expect(remoteChip(session({ remote: { target: 'localhost:3333' } }))).toBe('localhost:3333')
+    expect(remoteChip(session({ remote: {} }))).toBe('remote target')
+    expect(stateLabel(session({ stopped: { reason: 'entry', allThreadsStopped: true, at: 0 } }))).toBe('Paused (at the reset vector)')
+    expect(stateLabel(session({ state: 'starting', phase: 'Downloading fw.elf' }))).toBe('Downloading fw.elf')
+    expect(stateLabel(session({ state: 'terminated', request: 'attach', stopRequested: true }))).toBe('Detached')
+  })
+
+  it('groups a remote configuration with the explicit ones', () => {
+    const groups = groupConfigs([config(), config({ name: 'cargo bin', origin: 'cargo', remote: undefined })])
+    expect(groups.map((g) => [g.title, g.items.map((c) => c.name)])).toEqual([
+      ['Launch configurations', ['board']],
+      ['Cargo', ['cargo bin']],
+    ])
+  })
+})
+
+describe('peripherals', () => {
+  const reg = (over: Partial<SvdRegister> = {}): SvdRegister => ({
+    name: 'CR1',
+    offset: 0,
+    address: 0x40000000,
+    size: 32,
+    access: 'read-write',
+    readAction: false,
+    fields: [],
+    ...over,
+  })
+
+  it('spells addresses and bit ranges the way a datasheet does', () => {
+    expect(hexAddress(0x40020000)).toBe('0x40020000')
+    expect(hexAddress(0x10)).toBe('0x00000010')
+    expect(hexAddress(0x1_0000_0000)).toBe('0x100000000')
+    expect(fieldRange({ bitOffset: 3, bitWidth: 1 })).toBe('[3]')
+    expect(fieldRange({ bitOffset: 4, bitWidth: 4 })).toBe('[7:4]')
+    expect(fieldRange({ bitOffset: 0, bitWidth: 32 })).toBe('[31:0]')
+  })
+
+  it('shows a field as its value name and number, hex when it is wide', () => {
+    expect(fieldValueText({ bitWidth: 2, value: 1, valueName: 'Down' })).toBe('Down (1)')
+    expect(fieldValueText({ bitWidth: 1, value: 0, valueName: null })).toBe('0')
+    expect(fieldValueText({ bitWidth: 24, value: 0xffffff, valueName: null })).toBe('0xFFFFFF')
+    expect(fieldValueText({ bitWidth: 24, value: 0, valueName: 'Zero' })).toBe('Zero (0x0)')
+    expect(fieldValueText({ bitWidth: 3, value: null, valueName: null })).toBe('')
+  })
+
+  it('filters peripherals and registers by every word, in name, group or description', () => {
+    const list = [
+      { name: 'USART1', base: 1, registers: 7, description: 'Universal synchronous asynchronous receiver transmitter', group: 'USART' },
+      { name: 'TIM2', base: 2, registers: 12, description: 'General-purpose timer' },
+      { name: 'GPIOA', base: 3, registers: 9, description: 'General-purpose I/O' },
+    ]
+    expect(filterPeripherals(list, '').map((p) => p.name)).toEqual(['USART1', 'TIM2', 'GPIOA'])
+    // Words match as substrings, so "general purpose" finds "General-purpose" in two descriptions.
+    expect(filterPeripherals(list, 'general purpose').map((p) => p.name)).toEqual(['TIM2', 'GPIOA'])
+    expect(filterPeripherals(list, 'general purpose timer').map((p) => p.name)).toEqual(['TIM2'])
+    expect(filterPeripherals(list, 'general-purpose timer').map((p) => p.name)).toEqual(['TIM2'])
+    expect(filterPeripherals(list, '  usart ').map((p) => p.name)).toEqual(['USART1'])
+    expect(filterPeripherals(list, 'nothing')).toEqual([])
+    const regs = [reg({ name: 'CR1', description: 'Control register 1' }), reg({ name: 'SR', description: 'Status' })]
+    expect(filterRegisters(regs, 'control').map((r) => r.name)).toEqual(['CR1'])
+    expect(filterRegisters(regs, 'sr').map((r) => r.name)).toEqual(['SR'])
+    expect(filterRegisters(regs, '')).toHaveLength(2)
+  })
+
+  it('says why a register has no value', () => {
+    expect(registerNote(reg({ value: '0x00000001' }))).toBe('')
+    expect(registerNote(reg({ error: 'Cannot access memory' }))).toBe('Cannot access memory')
+    expect(registerNote(reg({ skipped: 'reading it changes the chip' }))).toBe('reading it changes the chip')
+    expect(registerNote(reg({ access: 'write-only', skipped: 'write-only' }))).toBe('write-only')
+    expect(registerNote(reg())).toBe('')
+    // A value wins over a stale note.
+    expect(registerNote(reg({ value: '0x0', skipped: 'x' }))).toBe('')
   })
 })

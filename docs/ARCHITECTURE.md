@@ -59,7 +59,7 @@ server/            Rust crate `workbench`
   src/files/         SLICE files: tree, read/write, watch, search, quick open, local history (history/)
   src/git/           SLICE git: CLion-style VCS, line staging, interactive rebase, changelists, shelf, bisect
   src/lsp/           SLICE lsp: language servers → Monaco (process manager, trust gate, URI mapping, editor socket)
-  src/debug/         SLICE debug: Debug Adapter Protocol sessions, launch configurations, breakpoints
+  src/debug/         SLICE debug: Debug Adapter Protocol sessions, launch configurations, breakpoints, remote (embedded) targets
   src/gitlab/        SLICE gitlab: MRs, pipelines, jobs, envs, issues, registry
   src/github/        SLICE github: PRs, Actions runs/jobs/logs, issues, releases
   src/workspace/     SLICE workspace: Mr. Mak-style deliverable cards and Home examples, sandboxed report serving, trash
@@ -90,7 +90,7 @@ packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows rele
 ## Configuration
 
 - `~/.config/workbench/config.toml` (`%APPDATA%\workbench\config.toml` on Windows) holds global settings (`config/global.rs`). It is written with detected defaults on first run.
-  - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions` and `permission_wait`) and `[agents.providers.*]`, `[terminals]` (`shell`: the argv of new shells; default `$SHELL -l`, on Windows PowerShell), `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[update]` (`check`, `repo`, `api`: see "Updates"), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
+  - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions` and `permission_wait`) and `[agents.providers.*]`, `[terminals]` (`shell`: the argv of new shells; default `$SHELL -l`, on Windows PowerShell), `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[update]` (`check`, `repo`, `api`: see "Updates"), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`, `[debug.servers.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
   - Settings saves edit config.toml in place (`platform::config_edit`): comments and layout survive, for every section.
   - Settings saves apply at once. Edits made outside Workbench (an editor, a setup hint followed by hand) apply too: `platform::settings::watch_config` watches the config directory and applies a valid `config.toml` like a raw save (config swapped, secret cache cleared, projects reloaded, `settings.changed`). A file that does not parse or fails the hard checks is reported once (`ui.notify`) and the running config stays; the watcher never writes the file.
 - **Project ids** are the directory name as a slug (`api`, then `api-2`… for another directory of that name) and are bound to the directory for good in `data_dir/project-ids.json` (canonical path → id). Everything keyed by an id belongs to that directory: the overlay `projects/<id>.toml` with its secrets, `data_dir/workspace/<id>`, terminals and agent sessions (`projectId`, hence their MCP confinement). Scan order (roots, then includes) only decides the id the first time a directory is seen; adding a root with a same-named repository or removing the first of two never moves an id, and a new directory never gets an id the file gives to another one, even one that is gone or excluded. A moved repository therefore gets a new id: rename its overlay to follow it.
@@ -104,7 +104,7 @@ packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows rele
   - `[secrets]` is ignored: secret references (`command`, `file`, `dotenv`…) are read only from the overlay and config.toml.
   - Secret *names* used by repository entries (env `auth.password`, `repo.gitlab.token`, `links.*.token`, `database.password` / `database.url`) resolve only against the overlay's `[secrets]`, never config.toml's (`Project::repo_secret_names`, enforced in `AppState::secret`).
   - `agent.env`, `agent.add_dirs` and any `agent.permission_mode` other than `manual`, `plan` or `dontAsk` are ignored.
-  - Language servers and debug adapters are commands: only config.toml defines them (`[lsp.servers.*]`, `[debug.adapters.*]`); a repository's `[[debug]]` launch configuration names an adapter by id, never a command, and its `${secret:…}` env resolves only against the overlay.
+  - Language servers, debug adapters and debug servers are commands: only config.toml defines them (`[lsp.servers.*]`, `[debug.adapters.*]`, `[debug.servers.*]`); a repository's `[[debug]]` launch configuration names an adapter (and, in `[debug.remote]`, a server) by id, never a command, and its `${secret:…}` env resolves only against the overlay. What a repository's `[debug.remote]` adds (server arguments, gdb commands, a `connect` address) runs only when the user starts that configuration, like `pre_launch`, and the Start view shows it first.
   - Nothing runs by itself: a service run's `status` (polled in the background) and an env health probe over ssh (`via_host`, unless its host is an overlay `[hosts]` entry) are dropped.
   - A token-less `links.confluence`/`links.jira` keeps its `site` only when it is the configured site or an `https://*.atlassian.net` site, so config.toml's Atlassian token never goes elsewhere.
   - A token-less `repo.gitlab` gets config.toml's `[gitlab]` token only when its base URL, **scheme included**, is the configured host (`gitlab::client::global_host_matches`), so an `http://` twin of an https host never receives it.
@@ -157,7 +157,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 - **Dev containers:** a `devcontainer.json` (with its Dockerfile and compose files) is repository content that runs code on the host's Docker. Nothing builds or starts without the user's approval of the exact plan (a sha256 the server checks); agents can only read the status. The bridge listener on a container network's gateway serves only `/api/hooks/**` and `/mcp`, only with agent tokens. See "Dev containers".
 - **Docker (Services)** is root on this computer: `/api/docker/**` acts only for devices (agent tokens are not valid there; in-process callers get 403 on every route that changes something or opens a terminal). Details and `inspect` mask values of secret-looking names (`*PASSWORD*`, `*TOKEN*`, `*_KEY`, `*SECRET*`…), passwords in URLs, and those inside JSON labels (`devcontainer.metadata`'s `remoteEnv`).
 - **Databases** (`/api/projects/{pid}/db/**`): a console runs what the user types with the database user's rights, so everything but the list refuses in-process callers (agents over MCP get 403; agent tokens are not valid there at all). Credentials are secret names resolved in the backend; the list shows the names, never values; a password typed into the browser is refused. Connection errors are redacted of the secrets used.
-- **Language servers and debug adapters** run project code. Their commands come only from config.toml; a project's servers start only after the user enabled code intelligence for that directory (`data_dir/lsp/<id>.json`), a debug session only on a click; debug adapters start in `data_dir/debug/adapter` so a repository's modules cannot shadow the adapter's (debugpy). Every write route of both slices refuses in-process callers: agents (MCP) read diagnostics, symbols and a stopped session's state, and never enable, start, step, evaluate or stop anything. See "Code intelligence" and "Debugger".
+- **Language servers, debug adapters and debug servers** run project code. Their commands come only from config.toml; a project's servers start only after the user enabled code intelligence for that directory (`data_dir/lsp/<id>.json`), a debug session only on a click; debug adapters start in `data_dir/debug/adapter` so a repository's modules cannot shadow the adapter's (debugpy). Every write route of both slices refuses in-process callers: agents (MCP) read diagnostics, symbols and a stopped session's state, and never enable, start, step, evaluate or stop anything. See "Code intelligence" and "Debugger".
 - **Permission requests** of Claude Code sessions are answered only by signed-in devices (`POST /api/agents/{id}/permission`: agent tokens 401, the master token and in-process calls 403), so a session never approves itself through Workbench. One-tap Allow (the attention toast, a push notification) is offered only for a request shown whole: `pendingPermission.complete` and at most 300 characters on 4 lines. See "Approvals".
 - **Web Push** posts to a browser-supplied endpoint: an SSRF boundary. Only the browsers' push services (FCM, Mozilla, Apple, WNS) and `[push] extra_endpoint_hosts` are accepted, https on the default port, no IP literals, no redirects; payloads carry titles and short summaries only. The service worker answers Allow / Deny with the device key it keeps in IndexedDB (as exposed as the page's `localStorage` copy). See "Phone app and push".
 - **Updates** replace the program Workbench runs from, so only config.toml (or the release build itself) says where releases come from, never a repository's config; the source is https (plain http only for this computer), no token is sent, and redirects go to https only. Nothing is installed without a click or `workbench update`: `POST /api/platform/update/install` and `POST /api/platform/restart` refuse in-process callers (agents over MCP get 403; agent tokens are not valid under `/api`), and there is no MCP tool for either. A download is installed only when its SHA-256 matches the release's checksum file (and GitHub's own digest when the API gives one), the archive holds the program as a regular file, and that program reports the release's version when run. The checksum comes from the same release as the archive: it catches a damaged download; TLS to the release host is what vouches for the publisher (releases are not signed). See "Updates".
@@ -508,7 +508,9 @@ Added in the third phase (all confined with `McpCtx::project_for`):
 | tool | owner | what |
 |---|---|---|
 | `code_diagnostics {path?}`, `code_symbols {query}`, `code_definition {path, line, column}`, `code_references {path, line, column}` | lsp | read-only; only servers that already run (a tool never enables or starts one) |
-| `debug_state {sessionId?, frame?}` | debug | read-only: sessions, the stop, the stack, a frame's locals (secret values masked), the console's newest tail |
+| `debug_state {sessionId?, frame?, registers?}` | debug | read-only: sessions, the stop, the stack, a frame's locals (secret values masked), the CPU registers on request, the console's newest tail |
+| `debug_control {action, sessionId?, threadId?, path?, line?, waitSeconds?, frame?, registers?}` | debug | `mutating`: continue, pause, next, stepIn, stepOut, runTo, stop on a session the user started; waits (≤300 s) for the program to stop and answers like `debug_state`; never starts, attaches, restarts or evaluates |
+| `debug_breakpoints {action, path?, breakpoints?, lines?, muted?}` | debug | `mutating`: list, add, remove, set, functions, mute, clear for the project's breakpoints; a condition, hit-count expression or log message is refused (`403`: expressions run in the debugger) |
 | `workbench_changelists` | git | read-only: changelists and shelves with their files |
 | `files_local_history {path, limit?, revision?, diff?, against?, content?}` | files | read-only; sensitive paths refused |
 | `confluence_add_inline_comment` (mutating), `confluence_upload_attachment` (mutating; a file of the session's project, never hidden, key/token-named or `sensitive` files, symlinks resolved first), `confluence_labels` (mutating) | atlassian | Confluence authoring |
@@ -523,7 +525,7 @@ Only expose what an agent cannot do easily with its own shell, or what needs Wor
 - run-configuration output;
 - what only Workbench's running services know: language servers' diagnostics and symbols, a debug session's state, Local History, changelists.
 
-Agents never enable code intelligence, start, step or stop a debugger, answer a permission request, stage, commit, shelve, rebase or bisect, update or restart Workbench through MCP.
+Agents never enable code intelligence, start, attach or rerun a debug session, evaluate an expression or set a conditional breakpoint or log point in one, answer a permission request, stage, commit, shelve, rebase or bisect, update or restart Workbench through MCP. They may steer a debug session the user started: continue, pause, step, run to a line, stop, and plain breakpoints (`debug_control`, `debug_breakpoints`, `mutating`; see the debug slice).
 
 **Never** expose deploys or destructive git operations to agents. This includes run configurations that deploy or release: `run_start` refuses runs with `needsConfirm` (and documentation suggestions), which the UI starts only after the user confirms. It also refuses every run to a session whose CLI confines its commands to a sandbox (Codex, unless it bypasses it: `Terminals::sandboxed_agent`): a run's command comes from files such an agent can edit (Makefile, package.json), and Workbench would run it outside the sandbox.
 
@@ -1459,7 +1461,8 @@ once it has its server (`onOpened`).
 ### Debugger (debug)
 
 `server/src/debug/**` and `web/src/features/debug/**`: a CLion-like debugger over the Debug
-Adapter Protocol, for any language with a DAP adapter.
+Adapter Protocol, for any language with a DAP adapter, and for programs on microcontrollers
+and other remote targets through gdb ("Remote targets (embedded)" below).
 
 **Adapters** (`adapters.rs`). Presets, in preference order: `gdb` (`gdb -q -i dap`, GDB ≥ 14;
 C, C++, Rust, Fortran, Ada, D), `lldb-dap` (also `lldb-vscode` or a versioned `lldb-dap-NN`
@@ -1476,8 +1479,13 @@ port Workbench connects to), `enabled`, `env` (plain values, e.g. `PYTHONPATH`),
 `adapter_id` (DAP `adapterID`), `launch_defaults` (merged into every launch/attach
 request), `connect_timeout_s`, `install_hint`. `[debug] default_adapter.<language> = "<id>"`
 picks the adapter per language; otherwise the first *available* one listing the language.
-Availability is probed (cached 30 s): the command on PATH, `gdb --version` ≥ 14, `import
-debugpy` for the configured interpreter; the UI shows the problem and the install hint.
+Availability is probed (cached 30 s): the command on PATH, `gdb --version` ≥ 14 and
+`python print(6 * 7)` (DAP is a Python module of gdb: one built without Python fails `-i dap`
+with an error nobody reads), `import debugpy` for the configured interpreter; the UI shows
+the problem and the install hint. Four more presets are GDBs for remote targets
+(`gdb-multiarch`, `arm-none-eabi-gdb` (`-gdb-py` first when it exists), `riscv-gdb`,
+`xtensa-gdb`; their commands are the first of several vendor names on PATH, and they list the
+language `embedded` only, so no ordinary launch picks them).
 
 **Trust.** Adapter commands come only from presets and config.toml. Repository layers may
 define launch configurations (`[[debug]]`, they only run on a click, like run
@@ -1595,6 +1603,146 @@ cwd and breakpoints sent as `/workspaces/…`, frames back as project paths, std
 env values outside argv, the adapter gone after Stop); that image's GDB is 13 (no DAP), so
 a real debugger inside needs GDB ≥ 14 or lldb-dap in the image.
 
+**Remote targets (embedded)** (`servers.rs`, `elf.rs`, `launch.rs`, `session.rs`, `process.rs`).
+A `[[debug]]` entry with a `[debug.remote]` table debugs a program on a microcontroller (or
+another computer, or a simulator) through a gdb remote stub, with OpenOCD, J-Link, pyOCD,
+`st-util`, QEMU or any server that speaks gdb's remote protocol on a TCP port. Its `request`
+becomes an attach and the adapter must be a gdb. The GDB (`launch::remote_adapter`): the
+named `adapter`, else `[debug] default_adapter.embedded`, else the first available of
+`adapters::gdb_candidates(arch)` for the program's ELF header (`elf::arch`: Arm →
+`arm-none-eabi-gdb`, RISC-V → `riscv-gdb`, Xtensa → `xtensa-gdb`, then `gdb-multiarch`; the plain
+`gdb` only for the computer's own architecture; a program not built yet → `gdb-multiarch`
+first). Fields: `server` (a debug server id), `server_args`, `connect` (gdb's `target remote`
+argument; default the server's port on this computer), `port`, `init`, `reset` (one command or a
+list; `[]` overrides the server's default), `download`, `stop_at` (`main`, `reset` or any gdb
+location; naming one implies `stop_on_entry`), `source_map` (`[from, to]` pairs → gdb
+`set substitute-path`, `to` takes `{root}`), `svd`, `channels`, `extended`, `attach`, `exec_file`. **Debug servers** are the presets `openocd`,
+`jlink`, `pyocd`, `st-util` and `qemu-arm` merged field by field with `[debug.servers.<id>]` of
+config.toml (`label`, `command`, `args`, `enabled`, `env`, `init`, `reset`, `download`,
+`ready_timeout_s`, `install_hint`), plus custom ones (`command` required); `{port}`, `{port2}` …
+`{port9}` in their arguments are ports (`servers::ports_needed`: the highest one used decides how
+many `process::free_ports` issues), and `{program}`, `{root}`, toolchains and
+`${workspaceFolder}` expand in the server's and the configuration's arguments
+(`launch::remote_plan`). `remote_plan` checks, before anything runs and again in the Start view's
+problems: an unknown server, neither `server` nor `connect`, `server_args` without a server, a
+server whose arguments have no `{port}` while the configuration names no `port` and no loopback
+`connect` to wait on, a control character in a gdb command or `connect` (one gdb line each), a
+download without a `program`, a program that does not exist and has no pre-launch step. The
+server's availability is its command on PATH (`servers::locate`; J-Link also `/opt/SEGGER/JLink`),
+never run (`JLinkGDBServer` would start serving).
+
+*Start.* Pre-launch → **server** → adapter → `initialize` → `attach {program, target}` →
+breakpoints, `configurationDone` → **preparation** → run. The server
+(`process::spawn_server`: its own process group, stdin closed, stdout and stderr line by line
+into the console as category `server`, the launch configuration's env on top of its own) gets
+ports from `process::free_ports`: random ones in 20000–29999, below every system's ephemeral
+range (the system hands a just-released port to another `bind(0)` about 1% of the time — measured
+— and OpenOCD binds seconds after it started), none this process issued in the last two minutes,
+none listening. Ready means the gdb port listens, found **without connecting**
+(`process::listening_on`: on Linux the LISTEN rows of `/proc/net/tcp*`, which cannot mistake a
+client's socket for a listener; elsewhere a bind probe): `st-util`, `gdbserver --once` and pyOCD
+without `--persist` serve one connection and exit, so a probe that connected would leave gdb with
+nothing to attach to. A server that exits first fails the session with its last error lines
+(`OpenOCD exited before it was ready (exit code 1): Error: unable to find a matching CMSIS-DAP
+device`; gdb is never started), one that never listens within `ready_timeout_s` (30) is killed, a
+fixed `port` something else holds is refused. From then on a watcher fails the session when the
+server dies (`exited unexpectedly`). gdb gets the program on its command line, so breakpoints
+verify before the connection exists (as for a launch), and `attach` carries `program` and
+`target` (`launch::arguments`; gdb's DAP attach issues `target remote`). Connecting halts the
+target, and gdb reports that stop *after* the attach answer: the session is **held** in `starting`
+(`Data::hold`; the preparation waits for the held stop, `held_stop`, and says what it is doing in
+`phase`: `Initializing the target`, `Resetting the target`, `Downloading fw.elf`, `Running`). The
+preparation sends gdb commands through the console's channel (`evaluate`, context `repl`, 10
+minutes each, echoed as `repl-in`/`repl-out`/`repl-err` like typed commands): `init`, `reset`, then
+with `download` `load` and `reset` again (the new image starts from the reset vector), then — with
+`stop_on_entry` — `thbreak <stop_at>` (a temporary *hardware* breakpoint: flash cannot take a
+software one; if gdb refuses it the target stays halted and the console says why) and `continue`;
+for `reset` nothing resumes it and the stop has the reason `entry`. A failing command ends the
+session with the command and gdb's words. Preset defaults: `openocd` `reset = monitor reset halt`,
+download; `jlink` `monitor reset`, `monitor halt`, download; `pyocd` `monitor reset halt`,
+download; `st-util` none, download; `qemu-arm` none, no download (QEMU loads the image; its first
+serial port is the console's `server` output).
+
+*End.* Stop is a detach (`disconnect {terminateDebuggee: false}`: gdb never kills a target);
+`finish` then ends the server (SIGTERM, SIGKILL after 2 s, its whole group). A server also dies
+with Workbench (`ProcGroup::prepare_dies_with_parent`: `PR_SET_PDEATHSIG` on Linux, the job object
+on Windows), because nothing else tells it its parent is gone (gdb ends on stdin EOF, a server
+does not): a crash or SIGKILL never leaves an OpenOCD holding the probe. Rerun plans again,
+new ports included. A child session never inherits the remote plan. Refused with the way out:
+an adapter that is not a gdb.
+
+*Extended-remote* (`extended`). gdb's DAP `attach` issues `target remote` only, so for a stub that
+needs `target extended-remote` Workbench connects itself, through the console's channel, before
+it sends the DAP request (`session.rs`, step 3b): `target extended-remote <connect>`, `set remote
+exec-file <exec_file or program>` when the stub runs the program, then `init` (a probe's scan).
+The request (`launch::plan_config`) is then a `launch` of the program for `extended` without
+`attach` (gdb's `run` on the stub: gdbserver `--multi`; stops at `main` like a native launch, no
+held connect-stop) or an `attach` whose `pid` is the target number (`attach <n>`; Black Magic Probe
+after `monitor swdp_scan`), which carries no `target` because the connection exists.
+`remote_plan` refuses `attach` without `extended` and `exec_file` anywhere but a stub that runs the
+program. **Verified** with a real `gdbserver --multi`
+(launch). **Not verified:** the attach form on a real probe; with GDB 17.1 the DAP server aborted
+on an attach to an extended-remote target in the probe script, so BMP is written from gdb's
+documentation.
+
+*Output channels* (`channels.rs`, `itm.rs`). `[[debug.remote.channels]] {name?, port, format?,
+itm_port?}`: a TCP port on this computer (a number, or `{port2}`…`{port9}` that the server's
+arguments also use: `launch::channel_plans` refuses `{port}`, a placeholder nothing uses, a server
+that is not started, `format` other than `text`/`itm`, `itm_port` above 31 or without `itm`, more
+than 8). Once the server listens each channel connects (retrying every 2 s: RTT's port opens when the
+program runs, a reset closes it; never blocking the session), and its bytes go to the console as
+category `target` (the console logs `NAME connected (port N)` and `NAME closed`; a line without its
+newline is shown once the channel has been quiet for 150 ms; with several channels each line starts
+`[NAME] `). `itm` decodes a SWO stream (`Itm`: packets may be cut anywhere between reads; everything
+but instrumentation packets, that is timestamps, overflow, synchronisation and the DWT sources, is
+read past; the bytes of one stimulus port are the text). `target` joins `stdout` in the agent summary and in
+`debug_state`'s console tail. **Verified:** a fake server (`fake_server.py --channel`), QEMU's real
+UART through a channel, the ITM decoder on synthetic packets. **Not verified:** a real SWO pin or J-Link
+RTT.
+
+*Peripherals* (`svd.rs`, `peripherals.rs`). `svd` names a CMSIS-SVD file (project-relative, absolute or
+`~/`; read once per session, `Session::svd`): peripherals (with `derivedFrom`), clusters flattened,
+`dim` arrays, registers with their size, access and `readAction`, fields with enumerated values.
+Routes (user-only: `GET sessions/{sid}/svd`, `GET …/svd/{peripheral}?read=&registers=`, `PUT
+…/svd/{peripheral}/{register} {value, field?}`; an in-process caller is refused, because reading
+memory-mapped registers has side effects). A register is read with DAP `readMemory` of exactly its
+size (8 reads at a time), at the session's current stop, and only while it is suspended; a register
+with a `readAction` or write-only access is `skipped` unless named in `registers`. A write is a
+`writeMemory` of the register's size; a field is written by reading the register, replacing its bits
+and writing it back (refused for a register with a `readAction`; a value that does not fit the field's
+bits, or a name it does not have, is `400`). `SessionInfo.peripherals` turns the web tab on. **Verified:** the
+parser on ST's STM32F407 SVD, the routes against the fake adapter (sizes, skips, faults per register,
+read-modify-write, refusals, agents refused), SysTick on QEMU's Cortex-M3 (reload value, enable bits,
+a field written and read back), the tab in headless Chrome in both themes.
+
+*Dev containers.* A project that runs in its dev container builds there (`pre_launch` goes through
+`SpawnSpec` with the container target, `plan.build_target`) while gdb, the server and the channels
+stay on this computer (`plan.target` is `None`: the probe is here). `launch::substitute_paths`
+adds the workspace pair of the container's mount (`/workspaces/app` → the project root) to the
+configuration's `source_map`; `session.rs` hands them to gdb as `-iex "set substitute-path …"`
+arguments, before it reads the program. **Verified** with a throwaway Debian container: the build
+step ran in it (hostname), QEMU ran here, and a firmware whose debug information named
+`/workspaces/proj` resolved its source, breakpoints and frames. **Not verified:** a cross compiler
+inside the container.
+
+*Agents.* `debug_control` and `debug_breakpoints` (`agent.rs`) share the session helpers of the routes
+(`session::control`, `run_to`, `stop`, `set_file_breakpoints`, `set_function_breakpoints`,
+`set_muted`, `clear_breakpoints`), act on the project's live sessions (`McpCtx::project_for`), and are
+`mutating`. **Deliberately not offered:** start, attach, restart and evaluate, and breakpoint
+conditions and log messages. A gdb expression runs commands (`$_shell("…")`, `call`, `python`), a
+start runs the configuration's build step and the debug server, and so each is a way for text an
+agent wrote, or read in a repository, to run code outside the agent's sandbox; the user does them in
+the window. Granting them is a decision for the owner, not a default.
+
+*Trust.* A server's command comes from config.toml or a preset, like an adapter's. A repository's
+`[debug.remote]` supplies arguments and gdb commands (`server_args`, `init`, `reset`, `stop_at`,
+`connect`): like `pre_launch` they run when the user starts the configuration, and the Start view
+(tooltip, `LaunchConfigView.remote`) shows the server's command line and the commands first.
+`connect` is one gdb line (gdb's own `| command` pipe syntax included). `source_map` and `svd` are
+paths and text, never run. Agents steer a session the user started and never start, attach or
+evaluate; the routes added for the Peripherals tab are refused to them, and every write route still
+refuses in-process callers.
+
 **Breakpoints** (`breakpoints.rs`) persist in `data_dir/debug/<project>.json` (0600):
 line breakpoints (`id`, project-relative `path`, `line`, `enabled`, `condition`,
 `hitCondition`, `logMessage`; one per line, 300 per file, 2000 per project), function
@@ -1608,7 +1756,8 @@ live session verified it, unverified with the adapter's message when sessions ru
 none did, no status without a session. Exception filters an adapter announced are
 remembered (per server run) so the Breakpoints view offers them.
 
-**REST** under `/api/projects/{pid}/debug/`: `GET adapters`, `configs`, `processes` (this
+**REST** under `/api/projects/{pid}/debug/`: `GET adapters`, `servers` (the debug servers with
+their availability), `configs`, `processes` (this
 user's processes from `/proc`, newest first, with `ptraceScope` and a hint); `GET|POST
 sessions` (`{config, stopOnEntry?, pid?}`: an attach configuration that names no target —
 no `pid`, no `connect`/`listen`/`target`/`waitFor`/… in `extra`, no program name for
@@ -1626,6 +1775,10 @@ config.toml's and the overlay's secret files, `~/.ssh`, `~/.gnupg` and similar c
 stores; devices only — agents read sessions through `debug_state`), `output?after=&limit=`; `POST sessions/{sid}/evaluate {expression, frameId?, context:
 watch|repl|hover|clipboard}` (a `repl` evaluation is echoed into the console),
 `set-variable {variablesReference, name, value}`, `completions {text, column, frameId?}`;
+`GET servers` (the debug servers and whether each is installed), `GET sessions/{sid}/svd`, `GET
+sessions/{sid}/svd/{peripheral}?read=&registers=`, `PUT sessions/{sid}/svd/{peripheral}/{register}
+{value, field?}` (the register map, `409` unless suspended for reads and writes, `404` for a name the
+SVD lacks, `422` for an SVD that cannot be read);
 `GET breakpoints`, `PUT breakpoints/file {path, breakpoints}`, `PUT breakpoints/functions`,
 `PUT breakpoints/exceptions {adapter, filters}`, `PUT breakpoints/mute {muted}`, `POST
 breakpoints/clear`, `PUT watches {expressions}`. Adapter failures answer `422
@@ -1676,7 +1829,13 @@ shell has no editor tab: no toast per stop there). The frame it shows: after a s
 breakpoint the top one when it has source (a step into a library shows the library); after
 a pause, a signal or an exception the first project frame within 15. "Ask agent about this
 stop" pastes the stop, the stack, the selected frame's variables and recent output into
-an agent session (not submitted).
+an agent session (not submitted). Remote targets: the Start view marks their configurations
+with a chip icon, shows what a configuration will run in its tooltip (`remoteLines`: the server's
+command line, where gdb connects, the commands in order) and lists the debug servers under
+*Debug servers (embedded targets)* next to the adapters; the header row shows the active
+session's `server · target`, the console shows the server's lines in italics (`c-server`), its
+REPL placeholder suggests `monitor` commands, and a halt at the reset vector reads *Paused (at the
+reset vector)*.
 
 | Command | Shortcut |
 |---|---|
@@ -1697,13 +1856,19 @@ project has a live session (Monaco binds F8, Shift+F8 and Ctrl+F2 itself); termi
 every key. Ctrl+F8, Alt+F9 and Ctrl+Shift+F8 are editor actions (they need the caret);
 the palette commands act on the last focused editor.
 
-**MCP** `debug_state` (read-only): per session of the project (or `sessionId`) its
+**MCP** `debug_state` (read-only; for a remote target it adds `remote {server, target}`, and with
+`registers: true` the CPU registers of the frame, 64 values: what a HardFault needs; the
+debug server's output is part of the console tail): per session of the project (or `sessionId`) its
 configuration, adapter, state, error, exit code, and when stopped the reason, threads,
 the stack of the stopped thread (`#i function at file:line`, 30 frames), the locals of a
 frame (`frame`, default 0; scopes marked expensive, registers, globals and statics left
 out; 60 values of up to 300 characters; secret values masked) and the console's tail (the
 newest 4000 characters of the last 40 entries). It only sends
-`stackTrace`, `scopes` and `variables`.
+`stackTrace`, `scopes` and `variables`. `debug_control` and `debug_breakpoints` (`agent.rs`) steer: the
+session is `sessionId` or the project's only live one (`409` without one, `400` naming them when
+there are several); `continue`, the steps and `runTo` wait up to `waitSeconds` (15, ≤300) for a stop
+and answer with the `debug_state` report plus `settled`; `stop` ends it (a launched program is
+terminated, an attach or microcontroller detached).
 
 **Verified** (Linux, GDB 17.1, debugpy 1.8.22 on Python 3.14): unit tests (framing,
 correlation, timeouts, adapter config, breakpoint store and DAP mapping, Cargo/CMake/
@@ -1734,6 +1899,37 @@ lldb-dap, CodeLLDB and delve (not installed here: presets and dialects only), a 
 debugger inside a dev container, child sessions of a TCP adapter (js-debug style: the code
 path is the one the fake adapter's loopback child uses), the phone (no mobile tab:
 debugging is desktop-only).
+
+**Verified (embedded targets)** (Linux; GDB 17.1, QEMU 10.2.1, arm-none-eabi-gcc 14.2.1, OpenOCD
+0.12.0, unpacked from Ubuntu's packages into `~/.cache/workbench-tools/embedded`, nothing
+installed): unit tests (config parsing and merging, server presets and ports, the ELF header, the
+choice of GDB, port allocation and the listener probe — a client socket is not a listener, an
+IPv6-only listener is found —, remote plans and their mistakes, the `target` argument); integration
+tests against the fake adapter and a fake server (`fake_server.py`: delayed, failing, dying,
+SIGTERM-proof; it notes any client that connects): the whole sequence in order with the connecting
+stop held back until the download has finished (polled during a slow `load`, and in the order of
+the emitted events), `stop_at` variants and an unknown location, a failing command, a server that
+fails before it listens or never does, one that dies under a live session, one that ignores
+SIGTERM, a stub that already runs, every configuration mistake answered before anything starts,
+agents refused; with real tools (`WORKBENCH_TEST_EMBEDDED=<dir>` or PATH; skipped without them): a
+Cortex-M3 firmware built by the pre-launch step and run on QEMU's `lm3s6965evb` through
+gdb-multiarch — stop at `main`, a breakpoint verified before the connection, `.data` initialised by
+the firmware's own startup code, the stack, arguments and registers (`pc` `<fib+8>`), step, pause
+of a free-running core, `monitor info registers` in the console, Stop and the port closing — once
+with the image downloaded and the target reset twice; a host program through a real `gdbserver
+--once` with native gdb (the readiness probe leaves its one connection to gdb); OpenOCD 0.12.0
+started for real by the preset against a configuration without a probe (its three ports taken from
+`{port}`, `{port2}`, `{port3}`; `Error: unable to find a matching CMSIS-DAP device` as the
+failure); a live QEMU session of a scratch instance whose Workbench was SIGKILLed (QEMU and gdb gone
+within 0.25 s) and one that got SIGTERM (nothing left either). In headless Chrome, both themes: the Start view, the QEMU session (the source with the
+execution point and the breakpoint, frames, the Registers scope, the header chip, the console with
+the server's italic lines), the OpenOCD failure. vitest: the tooltip and subtitle texts, the chip,
+the halt label. **Not verified:** any real probe — OpenOCD (a chip behind it), J-Link GDB Server,
+pyOCD and `st-util` were never run against hardware, so their presets' default commands follow
+their documentation; `load` through a real flash driver; the vendor GDBs (Arm GNU Toolchain,
+Espressif, RISC-V) beyond the version and Python probe; Windows (type-checked, not run); a real
+SWO or RTT stream; attach on an extended-remote stub (Black Magic Probe); a cross toolchain inside a
+dev container. RTOS-aware thread names are whatever the server gives gdb.
 
 ### Version control: interactive rebase, line staging, changelists, shelf, bisect (git)
 

@@ -11,6 +11,7 @@ import {
   ChevronDown,
   CircleDot,
   CircleSlash,
+  Cpu,
   Pause,
   Play,
   Plug,
@@ -30,8 +31,9 @@ import { BreakpointsView } from './BreakpointsView'
 import { ConsoleView } from './ConsoleView'
 import { lastFocusedEditor } from './editor'
 import { FramesView } from './FramesView'
-import { ORIGIN_ICON } from './icons'
-import { defaultConfig, groupConfigs, isLive, stateLabel, stateTone } from './logic'
+import { PeripheralsView } from './PeripheralsView'
+import { configIcon } from './icons'
+import { configTitle, defaultConfig, groupConfigs, isLive, remoteChip, stateLabel, stateTone } from './logic'
 import { StartView } from './StartView'
 import { activeSession, openAttachPicker, sessionsOf, useDebug, useDebugPrefs, type DebugTab } from './store'
 import type { DebugSession } from './types'
@@ -47,7 +49,7 @@ function ConfigPicker({ projectId, compact }: { projectId: string; compact?: boo
     for (const g of groupConfigs(list)) {
       if (items.length) items.push('separator')
       for (const c of g.items.slice(0, 40)) {
-        items.push({ label: c.problems.length ? `${c.name}  ⚠` : c.name, icon: ORIGIN_ICON[c.origin], run: () => useDebugPrefs.getState().setConfig(projectId, c.name) })
+        items.push({ label: c.problems.length ? `${c.name}  ⚠` : c.name, icon: configIcon(c), run: () => useDebugPrefs.getState().setConfig(projectId, c.name) })
       }
     }
     if (items.length) items.push('separator')
@@ -56,7 +58,7 @@ function ConfigPicker({ projectId, compact }: { projectId: string; compact?: boo
   }
   return (
     <div className="wb-dbg-launch" role="group" aria-label="Launch configuration">
-      <button className="wb-dbg-launch-sel" onClick={(e) => open(e.currentTarget)} disabled={q.isLoading} title={current ? [current.program ?? current.module ?? '', current.preLaunch ? `before: ${current.preLaunch}` : '', ...current.problems.map((p) => `⚠ ${p}`)].filter(Boolean).join('\n') : 'No launch configurations'}>
+      <button className="wb-dbg-launch-sel" onClick={(e) => open(e.currentTarget)} disabled={q.isLoading} title={current ? configTitle(current) : 'No launch configurations'}>
         {q.isLoading ? <Spinner size={11} /> : null}
         <span className="wb-ellipsis">{current?.name ?? 'No configurations'}</span>
         <ChevronDown size={13} className="wb-muted" />
@@ -172,29 +174,39 @@ export function DebugToolWindow({ projectId }: { projectId: string | null }) {
   const s = useMemo(() => activeSession({ sessions: sessionsMap, active: activeMap }, projectId), [sessionsMap, activeMap, projectId])
   if (!projectId) return <EmptyState title="No project selected" />
   const bpCount = (bps.data?.breakpoints.length ?? 0) + (bps.data?.functionBreakpoints.length ?? 0)
+  // A remembered Peripherals tab shows the first tab while this session has no register map.
+  const shown: DebugTab = tab === 'peripherals' && !s?.peripherals ? 'frames' : tab
   const tabs: { id: DebugTab; label: string; badge?: ReactNode }[] = [
     { id: 'frames', label: s ? 'Threads & Variables' : 'Start' },
     { id: 'console', label: 'Console', badge: s && (output[s.id]?.length ?? 0) > 0 && tab !== 'console' ? <span className="wb-dbg-tabdot" /> : undefined },
     { id: 'breakpoints', label: 'Breakpoints', badge: bpCount ? <span className="wb-subtle wb-small"> {bpCount}</span> : undefined },
+    // The chip's register map: only for a session whose configuration names an SVD file.
+    ...(s?.peripherals ? [{ id: 'peripherals' as const, label: 'Peripherals' }] : []),
   ]
   return (
     <div className="wb-dbg">
       <div className="wb-dbg-head">
         {list.length > 0 ? <SessionTabs list={list} active={s} projectId={projectId} /> : <span className="wb-dbg-head-title wb-muted wb-small">No debug session</span>}
         <span className="wb-grow" />
+        {s && remoteChip(s) && (
+          <span className="wb-badge wb-dbg-remote" title={`Remote target: gdb is connected to ${s.remote?.target ?? 'the debug server'}`}>
+            <Cpu size={11} /> {remoteChip(s)}
+          </span>
+        )}
         <ConfigPicker projectId={projectId} compact={!!s && isLive(s)} />
       </div>
       {/* CLion: the view tabs and the session's toolbar share one row. */}
       <div className="wb-dbg-bar">
-        <Tabs tabs={tabs} value={tab} onChange={setTab} />
+        <Tabs tabs={tabs} value={shown} onChange={setTab} />
         {s && <span className="wb-dbg-sep" />}
         {s && <SessionToolbar s={s} />}
       </div>
       {s?.error && <div className="wb-dbg-error">{s.error}</div>}
       <div className="wb-dbg-body">
-        {tab === 'frames' && (s ? <FramesAndVariables s={s} /> : <StartView projectId={projectId} />)}
-        {tab === 'console' && (s ? <ConsoleView s={s} /> : <EmptyState title="No debug session">Output of the program and the debugger shows here.</EmptyState>)}
-        {tab === 'breakpoints' && <BreakpointsView projectId={projectId} />}
+        {shown === 'frames' && (s ? <FramesAndVariables s={s} /> : <StartView projectId={projectId} />)}
+        {shown === 'console' && (s ? <ConsoleView s={s} /> : <EmptyState title="No debug session">Output of the program and the debugger shows here.</EmptyState>)}
+        {shown === 'breakpoints' && <BreakpointsView projectId={projectId} />}
+        {shown === 'peripherals' && s && <PeripheralsView s={s} />}
       </div>
     </div>
   )

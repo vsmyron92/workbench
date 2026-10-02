@@ -484,6 +484,23 @@
 .wb-dbg-console-out .c-adapter {
   color: var(--fg-subtle);
 }
+/* The remote target of the active session, in the header row beside the launch picker. */
+.wb-dbg-remote {
+  gap: 4px;
+  margin-right: 6px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A microcontroller's output channels (UART, SWO, RTT): the program's own output, like stdout. */
+.wb-dbg-console-out .c-target {
+  color: var(--fg);
+}
+/* A debug server's own output (OpenOCD, J-Link, QEMU's serial port): apart from the program's. */
+.wb-dbg-console-out .c-server {
+  color: var(--fg-muted);
+  font-style: italic;
+}
 .wb-dbg-console-out .c-workbench {
   color: var(--accent);
 }
@@ -741,4 +758,56 @@
   flex: 1;
   min-height: 0;
   position: relative;
+}
+
+/* ---------------------------------------------------------------- peripherals (SVD) */
+.wb-dbg-peri {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.wb-dbg-peri-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.wb-dbg-peri-head .wb-input {
+  flex: 1;
+  height: 24px;
+}
+.wb-dbg-peri-list {
+  flex: 1;
+  min-height: 0;
+  padding: 2px 0;
+}
+.wb-dbg-var .addr {
+  color: var(--fg-subtle);
+  font-size: var(--fs-xs);
+  flex: none;
+}
+.wb-dbg-var .value.hex {
+  letter-spacing: 0.02em;
+}
+.wb-dbg-var .note {
+  margin-left: 6px;
+  color: var(--fg-subtle);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.wb-dbg-var .note.error {
+  color: var(--danger);
+}
+.wb-dbg-peri-node .note {
+  font-weight: 400;
+}
+.wb-dbg-field .name {
+  color: var(--fg-muted);
 }

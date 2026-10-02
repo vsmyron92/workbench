@@ -12,20 +12,26 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::elf::Arch;
 use crate::app::AppState;
 
 /// `[debug]` in config.toml.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DebugConfig {
-    /// Overrides of the presets (`gdb`, `lldb-dap`, `codelldb`, `debugpy`, `delve`) and
-    /// custom adapters, by id.
+    /// Overrides of the presets (`gdb`, `lldb-dap`, `codelldb`, `debugpy`, `delve`, the
+    /// embedded GDBs) and custom adapters, by id.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub adapters: BTreeMap<String, AdapterConfig>,
     /// The adapter to use per language when a launch configuration names none,
-    /// e.g. `rust = "codelldb"`.
+    /// e.g. `rust = "codelldb"`; `embedded` is the GDB for remote targets (otherwise
+    /// the one that fits the program's architecture).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub default_adapter: BTreeMap<String, String>,
+    /// Debug servers (OpenOCD, J-Link GDB Server…) that remote-target launch
+    /// configurations start: overrides of the presets and custom ones, by id.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub servers: BTreeMap<String, super::servers::ServerConfig>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +123,10 @@ impl Adapter {
 }
 
 const NATIVE: &[&str] = &["c", "cpp", "rust"];
+const GDB_DAP: &[&str] = &["-q", "-i", "dap"];
+/// Embedded GDBs list this language only: no ordinary C, C++ or Rust launch picks them
+/// (`for_remote` does, by the program's architecture).
+const EMBEDDED: &[&str] = &["embedded"];
 
 fn preset(id: &str) -> Option<Adapter> {
     let base = |kind: AdapterKind, label: &str, command: &str, args: &[&str], langs: &[&str], transport: Transport, adapter_id: &str, hint: &str| Adapter {
@@ -140,7 +150,7 @@ fn preset(id: &str) -> Option<Adapter> {
             AdapterKind::Gdb,
             "GDB",
             "gdb",
-            &["-q", "-i", "dap"],
+            GDB_DAP,
             &["c", "cpp", "rust", "fortran", "ada", "d", "objc"],
             Transport::Stdio,
             "gdb",
@@ -187,11 +197,56 @@ fn preset(id: &str) -> Option<Adapter> {
             "go",
             "Install Delve: `go install github.com/go-delve/delve/cmd/dlv@latest` (it lands in ~/go/bin; put that on PATH or set [debug.adapters.delve] command).",
         ),
+        "gdb-multiarch" => base(
+            AdapterKind::Gdb,
+            "GDB (multi-architecture)",
+            "gdb-multiarch",
+            GDB_DAP,
+            EMBEDDED,
+            Transport::Stdio,
+            "gdb",
+            "Install gdb-multiarch (`sudo apt install gdb-multiarch`): one GDB for Arm, RISC-V, Xtensa and more. GDB 14 or newer, built with Python, speaks DAP.",
+        ),
+        "arm-none-eabi-gdb" => base(
+            AdapterKind::Gdb,
+            "GDB for Arm (arm-none-eabi)",
+            &first_on_path(&["arm-none-eabi-gdb-py", "arm-none-eabi-gdb"]),
+            GDB_DAP,
+            EMBEDDED,
+            Transport::Stdio,
+            "gdb",
+            "Install the Arm GNU Toolchain (developer.arm.com, release 13.3 or newer has GDB 14) and put its bin folder on PATH, or set [debug.adapters.arm-none-eabi-gdb] command. gdb-multiarch works too.",
+        ),
+        "riscv-gdb" => base(
+            AdapterKind::Gdb,
+            "GDB for RISC-V",
+            &first_on_path(&["riscv32-unknown-elf-gdb", "riscv64-unknown-elf-gdb", "riscv-none-elf-gdb", "riscv32-esp-elf-gdb", "riscv-none-embed-gdb"]),
+            GDB_DAP,
+            EMBEDDED,
+            Transport::Stdio,
+            "gdb",
+            "Install a RISC-V GDB 14 or newer (xPack riscv-none-elf-gdb, Espressif's riscv32-esp-elf-gdb, your SDK's) and put it on PATH, or set [debug.adapters.riscv-gdb] command. gdb-multiarch works too.",
+        ),
+        "xtensa-gdb" => base(
+            AdapterKind::Gdb,
+            "GDB for Xtensa (ESP32)",
+            &first_on_path(&["xtensa-esp32-elf-gdb", "xtensa-esp32s3-elf-gdb", "xtensa-esp-elf-gdb", "xtensa-esp32s2-elf-gdb", "xtensa-lx106-elf-gdb"]),
+            GDB_DAP,
+            EMBEDDED,
+            Transport::Stdio,
+            "gdb",
+            "Install Espressif's GDB (ESP-IDF's install script puts xtensa-esp-elf-gdb under ~/.espressif/tools) and put it on PATH, or set [debug.adapters.xtensa-gdb] command.",
+        ),
         _ => return None,
     })
 }
 
-pub const PRESETS: &[&str] = &["gdb", "lldb-dap", "codelldb", "debugpy", "delve"];
+pub const PRESETS: &[&str] = &["gdb", "lldb-dap", "codelldb", "debugpy", "delve", "gdb-multiarch", "arm-none-eabi-gdb", "riscv-gdb", "xtensa-gdb"];
+
+/// The first of `names` that is on PATH, else the first name (so the error names it).
+fn first_on_path(names: &[&str]) -> String {
+    names.iter().find(|n| crate::util::which(n)).unwrap_or(&names[0]).to_string()
+}
 
 /// Arguments before the adapter's `args`: the Python launcher's `-3` while debugpy runs
 /// the preset's `py` (Windows without `python`). Kept out of `args`, so a `command` of the
@@ -341,7 +396,7 @@ pub struct Availability {
 }
 
 impl Availability {
-    fn missing(problem: String) -> Self {
+    pub(crate) fn missing(problem: String) -> Self {
         Self { available: false, path: None, version: None, problem: Some(problem) }
     }
 }
@@ -386,7 +441,18 @@ async fn probe_uncached(a: &Adapter) -> Availability {
                         version: Some(line),
                         problem: Some("this GDB has no DAP support: GDB 14 or newer is needed".into()),
                     },
-                    _ => Availability { available: true, path: Some(path_s), version: Some(line), problem: None },
+                    // DAP is a Python module of gdb: one built without Python (some vendor
+                    // toolchains, `gdb-minimal`) fails `-i dap` with an error nobody reads.
+                    _ => match run(vec!["-nx", "-batch", "-ex", "python print(6 * 7)"]).await {
+                        Ok(o) if o.stdout.trim() == "42" => Availability { available: true, path: Some(path_s), version: Some(line), problem: None },
+                        Ok(_) => Availability {
+                            available: false,
+                            path: Some(path_s),
+                            version: Some(line),
+                            problem: Some("this GDB was built without Python, which its DAP server needs".into()),
+                        },
+                        Err(e) => Availability::missing(format!("`{} -batch` failed: {}", a.command, e.message)),
+                    },
                 }
             }
             Err(e) => Availability::missing(format!("`{} --version` failed: {}", a.command, e.message)),
@@ -412,9 +478,20 @@ async fn probe_uncached(a: &Adapter) -> Availability {
     }
 }
 
+fn probe_key(a: &Adapter) -> String {
+    format!("{}\u{0}{}\u{0}{:?}\u{0}{}", a.id, a.command, a.kind, a.enabled)
+}
+
+/// Tests: say what probing `a` found without running its executable (a fake adapter
+/// that must be `kind = "gdb"` is not a GDB `--version` can talk to).
+#[cfg(test)]
+pub fn seed_probe(state: &AppState, a: &Adapter, found: Availability) {
+    state.debug.probes.lock().insert(probe_key(a), (Instant::now(), found));
+}
+
 /// Whether `a` can run here (cached for half a minute: config edits apply soon).
 pub async fn probe(state: &AppState, a: &Adapter) -> Availability {
-    let key = format!("{}\u{0}{}\u{0}{:?}\u{0}{}", a.id, a.command, a.kind, a.enabled);
+    let key = probe_key(a);
     if let Some((at, v)) = state.debug.probes.lock().get(&key) {
         if at.elapsed() < PROBE_TTL {
             return v.clone();
@@ -464,9 +541,67 @@ pub async fn for_language(state: &AppState, language: &str, gdb: bool) -> Option
     candidates.iter().find(usable).or(candidates.first()).cloned()
 }
 
+/// The adapter ids that can debug a program built for `arch`, best first. The GDB of
+/// the program's own toolchain, then the multi-architecture one; the native `gdb` only
+/// where it is the same architecture (or nothing is known).
+pub fn gdb_candidates(arch: Option<Arch>) -> Vec<&'static str> {
+    let host = Arch::host();
+    match arch {
+        Some(a) if a == host => vec!["gdb", "gdb-multiarch"],
+        Some(Arch::Arm) => vec!["arm-none-eabi-gdb", "gdb-multiarch"],
+        Some(Arch::Riscv) => vec!["riscv-gdb", "gdb-multiarch"],
+        Some(Arch::Xtensa) => vec!["xtensa-gdb", "gdb-multiarch"],
+        Some(Arch::Aarch64 | Arch::X86 | Arch::X86_64 | Arch::Avr | Arch::Msp430) => vec!["gdb-multiarch", "gdb"],
+        // Not built yet (a pre-launch step makes it) or not an ELF file: any GDB that works.
+        Some(Arch::Other) | None => vec!["gdb-multiarch", "arm-none-eabi-gdb", "riscv-gdb", "xtensa-gdb", "gdb"],
+    }
+}
+
+/// The GDB for a remote target built for `arch`: `[debug] default_adapter.embedded`, else
+/// the first of `gdb_candidates` that is available, else the first (so the error names
+/// what to install).
+pub async fn for_remote(state: &AppState, arch: Option<Arch>) -> Adapter {
+    let cfg = state.config.read().debug.clone();
+    if let Some(a) = cfg.default_adapter.get("embedded").and_then(|id| find(&cfg, id)) {
+        return a;
+    }
+    let mut first = None;
+    for id in gdb_candidates(arch) {
+        let Some(a) = find(&cfg, id).filter(|a| a.enabled) else { continue };
+        if probe(state, &a).await.available {
+            return a;
+        }
+        first.get_or_insert(a);
+    }
+    first.unwrap_or_else(|| find(&cfg, "gdb-multiarch").expect("preset"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_targets_get_the_gdb_that_fits_their_architecture() {
+        let first = |a: Option<Arch>| gdb_candidates(a)[0];
+        assert_eq!(first(Some(Arch::Arm)), if Arch::host() == Arch::Arm { "gdb" } else { "arm-none-eabi-gdb" });
+        assert_eq!(first(Some(Arch::Riscv)), if Arch::host() == Arch::Riscv { "gdb" } else { "riscv-gdb" });
+        assert_eq!(first(Some(Arch::Xtensa)), "xtensa-gdb");
+        assert_eq!(first(Some(Arch::host())), "gdb", "the native GDB for the computer's own architecture");
+        assert_eq!(first(None), "gdb-multiarch", "an unbuilt program: the one that debugs everything");
+        // The multi-architecture GDB is always the fallback; a vendor GDB never debugs another's chip.
+        for a in [Arch::Arm, Arch::Riscv, Arch::Xtensa] {
+            assert!(gdb_candidates(Some(a)).contains(&"gdb-multiarch"));
+        }
+        assert!(!gdb_candidates(Some(Arch::Riscv)).contains(&"arm-none-eabi-gdb"));
+        // Every candidate is a preset, and none of them is picked for ordinary languages.
+        for id in gdb_candidates(None) {
+            let a = find(&DebugConfig::default(), id).unwrap();
+            assert_eq!(a.kind, AdapterKind::Gdb, "{id}");
+            if id != "gdb" {
+                assert_eq!(a.languages, vec!["embedded"], "{id} is for remote targets only");
+            }
+        }
+    }
 
     #[test]
     fn presets_merge_with_config_and_custom_adapters_need_a_command() {
@@ -500,7 +635,7 @@ mod tests {
         assert!(!list.iter().any(|a| a.id == "broken"));
         assert!(warnings.iter().any(|w| w.contains("broken") && w.contains("command")), "{warnings:?}");
         // Order: presets first (preference order), custom after.
-        assert_eq!(list.iter().map(|a| a.id.as_str()).take(5).collect::<Vec<_>>(), PRESETS.to_vec());
+        assert_eq!(list.iter().map(|a| a.id.as_str()).take(PRESETS.len()).collect::<Vec<_>>(), PRESETS.to_vec());
         // Round-trips through TOML (config.toml is rewritten by Settings).
         let text = toml::to_string(&cfg).unwrap();
         assert_eq!(toml::from_str::<DebugConfig>(&text).unwrap(), cfg);

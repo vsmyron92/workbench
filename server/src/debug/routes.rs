@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 
 use super::breakpoints::{FunctionBreakpoint, LineBreakpoint};
 use super::session::{self, EVAL_TIMEOUT, Lines, REQUEST_TIMEOUT, Session, SessionInfo};
-use super::{adapters, launch, procs};
+use super::{adapters, launch, procs, servers};
 use crate::app::AppState;
 use crate::auth::Caller;
 use crate::error::{ApiError, ApiResult};
@@ -36,6 +36,7 @@ pub fn router() -> Router<AppState> {
     let b = "/api/projects/{pid}/debug";
     Router::new()
         .route(&format!("{b}/adapters"), get(adapters_list))
+        .route(&format!("{b}/servers"), get(servers_list))
         .route(&format!("{b}/configs"), get(configs))
         .route(&format!("{b}/processes"), get(processes))
         .route(&format!("{b}/sessions"), get(sessions).post(start_session))
@@ -55,6 +56,9 @@ pub fn router() -> Router<AppState> {
         .route(&format!("{b}/sessions/{{sid}}/evaluate"), post(evaluate))
         .route(&format!("{b}/sessions/{{sid}}/set-variable"), post(set_variable))
         .route(&format!("{b}/sessions/{{sid}}/completions"), post(completions))
+        .route(&format!("{b}/sessions/{{sid}}/svd"), get(super::peripherals::list))
+        .route(&format!("{b}/sessions/{{sid}}/svd/{{peripheral}}"), get(super::peripherals::detail))
+        .route(&format!("{b}/sessions/{{sid}}/svd/{{peripheral}}/{{register}}"), put(super::peripherals::write))
         .route(&format!("{b}/breakpoints"), get(breakpoints_get))
         .route(&format!("{b}/breakpoints/file"), put(breakpoints_file))
         .route(&format!("{b}/breakpoints/functions"), put(breakpoints_functions))
@@ -64,17 +68,17 @@ pub fn router() -> Router<AppState> {
         .route(&format!("{b}/watches"), put(watches))
 }
 
-type C = Option<Extension<Caller>>;
+pub(super) type C = Option<Extension<Caller>>;
 
 /// Debug sessions run project code: only the user starts, steps or changes them.
-fn user_only(caller: &C) -> ApiResult<()> {
+pub(super) fn user_only(caller: &C) -> ApiResult<()> {
     match caller.as_ref().map(|c| &c.0) {
-        Some(Caller::Internal { .. }) => Err(ApiError::forbidden("debug sessions are started and controlled by the user only; agents can read them with debug_state")),
+        Some(Caller::Internal { .. }) => Err(ApiError::forbidden("debug sessions are started by the user only; agents read them with debug_state and steer them with debug_control")),
         _ => Ok(()),
     }
 }
 
-fn session_of(state: &AppState, pid: &str, sid: &str) -> ApiResult<std::sync::Arc<Session>> {
+pub(super) fn session_of(state: &AppState, pid: &str, sid: &str) -> ApiResult<std::sync::Arc<Session>> {
     state.projects.require(pid)?;
     state.debug.get(pid, sid).ok_or_else(|| ApiError::not_found(format!("no debug session {sid}")))
 }
@@ -96,6 +100,12 @@ async fn adapters_list(State(state): State<AppState>, Path(pid): Path<String>) -
     state.projects.require(&pid)?;
     let (list, warnings) = adapters::views(&state).await;
     Ok(Json(json!({ "adapters": list, "warnings": warnings })))
+}
+
+async fn servers_list(State(state): State<AppState>, Path(pid): Path<String>) -> ApiResult<Json<Value>> {
+    state.projects.require(&pid)?;
+    let (list, warnings) = servers::views(&state);
+    Ok(Json(json!({ "servers": list, "warnings": warnings })))
 }
 
 async fn configs(State(state): State<AppState>, Path(pid): Path<String>) -> ApiResult<Json<Value>> {
@@ -187,17 +197,8 @@ async fn stop(State(state): State<AppState>, caller: C, Path((pid, sid)): Path<(
 async fn restart(State(state): State<AppState>, caller: C, Path((pid, sid)): Path<(String, String)>) -> ApiResult<Json<SessionInfo>> {
     user_only(&caller)?;
     let s = session_of(&state, &pid, &sid)?;
-    let Some(config) = s.config.clone() else {
-        return Err(ApiError::bad_request("only sessions of a launch configuration can be rerun"));
-    };
     let p = state.projects.require(&pid)?;
-    // Plan first: a configuration that no longer works keeps the old session. An
-    // attach configuration reattaches to the process it was given.
-    let plan = launch::plan_config(&state, &p, &config, None, s.attach_pid()).await?;
-    session::stop(&state, &s).await;
-    state.debug.remove(&sid);
-    state.events.emit("debug.session", Some(&pid), json!({ "id": sid, "projectId": pid, "removed": true }));
-    Ok(Json(session::start(&state, p, plan, None).await?))
+    Ok(Json(session::restart(&state, p, &s).await?))
 }
 
 #[derive(Deserialize)]
@@ -522,27 +523,7 @@ async fn evaluate(State(state): State<AppState>, caller: C, Path((pid, sid)): Pa
         Some(c @ ("watch" | "repl" | "hover" | "clipboard")) => c,
         _ => "repl",
     };
-    let mut args = json!({ "expression": expr, "context": context });
-    if let Some(f) = b.frame_id {
-        args["frameId"] = json!(f);
-    }
-    let repl = context == "repl";
-    if repl {
-        s.log("repl-in", format!("> {expr}\n"), None);
-    }
-    let r = s.evaluate(&expr, args, EVAL_TIMEOUT).await;
-    if repl {
-        match &r {
-            Ok(v) => {
-                let text = v.get("result").and_then(Value::as_str).unwrap_or("");
-                if !text.is_empty() {
-                    s.log("repl-out", format!("{}\n", text.trim_end_matches('\n')), None);
-                }
-            }
-            Err(e) => s.log("repl-err", format!("{}\n", e.message), None),
-        }
-        s.flush(&state);
-    }
+    let r = session::evaluate_logged(&state, &s, &expr, b.frame_id, context, None).await;
     Ok(Json(variable_view(&s, &r?, "result")))
 }
 
@@ -628,9 +609,7 @@ struct FileBody {
 async fn breakpoints_file(State(state): State<AppState>, caller: C, Path(pid): Path<String>, Json(b): Json<FileBody>) -> ApiResult<Json<Value>> {
     user_only(&caller)?;
     state.projects.require(&pid)?;
-    let path = super::breakpoints::normalize_path(&b.path)?;
-    state.debug.store.update(&state.paths.data_dir, &pid, |p| p.set_file(&path, b.breakpoints)).await?;
-    session::breakpoints_changed(&state, &pid, Lines::File(&path), false, false).await;
+    session::set_file_breakpoints(&state, &pid, &b.path, b.breakpoints).await?;
     Ok(Json(session::breakpoints_view(&state, &pid)))
 }
 
@@ -642,8 +621,7 @@ struct FunctionsBody {
 async fn breakpoints_functions(State(state): State<AppState>, caller: C, Path(pid): Path<String>, Json(b): Json<FunctionsBody>) -> ApiResult<Json<Value>> {
     user_only(&caller)?;
     state.projects.require(&pid)?;
-    state.debug.store.update(&state.paths.data_dir, &pid, |p| p.set_functions(b.breakpoints)).await?;
-    session::breakpoints_changed(&state, &pid, Lines::None, true, false).await;
+    session::set_function_breakpoints(&state, &pid, b.breakpoints).await?;
     Ok(Json(session::breakpoints_view(&state, &pid)))
 }
 
@@ -679,31 +657,14 @@ struct MuteBody {
 async fn breakpoints_mute(State(state): State<AppState>, caller: C, Path(pid): Path<String>, Json(b): Json<MuteBody>) -> ApiResult<Json<Value>> {
     user_only(&caller)?;
     state.projects.require(&pid)?;
-    state
-        .debug
-        .store
-        .update(&state.paths.data_dir, &pid, |p| {
-            p.muted = b.muted;
-            Ok(())
-        })
-        .await?;
-    session::breakpoints_changed(&state, &pid, Lines::All, true, true).await;
+    session::set_muted(&state, &pid, b.muted).await?;
     Ok(Json(session::breakpoints_view(&state, &pid)))
 }
 
 async fn breakpoints_clear(State(state): State<AppState>, caller: C, Path(pid): Path<String>) -> ApiResult<Json<Value>> {
     user_only(&caller)?;
     state.projects.require(&pid)?;
-    state
-        .debug
-        .store
-        .update(&state.paths.data_dir, &pid, |p| {
-            p.breakpoints.clear();
-            p.function_breakpoints.clear();
-            Ok(())
-        })
-        .await?;
-    session::breakpoints_changed(&state, &pid, Lines::All, true, false).await;
+    session::clear_breakpoints(&state, &pid).await?;
     Ok(Json(session::breakpoints_view(&state, &pid)))
 }
 

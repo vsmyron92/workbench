@@ -29,6 +29,16 @@ impl ProcGroup {
         imp::prepare(cmd);
     }
 
+    /// Before spawning, with `prepare`: the child is ended when Workbench is, by the system,
+    /// even after a crash or a SIGKILL. For a process that nothing else tells its parent is
+    /// gone (a debug server holding a probe: gdb and the language servers end on stdin EOF).
+    /// Linux: `PR_SET_PDEATHSIG` (SIGTERM; it follows the thread that spawned, which for an
+    /// async task is a runtime worker that lives as long as Workbench). Windows: the job
+    /// `attach` puts it in is closed with the process, which kills what is left in it.
+    pub fn prepare_dies_with_parent(cmd: &mut Command) {
+        imp::dies_with_parent(cmd);
+    }
+
     /// Before spawning: the child leads a new session (Unix), so it has no controlling
     /// terminal to prompt on. Windows: as `prepare`, but with no console at all
     /// (`DETACHED_PROCESS`): Git for Windows then starts ssh without one too, and ssh fails
@@ -236,6 +246,26 @@ mod imp {
 
     pub fn prepare(cmd: &mut Command) {
         cmd.process_group(0);
+    }
+
+    pub fn dies_with_parent(cmd: &mut Command) {
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: getpid, prctl, getppid and _exit are async-signal-safe and run in the child before exec.
+            let parent = unsafe { libc::getpid() };
+            unsafe {
+                cmd.pre_exec(move || {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong);
+                    // Workbench died between fork and here: the signal will not come.
+                    if libc::getppid() != parent {
+                        libc::_exit(1);
+                    }
+                    Ok(())
+                });
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = cmd;
     }
 
     pub fn prepare_session(cmd: &mut Command) {
@@ -524,6 +554,10 @@ mod imp {
     pub fn prepare(cmd: &mut Command) {
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
+
+    /// The job `Group::attach` puts the process in is killed when Workbench's last handle to
+    /// it closes, which includes Workbench dying: nothing to prepare.
+    pub fn dies_with_parent(_cmd: &mut Command) {}
 
     pub fn prepare_session(cmd: &mut Command) {
         // Not CREATE_NO_WINDOW: a hidden console is still one to prompt on. git passes

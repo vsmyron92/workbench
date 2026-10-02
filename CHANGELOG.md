@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.7.0 - 2026-10-02
+
+- **Embedded debugging:** debug firmware on a microcontroller, or in QEMU, from the Debug
+  tool window. A `[[debug]]` entry with a `[debug.remote]` table starts a debug server
+  (presets for **OpenOCD**, **J-Link GDB Server**, **pyOCD**, **st-util** and **QEMU**; your own
+  under `[debug.servers.<id>]` in `config.toml`), waits until its gdb port listens, connects
+  gdb to it, resets the target, downloads the program (`load`), resets it again and runs to
+  `main` or to your breakpoint. Stop disconnects gdb and ends the server; if the server dies
+  or never comes up, the session says why, with the server's own error line.
+- **The right GDB for the chip:** Workbench reads the program's ELF header and picks
+  `arm-none-eabi-gdb`, a RISC-V or Espressif GDB, or `gdb-multiarch`; new presets
+  `gdb-multiarch`, `arm-none-eabi-gdb`, `riscv-gdb` and `xtensa-gdb` appear under Debug
+  adapters. A GDB built without Python (which cannot speak DAP) is now reported as unusable
+  instead of failing at start.
+- **In the window:** configurations of a remote target have a chip icon and a tooltip that
+  lists the server's command line and the commands they will run; the Start view lists the
+  debug servers it found and how to install the missing ones; the header shows
+  `server · target`; the Console shows the server's output in italics and takes `monitor`
+  commands; the CPU registers are among the variables. A target can be left halted at the
+  reset vector (`stop_at = "reset"`).
+- **Agents** can read the server, its output and, with `registers`, the CPU registers of a
+  halted core through `debug_state`, and steer a session you started: `debug_control`
+  continues, pauses, steps, runs to a line and stops it and answers with the new state;
+  `debug_breakpoints` lists and edits plain line and function breakpoints. Both are writes
+  (the agent's permission prompt applies, Activity marks them). Agents cannot start,
+  attach or restart a session, evaluate expressions, or set conditions and log points:
+  a gdb expression can run a shell command, so you do those from the window.
+- **Registers by name:** name the chip's CMSIS-SVD file (`svd` under `[debug.remote]`) and
+  the Debug window gets a **Peripherals** tab: peripherals, registers and bit fields with
+  the vendor's value names, read from the halted target with each register's own access
+  size, edited with a double-click (a register, or one field). Registers that change when
+  read are left alone until you ask. Checked against ST's STM32F407 SVD and QEMU's SysTick.
+- **Target output:** `[[debug.remote.channels]]` shows text the program streams out of band
+  (a UART or RTT telnet port, or a decoded SWO/ITM stream) in the Console. QEMU's UART was
+  run for real; a real SWO or RTT stream was not.
+- **Extended-remote stubs:** `extended = true` connects with `target extended-remote`
+  (`gdbserver --multi`, run for real; Black Magic Probe with `attach`, not verified).
+- **Dev containers:** a project that runs in its dev container builds there while gdb and
+  the debug server stay on this computer; the workspace's paths are mapped for you, and
+  `source_map` maps others. Run against a throwaway Debian container.
+- `{port2}` to `{port9}` are free ports for a debug server's other listeners.
+- A debug server never outlives Workbench: if Workbench crashes or is killed, the system ends
+  the server too, so it cannot keep holding the probe.
+- Each session gets ports of its own below the system's ephemeral range, so two sessions, or
+  an OpenOCD left running, never fight over 3333. The server's *command* comes only from
+  `config.toml` or a preset; a repository adds arguments and gdb commands that run when you
+  start the configuration.
+- See [embedded debugging](docs/embedded-debugging.md). Run end to end with real tools: a
+  Cortex-M3 firmware in QEMU through gdb-multiarch, and a host program through `gdbserver`.
+  OpenOCD, J-Link, pyOCD, st-util and Black Magic Probe were not run against a chip: their
+  commands follow their documentation.
+
 ## 0.6.0 - 2026-10-02
 
 - **Updates:** Workbench updates itself. A Workbench installed from a release looks for a

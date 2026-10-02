@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::adapters::{Adapter, AdapterKind, Transport};
 use super::client::{DapClient, Incoming};
@@ -127,6 +127,115 @@ pub fn without_tty(argv: Vec<String>) -> Vec<String> {
 fn free_port() -> std::io::Result<u16> {
     let l = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     Ok(l.local_addr()?.port())
+}
+
+/// Ports handed out recently: between picking a free port and the server binding it,
+/// another session must not be given the same one.
+static ISSUED_PORTS: parking_lot::Mutex<Vec<(u16, std::time::Instant)>> = parking_lot::Mutex::new(Vec::new());
+
+/// Where debug servers' ports are picked: below every system's ephemeral range (Linux
+/// 32768.., Windows and macOS 49152..). A port the system hands out for `bind(0)` or an
+/// outgoing connection may be given away again a moment after it was released (1% of
+/// the time on Linux, measured), and OpenOCD binds its gdb port seconds after it started.
+const SERVER_PORTS: std::ops::Range<u32> = 20000..30000;
+
+/// `n` distinct free loopback ports for a debug server's listeners, none that this process
+/// handed out in the last two minutes. Whoever uses them binds them soon: they are only
+/// checked, not held.
+pub fn free_ports(n: usize) -> std::io::Result<Vec<u16>> {
+    use rand::RngCore;
+    let mut issued = ISSUED_PORTS.lock();
+    issued.retain(|(_, at)| at.elapsed() < Duration::from_secs(120));
+    let mut out: Vec<u16> = vec![];
+    let mut rng = rand::rng();
+    for _ in 0..2000 {
+        if out.len() == n {
+            break;
+        }
+        let port = (SERVER_PORTS.start + rng.next_u32() % (SERVER_PORTS.end - SERVER_PORTS.start)) as u16;
+        // (`listening_on` asks the kernel; a probe that bound the port would be a listener
+        // for a moment, and one that a forking thread copies stays one until it execs.)
+        let taken = out.contains(&port) || issued.iter().any(|(p, _)| *p == port) || listening_on(port).is_some();
+        if !taken {
+            out.push(port);
+        }
+    }
+    // A crowded range (or one that is not ours to bind): whatever the system offers.
+    let mut held = vec![];
+    while out.len() < n {
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        let port = l.local_addr()?.port();
+        held.push(l);
+        if !out.contains(&port) && !issued.iter().any(|(p, _)| *p == port) {
+            out.push(port);
+        }
+        if held.len() > 64 {
+            return Err(std::io::Error::other("no free port"));
+        }
+    }
+    issued.extend(out.iter().map(|p| (*p, std::time::Instant::now())));
+    Ok(out)
+}
+
+/// The loopback address something listens on at `port`, found without connecting: a
+/// gdb stub that serves one connection (`st-util`, `gdbserver`, pyOCD, QEMU) would take
+/// a probe for its client. Linux asks the kernel's table of listening sockets; elsewhere
+/// binding the port is tried (it fails while anything holds it).
+pub fn listening_on(port: u16) -> Option<std::net::IpAddr> {
+    #[cfg(target_os = "linux")]
+    if let Some(found) = proc_listener(port) {
+        return found;
+    }
+    bind_probe(port)
+}
+
+fn bind_probe(port: u16) -> Option<std::net::IpAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener};
+    [IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)]
+        .into_iter()
+        .find(|ip| matches!(TcpListener::bind((*ip, port)), Err(e) if e.kind() == std::io::ErrorKind::AddrInUse))
+}
+
+/// `/proc/net/tcp` and `tcp6`: a socket in state LISTEN (0A) on `port` that a loopback
+/// client reaches. `None`: the tables cannot be read.
+#[cfg(target_os = "linux")]
+fn proc_listener(port: u16) -> Option<Option<std::net::IpAddr>> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let mut readable = false;
+    let mut found = None;
+    for (file, v6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
+        let Ok(text) = std::fs::read_to_string(file) else { continue };
+        readable = true;
+        for line in text.lines().skip(1) {
+            let mut cols = line.split_whitespace();
+            let (Some(local), Some(state)) = (cols.nth(1), cols.nth(1)) else { continue };
+            let Some((addr, p)) = local.rsplit_once(':') else { continue };
+            if state != "0A" || u16::from_str_radix(p, 16) != Ok(port) {
+                continue;
+            }
+            // The address as the kernel prints it: IPv4 as one little-endian word, IPv6 as
+            // four of them.
+            let ip = if v6 {
+                match addr {
+                    "00000000000000000000000000000000" => Some(IpAddr::V6(Ipv6Addr::LOCALHOST)), // `::`: dual-stack or v6-only, ::1 is reached either way
+                    "00000000000000000000000001000000" => Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+                    // ::ffff:127.0.0.1 and ::ffff:0.0.0.0: an IPv4 listener of a dual-stack socket
+                    a if a == "0000000000000000FFFF00000100007F" || a == "0000000000000000FFFF000000000000" => Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                    _ => None,
+                }
+            } else {
+                match addr {
+                    "00000000" => Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                    a if a.ends_with("7F") && a.len() == 8 => Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                    _ => None,
+                }
+            };
+            if ip.is_some() && (found.is_none() || ip == Some(IpAddr::V4(Ipv4Addr::LOCALHOST))) {
+                found = ip;
+            }
+        }
+    }
+    readable.then_some(found)
 }
 
 pub fn substitute_port(args: &[String], port: u16) -> Vec<String> {
@@ -278,6 +387,88 @@ impl AdapterProc {
     }
 }
 
+/// A debug server (OpenOCD, J-Link GDB Server…) of one session: its own process group,
+/// output forwarded line by line, its end observable.
+#[derive(Clone)]
+pub struct ServerProc {
+    group: crate::util::os::proc::ProcGroup,
+    exit: watch::Receiver<Option<String>>,
+}
+
+impl ServerProc {
+    /// How the process ended, once it has.
+    pub fn exited(&self) -> Option<String> {
+        self.exit.borrow().clone()
+    }
+
+    /// A receiver that turns `Some(how it ended)` when the process ends.
+    pub fn watch(&self) -> watch::Receiver<Option<String>> {
+        self.exit.clone()
+    }
+
+    /// End the server and what it started: SIGTERM, then SIGKILL after a grace period.
+    pub async fn kill(&self) {
+        if self.exited().is_none() {
+            self.group.terminate();
+            let mut rx = self.exit.clone();
+            if tokio::time::timeout(Duration::from_millis(2000), rx.wait_for(|e| e.is_some())).await.is_err() {
+                self.group.kill();
+            }
+        }
+        // The leader is gone; members of its group may not be.
+        self.group.kill();
+    }
+}
+
+/// Start `server` in `cwd` with `args`: stdin closed, stdout and stderr (merged into
+/// `on_line`, line by line). The environment is the child environment of Workbench's
+/// other processes, the server's own `env`, then the launch configuration's.
+pub fn spawn_server(server: &super::servers::Server, args: &[String], cwd: &Path, env: &[(String, String)], on_line: impl Fn(String) + Send + Sync + 'static) -> Result<ServerProc, String> {
+    use crate::util::os::exe;
+    let path = super::servers::locate(&server.command).ok_or_else(|| format!("`{}` was not found on PATH. {}", server.command, server.install_hint))?;
+    let r = exe::classify(path);
+    if r.kind == exe::Kind::Batch && !exe::batch_args_safe(args) {
+        return Err(format!(
+            "{} is a batch file ({}), and cmd.exe would misread an argument with % ! ^ & | < > \" or a line break: point [debug.servers.{}] command at the program itself",
+            server.label,
+            r.program.display(),
+            server.id
+        ));
+    }
+    let mut cmd = exe::command(&r);
+    cmd.args(args);
+    for (k, v) in server.env.iter().chain(env) {
+        cmd.env(k, v);
+    }
+    crate::util::proc::clean_env(&mut cmd);
+    cmd.env_remove("WORKBENCH_AGENT_TOKEN");
+    cmd.current_dir(if cwd.is_dir() { cwd } else { Path::new("/") }).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    crate::util::os::proc::ProcGroup::prepare(&mut cmd);
+    // Nothing tells a debug server that Workbench is gone: left running it would hold its probe.
+    crate::util::os::proc::ProcGroup::prepare_dies_with_parent(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", server.label))?;
+    let group = crate::util::os::proc::ProcGroup::attach(&child);
+    let on_line = Arc::new(on_line);
+    if let Some(o) = child.stdout.take() {
+        let f = on_line.clone();
+        forward_lines(o, move |l| f(l));
+    }
+    if let Some(e) = child.stderr.take() {
+        let f = on_line.clone();
+        forward_lines(e, move |l| f(l));
+    }
+    let (tx, exit) = watch::channel(None);
+    tokio::spawn(async move {
+        let how = match child.wait().await {
+            Ok(st) => crate::util::os::proc::exit_text(&st),
+            Err(e) => format!("lost: {e}"),
+        };
+        // The readers deliver the last lines a moment later: whoever reports the end waits for them.
+        tx.send_replace(Some(how));
+    });
+    Ok(ServerProc { group, exit })
+}
+
 /// Lines of a reader, capped (a chatty adapter cannot flood the console).
 pub fn forward_lines<R: tokio::io::AsyncRead + Unpin + Send + 'static>(r: R, mut f: impl FnMut(String) + Send + 'static) {
     tokio::spawn(async move {
@@ -328,6 +519,86 @@ mod tests {
         for k in [Gdb, Delve, Debugpy, Lldb, Codelldb, Generic] {
             assert!(!runs_in_project(k, DebugRequest::Attach), "attach {k:?}");
         }
+    }
+
+    #[test]
+    fn listeners_are_found_without_connecting_to_them() {
+        let ports = free_ports(3).unwrap();
+        assert_eq!(ports.len(), 3);
+        assert!(ports[0] != ports[1] && ports[1] != ports[2] && ports[0] != ports[2], "{ports:?}");
+        if cfg!(target_os = "linux") {
+            assert_eq!(listening_on(ports[0]), None, "nothing listens yet");
+        }
+        let l = std::net::TcpListener::bind(("127.0.0.1", ports[0])).unwrap();
+        assert_eq!(listening_on(ports[0]), Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
+        // The probe did not take the listener's one connection.
+        let c = std::net::TcpStream::connect(("127.0.0.1", ports[0])).unwrap();
+        assert!(l.accept().is_ok());
+        drop((c, l));
+        // Gone for good, though not at the very instant: a thread of this process that forks
+        // meanwhile holds a copy of the socket until it execs.
+        if cfg!(target_os = "linux") {
+            let end = std::time::Instant::now() + Duration::from_secs(3);
+            while listening_on(ports[0]).is_some() {
+                assert!(std::time::Instant::now() < end, "still listening on {} three seconds after it closed", ports[0]);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// The server is told to die with Workbench: the system ends it after a crash or a
+    /// SIGKILL, when no graceful `finish` runs (an OpenOCD left behind holds its probe).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_debug_server_dies_with_workbench() {
+        if !crate::util::which("python3") {
+            eprintln!("skipped: Python 3 is not installed");
+            return;
+        }
+        let mut server = crate::debug::servers::find(&Default::default(), "openocd").unwrap();
+        server.command = "python3".into();
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(vec![]));
+        let sink = seen.clone();
+        // PR_GET_PDEATHSIG (2) reads the signal the kernel will send when the parent goes.
+        let code = "import ctypes; x = ctypes.c_int(); ctypes.CDLL(None).prctl(2, ctypes.byref(x)); print('pdeathsig', x.value)";
+        let p = spawn_server(&server, &["-c".into(), code.into()], Path::new("/"), &[], move |l| sink.lock().push(l)).unwrap();
+        let mut gone = p.watch();
+        tokio::time::timeout(Duration::from_secs(10), gone.wait_for(|e| e.is_some())).await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(*seen.lock(), ["pdeathsig 15"], "SIGTERM when the parent goes");
+    }
+
+    /// Server ports come from below the ephemeral range, which `bind(0)` and outgoing
+    /// connections draw from, and are never given twice.
+    #[test]
+    fn server_ports_stay_below_the_ephemeral_range_and_are_never_repeated() {
+        let mut all = std::collections::HashSet::new();
+        for _ in 0..20 {
+            for p in free_ports(3).unwrap() {
+                assert!(SERVER_PORTS.contains(&u32::from(p)), "{p}");
+                assert!(all.insert(p), "{p} was handed out twice");
+            }
+        }
+        assert_eq!(all.len(), 60);
+    }
+
+    /// A socket that merely holds a port (a client's end of a connection) is not a
+    /// listener: it would make a stub look ready that is not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_listening_sockets_count() {
+        let server = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let client = std::net::TcpStream::connect(server.local_addr().unwrap()).unwrap();
+        let held = client.local_addr().unwrap().port();
+        assert_ne!(held, server.local_addr().unwrap().port());
+        assert_eq!(listening_on(held), None, "the client's own port");
+        // An IPv6-only listener is found, and a client reaches it through ::1.
+        if let Ok(v6) = std::net::TcpListener::bind(("::1", 0)) {
+            assert_eq!(listening_on(v6.local_addr().unwrap().port()), Some(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
+        }
+        // A listener on all interfaces is reached through loopback.
+        let all = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        assert_eq!(listening_on(all.local_addr().unwrap().port()), Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
     }
 
     #[test]

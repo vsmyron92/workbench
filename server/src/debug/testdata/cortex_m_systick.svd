@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Arm Cortex-M system timer (SysTick), from the ARMv7-M Architecture Reference Manual: a
+     register map that every Cortex-M3/M4/M7 has, small enough to read at a glance. -->
+<device schemaVersion="1.3">
+  <name>CortexM-SysTick</name>
+  <description>The system timer of an Arm Cortex-M core</description>
+  <size>32</size>
+  <access>read-write</access>
+  <peripherals>
+    <peripheral>
+      <name>SYST</name>
+      <description>SysTick: a 24-bit down counter that can interrupt</description>
+      <baseAddress>0xE000E010</baseAddress>
+      <registers>
+        <register>
+          <name>CSR</name>
+          <description>Control and status</description>
+          <addressOffset>0x0</addressOffset>
+          <resetValue>0x00000004</resetValue>
+          <!-- Reading CSR clears COUNTFLAG. -->
+          <readAction>clear</readAction>
+          <fields>
+            <field><name>ENABLE</name><description>Counter enable</description><bitOffset>0</bitOffset><bitWidth>1</bitWidth></field>
+            <field><name>TICKINT</name><description>Interrupt when the counter reaches 0</description><bitOffset>1</bitOffset><bitWidth>1</bitWidth></field>
+            <field>
+              <name>CLKSOURCE</name><description>Clock source</description><bitOffset>2</bitOffset><bitWidth>1</bitWidth>
+              <enumeratedValues>
+                <enumeratedValue><name>External</name><value>0</value></enumeratedValue>
+                <enumeratedValue><name>Processor</name><value>1</value></enumeratedValue>
+              </enumeratedValues>
+            </field>
+            <field><name>COUNTFLAG</name><description>The counter reached 0 since the last read</description><bitOffset>16</bitOffset><bitWidth>1</bitWidth><access>read-only</access></field>
+          </fields>
+        </register>
+        <register>
+          <name>RVR</name>
+          <description>Reload value</description>
+          <addressOffset>0x4</addressOffset>
+          <fields><field><name>RELOAD</name><bitOffset>0</bitOffset><bitWidth>24</bitWidth></field></fields>
+        </register>
+        <register>
+          <name>CVR</name>
+          <description>Current value (a write clears it)</description>
+          <addressOffset>0x8</addressOffset>
+          <fields><field><name>CURRENT</name><bitOffset>0</bitOffset><bitWidth>24</bitWidth></field></fields>
+        </register>
+        <register>
+          <name>CALIB</name>
+          <description>Calibration</description>
+          <addressOffset>0xC</addressOffset>
+          <access>read-only</access>
+          <fields>
+            <field><name>TENMS</name><bitOffset>0</bitOffset><bitWidth>24</bitWidth></field>
+            <field><name>SKEW</name><bitOffset>30</bitOffset><bitWidth>1</bitWidth></field>
+            <field><name>NOREF</name><bitOffset>31</bitOffset><bitWidth>1</bitWidth></field>
+          </fields>
+        </register>
+      </registers>
+    </peripheral>
+  </peripherals>
+</device>

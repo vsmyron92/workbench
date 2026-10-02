@@ -11,9 +11,16 @@
 //! `debug.output` (batched per burst of events), breakpoint verification as
 //! `debug.breakpoints`.
 //!
+//! A remote target (embedded: OpenOCD, J-Link, QEMU…) adds a debug server before the
+//! adapter and a target preparation after `attach`: the server is started and waited
+//! for until its gdb port listens, gdb attaches with `target remote`, and while the
+//! session is held back in `starting` the configuration's gdb commands run (reset,
+//! `load`, reset), then the program runs or stops where `stop_on_entry` says.
+//!
 //! Ending (`finish`, idempotent): the adapter's stdin is closed, then its process
 //! group is signalled; a debuggee Workbench launched (its pid from the `process`
-//! event, still a child of the adapter) and debuggee terminals are killed too.
+//! event, still a child of the adapter), debuggee terminals and the debug server are
+//! killed too.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -32,7 +39,8 @@ use super::breakpoints;
 use super::client::{DapClient, DapError, Incoming};
 use super::derive;
 use super::launch::{self, Build, Plan, PreLaunch};
-use super::process::{self, AdapterDir, AdapterProc};
+use super::process::{self, AdapterDir, AdapterProc, ServerProc};
+use super::servers;
 use crate::app::AppState;
 use crate::config::project::DebugRequest;
 use crate::devcontainer::ExecTarget;
@@ -57,6 +65,11 @@ const MAX_SOURCES: usize = 5000;
 const ADAPTER_TAIL: usize = 6;
 pub const MAX_LIVE: usize = 16;
 const PRELAUNCH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// One gdb command of a remote target's preparation: `load` of a big image over SWD
+/// takes minutes. Stop ends it sooner.
+const TARGET_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// The debug server's last lines of output kept for "exited unexpectedly".
+const SERVER_TAIL: usize = 30;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -144,6 +157,8 @@ pub struct SessionInfo {
     pub config: Option<String>,
     pub adapter: String,
     pub adapter_label: String,
+    /// `gdb`, `lldb`, `codelldb`, `debugpy`, `delve` or `generic`: how the UI talks to it.
+    pub adapter_kind: AdapterKind,
     pub request: DebugRequest,
     pub state: SessionState,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,6 +192,23 @@ pub struct SessionInfo {
     /// or "Detached" (an attach), not with the killed program's exit code.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stop_requested: bool,
+    /// A remote target: the debug server and where gdb connected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteInfo>,
+    /// The configuration names an SVD file: the Peripherals view has a register map.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub peripherals: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteInfo {
+    /// The debug server's label (none: a stub started elsewhere).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// gdb's `target remote` argument, once the server listens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 /// Host paths ↔ the paths the adapter sees (the same, or the dev container's).
@@ -279,6 +311,16 @@ struct Data {
     configured: bool,
     dirty: bool,
     bp_dirty: bool,
+    /// A remote target is being prepared (reset, download): the stop that connecting
+    /// causes is not shown, the session stays `starting`.
+    hold: bool,
+    /// The stop that connecting causes arrived (and was held back): gdb sends it after
+    /// the attach answer, so the preparation waits for it before it lets events through.
+    held_stop: bool,
+    /// What gdb connects to (the debug server's port is picked at start).
+    remote_target: Option<String>,
+    /// The debug server's last lines of output.
+    server_tail: VecDeque<String>,
 }
 
 pub struct Session {
@@ -295,6 +337,10 @@ pub struct Session {
     plan: Plan,
     client: Mutex<Option<Arc<DapClient>>>,
     proc_: tokio::sync::Mutex<Option<AdapterProc>>,
+    /// The debug server of a remote target.
+    server: Mutex<Option<ServerProc>>,
+    /// The chip's SVD file, read once (the error is kept too).
+    svd: tokio::sync::OnceCell<Result<Arc<super::svd::Svd>, String>>,
     initialized: watch::Sender<bool>,
     terminated: AtomicBool,
     finished: AtomicBool,
@@ -369,6 +415,8 @@ impl Session {
             plan: plan.clone(),
             client: Mutex::new(None),
             proc_: tokio::sync::Mutex::new(None),
+            server: Mutex::new(None),
+            svd: tokio::sync::OnceCell::new(),
             initialized: tx,
             terminated: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -412,6 +460,7 @@ impl Session {
             config: self.config.clone(),
             adapter: self.adapter.id.clone(),
             adapter_label: self.adapter.label.clone(),
+            adapter_kind: self.adapter.kind,
             request: self.request,
             state: d.state.unwrap_or(SessionState::Starting),
             phase: d.phase.clone(),
@@ -430,6 +479,11 @@ impl Session {
             debuggee_terminal_id: d.debuggee_terminals.last().cloned(),
             output_seq: d.out_seq,
             stop_requested: self.stop_requested.load(Ordering::SeqCst),
+            remote: self.plan.remote.as_ref().filter(|_| self.plan.raw_arguments.is_none()).map(|r| RemoteInfo {
+                server: r.server.as_ref().map(|s| s.label.clone()),
+                target: d.remote_target.clone(),
+            }),
+            peripherals: self.plan.remote.as_ref().is_some_and(|r| r.svd.is_some()) && self.plan.raw_arguments.is_none(),
         }
     }
 
@@ -465,6 +519,28 @@ impl Session {
     /// Whether the adapter named `path` in this session's frames or output.
     pub fn knows_source(&self, path: &str) -> bool {
         self.data.lock().sources.contains(path)
+    }
+
+    fn note_server_line(&self, line: &str) {
+        let mut d = self.data.lock();
+        if d.server_tail.len() >= SERVER_TAIL {
+            d.server_tail.pop_front();
+        }
+        d.server_tail.push_back(crate::secrets::redact(line, &self.redact));
+    }
+
+    /// The reason in a debug server's last words: its error lines when it printed any
+    /// (OpenOCD says `Error: unable to open CMSIS-DAP device` among dozens of `Info:`
+    /// lines), else its last lines. Empty, or `: <lines>`.
+    fn server_tail_text(&self) -> String {
+        let d = self.data.lock();
+        let all: Vec<&String> = d.server_tail.iter().filter(|l| !l.trim().is_empty()).collect();
+        let bad: Vec<&&String> = all.iter().filter(|l| {
+            let l = l.to_ascii_lowercase();
+            ["error", "fail", "cannot", "can't", "unable", "not found", "no device", "denied"].iter().any(|w| l.contains(w))
+        }).collect();
+        let lines: Vec<&str> = if bad.is_empty() { all.iter().rev().take(3).rev().map(|l| l.as_str()).collect() } else { bad.iter().rev().take(4).rev().map(|l| l.as_str()).collect() };
+        if lines.is_empty() { String::new() } else { format!(": {}", lines.join(" / ")) }
     }
 
     fn note_adapter_line(&self, line: &str) {
@@ -583,6 +659,43 @@ impl Session {
         let _ = rx.wait_for(|v| *v).await;
     }
 
+    /// The chip's register map (the `svd` of the configuration), read on first use.
+    pub async fn svd(&self) -> Result<Arc<super::svd::Svd>, ApiError> {
+        let Some(path) = self.plan.remote.as_ref().and_then(|r| r.svd.clone()).filter(|_| self.plan.raw_arguments.is_none()) else {
+            return Err(ApiError::not_found("this session has no SVD file: name one with `svd` in [debug.remote]"));
+        };
+        let loaded = self
+            .svd
+            .get_or_init(|| async move { tokio::task::spawn_blocking(move || super::svd::load(&path).map(Arc::new)).await.map_err(|e| e.to_string()).and_then(|r| r) })
+            .await;
+        loaded.clone().map_err(|e| ApiError::new(axum::http::StatusCode::UNPROCESSABLE_ENTITY, "debugger_error", e))
+    }
+
+    /// Read `count` bytes of the target's memory (the exact size of one register: peripherals
+    /// react to neighbouring reads).
+    pub async fn read_memory(&self, address: u64, count: usize) -> Result<Vec<u8>, ApiError> {
+        use base64::Engine;
+        if !self.cap("supportsReadMemoryRequest") {
+            return Err(ApiError::bad_request(format!("{} cannot read memory", self.adapter.label)));
+        }
+        let body = self.request("readMemory", json!({ "memoryReference": format!("{address:#x}"), "count": count }), REQUEST_TIMEOUT).await?;
+        let data = body.get("data").and_then(Value::as_str).unwrap_or("");
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| ApiError::internal("the debugger's memory was not base64"))?;
+        if bytes.len() != count {
+            return Err(ApiError::new(axum::http::StatusCode::UNPROCESSABLE_ENTITY, "debugger_error", format!("the debugger returned {} of {count} bytes at {address:#x}", bytes.len())));
+        }
+        Ok(bytes)
+    }
+
+    pub async fn write_memory(&self, address: u64, bytes: &[u8]) -> Result<(), ApiError> {
+        use base64::Engine;
+        if !self.cap("supportsWriteMemoryRequest") {
+            return Err(ApiError::bad_request(format!("{} cannot write memory", self.adapter.label)));
+        }
+        self.request("writeMemory", json!({ "memoryReference": format!("{address:#x}"), "data": base64::engine::general_purpose::STANDARD.encode(bytes) }), REQUEST_TIMEOUT).await?;
+        Ok(())
+    }
+
     /// Send a request to the adapter (the session must have one).
     pub async fn request(&self, command: &str, args: Value, timeout: Duration) -> Result<Value, ApiError> {
         let c = self.client()?;
@@ -694,7 +807,22 @@ pub async fn start(state: &AppState, project: Arc<Project>, plan: Plan, parent: 
     }
     let s = Arc::new(Session::new(&project, &plan, parent));
     state.debug.insert(s.clone());
-    s.log("workbench", format!("Debugging {} with {}{}\n", plan.name, plan.adapter.label, if plan.target.is_some() { " in the dev container" } else { "" }), None);
+    s.log(
+        "workbench",
+        format!(
+            "Debugging {} with {}{}\n",
+            plan.name,
+            plan.adapter.label,
+            if plan.target.is_some() {
+                " in the dev container"
+            } else if plan.build_target.is_some() {
+                ": the build runs in the dev container, the debugger and the debug server on this computer"
+            } else {
+                ""
+            }
+        ),
+        None,
+    );
     s.flush(state);
     if plan.config.is_some() && s.parent.is_none() {
         let name = plan.config.clone();
@@ -748,6 +876,16 @@ async fn startup(state: &AppState, project: &Arc<Project>, s: &Arc<Session>, pla
         }
     }
 
+    // 1b. A remote target's debug server: started, and waited for until its gdb port
+    // listens. gdb connects to `remote_target` below.
+    let remote = plan.remote.clone().filter(|_| plan.raw_arguments.is_none() && plan.connect.is_none());
+    let mut remote_target: Option<String> = None;
+    if let Some(r) = &remote {
+        let t = start_server(state, s, &plan, r).await?;
+        s.update(|d| d.remote_target = Some(t.clone()));
+        remote_target = Some(t);
+    }
+
     // 2. The adapter: a new process, or (a child session) a new connection to the
     // parent's adapter, which knows the child process.
     let (client, incoming) = if let Some((host, port)) = plan.connect.clone() {
@@ -758,7 +896,7 @@ async fn startup(state: &AppState, project: &Arc<Project>, s: &Arc<Session>, pla
         s.set_phase(state, format!("Starting {}", plan.adapter.label));
         let inside = target.as_ref().zip(plan.inside_command.clone());
         let mut extra_args = vec![];
-        if plan.adapter.kind == AdapterKind::Gdb && plan.request == DebugRequest::Launch && plan.raw_arguments.is_none() {
+        if plan.adapter.kind == AdapterKind::Gdb && (plan.request == DebugRequest::Launch || remote.is_some()) && plan.raw_arguments.is_none() {
             if launch::language_of(&plan.launch, &project.root) == "rust" && target.is_none() {
                 use crate::util::os::support::{Feature, unsupported};
                 let (args, note) = rust_gdb_args(&project.root).await;
@@ -769,14 +907,18 @@ async fn startup(state: &AppState, project: &Arc<Project>, s: &Arc<Session>, pla
                     Some(n) => s.log("workbench", format!("{n}\n"), None),
                 }
             }
+            // Where the source was built is not where it is here (a dev container's workspace, a
+            // build server's checkout): gdb finds the files through these.
+            extra_args.extend(launch::substitute_path_args(&plan.substitute_paths));
             // Load the program at once: breakpoints resolve when they are set instead of
-            // staying pending until the launch (gdb reads the file only then).
+            // staying pending until the launch (gdb reads the file only then; a remote
+            // target's attach reads it only after configurationDone too).
             if let Some(p) = &program {
                 extra_args.push(p.clone());
             }
         }
         let neutral = neutral_dir(state);
-        let dir = if process::runs_in_project(plan.adapter.kind, plan.request) && plan.raw_arguments.is_none() {
+        let dir = if process::runs_in_project(plan.adapter.kind, plan.request) && plan.raw_arguments.is_none() && remote.is_none() {
             AdapterDir::Project(&plan.cwd)
         } else {
             AdapterDir::Neutral(&neutral)
@@ -831,19 +973,49 @@ async fn startup(state: &AppState, project: &Arc<Project>, s: &Arc<Session>, pla
     }
     s.update(|d| d.capabilities = caps.clone());
 
+    // 3b. An extended-remote stub (gdbserver --multi, Black Magic Probe): gdb's DAP attach only
+    // issues `target remote`, so the connection is made through the console's channel, and the
+    // commands that must come before the attach (a probe's scan) run here too.
+    if let Some(r) = remote.as_ref().filter(|r| r.extended) {
+        let target = remote_target.clone().unwrap_or_default();
+        s.set_phase(state, "Connecting to the target");
+        gdb_command(state, s, &format!("target extended-remote {target}"))
+            .await
+            .map_err(|e| format!("gdb could not connect to {target}: {e}. Is the board powered and the probe plugged in? The debug server's output is in the console"))?;
+        if r.runs_program() {
+            if let Some(exec) = r.exec_file.clone().or_else(|| program.clone()) {
+                gdb_command(state, s, &format!("set remote exec-file {exec}")).await?;
+            }
+        }
+        for c in &r.init {
+            s.set_phase(state, "Initializing the target");
+            gdb_command(state, s, c).await?;
+        }
+    }
+
     // 4. launch / attach, without waiting for its answer (see the module docs).
     let attach = plan.request == DebugRequest::Attach;
     if attach && plan.pid == Some(0) {
         return Err("no process to attach to".into());
     }
-    s.set_phase(state, if attach { "Attaching" } else { "Launching" });
+    s.set_phase(state, if remote.is_some() { "Connecting to the target" } else if attach { "Attaching" } else { "Launching" });
     let terminal = plan.adapter.supports_terminal() && plan.launch.console.as_deref() != Some("console");
-    let args = launch::arguments(&plan, program.as_deref(), terminal);
+    // An extended stub has been connected to above: the attach names its target by number.
+    let connect_to = remote_target.as_deref().filter(|_| !remote.as_ref().is_some_and(|r| r.extended));
+    let args = launch::arguments(&plan, program.as_deref(), terminal, connect_to);
+    // Connecting stops the target; the session shows that only once it is prepared (a stub that
+    // runs the program stops it as an ordinary launch does).
+    if remote.as_ref().is_some_and(|r| !r.runs_program()) {
+        s.update(|d| d.hold = true);
+    }
     let command = if attach { "attach" } else { "launch" };
     let c2 = client.clone();
     let mut launch_task = tokio::spawn(async move { c2.request(command, args, LAUNCH_TIMEOUT).await });
     let mut launched: Option<Value> = None;
     let explain = |e: DapError| -> String {
+        if let Some(t) = &remote_target {
+            return format!("gdb could not connect to {t}: {e}. Is the board powered and the probe plugged in? The debug server's output is in the console");
+        }
         let mut m = format!("{command} failed: {e}");
         if attach && super::procs::ptrace_scope().is_some_and(|x| x > 0) {
             let low = m.to_ascii_lowercase();
@@ -882,9 +1054,13 @@ async fn startup(state: &AppState, project: &Arc<Project>, s: &Arc<Session>, pla
             Err(e) => return Err(explain(e)),
         }
     }
+    // A remote target: reset, download, run (or stop where the configuration says).
+    if let Some(r) = remote.as_ref().filter(|r| !r.runs_program()) {
+        prepare_target(state, s, &plan, r, program.as_deref()).await?;
+    }
     // gdb (17) answers `attach` with success even when ptrace refused, and says
     // nothing: check that a native debugger really traces the process.
-    if let (true, Some(pid), None) = (attach, plan.pid, &target) {
+    if let (true, Some(pid), None, None) = (attach, plan.pid, &target, &remote) {
         if matches!(plan.adapter.kind, AdapterKind::Gdb | AdapterKind::Lldb | AdapterKind::Codelldb) && !traced(pid).await {
             let mut m = format!("{} could not attach to process {pid}", plan.adapter.label);
             if let Some(h) = super::procs::ptrace_hint(super::procs::ptrace_scope()) {
@@ -901,6 +1077,202 @@ async fn startup(state: &AppState, project: &Arc<Project>, s: &Arc<Session>, pla
         }
     });
     s.flush(state);
+    Ok(())
+}
+
+/// Start the debug server of a remote target and wait until its gdb port listens;
+/// returns gdb's `target remote` argument. Without a server (a stub that already runs)
+/// it is the configuration's `connect`.
+async fn start_server(state: &AppState, s: &Arc<Session>, plan: &Plan, r: &launch::RemotePlan) -> Result<String, String> {
+    let Some(server) = &r.server else {
+        // A stub that already runs: its channels are on ports the configuration names.
+        spawn_channels(state, s, r, &[]);
+        return Ok(r.connect.clone().unwrap_or_default());
+    };
+    s.set_phase(state, format!("Starting {}", server.label));
+    let args = r.server_args.clone();
+    let mut ports = process::free_ports(r.ports_needed().max(1)).map_err(|e| format!("no free port for {}: {e}", server.label))?;
+    if let Some(p) = r.port {
+        // Something else holding it would answer gdb instead of our server.
+        if process::listening_on(p).is_some() {
+            return Err(format!("port {p} is already in use: is another {} (or debug session) running? Stop it, or pick another `port`", server.label));
+        }
+        ports[0] = p;
+    }
+    let port = ports[0];
+    let args = servers::substitute_ports(&args, &ports);
+    s.log("workbench", format!("$ {} {}\n", server.command, args.join(" ")), None);
+    s.flush(state);
+    let (st, s2) = (state.clone(), s.clone());
+    let proc_ = process::spawn_server(server, &args, &plan.cwd, &plan.env, move |line| {
+        s2.note_server_line(&line);
+        if !line.trim().is_empty() {
+            s2.log("server", format!("{line}\n"), None);
+            s2.flush(&st);
+        }
+    })?;
+    *s.server.lock() = Some(proc_.clone());
+
+    let deadline = tokio::time::Instant::now() + server.ready_timeout;
+    let ip = loop {
+        if let Some(ip) = process::listening_on(port) {
+            break ip;
+        }
+        if let Some(how) = proc_.exited() {
+            // Its last lines are still on their way from the pipes.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            return Err(format!("{} exited before it was ready ({how}){}", server.label, s.server_tail_text()));
+        }
+        if tokio::time::Instant::now() > deadline {
+            return Err(format!("{} did not listen on port {port} within {}s{}", server.label, server.ready_timeout.as_secs(), s.server_tail_text()));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    spawn_channels(state, s, r, &ports);
+    // From now on its end is the session's (a pulled USB cable, a crash).
+    let (st, s2, label, mut gone) = (state.clone(), s.clone(), server.label.clone(), proc_.watch());
+    tokio::spawn(async move {
+        let _ = gone.wait_for(|e| e.is_some()).await;
+        let ours = s2.stop_requested.load(Ordering::SeqCst) || s2.finished.load(Ordering::SeqCst) || s2.cancel.is_cancelled();
+        if ours || !s2.is_live() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let how = gone.borrow().clone().unwrap_or_default();
+        s2.fail(&st, format!("{label} exited unexpectedly ({how}){}", s2.server_tail_text()));
+        finish(&st, &s2).await;
+    });
+    Ok(match (&r.connect, ip) {
+        (Some(c), _) => c.clone(),
+        (None, std::net::IpAddr::V6(_)) => format!("[::1]:{port}"),
+        (None, _) => format!("127.0.0.1:{port}"),
+    })
+}
+
+/// Start the readers of the target's output channels (RTT, SWO, a UART on a socket).
+fn spawn_channels(state: &AppState, s: &Arc<Session>, r: &launch::RemotePlan, ports: &[u16]) {
+    let many = r.channels.len() > 1;
+    for c in r.channels.iter().filter_map(|c| c.resolve(ports)) {
+        super::channels::spawn(state, s, c, many);
+    }
+}
+
+/// One gdb command through the debug console's channel, echoed into the console like
+/// something the user typed: `monitor reset halt`, `load` (whose progress is its output).
+async fn gdb_command(state: &AppState, s: &Arc<Session>, cmd: &str) -> Result<(), String> {
+    s.log("repl-in", format!("> {cmd}\n"), None);
+    s.flush(state);
+    let r = s.evaluate(cmd, json!({ "expression": cmd, "context": "repl" }), TARGET_COMMAND_TIMEOUT).await;
+    let out = match r {
+        Ok(v) => {
+            let text = v.get("result").and_then(Value::as_str).unwrap_or("").replace("\r\n", "\n");
+            if !text.trim().is_empty() {
+                s.log("repl-out", format!("{}\n", text.trim_end_matches('\n')), None);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            s.log("repl-err", format!("{}\n", e.message), None);
+            Err(format!("`{cmd}` failed: {}", e.message))
+        }
+    };
+    s.flush(state);
+    out
+}
+
+/// A remote target after gdb connected (the target is halted, the session still
+/// `starting`): the configuration's commands, the reset, the download, the reset again,
+/// then the program runs, or stops where `stop_on_entry` says.
+async fn prepare_target(state: &AppState, s: &Arc<Session>, plan: &Plan, r: &launch::RemotePlan, program: Option<&str>) -> Result<(), String> {
+    // The connecting stop is still on its way (events follow the answer that caused them).
+    let wait_until = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !s.data.lock().held_stop {
+        if tokio::time::Instant::now() > wait_until {
+            s.log("workbench", "The target did not report a stop after gdb connected; going on.\n", None);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // (An extended stub's commands ran before the attach.)
+    for c in r.init.iter().filter(|_| !r.extended) {
+        s.set_phase(state, "Initializing the target");
+        gdb_command(state, s, c).await?;
+    }
+    let reset = |phase: &'static str| async move {
+        for c in &r.reset {
+            s.set_phase(state, phase);
+            gdb_command(state, s, c).await?;
+        }
+        Ok::<(), String>(())
+    };
+    reset("Resetting the target").await?;
+    if r.download {
+        let name = program.and_then(|p| Path::new(p).file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "the program".into());
+        s.set_phase(state, format!("Downloading {name}"));
+        gdb_command(state, s, "load").await?;
+        // The new image starts from the reset vector, not from where the old one was.
+        reset("Resetting the target").await?;
+    }
+    // A server that died meanwhile has ended the session: it stays ended.
+    if !s.is_live() {
+        return Err("the debug session ended while the target was being prepared".into());
+    }
+    let mut stay = false;
+    if plan.stop_on_entry {
+        let location = match &r.stop_at {
+            launch::StopAt::Reset => None,
+            launch::StopAt::Main => Some("main".to_string()),
+            launch::StopAt::Location(l) => Some(l.clone()),
+        };
+        match location {
+            None => stay = true,
+            Some(l) => {
+                // A temporary hardware breakpoint: flash cannot take a software one.
+                if let Err(e) = gdb_command(state, s, &format!("thbreak {l}")).await {
+                    s.log("workbench", format!("Cannot stop at {l}: the target stays halted at the reset vector ({e})\n"), None);
+                    stay = true;
+                }
+            }
+        }
+    }
+    s.set_phase(state, if stay { "Halted" } else { "Running" });
+    if stay {
+        let epoch = {
+            let mut d = s.data.lock();
+            d.hold = false;
+            if d.state == Some(SessionState::Starting) {
+                d.state = Some(SessionState::Stopped);
+            }
+            d.stopped = Some(StopInfo {
+                reason: "entry".into(),
+                description: Some("Halted at the reset vector".into()),
+                text: None,
+                thread_id: d.threads.first().map(|t| t.id).or(Some(1)),
+                all_threads_stopped: true,
+                hit_breakpoint_ids: vec![],
+                during_evaluation: None,
+                at: crate::util::now_ms(),
+            });
+            d.stop_epoch += 1;
+            d.dirty = true;
+            d.stop_epoch
+        };
+        s.flush(state);
+        refresh_threads(state, s, epoch).await;
+        return Ok(());
+    }
+    let tid = s.data.lock().threads.first().map(|t| t.id).unwrap_or(1);
+    s.update(|d| {
+        d.hold = false;
+        if d.state == Some(SessionState::Starting) {
+            d.state = Some(SessionState::Running);
+        }
+        d.stopped = None;
+        d.stop_epoch += 1;
+    });
+    s.flush(state);
+    let client = s.client().map_err(|e| e.message)?;
+    client.request("continue", json!({ "threadId": tid }), REQUEST_TIMEOUT).await.map_err(|e| format!("continue failed: {e}"))?;
     Ok(())
 }
 
@@ -1003,7 +1375,8 @@ async fn run_prelaunch_config(state: &AppState, project: &Arc<Project>, s: &Arc<
 /// project (in its dev container when the session uses it) and wait for it to succeed.
 async fn run_in_terminal(state: &AppState, s: &Arc<Session>, plan: &Plan, title: &str, command: &str) -> Result<String, String> {
     let mut meta = json!({ "debug": s.id, "debugPreLaunch": true });
-    if plan.target.is_some() {
+    // (A remote target's gdb runs on this computer, but its build is the container's.)
+    if plan.target.is_some() || plan.build_target.is_some() {
         meta["inContainer"] = json!(true);
     }
     let spec = SpawnSpec {
@@ -1274,6 +1647,104 @@ pub async fn breakpoints_changed(state: &AppState, pid: &str, lines: Lines<'_>, 
     emit_breakpoints(state, pid);
 }
 
+/// Replace the line breakpoints of one file (REST and the agents' tool share this).
+pub async fn set_file_breakpoints(state: &AppState, pid: &str, path: &str, list: Vec<breakpoints::LineBreakpoint>) -> Result<(), ApiError> {
+    let path = breakpoints::normalize_path(path)?;
+    state.debug.store.update(&state.paths.data_dir, pid, |p| p.set_file(&path, list)).await?;
+    breakpoints_changed(state, pid, Lines::File(&path), false, false).await;
+    Ok(())
+}
+
+pub async fn set_function_breakpoints(state: &AppState, pid: &str, list: Vec<breakpoints::FunctionBreakpoint>) -> Result<(), ApiError> {
+    state.debug.store.update(&state.paths.data_dir, pid, |p| p.set_functions(list)).await?;
+    breakpoints_changed(state, pid, Lines::None, true, false).await;
+    Ok(())
+}
+
+pub async fn set_muted(state: &AppState, pid: &str, muted: bool) -> Result<(), ApiError> {
+    state
+        .debug
+        .store
+        .update(&state.paths.data_dir, pid, |p| {
+            p.muted = muted;
+            Ok(())
+        })
+        .await?;
+    breakpoints_changed(state, pid, Lines::All, true, true).await;
+    Ok(())
+}
+
+pub async fn clear_breakpoints(state: &AppState, pid: &str) -> Result<(), ApiError> {
+    state
+        .debug
+        .store
+        .update(&state.paths.data_dir, pid, |p| {
+            p.breakpoints.clear();
+            p.function_breakpoints.clear();
+            Ok(())
+        })
+        .await?;
+    breakpoints_changed(state, pid, Lines::All, true, false).await;
+    Ok(())
+}
+
+/// Rerun a session's launch configuration: plan first (a configuration that no longer works
+/// keeps the old session; an attach reattaches to the process it was given), then stop the
+/// old session and start the new one.
+pub async fn restart(state: &AppState, project: Arc<Project>, s: &Arc<Session>) -> Result<SessionInfo, ApiError> {
+    let Some(config) = s.config.clone() else {
+        return Err(ApiError::bad_request("only sessions of a launch configuration can be rerun"));
+    };
+    let plan = launch::plan_config(state, &project, &config, None, s.attach_pid()).await?;
+    stop(state, s).await;
+    state.debug.remove(&s.id);
+    state.events.emit("debug.session", Some(&project.id), json!({ "id": s.id, "projectId": project.id, "removed": true }));
+    start(state, project, plan, None).await
+}
+
+/// Evaluate in a session. A console (`repl`) evaluation is echoed into the console like
+/// typed input and its answer follows; `origin` (an agent) is named there, so the user sees
+/// who asked. The answer is the adapter's, unredacted: callers pass it through `variable_view`.
+pub async fn evaluate_logged(state: &AppState, s: &Arc<Session>, expr: &str, frame_id: Option<i64>, context: &str, origin: Option<&str>) -> Result<Value, ApiError> {
+    let mut args = json!({ "expression": expr, "context": context });
+    if let Some(f) = frame_id {
+        args["frameId"] = json!(f);
+    }
+    let repl = context == "repl";
+    if repl {
+        s.log("repl-in", format!("> {expr}{}\n", origin.map(|o| format!("   ({o})")).unwrap_or_default()), None);
+    }
+    let r = s.evaluate(expr, args, EVAL_TIMEOUT).await;
+    if repl {
+        match &r {
+            Ok(v) => {
+                let text = v.get("result").and_then(Value::as_str).unwrap_or("");
+                if !text.is_empty() {
+                    s.log("repl-out", format!("{}\n", text.trim_end_matches('\n')), None);
+                }
+            }
+            Err(e) => s.log("repl-err", format!("{}\n", e.message), None),
+        }
+        s.flush(state);
+    }
+    r
+}
+
+/// Wait up to `timeout` for `done(info)` to hold of the session (polling its state); `true`
+/// when it did. For callers that act and then report what the program did.
+pub async fn wait_for(s: &Arc<Session>, timeout: Duration, done: impl Fn(&SessionInfo) -> bool) -> bool {
+    let end = tokio::time::Instant::now() + timeout;
+    loop {
+        if done(&s.info()) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= end {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+}
+
 // ---------------------------------------------------------------- the event loop
 
 async fn event_loop(state: AppState, s: Arc<Session>, mut rx: mpsc::Receiver<Incoming>) {
@@ -1367,6 +1838,15 @@ fn on_event(state: &AppState, s: &Arc<Session>, e: Value) {
             s.initialized.send_replace(true);
         }
         "stopped" => {
+            // Connecting to a remote target halts it: not a stop worth showing while it
+            // is still being reset and flashed.
+            {
+                let mut d = s.data.lock();
+                if d.hold {
+                    d.held_stop = true;
+                    return;
+                }
+            }
             let reason = str_of("reason").unwrap_or_else(|| "pause".into());
             let thread_id = body.get("threadId").and_then(Value::as_i64);
             let mut temp = None;
@@ -1599,6 +2079,7 @@ async fn on_reverse_request(state: &AppState, s: &Arc<Session>, r: Value) {
             plan.request = request;
             plan.pid = None;
             plan.raw_arguments = Some(configuration);
+            plan.remote = None;
             plan.connect = connect;
             client.respond(&r, true, json!({}), None);
             // Started by `children` (a task of `debug::start`): a session cannot
@@ -1793,6 +2274,11 @@ pub async fn finish(state: &AppState, s: &Arc<Session>) {
         }
         p.wait_exit(Duration::from_millis(500)).await;
         p.kill().await;
+    }
+    // The debug server goes after gdb, which has detached from it by now.
+    let server = s.server.lock().take();
+    if let Some(server) = server {
+        server.kill().await;
     }
     for t in terminals {
         if state.terminals.info(&t).is_some_and(|i| i.status != crate::terminals::TerminalStatus::Exited) {
