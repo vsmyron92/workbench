@@ -342,7 +342,7 @@ mod tests {
             assert_eq!((&v["unsupported"], &v["experimental"]), (&serde_json::json!({}), &serde_json::json!({})), "{v}");
         }
         if cfg!(windows) {
-            for key in ["devcontainer", "desktopNotifications", "gdbAttach", "rustGdbPrettyPrinters", "networkRoots"] {
+            for key in ["devcontainer", "desktopNotifications", "gdbAttach", "rustGdbPrettyPrinters", "networkRoots", "selfUpdate"] {
                 assert!(v["unsupported"][key].as_str().is_some_and(|why| why.contains("Windows")), "{key}: {v}");
             }
             assert!(v["experimental"]["services"].is_string(), "{v}");

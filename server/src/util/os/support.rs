@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn this_windows_build_reports_them() {
         assert_eq!(os(), "windows");
-        assert_eq!(unsupported_all().len(), 5);
+        assert_eq!(unsupported_all().len(), 6);
         assert_eq!(experimental_all().keys().copied().collect::<Vec<_>>(), ["services"]);
         let e = require(Feature::Devcontainer).unwrap_err();
         assert_eq!((e.status.as_u16(), e.code, e.feature), (501, "unsupported_platform", Some("devcontainer")));
