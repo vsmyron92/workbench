@@ -2638,7 +2638,9 @@ source_map = [["/a\nb", "/c"]]
     env.wait_session(&sid, "the halt", |v| v["state"] == "stopped" || v["state"] == "failed").await;
     let log = std::fs::read_to_string(&env.log).unwrap();
     let argv: Vec<String> = log.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|v| v.get("_argv").cloned()).unwrap().as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_string()).collect();
-    let src = env.root.join("src").display().to_string();
+    // `{root}/src` is the root as the computer spells it plus what the configuration wrote; a
+    // backslash in a Windows path is escaped for gdb's own quoting.
+    let src = format!("{}/src", env.root.display()).replace('\\', "\\\\");
     assert_eq!(
         argv,
         ["-iex".to_string(), format!("set substitute-path \"/ci/workspace\" \"{src}\""), "-iex".to_string(), "set substitute-path \"/opt/sdk\" \"/usr/src/sdk\"".to_string(), env.root.join("prog.bin").display().to_string()],
