@@ -351,7 +351,7 @@ mod tests {
 }
 
 /// The running server's local URL and the master token.
-fn running_server() -> anyhow::Result<(String, String)> {
+pub(crate) fn running_server() -> anyhow::Result<(String, String)> {
     let paths = Paths::from_env()?;
     let rt: serde_json::Value = util::fs::read_json(&paths.data_dir.join("runtime.json"))?
         .ok_or_else(|| anyhow::anyhow!("Workbench is not running (no runtime.json); start it with `workbench`"))?;

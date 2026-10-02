@@ -38,9 +38,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
-      # The release binary embeds web/dist.
+      # The release binary embeds web/dist, and looks to this repository's releases for
+      # updates (server/src/platform/update: WORKBENCH_UPDATE_REPO).
       - name: Binary
         working-directory: server
+        env:
+          WORKBENCH_UPDATE_REPO: ${{ github.repository }}
         run: |
           cargo build --release --locked
           strip target/release/workbench
@@ -118,9 +121,11 @@ jobs:
         with:
           workspaces: server
       # The release binary embeds web/dist; server/.cargo/config.toml links the C runtime
-      # statically (no Visual C++ Redistributable needed).
+      # statically (no Visual C++ Redistributable needed). WORKBENCH_UPDATE_REPO: as on Linux.
       - name: Binary
         working-directory: server
+        env:
+          WORKBENCH_UPDATE_REPO: ${{ github.repository }}
         run: cargo build --release --locked
       - name: ConPTY
         run: |

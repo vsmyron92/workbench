@@ -48,9 +48,21 @@ install -m 0755 target/release/workbench ~/.local/bin/
 
 The web UI is embedded in the binary, so `~/.local/bin/workbench` is all you need to run.
 The build also makes `target/release/workbenchw`, the Windows launcher of `workbench
-service`: on Linux it is a stub that only prints a message, and nothing uses it. To update
-later, install the new release (or pull, rebuild both parts and install the
-binary again); then restart the service (below) or the running `workbench serve`.
+service`: on Linux it is a stub that only prints a message, and nothing uses it.
+
+## Updating
+
+A Workbench installed from a release updates itself when you tell it to: it looks for a
+newer release once a day, shows **Update X.Y.Z** in the status bar, and **Settings ›
+Updates › Update and restart** downloads it, checks its SHA-256, replaces the program and
+restarts into it (the page reloads by itself). `workbench update` does the same from a
+terminal; `--check` only looks. The replaced version stays as `workbench.prev`. Turn the
+daily look off with `[update] check = false`.
+
+A build from source has no release to look for: pull, rebuild both parts and install the
+binary again, then restart the service (below) or the running `workbench serve`; or set
+`[update] repo = "owner/name"` to update from that repository's releases. On Windows
+Workbench only tells you about a new version: install it with the archive's `install.ps1`.
 
 ## Install on Windows (experimental)
 

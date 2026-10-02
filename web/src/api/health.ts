@@ -25,6 +25,7 @@ export const FEATURES = {
   rustGdbPrettyPrinters: 'rustGdbPrettyPrinters',
   networkRoots: 'networkRoots',
   services: 'services',
+  selfUpdate: 'selfUpdate',
 } as const
 
 export type Feature = (typeof FEATURES)[keyof typeof FEATURES]
@@ -60,6 +61,20 @@ export async function loadHealth(): Promise<void> {
     setHealth(await api.get<Health>('/api/health'))
   } catch {
     /* an older or unreachable server: nothing is marked */
+  }
+}
+
+/**
+ * Ask again, whatever was loaded: the server may be another version after a restart
+ * (`features/platform/update.ts`). Null when it does not answer.
+ */
+export async function refreshHealth(): Promise<Health | null> {
+  try {
+    const h = await api.get<Health>('/api/health')
+    setHealth(h)
+    return h
+  } catch {
+    return null
   }
 }
 

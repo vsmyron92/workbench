@@ -11,9 +11,12 @@ import {
   prependCapped,
   projectPathError,
   publicUrlError,
+  restartImpact,
   restartText,
   secretRefFields,
   timeline,
+  updateFraction,
+  updatePhaseText,
 } from './lib'
 import type { ActivityEvent, McpCall } from './types'
 
@@ -179,5 +182,46 @@ describe('activity', () => {
     expect(timeline(calls, events, { show: 'all', writesOnly: true, errorsOnly: false, since: 0 }).map((i) => i.at)).toEqual([30])
     expect(timeline(calls, events, { show: 'all', writesOnly: false, errorsOnly: true, since: 0 }).map((i) => i.at)).toEqual([40, 10])
     expect(timeline(calls, events, { show: 'events', writesOnly: false, errorsOnly: false, since: 20 }).map((i) => i.at)).toEqual([40])
+  })
+})
+
+describe('updates', () => {
+  const mb = 1024 * 1024
+
+  it('says what an update is doing', () => {
+    expect(updatePhaseText('idle', null)).toBeNull()
+    expect(updatePhaseText('checking', null)).toBe('Looking for a newer release…')
+    expect(updatePhaseText('downloading', null, '0.6.0')).toBe('Downloading 0.6.0…')
+    expect(updatePhaseText('downloading', { received: 0, total: 0 })).toBe('Downloading…')
+    expect(updatePhaseText('downloading', { received: 12.34 * mb, total: 28 * mb }, '0.6.0')).toBe('Downloading 0.6.0: 12.3 of 28.0 MB')
+    expect(updatePhaseText('verifying', null)).toContain('SHA-256')
+    expect(updatePhaseText('installing', null)).toBe('Installing…')
+    expect(updatePhaseText('restarting', null)).toBe('Restarting Workbench…')
+  })
+
+  it('measures only a download of a known size', () => {
+    expect(updateFraction('downloading', { received: 7 * mb, total: 28 * mb })).toBe(0.25)
+    expect(updateFraction('downloading', { received: 30 * mb, total: 28 * mb })).toBe(1)
+    expect(updateFraction('downloading', { received: 5, total: 0 })).toBeNull()
+    expect(updateFraction('downloading', null)).toBeNull()
+    expect(updateFraction('installing', { received: 1, total: 2 })).toBeNull()
+  })
+
+  it('says what a restart stops', () => {
+    const agent = { kind: 'agent' as const, working: false }
+    const working = { kind: 'agent' as const, working: true }
+    const shell = { kind: 'shell' as const, working: false }
+    const run = { kind: 'run' as const, working: false }
+    const command = { kind: 'command' as const, working: false }
+    expect(restartImpact([], true)).toBe('Nothing is running in its terminals. Workbench is back in a few seconds.')
+    expect(restartImpact([agent], true)).toBe('1 agent session will stop. Agent sessions resume after the restart.')
+    expect(restartImpact([working, working, agent, shell, run, command], true)).toBe(
+      '3 agent sessions, 1 shell and 2 runs will stop (2 agents are working right now). Agent sessions resume after the restart; shells start again under their last screen, without what ran in them; runs are not started again.',
+    )
+    expect(restartImpact([working], false)).toBe(
+      '1 agent session will stop (1 agent is working right now). Agent sessions are not resumed (agents.restore_on_start is off) but stay in the history.',
+    )
+    expect(restartImpact([shell, shell], true)).toBe('2 shells will stop. Shells start again under their last screen, without what ran in them.')
+    expect(restartImpact([agent, run], true)).toBe('1 agent session and 1 run will stop. Agent sessions resume after the restart; runs are not started again.')
   })
 })

@@ -154,6 +154,23 @@ pub fn runnable_exe() -> Option<PathBuf> {
     imp::runnable_exe()
 }
 
+/// Whether another file took this executable's place on disk since the process started
+/// (an update, an installer run by hand): a restart then runs the new one. Linux only;
+/// Windows cannot tell (a running image is renamed aside, and keeps reporting the path it
+/// was loaded from), so `false` there.
+pub fn exe_replaced() -> bool {
+    imp::exe_replaced()
+}
+
+/// Replaces this process with `exe` run with `args`, keeping the pid, the environment and
+/// the working directory, so whoever supervises it (systemd, a terminal) sees one process
+/// that never stopped. Returns only when that failed. Unix: `exec`; file descriptors are
+/// close-on-exec, so the caller's listening sockets are free for the new image. Windows
+/// has no such call: always an error there (`support::Feature::SelfUpdate`).
+pub fn reexec(exe: &Path, args: &[std::ffi::OsString]) -> std::io::Error {
+    imp::reexec(exe, args)
+}
+
 // ---------------------------------------------------------------- debugger support
 
 /// A process of this user, for the debugger's attach list.
@@ -368,6 +385,16 @@ mod imp {
             return Some(exe);
         }
         exe_fallback(&exe, std::process::id())
+    }
+
+    pub fn exe_replaced() -> bool {
+        // The kernel's name for an image whose file is gone, and a file there again.
+        std::env::current_exe().is_ok_and(|exe| exe.to_string_lossy().ends_with(" (deleted)")) && current_exe().is_ok_and(|p| p.is_file())
+    }
+
+    pub fn reexec(exe: &Path, args: &[std::ffi::OsString]) -> std::io::Error {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new(exe).args(args).exec()
     }
 
     pub(super) fn exe_fallback(exe: &Path, pid: u32) -> Option<PathBuf> {
@@ -713,6 +740,14 @@ mod imp {
     pub fn runnable_exe() -> Option<PathBuf> {
         // A running exe cannot be deleted; renamed aside by an upgrade, its path holds the new one.
         current_exe().ok().filter(|p| p.is_file())
+    }
+
+    pub fn exe_replaced() -> bool {
+        false
+    }
+
+    pub fn reexec(_exe: &Path, _args: &[std::ffi::OsString]) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::Unsupported, "a running Workbench cannot be replaced in place on Windows")
     }
 
     pub fn user_processes() -> impl Iterator<Item = ProcEntry> {

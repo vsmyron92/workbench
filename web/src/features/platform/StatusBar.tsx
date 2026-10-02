@@ -1,9 +1,9 @@
-// Status bar widgets: remote-access indicator and the settings gear.
+// Status bar widgets: the remote-access indicator and the update notice.
 
-import { AlertTriangle, MonitorSmartphone } from 'lucide-react'
+import { AlertTriangle, CircleArrowUp, MonitorSmartphone, RotateCw } from 'lucide-react'
 import { openPanel } from '@/shell/actions'
-import { useRemote } from './api'
-import { restartText } from './lib'
+import { useRemote, useUpdate } from './api'
+import { restartText, updatePhaseText } from './lib'
 
 export function openSettings(section?: string) {
   openPanel({ kind: 'settings', id: 'settings', title: 'Settings', params: section ? { section } : {} })
@@ -32,4 +32,34 @@ export function RemoteIndicator() {
       )}
     </>
   )
+}
+
+/** Shown while a newer release waits, an update runs, or an installed one waits for the restart. */
+export function UpdateIndicator() {
+  const { data } = useUpdate()
+  if (!data) return null
+  const open = () => openSettings('updates')
+  const running = data.phase === 'checking' ? null : updatePhaseText(data.phase, data.progress, data.latest?.version)
+  if (running) {
+    return (
+      <button className="wb-status-item" onClick={open} title={running}>
+        <CircleArrowUp size={13} /> Updating…
+      </button>
+    )
+  }
+  if (data.restartPending && data.canRestart) {
+    return (
+      <button className="wb-status-item wb-warning" onClick={open} title={`Restart Workbench to use ${data.installed ?? 'the installed version'}`}>
+        <RotateCw size={13} /> Restart to update
+      </button>
+    )
+  }
+  if (data.available && data.latest) {
+    return (
+      <button className="wb-status-item wb-status-update" onClick={open} title={`Workbench ${data.latest.version} is available (this is ${data.current})`}>
+        <CircleArrowUp size={13} /> Update {data.latest.version}
+      </button>
+    )
+  }
+  return null
 }

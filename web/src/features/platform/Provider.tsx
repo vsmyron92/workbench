@@ -1,5 +1,5 @@
 // Global platform provider: server toasts (`ui.notify`), agent-driven panel
-// opening (`ui.open`), settings refreshes, browser notifications on remote
+// opening (`ui.open`), settings refreshes, the reload after an update, browser notifications on remote
 // devices, the pairing dialog, and the phone-app side of push: the service
 // worker, keeping this device's push subscription in line with the server,
 // presence reports, panels a notification or a manifest shortcut opens, and the
@@ -18,6 +18,7 @@ import { pk, usePushInfo } from './api'
 import { desktopNotifiesHere, panelIdFor } from './lib'
 import { PairDialogHost } from './PairDialog'
 import { listenToWorker, openTarget, registerWorker, startPresence, syncPush, takeLaunch, type ProjectIds } from './push'
+import { watchServerVersion } from './update'
 
 const LEVELS = new Set<ToastLevel>(['info', 'success', 'warning', 'error'])
 
@@ -130,6 +131,9 @@ export function PlatformProvider({ children }: { children?: ReactNode }) {
   })
 
   useEvent<UiOpen>('ui.open', (ev) => handleUiOpen(ev.data ?? {}))
+
+  // A server that came back as another version (an update): reload, or offer to.
+  useEffect(() => watchServerVersion(), [])
 
   useEvent('settings.changed', () => void qc.invalidateQueries({ queryKey: pk.all }))
 

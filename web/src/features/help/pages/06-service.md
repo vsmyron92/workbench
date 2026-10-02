@@ -24,7 +24,25 @@ Use `workbench service status` to see the real unit name. Agent sessions are bro
 
 ## Updating
 
-Download the new release archive, unpack it and run its `install.sh`, which replaces `~/.local/bin/workbench` (a running Workbench keeps using the old file until it restarts). Then restart the service as above. Your configuration and `~/.local/share/workbench` stay as they are.
+A Workbench installed from a release looks for a newer one once a day and shows **Update X.Y.Z** in the status bar. **Settings › Updates** has the release notes and two buttons:
+
+- **Check now** looks at once.
+- **Update and restart** downloads the release, compares its SHA-256 with the release's checksum, replaces the `workbench` program and restarts into it. It asks first and says what the restart stops: agent sessions resume afterwards (with `restore_on_start`), shells start again under their last screen, runs do not. The page reloads by itself when the new version is up.
+
+Nothing is installed without your click, and agents cannot start an update. The version that was replaced stays beside the new one as `workbench.prev`: to go back, rename it over `workbench` and restart.
+
+From a terminal, `workbench update` does the same (`--check` only looks, `--restart` also restarts the running Workbench).
+
+Looking is one request a day to GitHub for the latest release's description, without a token. Turn it off in Settings › Updates, or in `config.toml`:
+
+```toml
+[update]
+check = false
+```
+
+A Workbench you built yourself does not know where its releases are published. Name the GitHub repository to get updates from it: `repo = "owner/name"` under `[update]`.
+
+When Workbench cannot write to the folder it is installed in (a system-wide install), or on Windows, it only tells you about the new version. Install it by hand: download the release archive, unpack it and run its `install.sh`, which replaces `~/.local/bin/workbench` (a running Workbench keeps using the old file until it restarts), then press **Restart now** in Settings › Updates or restart the service as above. Your configuration and `~/.local/share/workbench` stay as they are.
 
 On Windows, run the new archive's `install.ps1`, which works while Workbench runs (it also updates `conpty.dll` and `OpenConsole.exe`), then `workbench service stop` and open Workbench from the Start Menu.
 

@@ -221,6 +221,51 @@
   padding: 0 4px;
   font-size: var(--fs-xs);
 }
+/* Updates: an install's progress, the release notes, the status bar notice. */
+.wb-set-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-top: 12px;
+  border-radius: var(--radius);
+  background: var(--accent-bg);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  font-size: var(--fs-sm);
+}
+.wb-set-progress-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+.wb-set-progress-bar {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s linear;
+}
+.wb-set-notes {
+  padding: 2px 14px 8px;
+  max-height: 420px;
+  overflow: auto;
+}
+.wb-set-notes .wb-prose {
+  font-size: var(--fs);
+  line-height: 1.5;
+}
+.wb-set-accent,
+button.wb-status-item.wb-status-update {
+  color: var(--accent);
+}
+.wb-set-page > .wb-set-note {
+  margin-top: 12px;
+}
+/* A reason from the server can hold a checksum or a path: no word to break at. */
+.wb-set-page > .wb-set-note > .wb-grow,
+.wb-more .wb-set-box {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .wb-set-code {
   display: flex;
   align-items: center;

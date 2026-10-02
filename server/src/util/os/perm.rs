@@ -110,6 +110,13 @@ pub fn owned_by_me(path: &Path) -> io::Result<bool> {
     imp::owned_by_me(path)
 }
 
+/// Whether the current user may create and rename files in the folder `dir` (Unix:
+/// `access(2)` for write and search, so read-only mounts and other users' folders say no).
+/// Windows: whether a file can be created there, tried with a file that is removed again.
+pub fn dir_writable(dir: &Path) -> bool {
+    imp::dir_writable(dir)
+}
+
 /// The current user's uid and gid (a dev container's user is mapped onto them); `None` on
 /// Windows, which has neither.
 pub fn user_ids() -> Option<(u32, u32)> {
@@ -206,6 +213,11 @@ mod imp {
 
     pub fn owned_by_me(path: &Path) -> io::Result<bool> {
         Ok(std::fs::metadata(path)?.uid() == nix::unistd::getuid().as_raw())
+    }
+
+    pub fn dir_writable(dir: &Path) -> bool {
+        use nix::unistd::AccessFlags;
+        dir.is_dir() && nix::unistd::access(dir, AccessFlags::W_OK | AccessFlags::X_OK).is_ok()
     }
 
     pub fn user_ids() -> Option<(u32, u32)> {
@@ -410,6 +422,15 @@ mod imp {
         // SAFETY: valid SIDs; a null token checks this thread's (or this process's) token.
         let admin = unsafe { EqualSid(s.owner, sids.admins.ptr()) != 0 && CheckTokenMembership(null_mut(), sids.admins.ptr(), &mut member) != 0 };
         Ok(admin && member != 0)
+    }
+
+    pub fn dir_writable(dir: &Path) -> bool {
+        let probe = dir.join(format!(".workbench-probe-{}", std::process::id()));
+        let made = open_new(&probe, 0o600, true).is_ok();
+        if made {
+            let _ = std::fs::remove_file(&probe);
+        }
+        made
     }
 
     pub fn user_ids() -> Option<(u32, u32)> {

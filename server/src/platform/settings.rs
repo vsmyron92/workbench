@@ -188,6 +188,9 @@ pub fn check_global(cfg: &GlobalConfig) -> (Vec<String>, Vec<String>) {
             errors.push(format!("push.extra_endpoint_hosts entry {h:?} must be a host name like push.example.com or *.example.com"));
         }
     }
+    if let Err(e) = super::update::Source::from_config(&cfg.update) {
+        errors.push(e);
+    }
     (errors, warnings)
 }
 
@@ -311,7 +314,7 @@ pub async fn apply_config(
 /// Apply a structured change: `patch` maps top-level keys to new values.
 /// Object sections are merged field by field; `secrets` and `extra_roots` are replaced.
 pub fn patched(current: &GlobalConfig, patch: &Map<String, Value>) -> ApiResult<GlobalConfig> {
-    const KEYS: &[&str] = &["server", "projects", "agents", "gitlab", "github", "atlassian", "notify", "push", "extra_roots", "secrets"];
+    const KEYS: &[&str] = &["server", "projects", "agents", "gitlab", "github", "atlassian", "notify", "push", "update", "extra_roots", "secrets"];
     let mut v = serde_json::to_value(current)?;
     let obj = v.as_object_mut().ok_or_else(|| ApiError::internal("config is not an object"))?;
     for (k, val) in patch {
