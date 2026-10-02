@@ -16,9 +16,9 @@ import { IconButton, Loading, showMenu, showMenuAt, type MenuEntry } from '@/ui'
 import { closeTerminal, terminalMenu } from './actions'
 import { AgentsHome } from './AgentsHome'
 import { newShell } from './commands'
-import { colorCss, columnTabs, counts, isRunning, tabAfterClose, terminalPanelId } from './lib/sessions'
+import { colorCss, columnTabs, counts, isRunning, tabAfterClose, tabPlace, terminalPanelId } from './lib/sessions'
 import { ContainerBadge, ProviderBadge, StateDot } from './parts'
-import { cachedTerminals } from './queryAccess'
+import { cachedProjectIds, cachedTerminals } from './queryAccess'
 import { useAgentsUi } from './store'
 import { TerminalPanel } from './TerminalPanel'
 import { showBottomTerminal } from './TerminalToolWindow'
@@ -42,6 +42,26 @@ const currentTabs = () => {
   return columnTabs(cachedTerminals(), pid, ui.columnExtras[pid ?? ''], ui.bottomTerminals[pid ?? ''])
 }
 
+/**
+ * Show a terminal as a tab of the column of the project it belongs to. Another project's
+ * terminal is shown in that project's column (the UI switches to it when `focus`), never
+ * grafted onto the current one, so switching projects never shows a mix. A terminal not
+ * in the list yet is placed under the current project until its `terminal.created`
+ * arrives (`ProjectColumn` moves it then).
+ */
+function showTerminal(id: string, focus: boolean) {
+  const ui = useAgentsUi.getState()
+  const current = useUi.getState().projectId
+  const t = cachedTerminals()?.find((x) => x.id === id)
+  const place = tabPlace(t, current, cachedProjectIds())
+  const key = place.project ?? ''
+  if (!t) requested.set(id, Date.now())
+  if (place.extra) ui.addColumnExtra(key, id)
+  if (!focus) return
+  if (place.project !== current) useUi.getState().setProject(place.project)
+  ui.selectColumnTab(key, id)
+}
+
 const host: ColumnHost = {
   open: (p) => {
     const key = projectKey()
@@ -56,9 +76,7 @@ const host: ColumnHost = {
       if (p.focus) showBottomTerminal(useUi.getState().projectId, id)
       return
     }
-    requested.set(id, Date.now())
-    ui.addColumnExtra(key, id)
-    if (p.focus) ui.selectColumnTab(key, id)
+    showTerminal(id, p.focus)
   },
   close: (panelId) => {
     const id = terminalOf(panelId)
@@ -136,25 +154,41 @@ function ProjectColumn({ projectId }: { projectId: string | null }) {
     return () => window.clearTimeout(timer)
   }, [arriving, qc])
 
-  // Extras that became the project's own open terminals are tabs anyway; ones that are gone are forgotten.
+  // Extras that became the project's own open terminals are tabs anyway; ones that are gone
+  // are forgotten; another project's terminal (asked for before it was listed, or left by an
+  // earlier version) is shown in its own column instead: selected there when it was selected here.
+  const projectIds = projects.data
   useEffect(() => {
-    if (!data) return
+    if (!data || !projectIds) return
     const ui = useAgentsUi.getState()
+    const ids = projectIds.map((p) => p.id)
     for (const id of extras) {
       const t = data.find((x) => x.id === id)
-      const own = !!t && t.open && t.projectId === projectId
       const gone = !t && Date.now() - (requested.get(id) ?? 0) >= ARRIVAL_MS
-      if (own || gone) ui.removeColumnExtra(key, id)
-      if (gone) requested.delete(id)
+      if (gone) {
+        ui.removeColumnExtra(key, id)
+        requested.delete(id)
+        continue
+      }
+      if (!t) continue
+      const place = tabPlace(t, projectId, ids)
+      if (place.project === projectId) {
+        if (!place.extra) ui.removeColumnExtra(key, id)
+        continue
+      }
+      ui.removeColumnExtra(key, id)
+      if (ui.columnTab[key] !== id) continue
+      select(key, null)
+      showTerminal(id, true)
     }
-  }, [data, extras, key, projectId])
+  }, [data, extras, key, projectId, projectIds, select])
 
   const [mounted, setMounted] = useState<string[]>([])
   useEffect(() => {
     if (currentId) setMounted((m) => (m[m.length - 1] === currentId ? m : [...m.filter((x) => x !== currentId), currentId].slice(-MAX_MOUNTED)))
   }, [currentId])
 
-  /** Take a tab away without stopping anything (a view of another project's session, a closed terminal). */
+  /** Take a tab away without stopping anything (a closed terminal's saved screen, a terminal of a project that is gone). */
   const drop = (id: string) => {
     if (useAgentsUi.getState().columnTab[key] === id) select(key, tabAfterClose(tabs, id))
     useAgentsUi.getState().removeColumnExtra(key, id)

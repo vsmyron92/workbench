@@ -136,11 +136,26 @@ export function agentSessions(list: TerminalInfo[] | undefined, projectId: strin
 }
 
 /**
+ * Where a terminal opened on request is shown: the column of the project it belongs to.
+ * Another project's terminal goes to that project's column (the UI switches to it), so
+ * the columns never mix; one whose project is not listed any more, or that belongs to
+ * none, is shown in the current column. `extra`: it is not that project's own open tab
+ * (a closed session's saved screen, a project-less terminal), so it is added to the
+ * column's extras. A terminal not in the list yet (just created, its event on the way)
+ * is an extra of the current column until it arrives.
+ */
+export function tabPlace(t: TerminalInfo | undefined, currentProject: string | null, projectIds: readonly string[]): { project: string | null; extra: boolean } {
+  if (!t) return { project: currentProject, extra: true }
+  const home = t.projectId && projectIds.includes(t.projectId) ? t.projectId : currentProject
+  return { project: home, extra: !(t.open && t.projectId === home) }
+}
+
+/**
  * The tabs of the agents column for a project: its open terminals (agent sessions,
  * shells, runs, commands) in a stable order, pinned first, then the `extras` opened on
- * request (another project's session, a closed one's saved screen) in the order they
- * were opened. Terminals that no longer exist are left out, and so are the `exclude`d
- * ones (the Terminal tool window's shells).
+ * request (a closed one's saved screen, a terminal of a project that is gone) in the
+ * order they were opened. Terminals that no longer exist are left out, and so are the
+ * `exclude`d ones (the Terminal tool window's shells).
  */
 export function columnTabs(list: TerminalInfo[] | undefined, projectId: string | null, extras: string[] = [], exclude: string[] = []): TerminalInfo[] {
   const all = list ?? []

@@ -3,7 +3,7 @@
 
 import type { QueryClient } from '@tanstack/react-query'
 import { qk } from '@/api/queries'
-import type { TerminalInfo } from '@/api/types'
+import type { ProjectSummary, TerminalInfo } from '@/api/types'
 import { upsertTerminal } from './lib/sessions'
 
 let client: QueryClient | null = null
@@ -14,6 +14,11 @@ export function setQueryClient(c: QueryClient | null) {
 
 export function cachedTerminals(): TerminalInfo[] | undefined {
   return client?.getQueryData<TerminalInfo[]>(qk.terminals)
+}
+
+/** The ids of the projects listed (the project switcher's), from the ['projects'] cache. */
+export function cachedProjectIds(): string[] {
+  return (client?.getQueryData<ProjectSummary[]>(qk.projects) ?? []).map((p) => p.id)
 }
 
 /** Put a terminal a request returned into the cache at once (its event follows). */
