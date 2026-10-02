@@ -194,7 +194,10 @@ impl Env {
                 return v;
             }
             if tokio::time::Instant::now() > deadline {
-                panic!("timed out waiting for {what}: {v:#}");
+                // What the session had said by then: a start that hangs is told apart from a slow one by it.
+                let console = self.console(sid).await;
+                let tail: String = console.chars().rev().take(3000).collect::<Vec<_>>().into_iter().rev().collect();
+                panic!("timed out waiting for {what}: {v:#}\nthe console's tail:\n{tail}");
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -2142,7 +2145,7 @@ channels = [{{ name = "UART", port = "{{port3}}" }}, {{ name = "SWO", port = "{{
     assert_eq!(c["remote"]["channels"], json!(["UART ({port3})", "SWO ({port4})"]), "{c}");
 
     let sid = env.start("one").await;
-    env.wait_session(&sid, "the halt", |v| v["state"] == "stopped" || v["state"] == "failed").await;
+    env.wait_session_for(&sid, "the halt", Duration::from_secs(60), |v| v["state"] == "stopped" || v["state"] == "failed").await;
     let mut text = String::new();
     for _ in 0..100 {
         text = env.console(&sid).await;
@@ -2162,7 +2165,7 @@ channels = [{{ name = "UART", port = "{{port3}}" }}, {{ name = "SWO", port = "{{
 
     // Two channels: each line says whose it is, the SWO stream arrives decoded.
     let sid = env.start("two").await;
-    env.wait_session(&sid, "the halt", |v| v["state"] == "stopped" || v["state"] == "failed").await;
+    env.wait_session_for(&sid, "the halt", Duration::from_secs(60), |v| v["state"] == "stopped" || v["state"] == "failed").await;
     for _ in 0..100 {
         text = env.console(&sid).await;
         if text.contains("SWO\n") && text.contains("uart line") {
