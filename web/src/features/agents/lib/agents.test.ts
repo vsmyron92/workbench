@@ -8,6 +8,7 @@ import {
   bottomTabs,
   columnTabs,
   counts,
+  tabPlace,
   formatCost,
   lingering,
   needsAttention,
@@ -164,8 +165,25 @@ describe('agents column tabs', () => {
   })
 
   it('adds the terminals opened on request after them, once each, and only while they exist', () => {
-    // A closed session's saved screen, another project's session, one that is gone, and one that is a tab anyway.
+    // A closed session's saved screen, a terminal of a project that is gone, one that is gone, and one that is a tab anyway.
     expect(ids(columnTabs(list, 'shop', ['other', 'closed', 'gone', 'a2', 'other']))).toEqual(['pin', 'sh', 'a2', 'run', 'other', 'closed'])
+  })
+
+  it("shows a terminal opened on request in its own project's column", () => {
+    const projects = ['shop', 'docs']
+    const t = (id: string) => list.find((x) => x.id === id)
+    // The project's own open terminal: a tab already. A closed one: an extra of its project.
+    expect(tabPlace(t('a2'), 'shop', projects)).toEqual({ project: 'shop', extra: false })
+    expect(tabPlace(t('closed'), 'shop', projects)).toEqual({ project: 'shop', extra: true })
+    // Another project's: that project's column, not the current one.
+    expect(tabPlace(t('other'), 'shop', projects)).toEqual({ project: 'docs', extra: false })
+    expect(tabPlace({ ...t('other')!, open: false }, 'shop', projects)).toEqual({ project: 'docs', extra: true })
+    // Its project is not listed any more, or it belongs to none: an extra of the current column.
+    expect(tabPlace(t('other'), 'shop', ['shop'])).toEqual({ project: 'shop', extra: true })
+    expect(tabPlace(t('free'), 'shop', projects)).toEqual({ project: 'shop', extra: true })
+    expect(tabPlace(t('free'), null, projects)).toEqual({ project: null, extra: false })
+    // Not listed yet (just created): the current column, until it arrives.
+    expect(tabPlace(undefined, 'shop', projects)).toEqual({ project: 'shop', extra: true })
   })
 
   it("leaves the Terminal tool window's shells to it", () => {

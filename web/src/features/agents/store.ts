@@ -19,7 +19,8 @@ interface AgentsUi {
   columnTab: Record<string, string | null>
   /**
    * Terminals shown as column tabs on request although they are not the project's open
-   * ones (another project's session, a closed one's saved screen), per project.
+   * ones (a closed one's saved screen, a terminal of a project that is gone), per
+   * project. Another project's terminal is never one: it is shown in its own column.
    */
   columnExtras: Record<string, string[]>
   /**

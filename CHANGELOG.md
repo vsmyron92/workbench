@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3 - 2026-10-02
+
+- **Agents column:** a session opened from an attention toast, the history, a Workspace card
+  or a notification is shown in the column of its own project: Workbench switches to that
+  project instead of adding the tab to the project on screen, so the columns no longer mix
+  sessions of different projects. Tabs an earlier version added that way are moved on load.
+
 ## 0.5.2 - 2026-10-01
 
 - **Terminal tool window:** the **Terminal** button is back at the foot of the left stripe,
