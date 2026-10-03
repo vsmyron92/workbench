@@ -763,6 +763,15 @@ impl Terminals {
                 }
             }
         }
+        // Aider reads a missing `--env-file` as nothing and runs on the keys of the default
+        // account (the home and repository `.env`): refuse, so the wrong login never goes unseen.
+        if container.is_none() && provider.kind.home_is_file() {
+            if let Some(f) = provider.kind.home_var().and_then(|v| env_value(&env, v)).filter(|f| !f.is_empty()) {
+                if !Path::new(&f).is_file() {
+                    return Err(ApiError::conflict(format!("{}: its keys file {f} does not exist; create it (KEY=value lines), or Aider would run on another account's keys", provider.label)));
+                }
+            }
+        }
         Ok(Prepared { cwd, launch, project, provider, command, env, dir, token, add_dirs, container })
     }
 

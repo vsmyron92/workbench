@@ -314,6 +314,13 @@
   flex: 1;
   min-width: 0;
 }
+.wb-ag-providers-group {
+  display: contents;
+}
+.wb-ag-provider.add {
+  border-style: dashed;
+  color: var(--fg-subtle);
+}
 .wb-ag-provider {
   display: inline-flex;
   align-items: center;

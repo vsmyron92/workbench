@@ -90,17 +90,23 @@ answered from Workbench and Review Changes are Claude Code's.
 
 ## More than one account
 
-A second subscription of Claude Code, Codex or Kimi Code is an **account**: the same CLI with
-its own login, history and settings in a folder of its own. Add one in **Settings → Agents →
-Accounts** (a name, a label and a folder such as `~/.claude-work`). It appears in the new
-session picker beside the CLI, and its sessions are labelled with it. The first session
+A second subscription of Claude Code, Codex, Kimi Code or Gemini CLI is an **account**: the
+same CLI with its own login, history and settings in a folder of its own. Aider has no login,
+so its account is its own `.env` file of API keys. Manage them in **Settings → Agents →
+Accounts** (or with the **Account** button beside the CLIs in the new session composer): a
+name, a label and the folder, such as `~/.claude-work`. An account appears in the picker
+beside the CLI as "Claude · Work", and its sessions carry that name. The first session
 started with it shows the CLI's own sign-in, because the folder holds no login yet.
 
 Behind the form this is `[agents.providers.claude-work]` with `kind = "claude"` and
-`env = { CLAUDE_CONFIG_DIR = "~/.claude-work" }` (`CODEX_HOME` for Codex, `KIMI_CODE_HOME`
-for Kimi Code); model, effort and extra arguments can be set per account there. Conversation
-history, Remote Control links and the live sessions listed on Home follow each session's
-account. Workbench never reads or copies a login: the folder is the CLI's.
+`env = { CLAUDE_CONFIG_DIR = "~/.claude-work" }`. The variable is `CODEX_HOME` for Codex,
+`KIMI_CODE_HOME` for Kimi Code, `GEMINI_CLI_HOME` for Gemini CLI (the folder that holds its
+`.gemini`) and `AIDER_ENV_FILE` for Aider. Model, effort and extra arguments can be set per
+account in `config.toml`, which stays the place to edit by hand (Settings → Raw config).
+Conversation history, Remote Control links and the live sessions listed on Home follow each
+session's account. Workbench never reads or copies a login or a key. An Aider account's file
+must exist before a session starts (Aider would otherwise run on the default keys without
+saying so); Aider keeps its chat history in each repository, shared by all its accounts.
 
 ## On Windows
 

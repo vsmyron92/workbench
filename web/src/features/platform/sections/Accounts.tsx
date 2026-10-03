@@ -9,7 +9,7 @@ import type { ProviderSettings } from '../types'
 
 type Providers = Record<string, ProviderSettings>
 
-/** The accounts of `providers`: entries of a kind that keeps its login in a folder, minus the built-in presets. */
+/** The accounts of `providers`: entries of a CLI that can run under more than one login, minus the built-in presets. */
 function accountRows(providers: Providers) {
   return Object.entries(providers)
     .filter(([id, c]) => accountKind(c.kind) && !ACCOUNT_KINDS.some((k) => k.kind === id))
@@ -44,7 +44,7 @@ function AccountEditor({
   const [busy, setBusy] = useState(false)
 
   const effectiveId = idTouched ? id : suggestAccountId(kind, label)
-  const effectiveHome = homeTouched ? home : effectiveId ? `${k.defaultHome}-${effectiveId.replace(`${kind}-`, '')}` : ''
+  const effectiveHome = homeTouched ? home : effectiveId ? k.suggest(effectiveId.replace(`${kind}-`, '')) : ''
   const others = rows.filter((r) => r.id !== editId && r.kind.kind === kind).map((r) => ({ id: r.id, home: r.home }))
   const idError = editing ? null : accountIdError(effectiveId, rows.map((r) => r.id))
   const homeError = accountHomeError(kind, effectiveHome, others)
@@ -85,7 +85,9 @@ function AccountEditor({
       }
     >
       <div className="wb-small wb-muted">
-        Another login of the same CLI, for a second subscription. Its sessions, history and settings live in their own folder, next to the default one.
+        {k.file
+          ? 'Another set of API keys for Aider, such as a work and a personal one. Aider has no login: the keys live in a .env file of your own.'
+          : 'Another login of the same CLI, for a second subscription. Its sessions, history and settings live in their own folder, next to the default one.'}
       </div>
       <label className="wb-small wb-muted">CLI</label>
       <Select value={kind} disabled={editing} onChange={(e) => setKind(e.target.value as AccountKind)}>
@@ -109,7 +111,7 @@ function AccountEditor({
         }}
         placeholder={`${kind}-work`}
       />
-      <label className="wb-small wb-muted">Folder</label>
+      <label className="wb-small wb-muted">{k.file ? 'Keys file' : 'Folder'}</label>
       <Input
         className="mono"
         value={effectiveHome}
@@ -117,10 +119,15 @@ function AccountEditor({
           setHome(e.target.value)
           setHomeTouched(true)
         }}
-        placeholder={`${k.defaultHome}-work`}
+        placeholder={k.suggest('work')}
       />
       <div className="wb-small wb-muted">
-        Becomes <code>{k.homeVar}</code> for this account’s sessions. The CLI creates it and asks you to sign in the first time it runs there.
+        Becomes <code>{k.homeVar}</code> for this account’s sessions.{' '}
+        {k.file
+          ? 'Create the file yourself, with KEY=value lines such as OPENAI_API_KEY, and keep it private: Workbench passes only its path and never reads it. Sessions refuse to start while it is missing. Aider keeps its chat history in each repository, shared by all accounts.'
+          : kind === 'gemini'
+            ? 'The folder that holds the .gemini folder: Gemini CLI creates it there and asks you to sign in the first time it runs.'
+            : 'The CLI creates it and asks you to sign in the first time it runs there.'}
       </div>
       {editing && (
         <Checkbox checked={enabled} onChange={setEnabled}>
@@ -167,7 +174,7 @@ export function AccountsGroup() {
     <>
       <Group
         title="Accounts"
-        description="Run Claude Code, Codex or Kimi Code under more than one login, such as a work and a personal subscription. Each account keeps its login, history and settings in its own folder, and appears next to the CLI when you start a session."
+        description="Run Claude Code, Codex, Kimi Code, Gemini CLI or Aider under more than one login, such as a work and a personal subscription. Each account keeps its login, history and settings in its own folder (Aider: its own keys file), and appears next to the CLI when you start a session."
         actions={
           <Button icon={Plus} onClick={() => setEditor({ id: null, config: null })}>
             Add account
@@ -178,7 +185,7 @@ export function AccountsGroup() {
         {rows.length === 0 ? (
           <div className="wb-set-box">
             <EmptyState title="Only the default accounts">
-              Sessions use whichever login each CLI has outside Workbench (<code>~/.claude</code>, <code>~/.codex</code>…).
+              Sessions use whichever login each CLI has outside Workbench (<code>~/.claude</code>, <code>~/.codex</code>, <code>~/.gemini</code>…).
             </EmptyState>
           </div>
         ) : (
@@ -188,7 +195,7 @@ export function AccountsGroup() {
                 <tr>
                   <th>Account</th>
                   <th>CLI</th>
-                  <th>Folder</th>
+                  <th>Folder / keys file</th>
                   <th />
                 </tr>
               </thead>
@@ -227,7 +234,7 @@ export function AccountsGroup() {
       </Group>
       <div style={{ marginTop: 12 }}>
         <Note>
-          To sign an account in, start a session with it: its CLI shows its own login the first time it runs in the new folder. Accounts are
+          To sign an account in, start a session with it: its CLI shows its own login the first time it runs in the new folder (Aider reads the keys in its file). Accounts are
           saved as <code>[agents.providers.&lt;name&gt;]</code> in <code>config.toml</code>, where model, effort and extra arguments can be set per account.
         </Note>
       </div>

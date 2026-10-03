@@ -45,6 +45,8 @@ export interface ProviderInfo {
   /** The variable that moves the CLI's files (login included) and its value for this provider; `home` is null for the CLI's default account. */
   homeVar?: string | null
   home?: string | null
+  /** Aider's `home` is its keys file, not a folder. */
+  homeIsFile?: boolean
   /** hooks (Claude), rollout (Codex), activity (Kimi, custom: an estimate from output). */
   stateSource: 'hooks' | 'rollout' | 'activity'
   initialPrompt: 'argv' | 'paste'

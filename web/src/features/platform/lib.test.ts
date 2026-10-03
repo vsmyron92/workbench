@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   accountHomeError,
   accountIdError,
+  accountKind,
   desktopNotifiesHere,
   formatCountdown,
   formatMs,
@@ -259,5 +260,19 @@ describe('accounts', () => {
     expect(accountHomeError('claude', '~/.claude/', others)).toMatch(/default account/)
     expect(accountHomeError('codex', '~/.claude', [])).toBeNull()
     expect(accountHomeError('codex', '~/${secret:x}', [])).toMatch(/plain path/)
+  })
+
+  it('knows Gemini’s home holds .gemini and Aider’s is a keys file', () => {
+    expect(accountHomeError('gemini', '~/.gemini-work', [])).toBeNull()
+    expect(accountHomeError('gemini', '~/', [])).toMatch(/default account/)
+    expect(accountHomeError('aider', '~/.aider-work.env', [])).toBeNull()
+    expect(accountHomeError('aider', '~/.aider-work.env', [{ id: 'aider-a', home: '~/.aider-work.env' }])).toBe('Already the keys file of “aider-a”')
+    expect(accountHomeError('aider', '~/keys/', [])).toMatch(/file/)
+    expect(accountHomeError('aider', '', [])).toMatch(/\.env file/)
+    expect(accountIdError('gemini', [])).toMatch(/built-in/)
+    expect(accountIdError('aider', [])).toMatch(/built-in/)
+    expect(accountKind('aider')?.suggest('work')).toBe('~/.aider-work.env')
+    expect(accountKind('gemini')?.homeVar).toBe('GEMINI_CLI_HOME')
+    expect(accountKind('custom')).toBeUndefined()
   })
 })

@@ -368,6 +368,29 @@ async fn gemini_sessions_start_under_their_id_ask_on_screen_and_resume() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_aider_account_needs_its_keys_file_and_never_falls_back_to_other_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "aider");
+    let log = dir.path().join("aider.log");
+    let keys = dir.path().join("work.env");
+    let work = crate::config::global::ProviderConfig {
+        kind: Some("aider".into()),
+        command: Some(fake.display().to_string()),
+        env: [("AIDER_ENV_FILE".to_string(), keys.display().to_string()), ("FAKE_AIDER_LOG".to_string(), log.display().to_string())].into(),
+        ..Default::default()
+    };
+    let (state, pid) = provider_state(dir.path(), vec![("aider-work", work)]).await;
+    let ask = || super::agent::AgentRequest { project_id: pid.clone(), provider: Some("aider-work".into()), ..Default::default() };
+    // Aider would read a missing file as nothing and run on the default account's keys.
+    let err = state.terminals.spawn_agent(&state, ask()).await.err().expect("a missing keys file is refused");
+    assert!(err.to_string().contains("keys file") && err.to_string().contains("work.env"), "{err}");
+    std::fs::write(&keys, "OPENAI_API_KEY=x\n").unwrap();
+    let a = state.terminals.spawn_agent(&state, ask()).await.unwrap();
+    assert_eq!(a.agent.as_ref().and_then(|x| x.provider_id.as_deref()), Some("aider-work"));
+    state.terminals.kill(&a.id).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn aider_sessions_confirm_on_screen_and_restore_their_chat() {
     let dir = tempfile::tempdir().unwrap();
     let fake = fake_cli(dir.path(), "aider");

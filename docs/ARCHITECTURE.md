@@ -789,12 +789,14 @@ always for custom CLIs.
   button turns into a warning).
 - **Accounts.** A second login of a CLI is a provider of the same `kind` whose `env` sets the
   kind's home variable (`ProviderKind::home_var`: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
-  `KIMI_CODE_HOME`; `Provider::home`). The home decides everything the CLI keeps: Claude's
+  `KIMI_CODE_HOME`, `GEMINI_CLI_HOME` (the folder holding `.gemini`), `AIDER_ENV_FILE` (a keys
+  file, `home_is_file`: `prepare_launch` refuses a session while it is missing, since Aider
+  would run on the default keys); `Provider::home`). The home decides everything the CLI keeps: Claude's
   transcripts (`transcript::claude_dir`), Codex's rollouts, Kimi's index, so history,
   transcript tailing and the Remote Control bridge file (`check_bridge`) read the session's own
   home, and `terminals.external` scans the home of every enabled Claude provider (`claude_dirs`).
-  Workbench never reads credentials. `GET /api/agents/defaults` gives each provider `homeVar`
-  and `home`. Settings → Agents → Accounts (`platform/sections/Accounts.tsx`) edits the
+  Workbench never reads credentials. `GET /api/agents/defaults` gives each provider `homeVar`,
+  `homeIsFile` and `home`. Settings → Agents → Accounts (`platform/sections/Accounts.tsx`) edits the
   `agents.providers` map through `PATCH /api/settings` (`agents` merges field by field, so
   the map is sent whole); entries of other kinds in it are kept as they are.
 - **REST.** `POST /api/agents` and `/api/agents/ask` take `provider`; `ask` without one uses

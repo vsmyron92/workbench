@@ -2,10 +2,10 @@
 
 ## Unreleased
 
-- **Several accounts of one agent CLI.** Run Claude Code, Codex or Kimi Code under more than
-  one login, such as a work and a personal subscription. **Settings → Agents → Accounts** adds
+- **Several accounts of one agent CLI.** Run Claude Code, Codex, Kimi Code, Gemini CLI or
+  Aider under more than one login (Aider: more than one `.env` of API keys), such as a work and a personal subscription. **Settings → Agents → Accounts** adds
   an account (a name, a label and a folder of its own); it appears in the new session picker
-  beside the CLI. Each account's history, Remote Control links and live sessions follow its
+  beside the CLI, and the composer has an **Account** button for it. Each account's history, Remote Control links and live sessions follow its
   own folder, and Workbench never reads the logins. Accounts were already possible by hand
   in `config.toml`; Remote Control links and the live-session list of an extra Claude account
   were only looked up in the default `~/.claude` before.

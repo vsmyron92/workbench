@@ -2,10 +2,10 @@
 // permission mode, Remote Control (Claude), and the project's starter prompts as chips.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CircleQuestionMark, Container, FileCode, Play, Sparkles, TriangleAlert } from 'lucide-react'
+import { CircleQuestionMark, Container, FileCode, Play, Plus, Sparkles, TriangleAlert } from 'lucide-react'
 import { useProjects } from '@/api/queries'
 import type { TerminalInfo } from '@/api/types'
-import { confirmDialog, openPanel } from '@/shell/actions'
+import { confirmDialog, openPanel, openSettings } from '@/shell/actions'
 import { useUi } from '@/state/store'
 import { Button, Checkbox, ErrorBox, IconButton, Input, Kbd, Select, TextArea } from '@/ui'
 import { startAgent, useAgentDefaults, useContainerAgents, type AgentDefaults, type ProviderInfo } from './api'
@@ -35,21 +35,31 @@ function openRawConfig() {
 /** The provider chips. Unavailable ones stay selectable to show how to install them. */
 function ProviderPicker({ providers, value, onChange }: { providers: ProviderInfo[]; value: string | null; onChange: (id: string) => void }) {
   return (
-    <div className="wb-ag-providers" role="radiogroup" aria-label="Agent">
-      {providers.map((p) => (
-        <button
-          key={p.id}
-          role="radio"
-          aria-checked={p.id === value}
-          className={['wb-ag-provider', p.id === value && 'active', !p.available && 'unavailable'].filter(Boolean).join(' ')}
-          title={p.available ? `${displayLabel(p)} (${p.command})` : (p.reason ?? `${displayLabel(p)} is not available`)}
-          onClick={() => onChange(p.id)}
-        >
-          <ProviderIcon kind={p.kind} />
-          <span>{displayLabel(p)}</span>
-          {!p.available && <span className="wb-ag-provider-note">not installed</span>}
-        </button>
-      ))}
+    <div className="wb-ag-providers">
+      <div className="wb-ag-providers-group" role="radiogroup" aria-label="Agent">
+        {providers.map((p) => (
+          <button
+            key={p.id}
+            role="radio"
+            aria-checked={p.id === value}
+            className={['wb-ag-provider', p.id === value && 'active', !p.available && 'unavailable'].filter(Boolean).join(' ')}
+            title={p.available ? `${displayLabel(p)} (${p.command})` : (p.reason ?? `${displayLabel(p)} is not available`)}
+            onClick={() => onChange(p.id)}
+          >
+            <ProviderIcon kind={p.kind} />
+            <span>{displayLabel(p)}</span>
+            {!p.available && <span className="wb-ag-provider-note">not installed</span>}
+          </button>
+        ))}
+      </div>
+      <button
+        className="wb-ag-provider add"
+        title="Add or manage accounts: more than one login of Claude Code, Codex, Kimi Code, Gemini CLI or Aider"
+        onClick={() => openSettings('agents')}
+      >
+        <Plus size={12} />
+        <span>Account</span>
+      </button>
     </div>
   )
 }
@@ -71,7 +81,7 @@ function ProvidersHelp({ d }: { d: AgentDefaults }) {
       <div>
         Workbench runs agent CLIs in its terminals. Claude Code, Codex, Kimi Code, Gemini CLI and Aider are built in; any other CLI can be added. They are
         configured in <code>config.toml</code> under <code>[agents.providers.&lt;name&gt;]</code> (the <code>[agents]</code> section keeps the Claude Code
-        defaults).
+        defaults). A second login of a CLI (a work and a personal subscription) is an account: add it with <b>Account</b> or in Settings → Agents.
       </div>
       {d.answerPermissions && (
         <div className="wb-muted">

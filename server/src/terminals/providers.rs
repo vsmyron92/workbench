@@ -107,15 +107,24 @@ impl ProviderKind {
         }
     }
 
-    /// The environment variable that moves the CLI's files, login included, to another
-    /// folder: one folder per account. `None`: the CLI has no such variable we know of.
+    /// The environment variable that tells the CLI where its login lives: one folder (Gemini:
+    /// the folder that holds `.gemini`) per account, or for Aider, which has no login, the
+    /// `.env` file with the API keys (`home_is_file`). `None`: no variable we know of.
     pub fn home_var(self) -> Option<&'static str> {
         match self {
             Self::Claude => Some("CLAUDE_CONFIG_DIR"),
             Self::Codex => Some("CODEX_HOME"),
             Self::Kimi => Some("KIMI_CODE_HOME"),
-            Self::Gemini | Self::Aider | Self::Custom => None,
+            Self::Gemini => Some("GEMINI_CLI_HOME"),
+            // Read last and overriding the home and repository `.env` files (`--env-file`).
+            Self::Aider => Some("AIDER_ENV_FILE"),
+            Self::Custom => None,
         }
+    }
+
+    /// Whether `home_var` names a file the CLI would silently do without when it is missing.
+    pub fn home_is_file(self) -> bool {
+        self == Self::Aider
     }
 
     /// Whether the kind resumes a conversation by id.
@@ -829,6 +838,7 @@ pub fn describe(p: &Provider, available: Option<&PathBuf>) -> Value {
         "installHint": (!p.install_hint.is_empty()).then(|| p.install_hint.clone()),
         // The account's folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`…); absent: the CLI's default account.
         "homeVar": k.home_var(),
+        "homeIsFile": k.home_is_file(),
         "home": p.home(),
         "stateSource": k.state_source(),
         "initialPrompt": if k.prompt_in_argv() { "argv" } else { "paste" },
@@ -952,6 +962,15 @@ mod tests {
         let info = describe(get("claude-work"), None);
         assert_eq!((info["homeVar"].as_str(), info["home"].as_str()), (Some("CLAUDE_CONFIG_DIR"), Some("~/.claude-work")));
         assert!(describe(get("opencode"), None)["homeVar"].is_null());
+        // Gemini's home holds `.gemini`; Aider's is its keys file.
+        let more = cfg("[agents.providers.gemini-work]\nkind = \"gemini\"\nenv = { GEMINI_CLI_HOME = \"~/.gemini-work\" }\n[agents.providers.aider-work]\nkind = \"aider\"\nenv = { AIDER_ENV_FILE = \"~/.aider-work.env\" }\n");
+        let (list, warnings) = super::list(&more);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let get = |id: &str| list.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(get("gemini-work").home(), Some("~/.gemini-work"));
+        assert_eq!((get("aider-work").home(), get("aider-work").kind.home_is_file()), (Some("~/.aider-work.env"), true));
+        assert_eq!(describe(get("aider-work"), None)["homeIsFile"], true);
+        assert_eq!(get("gemini").home(), None);
     }
 
     fn preset_of(kind: ProviderKind, id: &str) -> &'static PermissionPreset {

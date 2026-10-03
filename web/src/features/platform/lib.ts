@@ -292,19 +292,28 @@ export function desktopNotifiesHere(hostname: string, desktopUnsupported: string
   return isLoopbackHost(hostname) && !desktopUnsupported
 }
 
-/** The CLIs that keep one login per folder, with the variable that moves the folder. */
+/**
+ * The CLIs that can run under more than one login, with the variable that selects it.
+ * Most keep a login in a folder of their own; Gemini CLI's variable names the folder that
+ * holds its `.gemini`, and Aider has no login at all, only API keys in a `.env` file.
+ */
 export const ACCOUNT_KINDS = [
-  { kind: 'claude', label: 'Claude Code', homeVar: 'CLAUDE_CONFIG_DIR', defaultHome: '~/.claude' },
-  { kind: 'codex', label: 'Codex', homeVar: 'CODEX_HOME', defaultHome: '~/.codex' },
-  { kind: 'kimi', label: 'Kimi Code', homeVar: 'KIMI_CODE_HOME', defaultHome: '~/.kimi' },
+  { kind: 'claude', label: 'Claude Code', homeVar: 'CLAUDE_CONFIG_DIR', file: false, defaultHome: '~/.claude', suggest: (n: string) => `~/.claude-${n}` },
+  { kind: 'codex', label: 'Codex', homeVar: 'CODEX_HOME', file: false, defaultHome: '~/.codex', suggest: (n: string) => `~/.codex-${n}` },
+  { kind: 'kimi', label: 'Kimi Code', homeVar: 'KIMI_CODE_HOME', file: false, defaultHome: '~/.kimi', suggest: (n: string) => `~/.kimi-${n}` },
+  { kind: 'gemini', label: 'Gemini CLI', homeVar: 'GEMINI_CLI_HOME', file: false, defaultHome: '~', suggest: (n: string) => `~/.gemini-${n}` },
+  { kind: 'aider', label: 'Aider', homeVar: 'AIDER_ENV_FILE', file: true, defaultHome: null, suggest: (n: string) => `~/.aider-${n}.env` },
 ] as const
 
 export type AccountKind = (typeof ACCOUNT_KINDS)[number]['kind']
 
 /** The names `[agents.providers]` gives to the built-in CLIs: an account cannot take one. */
-const PRESET_IDS = ['claude', 'codex', 'kimi', 'gemini', 'aider']
+const PRESET_IDS = ACCOUNT_KINDS.map((k) => k.kind as string)
 
 export const accountKind = (kind: string | null | undefined) => ACCOUNT_KINDS.find((k) => k.kind === kind)
+
+/** What the account's location is called: a folder, or Aider's keys file. */
+export const homeNoun = (kind: AccountKind): string => (accountKind(kind)!.file ? 'keys file' : 'folder')
 
 /** `claude` + "Work" → `claude-work`: a provider name (lowercase letters, digits, - and _). */
 export function suggestAccountId(kind: AccountKind, label: string): string {
@@ -327,17 +336,19 @@ export function accountIdError(id: string, existing: string[]): string | null {
 const sameFolder = (a: string, b: string) => a.trim().replace(/[\\/]+$/, '') === b.trim().replace(/[\\/]+$/, '')
 
 /**
- * Why `home` cannot be the folder of an account of `kind` (`null`: it can). Two accounts in
- * one folder are one login, and the default folder is the account the CLI uses outside
- * Workbench.
+ * Why `home` cannot be the folder (Aider: the keys file) of an account of `kind` (`null`: it
+ * can). Two accounts in one place are one login, and the default place is the account the CLI
+ * uses outside Workbench.
  */
 export function accountHomeError(kind: AccountKind, home: string, others: { id: string; home: string }[]): string | null {
+  const k = accountKind(kind)!
+  const noun = homeNoun(kind)
   const h = home.trim()
-  if (!h) return 'Enter the folder that holds this account’s login'
+  if (!h) return k.file ? 'Enter the .env file that holds this account’s API keys' : 'Enter the folder that holds this account’s login'
   if (!/^(~[\\/]|[\\/]|[A-Za-z]:[\\/])/.test(h)) return 'Use an absolute path, or one starting with ~/'
   if (h.includes('${')) return 'A plain path: no ${…} references'
-  const def = accountKind(kind)!.defaultHome
-  if (sameFolder(h, def)) return `${def} is the default account: it is already listed as “${accountKind(kind)!.label}”`
+  if (k.file && /[\\/]$/.test(h)) return 'A file, not a folder'
+  if (k.defaultHome !== null && sameFolder(h, k.defaultHome)) return `${k.defaultHome} is the default account: it is already listed as “${k.label}”`
   const clash = others.find((o) => sameFolder(o.home, h))
-  return clash ? `Already the folder of “${clash.id}”` : null
+  return clash ? `Already the ${noun} of “${clash.id}”` : null
 }
