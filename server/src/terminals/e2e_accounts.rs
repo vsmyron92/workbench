@@ -611,6 +611,7 @@ async fn an_account_is_signed_in_from_a_terminal_and_the_status_follows() {
     })
     .await;
     let t = &state.terminals;
+    let mut events = state.events.subscribe();
     let (cookie, key) = sign_in(&state, addr).await;
     let http = reqwest::Client::new();
     let origin = format!("http://{addr}");
@@ -663,6 +664,15 @@ async fn an_account_is_signed_in_from_a_terminal_and_the_status_follows() {
     t.send_text(&id, "code-123", true).await.unwrap();
     wait_long("the login to end", 10, || t.info(&id).is_some_and(|i| i.status == super::TerminalStatus::Exited)).await;
     assert_eq!(t.info(&id).unwrap().exit.and_then(|e| e.code), Some(0));
+    // The page asks the CLI again when this event arrives: it must say whose sign-in ended.
+    let mut ended = None;
+    while let Ok(ev) = events.try_recv() {
+        if ev.kind == "terminal.exited" && ev.data["id"] == id.as_str() {
+            ended = Some(ev.data.clone());
+        }
+    }
+    let ended = ended.expect("terminal.exited for the sign-in");
+    assert_eq!((ended["meta"]["signIn"].clone(), ended["meta"]["provider"].clone()), (json!(true), json!("claude-work")));
     let s: Value = get("/api/agents/signin?refresh=1").await;
     assert_eq!(s["accounts"]["claude-work"]["state"], "signedIn");
     assert_eq!(s["accounts"]["claude-work"]["method"], "Claude subscription");

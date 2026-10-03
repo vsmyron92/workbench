@@ -619,11 +619,6 @@ export function AccountsGroup({ onGoto }: { onGoto: (section: string) => void })
                     <div className="wb-grow">
                       <span className="wb-acct-name">{name}</span>{' '}
                       {r.builtIn && <Badge>built in</Badge>} {l && <Badge tone="accent">local</Badge>} {ap && <Badge tone="accent">API</Badge>} {r.config.enabled === false && <Badge>hidden</Badge>}{' '}
-                      {loginAccount && siText && (
-                        <Badge tone={si?.state === 'signedIn' ? 'success' : 'warning'} title="As the CLI itself reports it. Workbench reads no login.">
-                          {siText}
-                        </Badge>
-                      )}{' '}
                       <span className="mono wb-subtle wb-small">{r.id}</span>
                     </div>
                     {loginAccount && (
@@ -654,6 +649,13 @@ export function AccountsGroup({ onGoto }: { onGoto: (section: string) => void })
                       </>
                     )}
                   </div>
+                  {loginAccount && siText && (
+                    <div className="wb-acct-line">
+                      <Badge tone={si?.state === 'signedIn' ? 'success' : 'warning'} title="As the CLI itself reports it. Workbench reads no login.">
+                        {siText}
+                      </Badge>
+                    </div>
+                  )}
                   {!l && !ap && <UsageCell usage={usageOf(r.id)} />}
                   {ap && <UsageCell usage={usageOf(r.id)} none="Billed to the key: no subscription limits. Running out of credit moves on." />}
                   {r.config.fallback?.length ? (

@@ -835,7 +835,15 @@ always for custom CLIs.
   `state`, a *fixed* word for `method` (`Claude subscription`, `API key`, `Access token`, `Cloud provider`,
   `ChatGPT account`; anything else is dropped) and a `plan` that is a short word (`valid_plan`) leave the
   parsers: the CLI's text and the email it prints do not reach the browser (unit-tested against a status
-  containing both). A failing, slow or unexpected CLI is `unknown`, never `signedOut`.
+  containing both). A failing, slow or unexpected CLI is `unknown`, never `signedOut`. **Verified:** unit tests
+  of the parsers, the probe (a fake `claude` that reports from the account's folder, a failing exit code still
+  carrying the answer) and the cache; an e2e test through the real PTY (status of three kinds of account, a
+  login that makes the folder (0700), runs with the account's `CLAUDE_CONFIG_DIR` and ends with `terminal.exited`
+  carrying `meta.signIn`, a restart that signs in the same account, the refusals, agent tokens); in headless
+  Chrome on a scratch instance, Settings → Agents → Accounts going from "Signed out" to "Signed in" when the login
+  in the terminal tab ended, and the real `claude auth login` printing its link and paste prompt in a PTY.
+  **Not verified:** the Codex, Gemini and Kimi commands (only Claude Code is installed where this was built; the
+  Codex parser reads the messages as documented), and a login against a real claude.ai or ChatGPT account.
 - **Hosted APIs** (`[agents.providers.<name>.api] service, url, key, context`; `model` names the model).
   `providers::api_setup` maps a service to what each CLI needs (`ProviderKind::api_services`): Claude Code
   needs the Anthropic Messages API (`deepseek` `https://api.deepseek.com/anthropic`, `openrouter`

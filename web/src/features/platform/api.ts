@@ -59,9 +59,9 @@ export function setAccountLimit(provider: string, until: number | null) {
  */
 export function useSignIns() {
   const qc = useQueryClient()
-  useEvent<TerminalInfo>('terminal.updated', (ev) => {
-    const t = ev.data
-    if (t?.meta?.signIn === true && t.status === 'exited') void refreshSignIns(qc)
+  // `terminal.exited` carries the terminal's record when its process ends (not `terminal.updated`).
+  useEvent<TerminalInfo>('terminal.exited', (ev) => {
+    if (ev.data?.meta?.signIn === true) void refreshSignIns(qc)
   })
   return useQuery({ queryKey: pk.signin, queryFn: () => api.get<SignInInfo>('/api/agents/signin'), staleTime: 20_000, refetchOnWindowFocus: true })
 }
