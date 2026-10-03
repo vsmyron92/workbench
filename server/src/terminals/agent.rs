@@ -2309,8 +2309,8 @@ impl Terminals {
             }
             (pids, sessions)
         };
-        let dir = transcript::claude_dir(None);
-        let mut list = tokio::task::spawn_blocking(move || transcript::read_live_sessions(&dir)).await.unwrap_or_default();
+        let dirs = claude_dirs(&state.config.read().agents);
+        let mut list = tokio::task::spawn_blocking(move || dirs.iter().flat_map(|d| transcript::read_live_sessions(d)).collect::<Vec<_>>()).await.unwrap_or_default();
         // The pid as the session file has it: a negative one is no process.
         list.retain(|s| u32::try_from(s.pid).is_ok_and(|p| crate::util::os::proc::pid_alive(p) && !pids.contains(&p)) && !sessions.contains(&s.session_id));
         for s in &mut list {
@@ -2645,13 +2645,29 @@ async fn activity_loop(state: AppState, entry: Arc<Entry>, pty: Arc<pty::Pty>, m
     }
 }
 
+/// The folders of every enabled Claude Code account (the default one first), without repeats.
+fn claude_dirs(cfg: &AgentsConfig) -> Vec<PathBuf> {
+    let mut out = vec![transcript::claude_dir(None)];
+    for p in providers::list(cfg).0 {
+        if p.kind == ProviderKind::Claude && p.enabled {
+            let d = transcript::claude_dir(p.home());
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+    }
+    out
+}
+
 /// Remote Control sessions also advertise their bridge in `~/.claude/sessions/<pid>.json`.
 async fn check_bridge(state: &AppState, entry: &Entry, pid: u32) {
     let wants = entry.rec.lock().info.agent.as_ref().is_some_and(|a| a.remote_control && a.remote_url.is_none());
     if !wants || pid == 0 {
         return;
     }
-    let file = transcript::claude_dir(None).join("sessions").join(format!("{pid}.json"));
+    let provider_id = entry.rec.lock().info.agent.as_ref().and_then(|a| a.provider_id.clone());
+    let dir = providers::find(&state.config.read().agents, Some(provider_id.as_deref().unwrap_or("claude"))).map_or_else(|| transcript::claude_dir(None), |p| transcript::claude_dir(p.home()));
+    let file = dir.join("sessions").join(format!("{pid}.json"));
     let Ok(bytes) = tokio::fs::read(&file).await else { return };
     if let Some(url) = transcript::parse_live_session(&bytes).and_then(|s| s.remote_url) {
         state.terminals.set_remote_url(entry, url);
@@ -2772,6 +2788,31 @@ mod tests {
             remote_control: true,
             add_dirs: vec!["/tmp/x".into()],
         }
+    }
+
+    #[test]
+    fn claude_accounts_each_have_a_folder_to_scan() {
+        let g: crate::config::GlobalConfig = toml::from_str(
+            r#"
+            [agents.providers.claude-work]
+            kind = "claude"
+            env = { CLAUDE_CONFIG_DIR = "/acct/work" }
+            [agents.providers.claude-twin]
+            kind = "claude"
+            env = { CLAUDE_CONFIG_DIR = "/acct/work" }
+            [agents.providers.claude-off]
+            kind = "claude"
+            enabled = false
+            env = { CLAUDE_CONFIG_DIR = "/acct/off" }
+            [agents.providers.codex-work]
+            kind = "codex"
+            env = { CODEX_HOME = "/acct/codex" }
+            "#,
+        )
+        .unwrap();
+        let dirs = claude_dirs(&g.agents);
+        assert_eq!(dirs[0], transcript::claude_dir(None));
+        assert_eq!(&dirs[1..], [PathBuf::from("/acct/work")], "disabled accounts, other kinds and repeats are left out");
     }
 
     #[test]

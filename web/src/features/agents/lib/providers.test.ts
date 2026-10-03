@@ -3,6 +3,7 @@ import type { AgentInfo, AgentProvider } from '@/api/types'
 import type { ProviderInfo } from '../api'
 import {
   dialogSeenOnScreen,
+  displayLabel,
   historyProviders,
   initialProvider,
   isDangerous,
@@ -105,5 +106,24 @@ describe('providers', () => {
     expect(reportsAnswers('gemini') || reportsAnswers('aider') || reportsAnswers('kimi')).toBe(false)
     expect(providerLabel(withAgent({ provider: 'gemini', providerId: 'gemini' }))).toBe('Gemini')
     expect(resumes(withAgent({ provider: 'aider' })) && !resumes(withAgent({ provider: 'custom' }))).toBe(true)
+  })
+})
+
+describe('displayLabel', () => {
+  it('puts the CLI before the label of a second account', () => {
+    const work = provider('claude-work', 'claude', { label: 'Work', home: '~/.claude-work' })
+    expect(displayLabel(work)).toBe('Claude · Work')
+    expect(displayLabel(provider('codex-team', 'codex', { label: 'Team', home: '~/.codex-team' }))).toBe('Codex · Team')
+    // A label that names the CLI already is kept, as are the presets and CLIs without a folder.
+    expect(displayLabel(provider('claude-work', 'claude', { label: 'Claude (work)', home: '~/.claude-work' }))).toBe('Claude (work)')
+    expect(displayLabel(provider('codex', 'codex', { label: 'Codex', home: '~/.codex-x' }))).toBe('Codex')
+    expect(displayLabel(provider('claude-work', 'claude', { label: 'Work' }))).toBe('Work')
+    expect(displayLabel(provider('opencode', 'custom', { label: 'OpenCode' }))).toBe('OpenCode')
+  })
+
+  it('names the account on its sessions', () => {
+    const list = [provider('claude', 'claude', { label: 'Claude Code' }), provider('claude-work', 'claude', { label: 'Work', home: '~/.claude-work' })]
+    expect(providerLabel(withAgent({ provider: 'claude', providerId: 'claude-work' }), list)).toBe('Claude · Work')
+    expect(providerLabel(withAgent({ provider: 'claude', providerId: null }), list)).toBe('Claude')
   })
 })

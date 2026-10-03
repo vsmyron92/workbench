@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  accountHomeError,
+  accountIdError,
   desktopNotifiesHere,
   formatCountdown,
   formatMs,
@@ -14,6 +16,7 @@ import {
   restartImpact,
   restartText,
   secretRefFields,
+  suggestAccountId,
   timeline,
   updateFraction,
   updatePhaseText,
@@ -223,5 +226,38 @@ describe('updates', () => {
     )
     expect(restartImpact([shell, shell], true)).toBe('2 shells will stop. Shells start again under their last screen, without what ran in them.')
     expect(restartImpact([agent, run], true)).toBe('1 agent session and 1 run will stop. Agent sessions resume after the restart; runs are not started again.')
+  })
+})
+
+describe('accounts', () => {
+  it('suggests a provider name from the kind and the label', () => {
+    expect(suggestAccountId('claude', 'Work')).toBe('claude-work')
+    expect(suggestAccountId('codex', '  Team A / 2 ')).toBe('codex-team-a-2')
+    expect(suggestAccountId('kimi', '')).toBe('')
+    expect(suggestAccountId('claude', '日本')).toBe('')
+    expect(suggestAccountId('claude', 'x'.repeat(60))).toHaveLength(32)
+    expect(accountIdError(suggestAccountId('claude', 'x'.repeat(60)), [])).toBeNull()
+  })
+
+  it('refuses names the server would, and the built-in ones', () => {
+    expect(accountIdError('claude-work', [])).toBeNull()
+    expect(accountIdError('', [])).toMatch(/Enter/)
+    expect(accountIdError('Claude Work', [])).toMatch(/Lowercase/)
+    expect(accountIdError('-x', [])).toMatch(/Lowercase/)
+    expect(accountIdError('codex', [])).toMatch(/built-in/)
+    expect(accountIdError('claude-work', ['claude-work'])).toMatch(/exists/)
+  })
+
+  it('wants a folder of its own, spelled as a path', () => {
+    const others = [{ id: 'claude-work', home: '~/.claude-work/' }]
+    expect(accountHomeError('claude', '~/.claude-personal', others)).toBeNull()
+    expect(accountHomeError('claude', '/home/me/.claude-x', others)).toBeNull()
+    expect(accountHomeError('claude', 'C:\\Users\\me\\.claude-x', others)).toBeNull()
+    expect(accountHomeError('claude', '', others)).toMatch(/Enter/)
+    expect(accountHomeError('claude', '.claude-x', others)).toMatch(/absolute/)
+    expect(accountHomeError('claude', '~/.claude-work', others)).toMatch(/claude-work/)
+    expect(accountHomeError('claude', '~/.claude/', others)).toMatch(/default account/)
+    expect(accountHomeError('codex', '~/.claude', [])).toBeNull()
+    expect(accountHomeError('codex', '~/${secret:x}', [])).toMatch(/plain path/)
   })
 })

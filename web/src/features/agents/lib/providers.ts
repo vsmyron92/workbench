@@ -39,11 +39,21 @@ export function reportsAnswers(kind: AgentProvider): boolean {
   return kind === 'claude' || kind === 'codex'
 }
 
+/**
+ * What a provider is called in lists: its label, and for a second account of a CLI (its own
+ * folder, a name other than the CLI's) the CLI first, so "Work" is not read as a CLI.
+ */
+export function displayLabel(p: Pick<ProviderInfo, 'id' | 'kind' | 'label' | 'home'>): string {
+  if (!p.home || p.id === p.kind) return p.label
+  const cli = KIND_LABEL[p.kind]
+  return p.label.toLowerCase().includes(cli.toLowerCase()) ? p.label : `${cli} · ${p.label}`
+}
+
 /** A short name for the provider of a session: its configured label, else the kind's. */
 export function providerLabel(t: Pick<TerminalInfo, 'agent'>, providers?: ProviderInfo[]): string {
   const id = providerIdOf(t)
   const p = providers?.find((x) => x.id === id)
-  if (p) return p.kind === 'claude' && p.id === 'claude' ? 'Claude' : p.label
+  if (p) return p.kind === 'claude' && p.id === 'claude' ? 'Claude' : displayLabel(p)
   const kind = providerKindOf(t)
   return kind === 'custom' ? id : KIND_LABEL[kind]
 }

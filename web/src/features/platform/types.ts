@@ -8,6 +8,20 @@ export type SecretRef =
   | { dotenv: { path: string; key: string } }
   | { command: string[] }
 
+/** config/global.rs ProviderConfig. An account is a provider with its own `env` folder. */
+export interface ProviderSettings {
+  kind?: string | null
+  command?: string | null
+  args?: string[]
+  enabled?: boolean | null
+  label?: string | null
+  model?: string | null
+  effort?: string | null
+  permission_mode?: string | null
+  env?: Record<string, string>
+  install_hint?: string | null
+}
+
 /** config/global.rs GlobalConfig */
 export interface GlobalConfig {
   server: {
@@ -25,6 +39,9 @@ export interface GlobalConfig {
     remote_control: boolean
     restore_on_start: boolean
     statusline: boolean
+    default_provider?: string | null
+    /** `[agents.providers.<id>]`: extra accounts of a CLI, other CLIs, tweaks to the presets. */
+    providers?: Record<string, ProviderSettings>
   }
   gitlab?: { host: string; token: string } | null
   /** `token` empty: public repositories only, read-only. */

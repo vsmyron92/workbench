@@ -291,3 +291,53 @@ export function isLoopbackHost(hostname: string): boolean {
 export function desktopNotifiesHere(hostname: string, desktopUnsupported: string | null): boolean {
   return isLoopbackHost(hostname) && !desktopUnsupported
 }
+
+/** The CLIs that keep one login per folder, with the variable that moves the folder. */
+export const ACCOUNT_KINDS = [
+  { kind: 'claude', label: 'Claude Code', homeVar: 'CLAUDE_CONFIG_DIR', defaultHome: '~/.claude' },
+  { kind: 'codex', label: 'Codex', homeVar: 'CODEX_HOME', defaultHome: '~/.codex' },
+  { kind: 'kimi', label: 'Kimi Code', homeVar: 'KIMI_CODE_HOME', defaultHome: '~/.kimi' },
+] as const
+
+export type AccountKind = (typeof ACCOUNT_KINDS)[number]['kind']
+
+/** The names `[agents.providers]` gives to the built-in CLIs: an account cannot take one. */
+const PRESET_IDS = ['claude', 'codex', 'kimi', 'gemini', 'aider']
+
+export const accountKind = (kind: string | null | undefined) => ACCOUNT_KINDS.find((k) => k.kind === kind)
+
+/** `claude` + "Work" → `claude-work`: a provider name (lowercase letters, digits, - and _). */
+export function suggestAccountId(kind: AccountKind, label: string): string {
+  const slug = label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return (slug ? `${kind}-${slug}` : '').slice(0, 32).replace(/-+$/, '')
+}
+
+/** Why `id` cannot name a new account (`null`: it can). Mirrors the server's `valid_provider_id`. */
+export function accountIdError(id: string, existing: string[]): string | null {
+  if (!id) return 'Enter a name'
+  if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id)) return 'Lowercase letters, digits, - and _ (at most 32)'
+  if (PRESET_IDS.includes(id)) return `“${id}” is the built-in ${id}: choose another name`
+  if (existing.includes(id)) return 'An account with this name exists'
+  return null
+}
+
+const sameFolder = (a: string, b: string) => a.trim().replace(/[\\/]+$/, '') === b.trim().replace(/[\\/]+$/, '')
+
+/**
+ * Why `home` cannot be the folder of an account of `kind` (`null`: it can). Two accounts in
+ * one folder are one login, and the default folder is the account the CLI uses outside
+ * Workbench.
+ */
+export function accountHomeError(kind: AccountKind, home: string, others: { id: string; home: string }[]): string | null {
+  const h = home.trim()
+  if (!h) return 'Enter the folder that holds this account’s login'
+  if (!/^(~[\\/]|[\\/]|[A-Za-z]:[\\/])/.test(h)) return 'Use an absolute path, or one starting with ~/'
+  if (h.includes('${')) return 'A plain path: no ${…} references'
+  const def = accountKind(kind)!.defaultHome
+  if (sameFolder(h, def)) return `${def} is the default account: it is already listed as “${accountKind(kind)!.label}”`
+  const clash = others.find((o) => sameFolder(o.home, h))
+  return clash ? `Already the folder of “${clash.id}”` : null
+}

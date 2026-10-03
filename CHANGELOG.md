@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Several accounts of one agent CLI.** Run Claude Code, Codex or Kimi Code under more than
+  one login, such as a work and a personal subscription. **Settings → Agents → Accounts** adds
+  an account (a name, a label and a folder of its own); it appears in the new session picker
+  beside the CLI. Each account's history, Remote Control links and live sessions follow its
+  own folder, and Workbench never reads the logins. Accounts were already possible by hand
+  in `config.toml`; Remote Control links and the live-session list of an extra Claude account
+  were only looked up in the default `~/.claude` before.
+
 ## 0.7.1 - 2026-10-03
 
 - **Agents drive the debugger.** New MCP tools: `debug_start` (a configuration by name),

@@ -107,6 +107,17 @@ impl ProviderKind {
         }
     }
 
+    /// The environment variable that moves the CLI's files, login included, to another
+    /// folder: one folder per account. `None`: the CLI has no such variable we know of.
+    pub fn home_var(self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some("CLAUDE_CONFIG_DIR"),
+            Self::Codex => Some("CODEX_HOME"),
+            Self::Kimi => Some("KIMI_CODE_HOME"),
+            Self::Gemini | Self::Aider | Self::Custom => None,
+        }
+    }
+
     /// Whether the kind resumes a conversation by id.
     pub fn resumes(self) -> bool {
         matches!(self, Self::Claude | Self::Codex | Self::Kimi | Self::Gemini)
@@ -271,6 +282,12 @@ pub struct Provider {
 impl Provider {
     pub fn permission_preset(&self, id: &str) -> Option<&'static PermissionPreset> {
         self.kind.permission_modes().iter().find(|p| p.id == id)
+    }
+
+    /// The folder this provider keeps its files and login in, as configured (`None`: the
+    /// CLI's own default, the account the CLI is signed in to outside Workbench).
+    pub fn home(&self) -> Option<&str> {
+        self.kind.home_var().and_then(|v| self.env.get(v)).map(|s| s.trim()).filter(|s| !s.is_empty())
     }
 
     /// Whether a session started with `permission_mode` runs its commands inside the
@@ -810,6 +827,9 @@ pub fn describe(p: &Provider, available: Option<&PathBuf>) -> Value {
         "available": p.enabled && available.is_some(),
         "reason": reason,
         "installHint": (!p.install_hint.is_empty()).then(|| p.install_hint.clone()),
+        // The account's folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`…); absent: the CLI's default account.
+        "homeVar": k.home_var(),
+        "home": p.home(),
         "stateSource": k.state_source(),
         "initialPrompt": if k.prompt_in_argv() { "argv" } else { "paste" },
         "supports": {
@@ -902,6 +922,36 @@ mod tests {
         assert_eq!(plain.iter().map(|p| p.kind).collect::<Vec<_>>(), PRESETS);
         assert!(w.is_empty());
         assert_eq!(default_id(&AgentsConfig::default()), "claude");
+    }
+
+    #[test]
+    fn accounts_are_providers_with_their_own_home() {
+        let a = cfg(
+            r#"
+            [agents.providers.claude-work]
+            kind = "claude"
+            label = "Claude (work)"
+            env = { CLAUDE_CONFIG_DIR = "~/.claude-work" }
+            [agents.providers.codex-team]
+            kind = "codex"
+            env = { CODEX_HOME = " " }
+            [agents.providers.opencode]
+            command = "opencode"
+            env = { CODEX_HOME = "~/ignored" }
+            "#,
+        );
+        let (list, warnings) = list(&a);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let get = |id: &str| list.iter().find(|p| p.id == id).unwrap();
+        // The default account has no folder of its own; a second one does, and only for the
+        // variable of its own kind.
+        assert_eq!(get("claude").home(), None);
+        assert_eq!((get("claude-work").kind, get("claude-work").home()), (ProviderKind::Claude, Some("~/.claude-work")));
+        assert_eq!(get("codex-team").home(), None, "a blank folder is the default account");
+        assert_eq!(get("opencode").home(), None);
+        let info = describe(get("claude-work"), None);
+        assert_eq!((info["homeVar"].as_str(), info["home"].as_str()), (Some("CLAUDE_CONFIG_DIR"), Some("~/.claude-work")));
+        assert!(describe(get("opencode"), None)["homeVar"].is_null());
     }
 
     fn preset_of(kind: ProviderKind, id: &str) -> &'static PermissionPreset {

@@ -787,6 +787,16 @@ always for custom CLIs.
   dangerous default) is dropped with a `providerWarnings` entry, so it never fails every
   start; so is a `default_provider` that names no enabled provider (the composer's help
   button turns into a warning).
+- **Accounts.** A second login of a CLI is a provider of the same `kind` whose `env` sets the
+  kind's home variable (`ProviderKind::home_var`: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+  `KIMI_CODE_HOME`; `Provider::home`). The home decides everything the CLI keeps: Claude's
+  transcripts (`transcript::claude_dir`), Codex's rollouts, Kimi's index, so history,
+  transcript tailing and the Remote Control bridge file (`check_bridge`) read the session's own
+  home, and `terminals.external` scans the home of every enabled Claude provider (`claude_dirs`).
+  Workbench never reads credentials. `GET /api/agents/defaults` gives each provider `homeVar`
+  and `home`. Settings → Agents → Accounts (`platform/sections/Accounts.tsx`) edits the
+  `agents.providers` map through `PATCH /api/settings` (`agents` merges field by field, so
+  the map is sent whole); entries of other kinds in it are kept as they are.
 - **REST.** `POST /api/agents` and `/api/agents/ask` take `provider`; `ask` without one uses
   the most recent session of any provider that can take a prompt unasked: Claude Code when its
   state accepts one; Codex and Kimi only when idle after a turn of that process ended, with

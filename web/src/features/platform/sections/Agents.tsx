@@ -5,6 +5,7 @@ import { Button, Checkbox, ErrorBox, Input, Loading, Select } from '@/ui'
 import { patchSettings, reportApply, useSettings } from '../api'
 import { Group, Note, Page, Row, useDraft } from '../common'
 import type { GlobalConfig } from '../types'
+import { AccountsGroup } from './Accounts'
 
 type Agents = GlobalConfig['agents']
 
@@ -115,6 +116,10 @@ export function AgentsSection({ onGoto }: { onGoto: (section: string) => void })
           </Checkbox>
         </Row>
       </Group>
+
+      <div style={{ marginTop: 16 }}>
+        <AccountsGroup />
+      </div>
 
       <div style={{ marginTop: 16 }}>
         <Note>

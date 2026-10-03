@@ -9,7 +9,7 @@ import { confirmDialog, openPanel } from '@/shell/actions'
 import { useUi } from '@/state/store'
 import { Button, Checkbox, ErrorBox, IconButton, Input, Kbd, Select, TextArea } from '@/ui'
 import { startAgent, useAgentDefaults, useContainerAgents, type AgentDefaults, type ProviderInfo } from './api'
-import { initialProvider, isDangerous, pickerProviders, presetOf, PROVIDER_CONFIG_EXAMPLE, stateNote } from './lib/providers'
+import { displayLabel, initialProvider, isDangerous, pickerProviders, presetOf, PROVIDER_CONFIG_EXAMPLE, stateNote } from './lib/providers'
 import { ProviderIcon } from './parts'
 import { useAgentsUi, type NewSessionPrefill } from './store'
 
@@ -42,11 +42,11 @@ function ProviderPicker({ providers, value, onChange }: { providers: ProviderInf
           role="radio"
           aria-checked={p.id === value}
           className={['wb-ag-provider', p.id === value && 'active', !p.available && 'unavailable'].filter(Boolean).join(' ')}
-          title={p.available ? `${p.label} (${p.command})` : (p.reason ?? `${p.label} is not available`)}
+          title={p.available ? `${displayLabel(p)} (${p.command})` : (p.reason ?? `${displayLabel(p)} is not available`)}
           onClick={() => onChange(p.id)}
         >
           <ProviderIcon kind={p.kind} />
-          <span>{p.label}</span>
+          <span>{displayLabel(p)}</span>
           {!p.available && <span className="wb-ag-provider-note">not installed</span>}
         </button>
       ))}
@@ -83,7 +83,7 @@ function ProvidersHelp({ d }: { d: AgentDefaults }) {
         {d.providers.map((p) => (
           <li key={p.id}>
             <ProviderIcon kind={p.kind} size={12} />
-            <b>{p.label}</b>
+            <b>{displayLabel(p)}</b>
             <code title={p.command}>{p.command.split('/').pop()}</code>
             <span className="wb-muted">— {p.enabled ? caps(p) : 'disabled'}</span>
           </li>
@@ -175,13 +175,13 @@ export function NewSessionForm({
 
   const preset = presetOf(p, mode || p?.defaults.permissionMode)
   const dangerous = isDangerous(p, mode)
-  const label = p ? (p.kind === 'claude' && p.id === 'claude' ? 'Claude' : p.label) : 'the agent'
+  const label = p ? (p.kind === 'claude' && p.id === 'claude' ? 'Claude' : displayLabel(p)) : 'the agent'
 
   const start = async (text: string, n?: string) => {
     if (busy || !p || (!p.available && !runInside)) return
     if (dangerous) {
       const ok = await confirmDialog({
-        title: `Start ${p.label} without approvals?`,
+        title: `Start ${displayLabel(p)} without approvals?`,
         message: `${preset?.label}: ${preset?.description}. It can change files and run commands without asking.`,
         confirmLabel: 'Start anyway',
         danger: true,

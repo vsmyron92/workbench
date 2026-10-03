@@ -88,6 +88,20 @@ CLI, Aider and custom CLIs run without the MCP tools (their MCP settings live in
 Workbench does not change) and show activity from their output. Permission requests
 answered from Workbench and Review Changes are Claude Code's.
 
+## More than one account
+
+A second subscription of Claude Code, Codex or Kimi Code is an **account**: the same CLI with
+its own login, history and settings in a folder of its own. Add one in **Settings → Agents →
+Accounts** (a name, a label and a folder such as `~/.claude-work`). It appears in the new
+session picker beside the CLI, and its sessions are labelled with it. The first session
+started with it shows the CLI's own sign-in, because the folder holds no login yet.
+
+Behind the form this is `[agents.providers.claude-work]` with `kind = "claude"` and
+`env = { CLAUDE_CONFIG_DIR = "~/.claude-work" }` (`CODEX_HOME` for Codex, `KIMI_CODE_HOME`
+for Kimi Code); model, effort and extra arguments can be set per account there. Conversation
+history, Remote Control links and the live sessions listed on Home follow each session's
+account. Workbench never reads or copies a login: the folder is the CLI's.
+
 ## On Windows
 
 Windows support is in progress ([windows-port.md](windows-port.md)); this is how agents and
