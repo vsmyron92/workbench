@@ -10,6 +10,7 @@ import type {
   ActivityFeed,
   ApplyResult,
   GlobalConfig,
+  LocalModels,
   McpCall,
   McpOverview,
   ProjectSettings,
@@ -19,6 +20,7 @@ import type {
   SecretsInfo,
   SettingsInfo,
   UpdateStatus,
+  UsageInfo,
 } from './types'
 
 /** Every platform query lives under ['platform', …] so `settings.changed` can refresh them all. */
@@ -33,6 +35,24 @@ export const pk = {
   activity: ['platform-activity'] as const,
   push: ['platform', 'push'] as const,
   update: ['platform', 'update'] as const,
+  usage: ['platform', 'usage'] as const,
+}
+
+/** Which agent accounts are at their usage limit, and how full their windows are; `agent.usage` keeps it live. */
+export function useAccountUsage() {
+  const qc = useQueryClient()
+  useEvent('agent.usage', () => void qc.invalidateQueries({ queryKey: pk.usage }))
+  return useQuery({ queryKey: pk.usage, queryFn: () => api.get<UsageInfo>('/api/agents/usage'), staleTime: 30_000, refetchInterval: 60_000 })
+}
+
+/** Say an account is at its limit until `until` (ms), or usable again (`null`). */
+export function setAccountLimit(provider: string, until: number | null) {
+  return api.put<unknown>(`/api/agents/usage/${encodeURIComponent(provider)}`, { limitedUntil: until })
+}
+
+/** What a model server of your own serves (or why it does not answer). */
+export function probeLocalModels(server: string, url: string) {
+  return api.post<LocalModels>('/api/agents/local-models', { server, url })
 }
 
 /** The running version, the latest release and an install's progress; `platform.update` keeps it live. */

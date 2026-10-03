@@ -27,7 +27,7 @@ import { Badge, Button, Checkbox, EmptyState, ErrorBox, IconButton, Input, Loadi
 import { copyText, killTerminal, openRemote, restartTerminal, terminalMenu } from './actions'
 import { openTerminal, startAgent, useAgentDefaults, useAgentHistory, useExternalSessions, type HistoryEntry, type ProviderInfo } from './api'
 import { pendingOf } from './lib/permission'
-import { dialogSeenOnScreen, historyProviders, providerKindOf, reportsAnswers, resumes, SEEN_ON_SCREEN } from './lib/providers'
+import { dialogSeenOnScreen, displayLabel, historyProviders, providerKindOf, reportsAnswers, resumes, SEEN_ON_SCREEN } from './lib/providers'
 import { newShell } from './commands'
 import { agentMeta, agentSessions, colorCss, counts, isRunning, lastActivity, sortSessions, tone } from './lib/sessions'
 import { NewSessionForm } from './NewSession'
@@ -179,7 +179,7 @@ export function HistoryList({ projectId, onDone, limit = 12 }: { projectId: stri
               label: (
                 <span className="wb-ag-htab">
                   <ProviderIcon kind={p.kind} size={12} />
-                  {p.label}
+                  {displayLabel(p)}
                 </span>
               ),
             }))}
@@ -195,7 +195,7 @@ export function HistoryList({ projectId, onDone, limit = 12 }: { projectId: stri
 
 function ProviderHistory({ projectId, provider, onDone, limit }: { projectId: string; provider: ProviderInfo | undefined; onDone?: () => void; limit: number }) {
   const id = provider?.id ?? 'claude'
-  const label = provider?.label ?? 'Claude Code'
+  const label = provider ? displayLabel(provider) : 'Claude Code'
   const { data, isLoading, error, refetch } = useAgentHistory(projectId, id)
   const [filter, setFilter] = useState('')
   const [shown, setShown] = useState(limit)

@@ -314,6 +314,13 @@
   flex: 1;
   min-width: 0;
 }
+.wb-ag-providers-group {
+  display: contents;
+}
+.wb-ag-provider.add {
+  border-style: dashed;
+  color: var(--fg-subtle);
+}
 .wb-ag-provider {
   display: inline-flex;
   align-items: center;
@@ -337,6 +344,10 @@
   background: var(--accent-bg);
   color: var(--fg);
   font-weight: 600;
+}
+.wb-ag-provider.limited {
+  border-color: var(--warning);
+  color: var(--fg-muted);
 }
 .wb-ag-provider.unavailable {
   border-style: dashed;
@@ -1211,4 +1222,38 @@
 .wb-agcol .wb-ag-header > span[style*='flex: 1'] {
   flex: 1 1 0;
   min-width: 0;
+}
+
+/* "Continue on another account": the accounts to pick from. */
+.wb-ag-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wb-ag-target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.wb-ag-target:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.wb-ag-target.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.wb-ag-target:disabled {
+  color: var(--fg-subtle);
+  cursor: default;
+}
+.wb-ag-target-name {
+  flex: 1;
 }

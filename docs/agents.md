@@ -88,6 +88,136 @@ CLI, Aider and custom CLIs run without the MCP tools (their MCP settings live in
 Workbench does not change) and show activity from their output. Permission requests
 answered from Workbench and Review Changes are Claude Code's.
 
+## More than one account
+
+A second subscription of Claude Code, Codex, Kimi Code or Gemini CLI is an **account**: the
+same CLI with its own login, history and settings in a folder of its own. Aider has no login,
+so its account is its own `.env` file of API keys. Manage them in **Settings → Agents →
+Accounts** (or with the **Account** button beside the CLIs in the new session composer): a
+name, a label and the folder, such as `~/.claude-work`. An account appears in the picker
+beside the CLI as "Claude · Work", and its sessions carry that name. The first session
+started with it shows the CLI's own sign-in, because the folder holds no login yet.
+
+Behind the form this is `[agents.providers.claude-work]` with `kind = "claude"` and
+`env = { CLAUDE_CONFIG_DIR = "~/.claude-work" }`. The variable is `CODEX_HOME` for Codex,
+`KIMI_CODE_HOME` for Kimi Code, `GEMINI_CLI_HOME` for Gemini CLI (the folder that holds its
+`.gemini`) and `AIDER_ENV_FILE` for Aider. Model, effort and extra arguments can be set per
+account in `config.toml`, which stays the place to edit by hand (Settings → Raw config).
+Conversation history, Remote Control links and the live sessions listed on Home follow each
+session's account. Workbench never reads or copies a login or a key. An Aider account's file
+must exist before a session starts (Aider would otherwise run on the default keys without
+saying so); Aider keeps its chat history in each repository, shared by all its accounts.
+
+## Local models
+
+Claude Code, Codex and Aider can run on a model of your own: **Settings → Agents → Accounts → Add
+local model** takes the server (Ollama, LM Studio, or any OpenAI- or Anthropic-compatible one such as
+llama.cpp's `llama-server` or vLLM), its address and a model, and **Find models** lists what the server
+serves. Sessions of that account talk only to your server: nothing of the vendor's login or API key is
+passed on, and a session does not start at all if the server's setup is incomplete, instead of reaching
+the vendor. Claude Code needs a server with the Anthropic Messages API (Ollama 0.14+, LM Studio 0.4.1+,
+llama.cpp, vLLM, or a gateway); Codex needs `/v1/responses` (Ollama 0.13.4+, LM Studio 0.3.29+); Ollama
+recommends a context of 64k or more for both. Local sessions have no Remote Control and no usage limits.
+
+Set the model's **context window** (64k or more; Claude Code's own instructions and tools fill a small
+one, and at 32k it compacted the conversation at once in a test) and give the server the same
+(`OLLAMA_CONTEXT_LENGTH`; Ollama starts at 4096 and cuts off what does not fit).
+
+**DeepSeek and other open models.** Any model your server serves can be named, so DeepSeek, Qwen,
+GLM, Kimi, gpt-oss or Devstral run as long as the server can make **tool calls** with them, which an
+agent needs (Aider does not). On Ollama that is a capability a model has or has not, shown by
+`ollama show <model>`: from its source and third-party listings, `qwen3-coder`, `gpt-oss`, `glm-4.6`,
+`kimi-k2`, `devstral` and `deepseek-v3.1`/`v3.2` have it, recent pulls of `deepseek-r1` do (small
+ones work poorly for agents), `deepseek-v3` and `deepseek-coder-v2` do not. llama.cpp needs `--jinja`;
+vLLM needs `--enable-auto-tool-choice` and a `--tool-call-parser` for the model (`deepseek_v3` for
+DeepSeek), and a served model name without `/`. **Hosted** DeepSeek and other open-model services work with an API key: see "Hosted APIs" below.
+
+```toml
+[agents.providers.claude-local]
+kind = "claude"
+model = "qwen3-coder:30b"
+env = { CLAUDE_CONFIG_DIR = "~/.claude-local" }   # its own sessions and history
+local = { server = "ollama" }                     # url defaults to http://localhost:11434
+```
+
+## Usage limits and failover
+
+Workbench shows how full each account is and, when one is at its limit, can use the next. It learns
+the usage from what the CLIs report about themselves (Claude Code's status line, Codex's session log,
+and the message a CLI prints when it refuses a turn); it asks no vendor and reads no login. Give an
+account a `fallback` list, in Settings (**Edit**, or the built-in Claude Code row) or in `config.toml`:
+
+```toml
+[agents]
+failover = "new"                  # "off", "new" (default) or "session"
+
+[agents.providers.claude]         # the default login
+fallback = ["claude-work", "claude-local"]
+```
+
+With `new`, a session you start (or an agent starts) skips an account that is at its limit and runs on
+the first one of the list that is not, and says so. With `session`, a running session that hits its limit
+also continues on the next account: a new session in the same folder, told what the old one was doing and
+where its conversation is; the old one is left as it is. Without `session`, the toast of a session
+that hit its limit offers **Continue on …**. If the CLIs' reports are wrong or not enough, mark an account
+at its limit or usable by hand in its **Edit** dialog.
+
+## Hosted APIs
+
+An account can use a hosted model API with an API key instead of a subscription login: **Settings →
+Agents → Accounts → Add… → A hosted API with an API key**. Pick the CLI, the service, the model as the
+service names it, and the **secret** that holds the key.
+
+| CLI | Services |
+|---|---|
+| Claude Code | DeepSeek, OpenRouter, Z.ai, Moonshot, Fireworks (all through their Anthropic-compatible endpoints), the Anthropic API, or any other service with the Anthropic Messages API |
+| Codex | the OpenAI API, or any service with the Responses API (`/v1/responses`) |
+| Aider | DeepSeek, OpenRouter, the OpenAI API, the Anthropic API, or any OpenAI-compatible service |
+
+The key is never in `config.toml`: `key` names an entry of `[secrets]`, which says where the key lives
+(a file, an environment variable, the keyring, a command). The server reads it when a session starts,
+passes it to the CLI in its environment (not on its command line), and masks it if the session prints it;
+the browser only ever sees the secret's name. Your code and conversation go to that service, billed to the
+key. If the key cannot be read, or the account's settings are incomplete, the session does not start (it
+never falls back to the CLI's own login). A service that reports an exhausted balance moves new sessions
+on to the next account, like a usage limit.
+
+```toml
+[secrets]
+deepseek = { file = "~/.deepseek-key" }          # keep it private: chmod 600
+
+[agents.providers.claude-deepseek]
+kind = "claude"
+model = "deepseek-v4-pro"                         # as DeepSeek's documentation names it
+env = { CLAUDE_CONFIG_DIR = "~/.claude-deepseek" }
+api = { service = "deepseek", key = "deepseek", context = 131072 }
+```
+
+Service addresses are those the services document for Claude Code; change `url` if a service moves
+them, and check the service's own page for its model names. An address must be `https://` (plain
+`http://` only for this computer). With the Anthropic API Claude Code may ask once, in the terminal,
+whether to use the key: answer Yes.
+
+## Moving a conversation to another account
+
+**Continue on another account…** in a session's menu (or the toast of a session that hit its limit, or
+`failover = "session"`) starts a new session in the same folder on the account you pick. What it carries
+depends on the two CLIs:
+
+- **The same CLI** (Claude Code to another Claude Code account, Codex to Codex, also onto a local
+  model): the conversation itself. Workbench copies the session's own file into the other account's
+  folder and resumes it, so the model sees the whole history, tool calls included. No login is read or
+  copied, only the conversation file.
+- **A different CLI** (Claude Code or Codex to Codex, Aider, Kimi…): what was said, as text. The user's
+  and the assistant's words and one line per tool call, without tool output, are written to a Markdown
+  file the new session reads first (short conversations go in its prompt). The first turn and the most
+  recent ones are kept when it is long. The conversation goes to that CLI's service, or stays on your
+  network for a local model.
+- **Otherwise** (Kimi, Gemini, Aider or a custom CLI as the source, or **Only a short note** chosen):
+  a note on where the old session stopped.
+
+The old session is left as it is. `[agents] transfer = "notes"` makes the note the default.
+
 ## On Windows
 
 Windows support is in progress ([windows-port.md](windows-port.md)); this is how agents and

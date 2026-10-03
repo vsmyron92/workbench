@@ -674,3 +674,67 @@ button.wb-status-item.wb-status-update {
   overflow: hidden;
   overflow-wrap: anywhere;
 }
+
+/* ---------------------------------------------------------------- agent accounts: usage and fallback */
+.wb-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 190px;
+}
+.wb-usage-row {
+  display: grid;
+  grid-template-columns: 54px 1fr 34px;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.wb-usage-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+.wb-usage-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.wb-usage-fill.warn {
+  background: var(--warning);
+}
+.wb-usage-fill.full {
+  background: var(--danger);
+}
+.wb-usage-pct {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.wb-set-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wb-acct-list {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+.wb-acct {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+.wb-acct:first-child {
+  border-top: 0;
+}
+.wb-acct-name {
+  font-weight: 600;
+}
+.wb-acct-line {
+  overflow-wrap: anywhere;
+}

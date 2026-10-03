@@ -219,6 +219,17 @@ def claude(args):
             i += 1
     with open(settings, encoding="utf-8") as f:
         hooks = json.load(f).get("hooks", {})
+    # What the session was started with: its command line (a prompt may span lines), and the
+    # environment that decides which account or model server it talks to.
+    log("FAKE_CLAUDE_LOG", "ARGS " + " ".join(args).replace("\n", " / "))
+    log(
+        "FAKE_CLAUDE_LOG",
+        "ENV "
+        + " ".join(
+            f"{k}={os.environ.get(k, '<unset>')}"
+            for k in ("CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_MAX_CONTEXT_TOKENS")
+        ),
+    )
     url = auth = ""
     for groups in hooks.values():
         for g in groups:

@@ -8,6 +8,74 @@ export type SecretRef =
   | { dotenv: { path: string; key: string } }
   | { command: string[] }
 
+/** config/global.rs ProviderConfig. An account is a provider with its own `env` folder. */
+export interface ProviderSettings {
+  kind?: string | null
+  command?: string | null
+  args?: string[]
+  enabled?: boolean | null
+  label?: string | null
+  model?: string | null
+  effort?: string | null
+  permission_mode?: string | null
+  /** Accounts to use, in order, when this one is at its usage limit. */
+  fallback?: string[]
+  env?: Record<string, string>
+  install_hint?: string | null
+  /** A model server of your own instead of the vendor's. */
+  local?: LocalModelSettings | null
+  /** A hosted model API reached with an API key. */
+  api?: ApiSettings | null
+}
+
+/** config/global.rs ApiConfig. `key` is the name of a `[secrets]` entry, never the key. */
+export interface ApiSettings {
+  service: string
+  url: string
+  key: string
+  context?: number | null
+}
+
+/** config/global.rs LocalModelConfig */
+export interface LocalModelSettings {
+  server: string
+  url: string
+  /** The model's context window in tokens (Claude Code assumes 200 000 for a model it does not know). */
+  context?: number | null
+}
+
+/** terminals/usage.rs Window */
+export interface UsageWindow {
+  name: string
+  label: string
+  usedPct: number
+  /** ms */
+  resetsAt: number | null
+}
+
+/** One account's entry of GET /api/agents/usage. */
+export interface AccountUsage {
+  windows: UsageWindow[]
+  limited: boolean
+  limitedUntil: number | null
+  reason: string | null
+  updatedAt: number
+}
+
+export type FailoverMode = 'off' | 'new' | 'session'
+
+/** GET /api/agents/usage */
+export interface UsageInfo {
+  usage: Record<string, AccountUsage>
+  failover: FailoverMode
+}
+
+/** POST /api/agents/local-models */
+export interface LocalModels {
+  models: string[]
+  error?: string
+}
+
 /** config/global.rs GlobalConfig */
 export interface GlobalConfig {
   server: {
@@ -25,6 +93,13 @@ export interface GlobalConfig {
     remote_control: boolean
     restore_on_start: boolean
     statusline: boolean
+    default_provider?: string | null
+    /** `off` | `new` (default) | `session`: what an account at its usage limit does. */
+    failover?: string | null
+    /** `conversation` (default) | `notes`: what a session moved to another account takes along. */
+    transfer?: string | null
+    /** `[agents.providers.<id>]`: extra accounts of a CLI, other CLIs, tweaks to the presets. */
+    providers?: Record<string, ProviderSettings>
   }
   gitlab?: { host: string; token: string } | null
   /** `token` empty: public repositories only, read-only. */

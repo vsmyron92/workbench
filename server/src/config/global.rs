@@ -134,6 +134,17 @@ pub struct AgentsConfig {
     /// unless set to another `[agents.providers.<name>]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_provider: Option<String>,
+    /// What happens when an account is at its usage limit and has `fallback` accounts:
+    /// `off` (only show the usage), `new` (a new session starts on the first account
+    /// that is not at its limit; the default) or `session` (a running session that hits
+    /// its limit also continues on the next account, as a new session).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failover: Option<String>,
+    /// What a session moved to another account takes along: `conversation` (the default: the
+    /// conversation itself when the CLI is the same, else its text as a Markdown file) or
+    /// `notes` (a short note on where it stopped).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<String>,
     /// Agent CLIs besides Claude Code: the built-in `codex` and `kimi` presets, or any
     /// command (`[agents.providers.aider] command = "aider"`). The fields above stay the
     /// Claude Code defaults. Must stay the last field: TOML tables follow plain values.
@@ -154,6 +165,8 @@ impl Default for AgentsConfig {
             answer_permissions: true,
             permission_wait: 600,
             default_provider: None,
+            failover: None,
+            transfer: None,
             providers: BTreeMap::new(),
         }
     }
@@ -186,6 +199,10 @@ pub struct ProviderConfig {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Accounts (other provider names) to use, in this order, when this one is at its
+    /// usage limit: a second subscription, then perhaps a local model.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fallback: Vec<String>,
     /// A default permission preset of the provider. Dangerous presets (Codex `bypass`,
     /// Kimi `yolo`/`auto`, Gemini `yolo`, Aider `yes-always`) are never defaults: the user
     /// picks them per session.
@@ -198,6 +215,46 @@ pub struct ProviderConfig {
     /// How to install the command, shown while it is missing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub install_hint: Option<String>,
+    /// Run the CLI against a model server of your own (Ollama, LM Studio, any
+    /// OpenAI-compatible server) instead of the vendor's. `model` names the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local: Option<LocalModelConfig>,
+    /// Use a hosted model API (DeepSeek, OpenRouter, an Anthropic or OpenAI API key…) with an
+    /// API key instead of a subscription login. `model` names the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api: Option<ApiConfig>,
+}
+
+/// `[agents.providers.<name>.api]`: a hosted model API reached with an API key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ApiConfig {
+    /// `deepseek`, `openrouter`, `zai`, `moonshot`, `fireworks`, `anthropic`, `openai` or
+    /// `custom` (which needs `url`). Which of them a CLI can use depends on the API it speaks.
+    pub service: String,
+    /// The API's address. Empty: the service's usual one. Always `https://` (plain `http://` only
+    /// for this computer).
+    pub url: String,
+    /// Name of a `[secrets]` entry that holds the API key: the key itself is never in this file.
+    pub key: String,
+    /// The model's context window in tokens (see `local.context`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
+}
+
+/// `[agents.providers.<name>.local]`: a model server on this machine or your network.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LocalModelConfig {
+    /// `ollama`, `lmstudio` or `openai` (any server with an OpenAI-compatible API, such as
+    /// llama.cpp's `llama-server` or vLLM).
+    pub server: String,
+    /// The server's address, such as `http://localhost:11434`. Empty: the server's usual one.
+    pub url: String,
+    /// The model's context window in tokens, when it is not the 200 000 Claude Code assumes
+    /// for a model it does not know (a local model often has 32 000 to 128 000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

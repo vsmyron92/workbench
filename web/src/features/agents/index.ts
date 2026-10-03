@@ -7,7 +7,7 @@ import { AgentColumn } from './AgentColumn'
 import { AgentsHome } from './AgentsHome'
 import { agentCommands } from './commands'
 import { MobileAgents } from './MobileAgents'
-import { AgentDialogs, AttentionNotifier, TerminalsSync } from './providers'
+import { AccountNotifier, AgentDialogs, AttentionNotifier, TerminalsSync } from './providers'
 import { useAgentsUi } from './store'
 import { TerminalPanel } from './TerminalPanel'
 import { TerminalToolWindow } from './TerminalToolWindow'
@@ -43,7 +43,7 @@ const feature: FeatureModule = {
       },
     },
   ],
-  providers: [TerminalsSync, AttentionNotifier, AgentDialogs],
+  providers: [TerminalsSync, AttentionNotifier, AccountNotifier, AgentDialogs],
 }
 
 export default feature

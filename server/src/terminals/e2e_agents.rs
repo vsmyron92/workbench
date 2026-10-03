@@ -15,10 +15,30 @@ use crate::app::{self, AppState};
 /// A state served on a real loopback port (hooks posted by the session must reach it),
 /// with one project and the fake Claude as `[agents].command`.
 async fn served_state(dir: &Path, fake: &Path, log: &Path) -> (AppState, SocketAddr, String) {
-    let proj = dir.join("proj");
-    std::fs::create_dir_all(&proj).unwrap();
     let claude_home = dir.join("claude-home");
     std::fs::create_dir_all(&claude_home).unwrap();
+    served_with(dir, fake, |cfg| {
+        cfg.agents.providers.insert(
+            "claude".into(),
+            crate::config::global::ProviderConfig {
+                // Hermetic: never the user's own ~/.claude.
+                env: [("CLAUDE_CONFIG_DIR".to_string(), claude_home.display().to_string()), ("FAKE_CLAUDE_LOG".to_string(), log.display().to_string())]
+                    .into(),
+                ..Default::default()
+            },
+        );
+    })
+    .await
+}
+
+/// `served_state` with the providers (and anything else) `configure` sets.
+pub(super) async fn served_with(
+    dir: &Path,
+    fake: &Path,
+    configure: impl FnOnce(&mut crate::config::GlobalConfig),
+) -> (AppState, SocketAddr, String) {
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
     let paths = crate::config::Paths { config_dir: dir.join("config"), data_dir: dir.join("data") };
     std::fs::create_dir_all(&paths.config_dir).unwrap();
     std::fs::create_dir_all(&paths.data_dir).unwrap();
@@ -29,15 +49,7 @@ async fn served_state(dir: &Path, fake: &Path, log: &Path) -> (AppState, SocketA
     cfg.agents.restore_on_start = false;
     cfg.agents.statusline = false;
     cfg.agents.command = fake.display().to_string();
-    cfg.agents.providers.insert(
-        "claude".into(),
-        crate::config::global::ProviderConfig {
-            // Hermetic: never the user's own ~/.claude.
-            env: [("CLAUDE_CONFIG_DIR".to_string(), claude_home.display().to_string()), ("FAKE_CLAUDE_LOG".to_string(), log.display().to_string())]
-                .into(),
-            ..Default::default()
-        },
-    );
+    configure(&mut cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let state = AppState::new(paths, cfg, addr).await.unwrap();
@@ -51,7 +63,7 @@ async fn served_state(dir: &Path, fake: &Path, log: &Path) -> (AppState, SocketA
 }
 
 /// A signed-in device: its cookie and key (as a browser gets them from `/auth`).
-async fn sign_in(state: &AppState, addr: SocketAddr) -> (String, String) {
+pub(super) async fn sign_in(state: &AppState, addr: SocketAddr) -> (String, String) {
     let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
     let r = http.get(format!("http://{addr}/auth?token={}", state.auth.master_token())).send().await.unwrap();
     let location = r.headers()["location"].to_str().unwrap().to_string();
@@ -365,6 +377,29 @@ async fn gemini_sessions_start_under_their_id_ask_on_screen_and_resume() {
     assert_eq!(agent_of(&state, &l.id).session_id, lid);
     assert!(!t.screen_text(&l.id, 20).unwrap().contains("Invalid session identifier"));
     t.kill(&l.id).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_aider_account_needs_its_keys_file_and_never_falls_back_to_other_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "aider");
+    let log = dir.path().join("aider.log");
+    let keys = dir.path().join("work.env");
+    let work = crate::config::global::ProviderConfig {
+        kind: Some("aider".into()),
+        command: Some(fake.display().to_string()),
+        env: [("AIDER_ENV_FILE".to_string(), keys.display().to_string()), ("FAKE_AIDER_LOG".to_string(), log.display().to_string())].into(),
+        ..Default::default()
+    };
+    let (state, pid) = provider_state(dir.path(), vec![("aider-work", work)]).await;
+    let ask = || super::agent::AgentRequest { project_id: pid.clone(), provider: Some("aider-work".into()), ..Default::default() };
+    // Aider would read a missing file as nothing and run on the default account's keys.
+    let err = state.terminals.spawn_agent(&state, ask()).await.err().expect("a missing keys file is refused");
+    assert!(err.to_string().contains("keys file") && err.to_string().contains("work.env"), "{err}");
+    std::fs::write(&keys, "OPENAI_API_KEY=x\n").unwrap();
+    let a = state.terminals.spawn_agent(&state, ask()).await.unwrap();
+    assert_eq!(a.agent.as_ref().and_then(|x| x.provider_id.as_deref()), Some("aider-work"));
+    state.terminals.kill(&a.id).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

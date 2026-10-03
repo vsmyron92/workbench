@@ -2,14 +2,14 @@
 // permission mode, Remote Control (Claude), and the project's starter prompts as chips.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CircleQuestionMark, Container, FileCode, Play, Sparkles, TriangleAlert } from 'lucide-react'
+import { CircleQuestionMark, Container, FileCode, Play, Plus, Sparkles, TriangleAlert } from 'lucide-react'
 import { useProjects } from '@/api/queries'
 import type { TerminalInfo } from '@/api/types'
-import { confirmDialog, openPanel } from '@/shell/actions'
+import { confirmDialog, openPanel, openSettings } from '@/shell/actions'
 import { useUi } from '@/state/store'
 import { Button, Checkbox, ErrorBox, IconButton, Input, Kbd, Select, TextArea } from '@/ui'
 import { startAgent, useAgentDefaults, useContainerAgents, type AgentDefaults, type ProviderInfo } from './api'
-import { initialProvider, isDangerous, pickerProviders, presetOf, PROVIDER_CONFIG_EXAMPLE, stateNote } from './lib/providers'
+import { displayLabel, initialProvider, limitNote, isDangerous, pickerProviders, presetOf, PROVIDER_CONFIG_EXAMPLE, stateNote } from './lib/providers'
 import { ProviderIcon } from './parts'
 import { useAgentsUi, type NewSessionPrefill } from './store'
 
@@ -34,22 +34,52 @@ function openRawConfig() {
 
 /** The provider chips. Unavailable ones stay selectable to show how to install them. */
 function ProviderPicker({ providers, value, onChange }: { providers: ProviderInfo[]; value: string | null; onChange: (id: string) => void }) {
+  const byId = new Map(providers.map((p) => [p.id, p]))
+  /** What a new session of `p` would start as instead, when it is at its limit. */
+  const instead = (p: ProviderInfo): ProviderInfo | undefined => (p.fallback ?? []).map((f) => byId.get(f)).find((f) => f && f.enabled && f.available && !limitNote(f))
   return (
-    <div className="wb-ag-providers" role="radiogroup" aria-label="Agent">
-      {providers.map((p) => (
-        <button
-          key={p.id}
-          role="radio"
-          aria-checked={p.id === value}
-          className={['wb-ag-provider', p.id === value && 'active', !p.available && 'unavailable'].filter(Boolean).join(' ')}
-          title={p.available ? `${p.label} (${p.command})` : (p.reason ?? `${p.label} is not available`)}
-          onClick={() => onChange(p.id)}
-        >
-          <ProviderIcon kind={p.kind} />
-          <span>{p.label}</span>
-          {!p.available && <span className="wb-ag-provider-note">not installed</span>}
-        </button>
-      ))}
+    <div className="wb-ag-providers">
+      <div className="wb-ag-providers-group" role="radiogroup" aria-label="Agent">
+        {providers.map((p) => {
+          const limit = limitNote(p)
+          const next = limit ? instead(p) : undefined
+          return (
+            <button
+              key={p.id}
+              role="radio"
+              aria-checked={p.id === value}
+              className={['wb-ag-provider', p.id === value && 'active', !p.available && 'unavailable', limit && 'limited'].filter(Boolean).join(' ')}
+              title={
+                !p.available
+                  ? (p.reason ?? `${displayLabel(p)} is not available`)
+                  : limit
+                    ? `${displayLabel(p)} is ${limit}${next ? `: a new session starts on ${displayLabel(next)}` : ''}`
+                    : p.local
+                      ? `${displayLabel(p)} (${p.command}) on ${p.local.url || p.local.server}`
+                      : p.api
+                        ? `${displayLabel(p)} (${p.command}) through ${p.api.serviceLabel} with an API key`
+                        : `${displayLabel(p)} (${p.command})`
+              }
+              onClick={() => onChange(p.id)}
+            >
+              <ProviderIcon kind={p.kind} />
+              <span>{displayLabel(p)}</span>
+              {!p.available && <span className="wb-ag-provider-note">not installed</span>}
+              {p.available && limit && <span className="wb-ag-provider-note">{limit}</span>}
+              {p.available && !limit && p.local && <span className="wb-ag-provider-note">local</span>}
+              {p.available && !limit && p.api && <span className="wb-ag-provider-note">API</span>}
+            </button>
+          )
+        })}
+      </div>
+      <button
+        className="wb-ag-provider add"
+        title="Add or manage accounts: more than one login of Claude Code, Codex, Kimi Code, Gemini CLI or Aider"
+        onClick={() => openSettings('agents')}
+      >
+        <Plus size={12} />
+        <span>Account</span>
+      </button>
     </div>
   )
 }
@@ -71,7 +101,7 @@ function ProvidersHelp({ d }: { d: AgentDefaults }) {
       <div>
         Workbench runs agent CLIs in its terminals. Claude Code, Codex, Kimi Code, Gemini CLI and Aider are built in; any other CLI can be added. They are
         configured in <code>config.toml</code> under <code>[agents.providers.&lt;name&gt;]</code> (the <code>[agents]</code> section keeps the Claude Code
-        defaults).
+        defaults). A second login of a CLI (a work and a personal subscription) is an account: add it with <b>Account</b> or in Settings → Agents.
       </div>
       {d.answerPermissions && (
         <div className="wb-muted">
@@ -83,7 +113,7 @@ function ProvidersHelp({ d }: { d: AgentDefaults }) {
         {d.providers.map((p) => (
           <li key={p.id}>
             <ProviderIcon kind={p.kind} size={12} />
-            <b>{p.label}</b>
+            <b>{displayLabel(p)}</b>
             <code title={p.command}>{p.command.split('/').pop()}</code>
             <span className="wb-muted">— {p.enabled ? caps(p) : 'disabled'}</span>
           </li>
@@ -175,13 +205,13 @@ export function NewSessionForm({
 
   const preset = presetOf(p, mode || p?.defaults.permissionMode)
   const dangerous = isDangerous(p, mode)
-  const label = p ? (p.kind === 'claude' && p.id === 'claude' ? 'Claude' : p.label) : 'the agent'
+  const label = p ? (p.kind === 'claude' && p.id === 'claude' ? 'Claude' : displayLabel(p)) : 'the agent'
 
   const start = async (text: string, n?: string) => {
     if (busy || !p || (!p.available && !runInside)) return
     if (dangerous) {
       const ok = await confirmDialog({
-        title: `Start ${p.label} without approvals?`,
+        title: `Start ${displayLabel(p)} without approvals?`,
         message: `${preset?.label}: ${preset?.description}. It can change files and run commands without asking.`,
         confirmLabel: 'Start anyway',
         danger: true,

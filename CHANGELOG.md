@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.8.0 - 2026-10-03
+
+- **Hosted APIs.** An account can use a hosted model API with an API key: DeepSeek, OpenRouter, Z.ai,
+  Moonshot, Fireworks, the Anthropic and OpenAI APIs, or any compatible service, for Claude Code,
+  Codex and Aider (**Settings → Agents → Accounts → Add…**). The key is named by a `[secrets]` entry,
+  read by the server when a session starts, passed in the CLI's environment only and masked in its
+  output; the browser sees only the secret's name. Combine them with fallback lists, so a cheap API
+  account can take over when a subscription is at its limit.
+
+- **Conversation transfer.** A session can continue on another account with its conversation:
+  **Continue on another account…** in its menu, the toast of a session that hit its limit, or
+  `failover = "session"`. Between accounts of the same CLI (Claude Code to Claude Code, Codex to Codex,
+  also onto a local model) the conversation itself is resumed, by copying the session's file into the
+  other account's folder; to another CLI, what was said is written out as text for the new session to
+  read. `[agents] transfer = "notes"` carries only a short note. Checked against the real Claude Code
+  and Codex: the history reaches the model of the resumed session.
+- Local models: an optional **context window** (`local.context`) is passed to Claude Code
+  (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`) and Codex (`model_context_window`), and Claude Code's sub-agents
+  use the local model too.
+
+- **Local models.** Claude Code, Codex and Aider can run on a model server of your own (Ollama,
+  LM Studio, llama.cpp, vLLM…): **Settings → Agents → Accounts → Add local model**, with **Find
+  models** to list what the server serves. Nothing of the vendor's login or API key is passed on, and
+  a session never falls back to the vendor if the server's setup is incomplete.
+- **Usage limits and automatic failover.** Accounts show how full their 5-hour and weekly windows are
+  (from Claude Code's status line and Codex's session log) and when a limit ends. Give an account a
+  `fallback` list and a new session skips an account that is at its limit: a second subscription, then
+  perhaps a local model. `failover = "session"` also continues a running session that hits its limit on
+  the next account, as a new session that carries the conversation; otherwise its toast offers
+  **Continue on …**.
+
+- **Several accounts of one agent CLI.** Run Claude Code, Codex, Kimi Code, Gemini CLI or
+  Aider under more than one login (Aider: more than one `.env` of API keys), such as a work and a personal subscription. **Settings → Agents → Accounts** adds
+  an account (a name, a label and a folder of its own); it appears in the new session picker
+  beside the CLI, and the composer has an **Account** button for it. Each account's history, Remote Control links and live sessions follow its
+  own folder, and Workbench never reads the logins. Accounts were already possible by hand
+  in `config.toml`; Remote Control links and the live-session list of an extra Claude account
+  were only looked up in the default `~/.claude` before.
+
 ## 0.7.1 - 2026-10-03
 
 - **Agents drive the debugger.** New MCP tools: `debug_start` (a configuration by name),

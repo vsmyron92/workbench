@@ -3,6 +3,12 @@ import type { AgentInfo, AgentProvider } from '@/api/types'
 import type { ProviderInfo } from '../api'
 import {
   dialogSeenOnScreen,
+  carryKind,
+  carryText,
+  displayLabel,
+  movedToast,
+  limitEnds,
+  limitNote,
   historyProviders,
   initialProvider,
   isDangerous,
@@ -105,5 +111,70 @@ describe('providers', () => {
     expect(reportsAnswers('gemini') || reportsAnswers('aider') || reportsAnswers('kimi')).toBe(false)
     expect(providerLabel(withAgent({ provider: 'gemini', providerId: 'gemini' }))).toBe('Gemini')
     expect(resumes(withAgent({ provider: 'aider' })) && !resumes(withAgent({ provider: 'custom' }))).toBe(true)
+  })
+})
+
+describe('displayLabel', () => {
+  it('puts the CLI before the label of a second account', () => {
+    const work = provider('claude-work', 'claude', { label: 'Work', home: '~/.claude-work' })
+    expect(displayLabel(work)).toBe('Claude · Work')
+    expect(displayLabel(provider('codex-team', 'codex', { label: 'Team', home: '~/.codex-team' }))).toBe('Codex · Team')
+    // A label that names the CLI already is kept, as are the presets and CLIs without a folder.
+    expect(displayLabel(provider('claude-work', 'claude', { label: 'Claude (work)', home: '~/.claude-work' }))).toBe('Claude (work)')
+    expect(displayLabel(provider('codex', 'codex', { label: 'Codex', home: '~/.codex-x' }))).toBe('Codex')
+    expect(displayLabel(provider('claude-work', 'claude', { label: 'Work' }))).toBe('Work')
+    expect(displayLabel(provider('opencode', 'custom', { label: 'OpenCode' }))).toBe('OpenCode')
+  })
+
+  it('names the account on its sessions', () => {
+    const list = [provider('claude', 'claude', { label: 'Claude Code' }), provider('claude-work', 'claude', { label: 'Work', home: '~/.claude-work' })]
+    expect(providerLabel(withAgent({ provider: 'claude', providerId: 'claude-work' }), list)).toBe('Claude · Work')
+    expect(providerLabel(withAgent({ provider: 'claude', providerId: null }), list)).toBe('Claude')
+  })
+})
+
+describe('limitNote', () => {
+  const now = new Date(2026, 9, 3, 14, 0).getTime()
+  const usage = (limited: boolean, until: number | null) => ({ usage: { limited, limitedUntil: until, reason: null, windows: [] } })
+  it('says when an account at its limit is usable again', () => {
+    expect(limitNote(usage(true, new Date(2026, 9, 3, 15, 45).getTime()), now)).toMatch(/^at limit until 3:45\s?PM$/i)
+    expect(limitNote(usage(true, new Date(2026, 9, 5, 0, 0).getTime()), now)).toMatch(/^at limit until \w{3} 12:00\s?AM$/i)
+  })
+  it('says nothing about an account that is usable, or whose limit has passed', () => {
+    expect(limitNote(usage(false, null), now)).toBeNull()
+    expect(limitNote(usage(true, now - 1), now)).toBeNull()
+    expect(limitNote({}, now)).toBeNull()
+    expect(limitEnds(new Date(2026, 9, 20, 9, 0).getTime(), now)).toMatch(/20/)
+  })
+})
+
+describe('carrying a conversation', () => {
+  it('resumes it for the same CLI and writes it out for another', () => {
+    expect(carryKind('claude', 'claude')).toBe('resume')
+    expect(carryKind('codex', 'codex')).toBe('resume')
+    expect(carryKind('claude', 'codex')).toBe('digest')
+    expect(carryKind('codex', 'aider')).toBe('digest')
+    expect(carryKind('gemini', 'claude')).toBe('notes')
+    expect(carryKind('aider', 'aider')).toBe('notes')
+    expect(carryKind('claude', 'claude', 'notes')).toBe('notes')
+  })
+
+  it('says what goes where', () => {
+    expect(carryText('resume', { kind: 'claude', local: null }, 'claude')).toBe('The conversation itself continues there.')
+    expect(carryText('resume', { kind: 'claude', local: { server: 'ollama', url: '' } }, 'claude')).toMatch(/stays on your network/)
+    expect(carryText('digest', { kind: 'codex', local: null }, 'claude')).toMatch(/sent to that CLI’s service/)
+    expect(carryText('digest', { kind: 'aider', local: { server: 'ollama', url: '' } }, 'claude')).toMatch(/stays on your network/)
+    expect(carryText('notes', { kind: 'codex', local: null }, 'claude')).toMatch(/short note/)
+    // A hosted API is a third party, also for the same CLI.
+    const ds = { kind: 'claude' as const, local: null, api: { service: 'deepseek', serviceLabel: 'DeepSeek', url: '', key: 'k' } }
+    expect(carryText('resume', ds, 'claude')).toBe('The conversation itself continues there. It is sent to DeepSeek.')
+    expect(carryText('digest', { ...ds, kind: 'aider' as const }, 'claude')).toMatch(/sent to DeepSeek/)
+  })
+
+  it('titles the toast by how it was carried', () => {
+    expect(movedToast('resume', 'Claude · Work')).toEqual({ title: 'Continued on Claude · Work', detail: 'The same conversation, resumed.' })
+    expect(movedToast('digest', 'Codex').detail).toMatch(/as text/)
+    expect(movedToast('notes', 'Codex').title).toBe('Started on Codex')
+    expect(movedToast(undefined, 'X').title).toBe('Started on X')
   })
 })

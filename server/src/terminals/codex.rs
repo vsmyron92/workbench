@@ -105,6 +105,10 @@ pub enum Event {
     Model(String),
     Effort(String),
     ContextPct(f64),
+    /// The usage windows of the account (`token_count.rate_limits`).
+    RateLimits(Vec<super::usage::Reported>),
+    /// The turn failed because the account is at its usage limit (the error's text).
+    UsageLimit(String),
 }
 
 fn user_text(p: &Value) -> Option<String> {
@@ -142,11 +146,17 @@ pub fn parse_line(line: &[u8]) -> Vec<Event> {
                     let m = e.get("message").and_then(Value::as_str).or_else(|| e.as_str()).unwrap_or("The turn failed");
                     clean_line(m, 300)
                 });
-                vec![Event::TurnComplete {
+                let mut out = vec![];
+                // The error's code, not its wording, says the account is at its limit.
+                if p.pointer("/error/codex_error_info").and_then(Value::as_str) == Some("usage_limit_exceeded") {
+                    out.push(Event::UsageLimit(p.pointer("/error/message").and_then(Value::as_str).unwrap_or_default().chars().take(400).collect()));
+                }
+                out.push(Event::TurnComplete {
                     turn_id: s("turn_id").unwrap_or_default().to_string(),
                     last_message: s("last_agent_message").filter(|m| !m.trim().is_empty()).map(str::to_string),
                     error,
-                }]
+                });
+                out
             }
             Some("turn_aborted") => vec![Event::TurnAborted { reason: s("reason").unwrap_or("interrupted").to_string() }],
             Some("agent_message") => s("message").filter(|m| !m.trim().is_empty()).map(|m| vec![Event::AgentMessage(m.to_string())]).unwrap_or_default(),
@@ -159,10 +169,17 @@ pub fn parse_line(line: &[u8]) -> Vec<Event> {
             Some("token_count") => {
                 let used = p.pointer("/info/last_token_usage/total_tokens").and_then(Value::as_f64);
                 let window = p.pointer("/info/model_context_window").and_then(Value::as_f64);
-                match (used, window) {
-                    (Some(u), Some(w)) if w > 0.0 && u.is_finite() => vec![Event::ContextPct(((u * 100.0 / w).clamp(0.0, 100.0) * 10.0).round() / 10.0)],
-                    _ => vec![],
+                let mut out = vec![];
+                if let (Some(u), Some(w)) = (used, window) {
+                    if w > 0.0 && u.is_finite() {
+                        out.push(Event::ContextPct(((u * 100.0 / w).clamp(0.0, 100.0) * 10.0).round() / 10.0));
+                    }
                 }
+                let windows = p.get("rate_limits").map(super::usage::codex_reported).unwrap_or_default();
+                if !windows.is_empty() {
+                    out.push(Event::RateLimits(windows));
+                }
+                out
             }
             _ => vec![],
         },
@@ -286,6 +303,8 @@ pub fn apply(agent: &mut super::AgentInfo, t: &mut Tracker, events: Vec<Event>, 
                     out.changed = true;
                 }
             }
+            // Account usage is kept apart from the session (`Terminals::note_codex_usage`).
+            Event::RateLimits(_) | Event::UsageLimit(_) => {}
         }
     }
     out
@@ -728,6 +747,23 @@ mod tests {
             vec![Event::ContextPct(10.0)]
         );
         assert!(parse_line(br#"{"type":"event_msg","payload":{"type":"token_count","info":null}}"#).is_empty());
+        // The account's windows ride on the same event, with or without token usage.
+        let full = parse_line(
+            br#"{"timestamp":"2026-10-03T09:32:56.931Z","ordinal":11,"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":100.0,"window_minutes":300,"resets_at":1893456000},"secondary":{"used_percent":41.5,"window_minutes":10080,"resets_at":1893999000},"credits":null,"plan_type":null}}}"#,
+        );
+        match full.as_slice() {
+            [Event::RateLimits(w)] => assert_eq!((w.len(), w[0].used_pct, w[0].resets_at, w[1].window_minutes), (2, 100.0, Some(1893456000000), Some(10080))),
+            other => panic!("{other:?}"),
+        }
+        // A provider that has no limits (a local model) reports every field null.
+        assert!(parse_line(br#"{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","primary":null,"secondary":null}}}"#).is_empty());
+        // The failed turn carries a code; the wording is only shown.
+        let failed = parse_line(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"t1\",\"last_agent_message\":null,\"error\":{\"message\":\"You\u{2019}ve hit your usage limit. Try again at 3:45 PM.\",\"codex_error_info\":\"usage_limit_exceeded\"}}}".as_bytes(),
+        );
+        assert!(matches!(&failed[..], [Event::UsageLimit(m), Event::TurnComplete { error: Some(_), .. }] if m.contains("usage limit")), "{failed:?}");
+        let other = parse_line(br#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t2","error":{"message":"boom","codex_error_info":"server_overloaded"}}}"#);
+        assert!(matches!(&other[..], [Event::TurnComplete { .. }]));
         assert!(parse_line(br#"{"type":"response_item","payload":{"type":"message"}}"#).is_empty());
         assert!(parse_line(b"{not json").is_empty());
     }

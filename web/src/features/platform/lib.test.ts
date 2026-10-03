@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest'
 import {
+  accountHomeError,
+  accountIdError,
+  accountKind,
+  accountName,
+  apiKeyError,
+  apiUrlError,
+  API_BY_KIND,
+  suggestApiId,
+  contextError,
+  parseContext,
+  fallbackCandidates,
+  formatUntil,
+  LOCAL_BY_KIND,
+  localUrlError,
+  moveItem,
+  suggestLocalId,
+  usageTone,
   desktopNotifiesHere,
   formatCountdown,
   formatMs,
@@ -14,6 +31,7 @@ import {
   restartImpact,
   restartText,
   secretRefFields,
+  suggestAccountId,
   timeline,
   updateFraction,
   updatePhaseText,
@@ -223,5 +241,169 @@ describe('updates', () => {
     )
     expect(restartImpact([shell, shell], true)).toBe('2 shells will stop. Shells start again under their last screen, without what ran in them.')
     expect(restartImpact([agent, run], true)).toBe('1 agent session and 1 run will stop. Agent sessions resume after the restart; runs are not started again.')
+  })
+})
+
+describe('accounts', () => {
+  it('suggests a provider name from the kind and the label', () => {
+    expect(suggestAccountId('claude', 'Work')).toBe('claude-work')
+    expect(suggestAccountId('codex', '  Team A / 2 ')).toBe('codex-team-a-2')
+    expect(suggestAccountId('kimi', '')).toBe('')
+    expect(suggestAccountId('claude', '日本')).toBe('')
+    expect(suggestAccountId('claude', 'x'.repeat(60))).toHaveLength(32)
+    expect(accountIdError(suggestAccountId('claude', 'x'.repeat(60)), [])).toBeNull()
+  })
+
+  it('refuses names the server would, and the built-in ones', () => {
+    expect(accountIdError('claude-work', [])).toBeNull()
+    expect(accountIdError('', [])).toMatch(/Enter/)
+    expect(accountIdError('Claude Work', [])).toMatch(/Lowercase/)
+    expect(accountIdError('-x', [])).toMatch(/Lowercase/)
+    expect(accountIdError('codex', [])).toMatch(/built-in/)
+    expect(accountIdError('claude-work', ['claude-work'])).toMatch(/exists/)
+  })
+
+  it('wants a folder of its own, spelled as a path', () => {
+    const others = [{ id: 'claude-work', home: '~/.claude-work/' }]
+    expect(accountHomeError('claude', '~/.claude-personal', others)).toBeNull()
+    expect(accountHomeError('claude', '/home/me/.claude-x', others)).toBeNull()
+    expect(accountHomeError('claude', 'C:\\Users\\me\\.claude-x', others)).toBeNull()
+    expect(accountHomeError('claude', '', others)).toMatch(/Enter/)
+    expect(accountHomeError('claude', '.claude-x', others)).toMatch(/absolute/)
+    expect(accountHomeError('claude', '~/.claude-work', others)).toMatch(/claude-work/)
+    expect(accountHomeError('claude', '~/.claude/', others)).toMatch(/default account/)
+    expect(accountHomeError('codex', '~/.claude', [])).toBeNull()
+    expect(accountHomeError('codex', '~/${secret:x}', [])).toMatch(/plain path/)
+  })
+
+  it('knows Gemini’s home holds .gemini and Aider’s is a keys file', () => {
+    expect(accountHomeError('gemini', '~/.gemini-work', [])).toBeNull()
+    expect(accountHomeError('gemini', '~/', [])).toMatch(/default account/)
+    expect(accountHomeError('aider', '~/.aider-work.env', [])).toBeNull()
+    expect(accountHomeError('aider', '~/.aider-work.env', [{ id: 'aider-a', home: '~/.aider-work.env' }])).toBe('Already the keys file of “aider-a”')
+    expect(accountHomeError('aider', '~/keys/', [])).toMatch(/file/)
+    expect(accountHomeError('aider', '', [])).toMatch(/\.env file/)
+    expect(accountIdError('gemini', [])).toMatch(/built-in/)
+    expect(accountIdError('aider', [])).toMatch(/built-in/)
+    expect(accountKind('aider')?.suggest('work')).toBe('~/.aider-work.env')
+    expect(accountKind('gemini')?.homeVar).toBe('GEMINI_CLI_HOME')
+    expect(accountKind('custom')).toBeUndefined()
+  })
+})
+
+describe('local models and fallback', () => {
+  it('knows which servers each CLI can run on', () => {
+    expect(LOCAL_BY_KIND.claude).toEqual(['ollama', 'lmstudio', 'anthropic'])
+    expect(LOCAL_BY_KIND.codex).not.toContain('anthropic')
+    expect(LOCAL_BY_KIND.gemini).toEqual([])
+  })
+
+  it('checks a server address', () => {
+    expect(localUrlError('ollama', '')).toBeNull()
+    expect(localUrlError('openai', '')).toMatch(/Enter/)
+    expect(localUrlError('openai', 'http://gpu.lan:8080/v1')).toBeNull()
+    expect(localUrlError('ollama', 'https://[::1]:11434')).toBeNull()
+    expect(localUrlError('ollama', 'localhost:11434')).toMatch(/http/)
+    expect(localUrlError('ollama', 'http://user:pw@host')).toMatch(/user name/)
+    expect(localUrlError('ollama', 'ftp://host')).toMatch(/http/)
+  })
+
+  it('names a local account from its parts', () => {
+    expect(suggestLocalId('claude', 'ollama', 'qwen3-coder:30b')).toBe('claude-ollama-qwen3-coder')
+    expect(suggestLocalId('aider', 'lmstudio', '')).toBe('aider-lmstudio')
+    expect(suggestLocalId('codex', 'openai', 'x'.repeat(60))).toHaveLength(32)
+  })
+
+  it('names accounts, and offers every other one to fall back to', () => {
+    const providers = {
+      'claude-work': { kind: 'claude', label: 'Work' },
+      'claude-ollama': { kind: 'claude', label: 'Claude on Ollama' },
+      'aider-off': { kind: 'aider', enabled: false },
+      opencode: { label: 'OpenCode' },
+    }
+    expect(accountName('claude', providers)).toBe('Claude Code')
+    expect(accountName('claude-work', providers)).toBe('Claude · Work')
+    expect(accountName('claude-ollama', providers)).toBe('Claude on Ollama')
+    expect(accountName('opencode', providers)).toBe('OpenCode')
+    expect(accountName('ghost', providers)).toBe('ghost')
+    const ids = fallbackCandidates('claude-work', providers).map((c) => c.id)
+    expect(ids).toContain('claude')
+    expect(ids).toContain('opencode')
+    expect(ids).not.toContain('claude-work')
+    expect(ids).not.toContain('aider-off')
+  })
+
+  it('moves items inside the list only', () => {
+    expect(moveItem(['a', 'b', 'c'], 1, -1)).toEqual(['b', 'a', 'c'])
+    expect(moveItem(['a', 'b', 'c'], 1, 1)).toEqual(['a', 'c', 'b'])
+    const l = ['a', 'b']
+    expect(moveItem(l, 0, -1)).toBe(l)
+    expect(moveItem(l, 1, 1)).toBe(l)
+  })
+
+  it('says when a limit ends and how full a window is', () => {
+    const now = new Date(2026, 9, 3, 14, 0).getTime()
+    expect(formatUntil(new Date(2026, 9, 3, 15, 45).getTime(), now)).toMatch(/^3:45\s?PM$/i)
+    expect(formatUntil(new Date(2026, 9, 5, 0, 0).getTime(), now)).toMatch(/12:00\s?AM$/i)
+    expect(formatUntil(new Date(2026, 9, 20, 9, 0).getTime(), now)).toMatch(/20/)
+    expect(usageTone(10)).toBe('ok')
+    expect(usageTone(85)).toBe('warn')
+    expect(usageTone(100)).toBe('full')
+  })
+})
+
+describe('context window', () => {
+  it('reads sizes people write', () => {
+    expect(parseContext('32768')).toBe(32768)
+    expect(parseContext('32k')).toBe(32768)
+    expect(parseContext(' 128 K ')).toBe(131072)
+    expect(parseContext('1m')).toBe(1048576)
+    expect(parseContext('131,072')).toBe(131072)
+    expect(parseContext('')).toBeNull()
+    expect(parseContext('big')).toBeNull()
+  })
+
+  it('accepts the server’s range only', () => {
+    expect(contextError('')).toBeNull()
+    expect(contextError('32k')).toBeNull()
+    expect(contextError('1000')).toMatch(/Between/)
+    expect(contextError('99m')).toMatch(/Between/)
+    expect(contextError('lots')).toMatch(/number of tokens/)
+  })
+})
+
+describe('hosted APIs', () => {
+  it('knows which services each CLI can use', () => {
+    expect(API_BY_KIND.claude).toContain('deepseek')
+    expect(API_BY_KIND.claude).not.toContain('openai')
+    expect(API_BY_KIND.codex).toEqual(['openai', 'custom'])
+    expect(API_BY_KIND.gemini).toEqual([])
+  })
+
+  it('wants https, except for this computer', () => {
+    expect(apiUrlError('claude', 'deepseek', '')).toBeNull()
+    expect(apiUrlError('claude', 'custom', '')).toMatch(/Enter/)
+    expect(apiUrlError('claude', 'anthropic', '')).toBeNull()
+    expect(apiUrlError('codex', 'custom', '')).toMatch(/Enter/)
+    expect(apiUrlError('codex', 'openai', '')).toBeNull()
+    expect(apiUrlError('aider', 'custom', '')).toMatch(/Enter/)
+    expect(apiUrlError('claude', 'custom', 'https://gw.example.com/v1')).toBeNull()
+    expect(apiUrlError('claude', 'custom', 'http://gw.example.com')).toMatch(/https:\/\/ only/)
+    expect(apiUrlError('claude', 'custom', 'http://localhost:4000')).toBeNull()
+    expect(apiUrlError('claude', 'custom', 'http://127.0.0.1:4000/x')).toBeNull()
+    expect(apiUrlError('claude', 'custom', 'https://u:p@host')).toMatch(/user name/)
+    expect(apiUrlError('claude', 'custom', 'gw.example.com')).toMatch(/https/)
+  })
+
+  it('wants a secret that exists', () => {
+    expect(apiKeyError('', ['deepseek'])).toMatch(/Choose/)
+    expect(apiKeyError('deepseek', ['deepseek'])).toBeNull()
+    expect(apiKeyError('other', ['deepseek'])).toMatch(/not defined/)
+  })
+
+  it('names the account', () => {
+    expect(suggestApiId('claude', 'deepseek', '')).toBe('claude-deepseek')
+    expect(suggestApiId('claude', 'deepseek', 'Cheap')).toBe('claude-cheap')
+    expect(suggestApiId('aider', 'openrouter', '')).toBe('aider-openrouter')
   })
 })
