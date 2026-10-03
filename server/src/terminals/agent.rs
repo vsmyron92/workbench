@@ -439,7 +439,19 @@ pub fn find_provider(cfg: &AgentsConfig, id: Option<&str>) -> Result<Provider, A
 }
 
 /// The error for a provider whose command is not installed.
-fn missing_command(p: &Provider) -> ApiError {
+/// The provider's own environment from config.toml (`env`: where its login lives, such as
+/// `CLAUDE_CONFIG_DIR`), `~/…` paths expanded. A session and a sign-in of the account get the same.
+pub(super) fn provider_env(p: &Provider) -> Vec<(String, Option<String>)> {
+    p.env
+        .iter()
+        .map(|(k, v)| {
+            let v = if crate::util::os::path::home_relative(v).is_some() { crate::config::expand_tilde(v).display().to_string() } else { v.clone() };
+            (k.clone(), Some(v))
+        })
+        .collect()
+}
+
+pub(super) fn missing_command(p: &Provider) -> ApiError {
     let key = if p.id == "claude" { "[agents].command".to_string() } else { format!("[agents.providers.{}].command", p.id) };
     let hint = if p.install_hint.is_empty() { String::new() } else { format!(" (`{}`)", p.install_hint) };
     ApiError::not_configured(format!("{} ({:?}) was not found. Install it{hint}, or set {key} in config.toml", p.label, p.command))
@@ -761,10 +773,7 @@ impl Terminals {
         if let Some(a) = &api {
             env.extend(a.env.iter().cloned());
         }
-        for (k, v) in &provider.env {
-            let v = if crate::util::os::path::home_relative(v).is_some() { crate::config::expand_tilde(v).display().to_string() } else { v.clone() };
-            env.push((k.clone(), Some(v)));
-        }
+        env.extend(provider_env(&provider));
         let mut secrets = vec![];
         if let Some(a) = &api {
             let key = state

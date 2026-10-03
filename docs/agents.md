@@ -95,8 +95,9 @@ same CLI with its own login, history and settings in a folder of its own. Aider 
 so its account is its own `.env` file of API keys. Manage them in **Settings → Agents →
 Accounts** (or with the **Account** button beside the CLIs in the new session composer): a
 name, a label and the folder, such as `~/.claude-work`. An account appears in the picker
-beside the CLI as "Claude · Work", and its sessions carry that name. The first session
-started with it shows the CLI's own sign-in, because the folder holds no login yet.
+beside the CLI as "Claude · Work", and its sessions carry that name. A new account holds no
+login yet: press **Sign in** on its row (see below), or start a session with it, which shows
+the CLI's own sign-in the first time.
 
 Behind the form this is `[agents.providers.claude-work]` with `kind = "claude"` and
 `env = { CLAUDE_CONFIG_DIR = "~/.claude-work" }`. The variable is `CODEX_HOME` for Codex,
@@ -107,6 +108,26 @@ Conversation history, Remote Control links and the live sessions listed on Home 
 session's account. Workbench never reads or copies a login or a key. An Aider account's file
 must exist before a session starts (Aider would otherwise run on the default keys without
 saying so); Aider keeps its chat history in each repository, shared by all its accounts.
+
+### Signing an account in
+
+Each account of Claude Code, Codex, Kimi Code or Gemini CLI shows whether it is signed in, and a
+**Sign in** button. The button runs the CLI's own login in a terminal tab ("Sign in · Claude · Work"),
+with the account's folder in its environment: `claude auth login` or `codex login`; Gemini CLI and Kimi
+Code are started as they are and ask by themselves. You finish it in your browser. Claude Code prints a
+link and asks for the code the page gives you, so it also works when Workbench runs on another
+computer; Codex's own login completes on the computer Workbench runs on, so from elsewhere use the
+device-code login that `codex login --help` lists, in a terminal of that account. A second click while a sign-in is
+open shows that tab; restarting it signs in the same account. The account's folder is made if it does
+not exist yet.
+
+The status ("Signed in · Claude subscription · max", "Signed out") is what the CLI says when asked
+(`claude auth status`, `codex login status`) under the account's own folder, reused for a few seconds
+and asked again when a sign-in ends. Gemini CLI and Kimi Code cannot say without a session, so they
+show none. An account on a model of your own or an API key has no login to sign in to, and neither has
+Aider. Workbench never reads a login file, a token or the email of the account: what leaves the server
+is a yes or no, one of a few fixed words for how the account signs in, and the plan's short name. The
+sign-in and the status are for a signed-in device; an agent's own credentials are refused.
 
 ## Local models
 

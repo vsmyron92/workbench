@@ -51,6 +51,7 @@ mod permission;
 mod providers;
 mod pty;
 mod routes;
+mod signin;
 mod statusline;
 mod store;
 mod tools;
@@ -426,6 +427,8 @@ pub struct Terminals {
     codex_features: Mutex<HashMap<PathBuf, (std::time::SystemTime, providers::CodexFeatures)>>,
     /// Which agent accounts are at their usage limit, and how full their windows are.
     pub(crate) usage: usage::Usage,
+    /// Whether each agent account is signed in, as its CLI last said.
+    pub(crate) signins: signin::Cache,
 }
 
 enum Write {

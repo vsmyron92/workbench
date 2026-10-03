@@ -12,6 +12,7 @@ import {
   parseContext,
   fallbackCandidates,
   formatUntil,
+  hasLogin,
   LOCAL_BY_KIND,
   localUrlError,
   moveItem,
@@ -31,6 +32,7 @@ import {
   restartImpact,
   restartText,
   secretRefFields,
+  signInText,
   suggestAccountId,
   timeline,
   updateFraction,
@@ -349,6 +351,22 @@ describe('local models and fallback', () => {
     expect(usageTone(10)).toBe('ok')
     expect(usageTone(85)).toBe('warn')
     expect(usageTone(100)).toBe('full')
+  })
+
+  it('knows which CLIs have a login to sign in to', () => {
+    for (const k of ['claude', 'codex', 'kimi', 'gemini']) expect(hasLogin(k), k).toBe(true)
+    // Aider has API keys in a file; anything else is not one of the CLIs.
+    for (const k of ['aider', 'custom', '', null, undefined]) expect(hasLogin(k), String(k)).toBe(false)
+  })
+
+  it('words a sign-in status', () => {
+    expect(signInText({ state: 'signedIn', method: 'Claude subscription', plan: 'max' })).toBe('Signed in · Claude subscription · max')
+    expect(signInText({ state: 'signedIn', method: 'API key' })).toBe('Signed in · API key')
+    expect(signInText({ state: 'signedIn' })).toBe('Signed in')
+    expect(signInText({ state: 'signedOut', method: 'API key' })).toBe('Signed out')
+    // The CLI could not say: nothing is claimed either way.
+    expect(signInText({ state: 'unknown' })).toBeNull()
+    expect(signInText(undefined)).toBeNull()
   })
 })
 

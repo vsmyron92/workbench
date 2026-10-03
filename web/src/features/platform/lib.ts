@@ -1,6 +1,6 @@
 // Pure helpers for the platform feature (tested in lib.test.ts).
 
-import type { ActivityEvent, McpCall, SecretRef, UpdateStatus } from './types'
+import type { AccountSignIn, ActivityEvent, McpCall, SecretRef, UpdateStatus } from './types'
 
 type Params = Record<string, unknown>
 
@@ -435,6 +435,19 @@ export function formatUntil(ms: number, now: number = Date.now()): string {
 /** The colour of a usage bar. */
 export function usageTone(pct: number): 'ok' | 'warn' | 'full' {
   return pct >= 99.5 ? 'full' : pct >= 80 ? 'warn' : 'ok'
+}
+
+/** Whether the CLI of an account has a login to sign in to (Aider has API keys in a file instead). */
+export function hasLogin(kind: string | null | undefined): boolean {
+  const k = accountKind(kind)
+  return !!k && !k.file
+}
+
+/** What a sign-in status says: "Signed in · Claude subscription · max", "Signed out"; `null` when the CLI could not say. */
+export function signInText(s: Pick<AccountSignIn, 'state' | 'method' | 'plan'> | undefined): string | null {
+  if (!s || s.state === 'unknown') return null
+  if (s.state === 'signedOut') return 'Signed out'
+  return ['Signed in', s.method, s.plan].filter(Boolean).join(' · ')
 }
 
 /** Why `text` cannot be a context window in tokens (`null`: it can; empty is "not set"). Mirrors the server's range. */

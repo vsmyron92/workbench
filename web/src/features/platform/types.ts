@@ -70,6 +70,25 @@ export interface UsageInfo {
   failover: FailoverMode
 }
 
+/** terminals/signin.rs State: what an account's CLI says about its login. `unknown`: it cannot say, or did not answer. */
+export type SignInState = 'signedIn' | 'signedOut' | 'unknown'
+
+/** One account's entry of GET /api/agents/signin. Fixed words only: the CLI's own text and the login's email never get here. */
+export interface AccountSignIn {
+  state: SignInState
+  /** How it signs in ("Claude subscription", "API key"…). */
+  method?: string
+  /** The plan's short name ("max"). */
+  plan?: string
+  /** ms */
+  checkedAt: number
+}
+
+/** GET /api/agents/signin: the accounts whose CLI can say whether it is signed in. */
+export interface SignInInfo {
+  accounts: Record<string, AccountSignIn>
+}
+
 /** POST /api/agents/local-models */
 export interface LocalModels {
   models: string[]
