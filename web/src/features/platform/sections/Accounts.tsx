@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { ArrowDown, ArrowUp, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react'
-import { confirmDialog, toast, toastError } from '@/shell/actions'
+import { ArrowDown, ArrowUp, LogIn, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react'
+import { confirmDialog, openPanel, toast, toastError } from '@/shell/actions'
 import { Badge, Button, Checkbox, EmptyState, IconButton, Input, Modal, Select, showMenuAt } from '@/ui'
-import { patchSettings, probeLocalModels, reportApply, setAccountLimit, useAccountUsage, useSettings } from '../api'
+import { patchSettings, probeLocalModels, reportApply, setAccountLimit, startSignIn, useAccountUsage, useSettings, useSignIns } from '../api'
 import { Group, Note, Row } from '../common'
 import {
   ACCOUNT_KINDS,
@@ -17,11 +17,13 @@ import {
   contextError,
   fallbackCandidates,
   formatUntil,
+  hasLogin,
   LOCAL_BY_KIND,
   LOCAL_SERVERS,
   localUrlError,
   moveItem,
   parseContext,
+  signInText,
   suggestAccountId,
   suggestApiId,
   suggestLocalId,
@@ -510,6 +512,7 @@ const FAILOVER: { value: FailoverMode; label: string; hint: string }[] = [
 export function AccountsGroup({ onGoto }: { onGoto: (section: string) => void }) {
   const settings = useSettings()
   const usage = useAccountUsage()
+  const signIns = useSignIns()
   const [editor, setEditor] = useState<{ id: string | null; config: ProviderSettings | null } | null>(null)
   const providers: Providers = settings.data?.config.agents.providers ?? {}
   const rows = accountRows(providers)
@@ -545,6 +548,17 @@ export function AccountsGroup({ onGoto }: { onGoto: (section: string) => void })
       next[x] = c.fallback?.includes(id) ? tidy({ ...c, fallback: c.fallback.filter((f) => f !== id) }) : c
     }
     await save(next, `${label} removed`).catch(() => {})
+  }
+
+  // The CLI's own login, in a terminal tab: Workbench starts it in the account's folder and never sees what is typed or stored.
+  const signIn = async (id: string, label: string) => {
+    try {
+      const t = await startSignIn(id)
+      openPanel({ kind: 'terminal', id: `terminal:${t.id}`, title: t.title, params: { terminalId: t.id } })
+      toast('info', `Follow the steps in the “${t.title}” tab to sign ${label} in`)
+    } catch (e) {
+      toastError(e, `Could not start the sign-in of ${label}`)
+    }
   }
 
   const setTransfer = async (value: 'conversation' | 'notes') => {
@@ -596,14 +610,27 @@ export function AccountsGroup({ onGoto }: { onGoto: (section: string) => void })
               const name = accountName(r.id, providers)
               const l = r.config.local
               const ap = r.config.api
+              const si = signIns.data?.accounts[r.id]
+              const siText = signInText(si)
+              const loginAccount = !l && !ap && hasLogin(r.kind?.kind)
               return (
                 <div key={r.id} className="wb-acct">
                   <div className="wb-row">
                     <div className="wb-grow">
                       <span className="wb-acct-name">{name}</span>{' '}
                       {r.builtIn && <Badge>built in</Badge>} {l && <Badge tone="accent">local</Badge>} {ap && <Badge tone="accent">API</Badge>} {r.config.enabled === false && <Badge>hidden</Badge>}{' '}
+                      {loginAccount && siText && (
+                        <Badge tone={si?.state === 'signedIn' ? 'success' : 'warning'} title="As the CLI itself reports it. Workbench reads no login.">
+                          {siText}
+                        </Badge>
+                      )}{' '}
                       <span className="mono wb-subtle wb-small">{r.id}</span>
                     </div>
+                    {loginAccount && (
+                      <Button size="small" icon={LogIn} onClick={() => void signIn(r.id, name)} title="Run the CLI’s own login in a terminal tab, for this account’s folder">
+                        {si?.state === 'signedIn' ? 'Sign in again' : 'Sign in'}
+                      </Button>
+                    )}
                     <IconButton icon={Pencil} label="Edit" onClick={() => setEditor({ id: r.id, config: r.config })} />
                     {!r.builtIn && <IconButton icon={Trash2} label="Remove" onClick={() => void remove(r.id, name)} />}
                   </div>
@@ -670,7 +697,7 @@ export function AccountsGroup({ onGoto }: { onGoto: (section: string) => void })
       </Group>
       <div style={{ marginTop: 12 }}>
         <Note>
-          To sign an account in, start a session with it: its CLI shows its own login the first time it runs in the new folder (Aider reads the keys in its file). Accounts are saved as{' '}
+          <b>Sign in</b> runs the CLI’s own login in a terminal tab, for the account’s folder: you finish it in your browser, and Workbench reads no login or token. An account that is not signed in also shows the CLI’s login the first time a session starts with it (Aider reads the keys in its file). Accounts are saved as{' '}
           <code>[agents.providers.&lt;name&gt;]</code> in <code>config.toml</code>, where model, effort and extra arguments can be set per account.
         </Note>
       </div>

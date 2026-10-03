@@ -3,6 +3,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { useEvent } from '@/api/events'
+import type { TerminalInfo } from '@/api/types'
 import { toast } from '@/shell/actions'
 import { prependCapped, restartText } from './lib'
 import type {
@@ -19,6 +20,7 @@ import type {
   RemoteInfo,
   SecretsInfo,
   SettingsInfo,
+  SignInInfo,
   UpdateStatus,
   UsageInfo,
 } from './types'
@@ -36,6 +38,7 @@ export const pk = {
   push: ['platform', 'push'] as const,
   update: ['platform', 'update'] as const,
   usage: ['platform', 'usage'] as const,
+  signin: ['platform', 'signin'] as const,
 }
 
 /** Which agent accounts are at their usage limit, and how full their windows are; `agent.usage` keeps it live. */
@@ -48,6 +51,29 @@ export function useAccountUsage() {
 /** Say an account is at its limit until `until` (ms), or usable again (`null`). */
 export function setAccountLimit(provider: string, until: number | null) {
   return api.put<unknown>(`/api/agents/usage/${encodeURIComponent(provider)}`, { limitedUntil: until })
+}
+
+/**
+ * Whether each account's CLI is signed in, as it last said (the server reuses an answer for a few seconds).
+ * A sign-in terminal that ends asks again at once, so the status turns when the login is done.
+ */
+export function useSignIns() {
+  const qc = useQueryClient()
+  useEvent<TerminalInfo>('terminal.updated', (ev) => {
+    const t = ev.data
+    if (t?.meta?.signIn === true && t.status === 'exited') void refreshSignIns(qc)
+  })
+  return useQuery({ queryKey: pk.signin, queryFn: () => api.get<SignInInfo>('/api/agents/signin'), staleTime: 20_000, refetchOnWindowFocus: true })
+}
+
+/** Ask every CLI again now, past the server's short memory. */
+export async function refreshSignIns(qc: ReturnType<typeof useQueryClient>) {
+  qc.setQueryData(pk.signin, await api.get<SignInInfo>('/api/agents/signin?refresh=1'))
+}
+
+/** Run the CLI's login for an account in a terminal (one that is already open is returned as it is). */
+export function startSignIn(provider: string) {
+  return api.post<TerminalInfo>(`/api/agents/signin/${encodeURIComponent(provider)}`, {})
 }
 
 /** What a model server of your own serves (or why it does not answer). */
