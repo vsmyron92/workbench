@@ -148,7 +148,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 - **Rendered Markdown is untrusted** (`ui/Markdown.tsx`). Raw HTML goes through `rehype-sanitize` with GitHub's schema: no scripts, iframes, event handlers, `style` or `javascript:` URLs, and ids and names from the document are prefixed `user-content-` so they cannot clobber the app's globals. Heading ids (`md-`) and alert classes are added after sanitizing. Mermaid diagrams render with `securityLevel: 'strict'`. The CSP is the second line: nothing inline can run.
 - **Logs:** request spans carry the method and path only, never the query string (`/auth?token=…`, `?wbk=`).
 - **Agent tokens:** `auth.issue_agent_token(terminal_id)` is put into a hosted session's environment (`WORKBENCH_AGENT_TOKEN`). It is valid only on `/api/hooks/**` and `/mcp`, whose handlers check it with `auth.agent_from_headers`.
-  - A hosted session is confined to its own project over MCP. Tools resolve the project with `McpCtx::project_for`, which refuses a `projectId` naming another project; terminal tools show only what `McpCtx::may_see_project` allows. Only a caller that is not a session (the master token without `X-Workbench-Terminal`) may name any project.
+  - A hosted session is confined to its own project over MCP. Tools resolve the project with `McpCtx::project_for`, which refuses a `projectId` naming another project; terminal tools show only what `McpCtx::may_see_project` allows. Only a caller that is not a session (the master token without `X-Workbench-Terminal`) may name any project. The one exception is the debug slice's agent tools (`debug_start`, `debug_attach`, `debug_restart`, `debug_evaluate`, `debug_control`, `debug_breakpoints`): the owner decided they take any `projectId` (default: the session's own).
 - **Git credentials** (`git::askpass`): remote ops (fetch, pull, push, rebase) let git ask `workbench askpass`, which answers only for the GitLab host Workbench has a token for (the project's `[repo.gitlab]` with its own token, else `[gitlab]`), only over https, and only when the prompt names that host unambiguously: git before its CVE-2024-50349 fix prints user names decoded, so `Password for 'https://gitlab.com/@evil.example': ` (user `gitlab.com/`) is refused. For that host the ops also empty git's credential helper list (`-c credential.https://<host>.helper=`, `askpass::reset_helpers_key`), so no helper (Git Credential Manager, `store`, `cache`, a keychain) is asked for it or handed the token to store; other hosts keep the user's helpers.
 - **Paths:** every client path goes through `util::paths::resolve_in_root`, or through `resolve_absolute_in` for extra roots. These reject `..` escapes and symlinks leaving the root.
   - Whether a string is an absolute path, and the Windows rules, live in `util::os::path`. On Windows client paths use `/` only (a `\` could slip past checks that split on `/`), and names that alias another file or a device are refused (`:`, device names like `NUL` or `com1.txt`, a trailing dot or space, 8.3 short names like `GIT~1`); roots compare without regard to ASCII case; UNC roots (`\\server\share`, `\\wsl$`, also spelled `\\?\UNC\…` or `\??\UNC\…`) are refused: adding one as a project answers `unsupported_platform` (`networkRoots`), so does a path that resolves to one (a mapped network drive), and config.toml entries naming one are skipped at reload before anything opens them. Canonical paths drop `\\?\` wherever a plain path names the same file and have an uppercase drive letter; comparisons take `\\?\C:\` for `C:\`. Linux keeps its rules: a `\` is part of a name, in the paths clients send and in the relative paths the server answers with, which `os::path::to_slash` writes with `/` on Windows only (`util::paths::relative_to`, listings, search, quick open, the watcher).
@@ -509,8 +509,10 @@ Added in the third phase (all confined with `McpCtx::project_for`):
 |---|---|---|
 | `code_diagnostics {path?}`, `code_symbols {query}`, `code_definition {path, line, column}`, `code_references {path, line, column}` | lsp | read-only; only servers that already run (a tool never enables or starts one) |
 | `debug_state {sessionId?, frame?, registers?}` | debug | read-only: sessions, the stop, the stack, a frame's locals (secret values masked), the CPU registers on request, the console's newest tail |
-| `debug_control {action, sessionId?, threadId?, path?, line?, waitSeconds?, frame?, registers?}` | debug | `mutating`: continue, pause, next, stepIn, stepOut, runTo, stop on a session the user started; waits (≤300 s) for the program to stop and answers like `debug_state`; never starts, attaches, restarts or evaluates |
-| `debug_breakpoints {action, path?, breakpoints?, lines?, muted?}` | debug | `mutating`: list, add, remove, set, functions, mute, clear for the project's breakpoints; a condition, hit-count expression or log message is refused (`403`: expressions run in the debugger) |
+| `debug_start {config, stopOnEntry?, pid?, waitSeconds?, frame?, registers?}`, `debug_attach {pid, adapter?, language?, program?, …}`, `debug_restart {sessionId?, …}` | debug | `mutating`: start a configuration (its build step and debug server run), attach to a process, rerun a session (a new sessionId); wait (default 60 s, ≤300) for a stop and answer like `debug_state` |
+| `debug_evaluate {expression, context?, frame?, threadId?, sessionId?}` | debug | `mutating`: `watch` (default) or `repl` (debugger commands, echoed into the console as `(agent)`) in a stopped session |
+| `debug_control {action, sessionId?, threadId?, path?, line?, waitSeconds?, frame?, registers?}` | debug | `mutating`: continue, pause, next, stepIn, stepOut, runTo, stop on a live session; waits (≤300 s) for the program to stop and answers like `debug_state` |
+| `debug_breakpoints {action, path?, breakpoints?, lines?, muted?}` | debug | `mutating`: list, add, remove, set, functions, mute, clear for the project's breakpoints; conditions and log messages are accepted |
 | `workbench_changelists` | git | read-only: changelists and shelves with their files |
 | `files_local_history {path, limit?, revision?, diff?, against?, content?}` | files | read-only; sensitive paths refused |
 | `confluence_add_inline_comment` (mutating), `confluence_upload_attachment` (mutating; a file of the session's project, never hidden, key/token-named or `sensitive` files, symlinks resolved first), `confluence_labels` (mutating) | atlassian | Confluence authoring |
@@ -525,7 +527,7 @@ Only expose what an agent cannot do easily with its own shell, or what needs Wor
 - run-configuration output;
 - what only Workbench's running services know: language servers' diagnostics and symbols, a debug session's state, Local History, changelists.
 
-Agents never enable code intelligence, start, attach or rerun a debug session, evaluate an expression or set a conditional breakpoint or log point in one, answer a permission request, stage, commit, shelve, rebase or bisect, update or restart Workbench through MCP. They may steer a debug session the user started: continue, pause, step, run to a line, stop, and plain breakpoints (`debug_control`, `debug_breakpoints`, `mutating`; see the debug slice).
+Agents never enable code intelligence, answer a permission request, stage, commit, shelve, rebase or bisect, update or restart Workbench through MCP. They do drive the debugger (the owner's decision, 0.7.1, no opt-in): start, attach, rerun, steer, evaluate and set conditional breakpoints, through `mutating` tools (see the debug slice).
 
 **Never** expose deploys or destructive git operations to agents. This includes run configurations that deploy or release: `run_start` refuses runs with `needsConfirm` (and documentation suggestions), which the UI starts only after the user confirms. It also refuses every run to a session whose CLI confines its commands to a sandbox (Codex, unless it bypasses it: `Terminals::sandboxed_agent`): a run's command comes from files such an agent can edit (Makefile, package.json), and Workbench would run it outside the sandbox.
 
@@ -1505,8 +1507,8 @@ thread names, the stop's description and text, `source`/`file` contents and
 `debug_state` — so the Variables view, watches, hover and "Ask agent" never see them.
 Every write route
 (`POST sessions…`, control, evaluate, set-variable, completions, breakpoint and watch
-writes) refuses in-process callers: agents never start, step, evaluate in or stop a
-session. Deriving configurations runs nothing (no `cargo metadata`: a
+writes) refuses in-process callers: agents act through their own tools (`agent.rs`), not
+these routes. Deriving configurations runs nothing (no `cargo metadata`: a
 `rust-toolchain.toml` or `.cargo/config.toml` could run repository code).
 
 **Launch configurations** (`launch.rs`, `derive.rs`, `config/project.rs`). `[[debug]]`
@@ -1725,23 +1727,32 @@ step ran in it (hostname), QEMU ran here, and a firmware whose debug information
 `/workspaces/proj` resolved its source, breakpoints and frames. **Not verified:** a cross compiler
 inside the container.
 
-*Agents.* `debug_control` and `debug_breakpoints` (`agent.rs`) share the session helpers of the routes
-(`session::control`, `run_to`, `stop`, `set_file_breakpoints`, `set_function_breakpoints`,
-`set_muted`, `clear_breakpoints`), act on the project's live sessions (`McpCtx::project_for`), and are
-`mutating`. **Deliberately not offered:** start, attach, restart and evaluate, and breakpoint
-conditions and log messages. A gdb expression runs commands (`$_shell("…")`, `call`, `python`), a
-start runs the configuration's build step and the debug server, and so each is a way for text an
-agent wrote, or read in a repository, to run code outside the agent's sandbox; the user does them in
-the window. Granting them is a decision for the owner, not a default.
+*Agents.* `agent.rs` gives agents `debug_start`, `debug_attach`, `debug_restart`, `debug_evaluate`,
+`debug_control` and `debug_breakpoints` beside the read-only `debug_state`. They share the session
+helpers of the routes (`launch::plan_config`/`plan_attach` + `session::start`, `restart`, `control`,
+`run_to`, `stop`, `evaluate_logged`, the breakpoint setters), act on the project
+named by `projectId` (default: the caller's; **not** confined with `McpCtx::project_for` like every
+other tool) and are `mutating`. The owner decided on 2026-10-02 that agents get all of it
+with no opt-in, and that a Codex session is not refused by Workbench either: its own sandbox and
+approvals decide. What is left is what the user's own tools provide: (1) the tools are `mutating`, so the
+agent's own permission prompt and the Activity view apply; (2) the planner refuses a pre-launch run
+that deploys or reaches another host, for every caller; (3) an agent's `repl` evaluation is echoed
+into the console as `> expr   (agent)`; (4) the REST routes still refuse in-process callers;
+(5) `debug_attach` refuses pid 1 and Workbench's own. This is a path for text an agent wrote, or read
+in a repository, to run code as the user: a start runs the build step, the debug server and the
+adapter, and gdb evaluates expressions (`$_shell("…")`, `call`, `python`), all outside the sandbox a
+CLI such as Codex keeps its own commands in. `run_start` refuses a sandboxed session
+(`Terminals::sandboxed_agent`); the debug tools deliberately do not. **Verified:** the fake adapter
+(start, the stop it answers with, evaluate against the user's own evaluation, the console echo,
+rerun, attach, refusals).
 
 *Trust.* A server's command comes from config.toml or a preset, like an adapter's. A repository's
 `[debug.remote]` supplies arguments and gdb commands (`server_args`, `init`, `reset`, `stop_at`,
 `connect`): like `pre_launch` they run when the user starts the configuration, and the Start view
 (tooltip, `LaunchConfigView.remote`) shows the server's command line and the commands first.
 `connect` is one gdb line (gdb's own `| command` pipe syntax included). `source_map` and `svd` are
-paths and text, never run. Agents steer a session the user started and never start, attach or
-evaluate; the routes added for the Peripherals tab are refused to them, and every write route still
-refuses in-process callers.
+paths and text, never run. Agents have their own tools for sessions (`agent.rs`); the routes added for
+the Peripherals tab are refused to them, and every write route still refuses in-process callers.
 
 **Breakpoints** (`breakpoints.rs`) persist in `data_dir/debug/<project>.json` (0600):
 line breakpoints (`id`, project-relative `path`, `line`, `enabled`, `condition`,
@@ -1864,7 +1875,7 @@ the stack of the stopped thread (`#i function at file:line`, 30 frames), the loc
 frame (`frame`, default 0; scopes marked expensive, registers, globals and statics left
 out; 60 values of up to 300 characters; secret values masked) and the console's tail (the
 newest 4000 characters of the last 40 entries). It only sends
-`stackTrace`, `scopes` and `variables`. `debug_control` and `debug_breakpoints` (`agent.rs`) steer: the
+`stackTrace`, `scopes` and `variables`. The tools of `agent.rs` act: the
 session is `sessionId` or the project's only live one (`409` without one, `400` naming them when
 there are several); `continue`, the steps and `runTo` wait up to `waitSeconds` (15, ≤300) for a stop
 and answer with the `debug_state` report plus `settled`; `stop` ends it (a launched program is

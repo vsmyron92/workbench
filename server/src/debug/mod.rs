@@ -10,9 +10,9 @@
 //! only, debug servers from presets and `[debug.servers.<id>]`. Launch configurations may come from repository config (`[[debug]]`, like
 //! run configurations: they run only on a click) and name adapters by id. Nothing
 //! starts by itself. Every write route refuses in-process callers; agents (MCP) read a
-//! session (`debug_state`) and steer one the user started (`debug_control`,
-//! `debug_breakpoints`: continue, pause, step, stop, plain breakpoints), and never start,
-//! attach, rerun or evaluate (`agent`).
+//! session (`debug_state`) and drive them through their own tools (`agent`): start, attach,
+//! rerun, steer, evaluate, set breakpoints with conditions, in any project. Those are writes;
+//! a CLI that sandboxes or prompts its agent decides for itself.
 //!
 //! Modules: `protocol` (DAP framing), `client` (requests with timeouts, events,
 //! reverse requests), `process` (adapter processes: host or dev container, stdio or

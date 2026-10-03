@@ -1,8 +1,8 @@
 //! MCP: `debug_state` (read-only). An agent sees what the user's debugger sees —
 //! sessions, why the program stopped, the top of the stack, the locals of a frame, the
 //! core registers of a halted microcontroller on request, and the console's tail —
-//! but never starts, steps, evaluates in or stops a session: the requests made here
-//! (`stackTrace`, `scopes`, `variables`) only read.
+//! but changes nothing: the requests made here (`stackTrace`, `scopes`, `variables`) only
+//! read. The tools that act on a session are in `agent`.
 
 use serde_json::{Value, json};
 
@@ -43,7 +43,7 @@ pub fn tools() -> Vec<McpTool> {
          variables of one frame (values truncated), plus the last lines of the debug console (for a remote target \
          also the debug server's output: OpenOCD, J-Link, QEMU). With `registers` the CPU registers of the frame \
          too: what a HardFault on a microcontroller needs (pc, lr, sp, xpsr). Use it to help the user understand a \
-         stop, a crash or a wrong value. Read-only; debug_control and debug_breakpoints steer a session the user started.",
+         stop, a crash or a wrong value. Read-only; debug_start, debug_attach, debug_restart, debug_evaluate, debug_control and debug_breakpoints act.",
         json!({ "type": "object", "properties": {
             "projectId": { "type": "string", "description": "Workbench project id; defaults to the calling session's project." },
             "sessionId": { "type": "string", "description": "One debug session (default: every session of the project)." },

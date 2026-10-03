@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.1 - 2026-10-03
+
+- **Agents drive the debugger.** New MCP tools: `debug_start` (a configuration by name),
+  `debug_attach` (a process), `debug_restart`, and `debug_evaluate` (an expression, or a
+  debugger command echoed into your console as `(agent)`); `debug_breakpoints` now accepts
+  conditions and log messages. There is no setting to turn on. They are writes (the agent's
+  permission prompt applies, Activity marks them) and, unlike the other MCP tools, are not
+  confined to the agent's project: `projectId` may name any.
+- They run on your computer, outside the sandbox a CLI such as Codex keeps its own commands
+  in (a gdb expression can call a shell command, and a start runs your build step and debug
+  server). Workbench does not refuse such a session; the CLI's own sandbox and approval
+  prompts are what hold it. A pre-launch run that deploys or reaches another host is still
+  refused.
+
 ## 0.7.0 - 2026-10-02
 
 - **Embedded debugging:** debug firmware on a microcontroller, or in QEMU, from the Debug
