@@ -6,14 +6,17 @@
 //! a yes or no, one of a few fixed words for how the account signs in, and the plan's short name.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::providers::ProviderKind;
+use super::providers::{self, Provider, ProviderKind};
+use super::{Entry, SpawnSpec, TerminalInfo, TerminalKind, agent};
+use crate::app::AppState;
+use crate::error::ApiError;
 use crate::util;
 
 /// How long a status command may run. The CLIs start Node or a Rust binary and read one file.
@@ -189,6 +192,103 @@ impl Cache {
     /// Forget the answer for `id`: its sign-in just ended, or it was started again.
     pub fn forget(&self, id: &str) {
         self.0.lock().remove(id);
+    }
+}
+
+/// Whether Workbench can ask this account's CLI about its login: the CLI reports it, and the
+/// account uses a login (not a model server of your own or an API key).
+fn askable(p: &Provider) -> bool {
+    p.enabled && p.local.is_none() && p.api.is_none() && method(p.kind).is_some_and(|m| m.status.is_some())
+}
+
+/// What the CLI sees when asked about this account: what one of its sessions sees.
+fn ask_env(state: &AppState, p: &Provider) -> Vec<(String, Option<String>)> {
+    let mut env = super::base_env(state, "signin");
+    env.extend(agent::provider_env(p));
+    env
+}
+
+/// Whether `e` is a sign-in terminal of the account `id`.
+fn is_signin_of(e: &Entry, id: &str) -> bool {
+    let r = e.rec.lock();
+    r.info.kind == TerminalKind::Command
+        && r.info.meta.get("signIn") == Some(&Value::Bool(true))
+        && r.info.meta.get("provider").and_then(Value::as_str) == Some(id)
+}
+
+impl super::Terminals {
+    /// `{accounts: {<provider>: {state, method?, plan?, checkedAt}}}` for the accounts whose CLI can
+    /// say whether it is signed in. An answer younger than a few seconds is reused unless `refresh`.
+    pub(crate) async fn signin_status(&self, state: &AppState, refresh: bool) -> Value {
+        let (list, _) = providers::list(&state.config.read().agents);
+        let asks = list.into_iter().filter(askable).map(|p| async move {
+            if !refresh {
+                if let Some(c) = self.signins.fresh(&p.id) {
+                    return Some((p.id, c));
+                }
+            }
+            let command = p.command.clone();
+            // The lookup walks PATH on disk. A CLI that is not installed has no answer, not "signed out".
+            let program = tokio::task::spawn_blocking(move || agent::resolve_command(&command)).await.ok().flatten()?;
+            let status = probe(&program, p.kind, &ask_env(state, &p)).await;
+            let checked = self.signins.put(&p.id, status);
+            Some((p.id, checked))
+        });
+        let accounts: serde_json::Map<String, Value> =
+            futures::future::join_all(asks).await.into_iter().flatten().map(|(id, c)| (id, c.describe())).collect();
+        json!({ "accounts": accounts })
+    }
+
+    /// Run the CLI's own login for `p` in a terminal, with the account's environment, and return the
+    /// terminal. One that is still open for the account is returned as it is. The login happens in the
+    /// CLI and the person's browser: nothing typed there, and nothing the CLI stores, passes through here.
+    pub(crate) async fn start_signin(&self, state: &AppState, p: &Provider) -> Result<TerminalInfo, ApiError> {
+        if p.local.is_some() {
+            return Err(ApiError::bad_request(format!("{} runs on a model server of your own: there is no login to sign in to", p.label)));
+        }
+        if p.api.is_some() {
+            return Err(ApiError::bad_request(format!("{} uses an API key from Secrets: there is no login to sign in to", p.label)));
+        }
+        if method(p.kind).is_none() {
+            return Err(ApiError::bad_request(match p.kind {
+                ProviderKind::Aider => "Aider has no login: its API keys are in a .env file".to_string(),
+                _ => format!("Workbench does not know how {} signs in; open a terminal and run it yourself", p.label),
+            }));
+        }
+        let command = p.command.clone();
+        let program = tokio::task::spawn_blocking(move || agent::resolve_command(&command))
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .ok_or_else(|| agent::missing_command(p))?;
+        if let Some(open) = self.all().into_iter().find(|e| is_signin_of(e, &p.id) && e.running_pty().is_some()) {
+            return Ok(open.info());
+        }
+        // The account's folder must exist (Codex refuses a CODEX_HOME that does not), and is private, as the CLIs make theirs.
+        if let (Some(home), false) = (p.home(), p.kind.home_is_file()) {
+            let dir = crate::config::expand_tilde(home);
+            if !dir.exists() {
+                std::fs::create_dir_all(&dir).map_err(|e| ApiError::conflict(format!("cannot create the folder {}: {e}", dir.display())))?;
+                let _ = crate::util::os::perm::apply(&dir, 0o700);
+            }
+        }
+        let argv = login_argv(&program, p.kind).ok_or_else(|| ApiError::internal("no login command"))?;
+        self.signins.forget(&p.id);
+        self.spawn(
+            state,
+            SpawnSpec {
+                kind: TerminalKind::Command,
+                title: format!("Sign in · {}", p.label),
+                project_id: None,
+                cwd: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+                argv,
+                // Only the account's own variables: the terminal adds the rest, and a restart gets the same.
+                env: agent::provider_env(p),
+                cols: None,
+                rows: None,
+                meta: json!({ "signIn": true, "provider": p.id, "restartable": true }),
+            },
+        )
+        .await
     }
 }
 

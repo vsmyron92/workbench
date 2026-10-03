@@ -16,7 +16,8 @@
 #   allowed tool for 12 s; `sticky:` ignores the hook's decision (like a tool that
 #   requires the user's interaction: only the terminal answers it); `plan:` asks for
 #   ExitPlanMode instead of Bash (its dialog, as Claude shows it, has none of the Bash
-#   dialog's texts).
+#   dialog's texts). `claude auth status --json` / `auth login`: signed in where
+#   $CLAUDE_CONFIG_DIR holds a `signed-in` file, which the login (a pasted code) creates.
 # codex: the OpenAI Codex CLI. It accepts the command lines Workbench builds
 #   (`[resume|fork] [options] [<id>] [-- <prompt>]`), prints a banner, and writes a
 #   rollout the way codex-cli 0.157 does:
@@ -199,7 +200,35 @@ PLAN_DIALOG = (
 )
 
 
+def claude_auth(args):
+    # `claude auth status` and `claude auth login`, as Claude Code 2.1 answers them. The login is a
+    # marker file in $CLAUDE_CONFIG_DIR (a token in the real one), so a test can tell which account
+    # was signed in. `status` prints an email, which Workbench must never pass on.
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    marker = os.path.join(cfg, "signed-in")
+    log("FAKE_CLAUDE_LOG", "AUTH " + " ".join(args) + " config=" + cfg)
+    if args[:1] == ["status"]:
+        if os.path.exists(marker):
+            reply = {"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty", "email": "person@example.com", "subscriptionType": "max"}
+            out(json.dumps(reply, indent=2) + "\n")
+            return
+        out(json.dumps({"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"}, indent=2) + "\n")
+        sys.exit(1)
+    if args[:1] == ["login"]:
+        out("Opening browser to sign in…\nIf the browser did not open, visit: https://claude.example/oauth/authorize?code=true\nPaste code here if prompted > ")
+        code = sys.stdin.readline().strip()
+        if not code:
+            sys.exit(1)
+        os.makedirs(cfg, exist_ok=True)
+        open(marker, "w", encoding="utf-8").close()
+        out("\nLogin successful.\n")
+        return
+    sys.exit(f"claude auth: unknown command {args!r}")
+
+
 def claude(args):
+    if args[:1] == ["auth"]:
+        return claude_auth(args[1:])
     # Imported here: they slow every other fake's start (and its argv log) by tens of ms.
     import threading
     import urllib.error

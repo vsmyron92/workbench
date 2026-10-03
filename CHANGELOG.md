@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Sign an account in from Settings.** **Settings → Agents → Accounts** shows whether each account's
+  CLI is signed in ("Signed in · Claude subscription · max", or "Signed out") and has a **Sign in**
+  button that runs the CLI's own login in a terminal tab, in that account's folder. Adding a second
+  subscription no longer means starting a session to find its login. The status is what the CLI itself
+  says (`claude auth status`, `codex login status`); Gemini CLI and Kimi Code cannot say, and are started
+  as they are, asking by themselves. Workbench reads no login, token or email, and the sign-in is only
+  for a signed-in device, not for an agent.
+
 ## 0.8.0 - 2026-10-03
 
 - **Hosted APIs.** An account can use a hosted model API with an API key: DeepSeek, OpenRouter, Z.ai,

@@ -427,7 +427,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 |---|---|
 | `/api/health`, `/api/auth/**`, `/api/projects` (list/add/reload/detail/delete; `POST {path, create?}`: a missing directory answers `not_found` unless `create: true` makes it, and the UI asks first), `/api/events/ws` | core |
 | `/api/fs/dirs?path=&hidden=` (subfolder names of any readable folder, empty path: home; the folder picker of Add project; devices only, since agent tokens are not valid under `/api`) | files |
-| `/api/terminals/**`, `/api/agents/**` (incl. `POST /api/agents/{id}/permission`, `POST /api/agents/{id}/switch {provider?, transfer?}`, `PUT /api/agents/usage/{provider}` and `POST /api/agents/local-models`, devices only; `GET /api/agents/usage`), `/api/hooks/**` | terminals |
+| `/api/terminals/**`, `/api/agents/**` (incl. `POST /api/agents/{id}/permission`, `POST /api/agents/{id}/switch {provider?, transfer?}`, `PUT /api/agents/usage/{provider}`, `POST /api/agents/local-models`, `GET /api/agents/signin` and `POST /api/agents/signin/{provider}`, devices only; `GET /api/agents/usage`), `/api/hooks/**` | terminals |
 | `/api/projects/{pid}/files/**` (incl. `files/history/**`: Local History), `/api/projects/{pid}/search`, `/api/fs/**` | files |
 | `/api/projects/{pid}/lsp/**` (incl. the `lsp/ws` editor socket) | lsp |
 | `/api/projects/{pid}/debug/**` | debug |
@@ -818,6 +818,24 @@ always for custom CLIs.
   where the user chose not to), has no Remote Control, and the server never sees the vendor's key.
   `POST /api/agents/local-models {server, url?}` (devices only) does one bounded GET (no redirects, 5 s,
   1 MB) of `/api/tags` (Ollama) or `/v1/models` and returns only model names that pass `valid_model`.
+- **Signing an account in** (`terminals/signin.rs`). `signin::method(kind)` is the fixed table of how a CLI
+  signs in and reports it: Claude Code `auth login` / `auth status --json`, Codex `login` / `login status`,
+  Gemini CLI and Kimi Code started as they are (they ask by themselves; no status), Aider and custom CLIs
+  none. It never comes from a repository, config.toml or the browser. `POST /api/agents/signin/{provider}`
+  (devices only; agent tokens get 401/403) resolves the account's CLI like a session does, creates the
+  account's folder (0700) when it is missing, and starts a **Command terminal** (`meta {signIn, provider,
+  restartable}`, cwd the home folder, env `agent::provider_env`, the one a session gets, kept in the
+  terminal's spec so a restart signs in the same account) running the login. A sign-in still running for the
+  account is returned instead of a second. Refused (400): an account with `local` or `api` (no login), Aider,
+  a custom CLI; a missing CLI is 412. `GET /api/agents/signin[?refresh=1]` → `{accounts: {<provider>: {state:
+  signedIn|signedOut|unknown, method?, plan?, checkedAt}}}` asks the CLIs that can say (not `local` / `api`
+  accounts, not CLIs that are not installed), concurrently, each under the account's env with an 8 s timeout and
+  no stdin (`util::proc::try_run_cmd`); an answer is reused for 20 s (`Cache`) and forgotten when a sign-in
+  starts, and the page asks again with `refresh=1` when a sign-in terminal exits. **No login is read.** Only
+  `state`, a *fixed* word for `method` (`Claude subscription`, `API key`, `Access token`, `Cloud provider`,
+  `ChatGPT account`; anything else is dropped) and a `plan` that is a short word (`valid_plan`) leave the
+  parsers: the CLI's text and the email it prints do not reach the browser (unit-tested against a status
+  containing both). A failing, slow or unexpected CLI is `unknown`, never `signedOut`.
 - **Hosted APIs** (`[agents.providers.<name>.api] service, url, key, context`; `model` names the model).
   `providers::api_setup` maps a service to what each CLI needs (`ProviderKind::api_services`): Claude Code
   needs the Anthropic Messages API (`deepseek` `https://api.deepseek.com/anthropic`, `openrouter`

@@ -57,6 +57,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/agents/usage", get(usage_snapshot))
         .route("/api/agents/usage/{provider}", put(set_limit))
         .route("/api/agents/local-models", post(local_models))
+        .route("/api/agents/signin", get(signin_status))
+        .route("/api/agents/signin/{provider}", post(start_signin))
         .route("/api/agents/{id}/switch", post(switch_account))
         .route("/api/agents/remote-control", post(remote_control))
         .route("/api/agents/{id}/permission", post(answer_permission))
@@ -564,6 +566,37 @@ async fn local_models(
         Ok(models) => json!({ "models": models }),
         Err(error) => json!({ "models": [], "error": error }),
     }))
+}
+
+#[derive(Deserialize)]
+struct SigninQuery {
+    /// `1`: ask the CLIs again instead of reusing an answer of the last seconds.
+    refresh: Option<String>,
+}
+
+/// `GET /api/agents/signin[?refresh=1]` → `{accounts: {<provider>: {state, method?, plan?, checkedAt}}}`:
+/// whether each account's CLI is signed in, as the CLI itself says (`claude auth status`, `codex login
+/// status`). Only fixed words and a yes or no leave: no email, token or text of the CLI.
+async fn signin_status(
+    State(state): State<AppState>,
+    Query(q): Query<SigninQuery>,
+    caller: Option<axum::extract::Extension<crate::auth::Caller>>,
+) -> ApiResult<Json<Value>> {
+    require_device(&caller)?;
+    let refresh = q.refresh.as_deref().is_some_and(|v| v == "1" || v == "true");
+    Ok(Json(state.terminals.signin_status(&state, refresh).await))
+}
+
+/// `POST /api/agents/signin/{provider}` → the terminal that runs the CLI's own login for the account,
+/// with the account's folder in its environment (a sign-in already open for it is returned as it is).
+async fn start_signin(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    caller: Option<axum::extract::Extension<crate::auth::Caller>>,
+) -> ApiResult<Json<TerminalInfo>> {
+    require_device(&caller)?;
+    let p = agent::find_provider(&state.config.read().agents, Some(&provider))?;
+    Ok(Json(state.terminals.start_signin(&state, &p).await?))
 }
 
 #[derive(Deserialize)]

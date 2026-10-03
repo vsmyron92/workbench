@@ -555,3 +555,153 @@ async fn a_hosted_api_key_comes_from_secrets_reaches_only_the_environment_and_is
         let _ = t.kill(&i.id).await;
     }
 }
+
+// ---------------------------------------------------------------- signing an account in
+
+/// A Claude Code account on the fake CLI whose folder does not exist yet: a sign-in makes it.
+fn signin_config(dir: &Path, fake: &Path, id: &str, label: &str) -> (ProviderConfig, PathBuf, PathBuf) {
+    let home = dir.join(format!("login-{id}"));
+    let log = dir.join(format!("{id}.log"));
+    let c = ProviderConfig {
+        kind: Some("claude".into()),
+        command: Some(fake.display().to_string()),
+        label: Some(label.into()),
+        env: [("CLAUDE_CONFIG_DIR".to_string(), home.display().to_string()), ("FAKE_CLAUDE_LOG".to_string(), log.display().to_string())].into(),
+        ..Default::default()
+    };
+    (c, home, log)
+}
+
+/// Run the fake once so it is not busy when the server starts it: a script written a moment ago can be
+/// held open by a child another test forked meanwhile, and starting it then fails with ETXTBSY.
+#[cfg(unix)]
+fn warm_up(fake: &Path, scratch: &Path) {
+    for _ in 0..200 {
+        match std::process::Command::new(fake).args(["auth", "status"]).env("CLAUDE_CONFIG_DIR", scratch).output() {
+            Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            _ => return,
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_account_is_signed_in_from_a_terminal_and_the_status_follows() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    #[cfg(unix)]
+    warm_up(&fake, &dir.path().join("warm-up"));
+    // The default account is signed in already; the second has no folder yet.
+    let (mut default, default_home, _) = signin_config(dir.path(), &fake, "claude", "Claude Code");
+    default.kind = None;
+    std::fs::create_dir_all(&default_home).unwrap();
+    std::fs::write(default_home.join("signed-in"), "").unwrap();
+    let (work, work_home, work_log) = signin_config(dir.path(), &fake, "claude-work", "Claude · Work");
+    let (mut local, ..) = signin_config(dir.path(), &fake, "claude-local", "Local");
+    local.model = Some("qwen3-coder".into());
+    local.local = Some(LocalModelConfig { server: "ollama".into(), url: "http://127.0.0.1:9".into(), context: None });
+    let (state, addr, _pid) = served_with(dir.path(), &fake, |cfg| {
+        for (id, c) in [("claude", default), ("claude-work", work), ("claude-local", local)] {
+            cfg.agents.providers.insert(id.into(), c);
+        }
+        // The other CLIs are not here: never ask a real one of the computer the test runs on.
+        for id in ["codex", "kimi", "gemini", "aider"] {
+            let missing = dir.path().join("missing").join(id).display().to_string();
+            cfg.agents.providers.insert(id.into(), ProviderConfig { command: Some(missing), ..Default::default() });
+        }
+    })
+    .await;
+    let t = &state.terminals;
+    let (cookie, key) = sign_in(&state, addr).await;
+    let http = reqwest::Client::new();
+    let origin = format!("http://{addr}");
+    let call = |method: reqwest::Method, path: &str| {
+        http.request(method, format!("{origin}{path}")).header("cookie", &cookie).header("origin", &origin).header(crate::auth::KEY_HEADER, &key).json(&json!({})).send()
+    };
+    let get = |path: &'static str| async move { call(reqwest::Method::GET, path).await.unwrap().json::<Value>().await.unwrap() };
+
+    // Who can say, and what they say. A model of your own has no login, and a CLI that is not
+    // installed has no answer (not "signed out").
+    let s = get("/api/agents/signin").await;
+    let mut names: Vec<&String> = s["accounts"].as_object().unwrap().keys().collect();
+    names.sort();
+    assert_eq!(names, ["claude", "claude-work"]);
+    assert_eq!(
+        (s["accounts"]["claude"]["state"].clone(), s["accounts"]["claude"]["method"].clone(), s["accounts"]["claude"]["plan"].clone()),
+        (json!("signedIn"), json!("Claude subscription"), json!("max"))
+    );
+    assert_eq!(s["accounts"]["claude-work"]["state"], "signedOut");
+    assert!(s["accounts"]["claude-work"].get("method").is_none());
+    assert!(s["accounts"]["claude-work"]["checkedAt"].as_i64().unwrap() > 0);
+    // The email the CLI prints is not passed on.
+    assert!(!s.to_string().contains("person@example.com"), "{s}");
+
+    // Sign the work account in: a terminal runs the CLI's own login, with that account's folder.
+    let r = call(reqwest::Method::POST, "/api/agents/signin/claude-work").await.unwrap();
+    assert_eq!(r.status(), 200);
+    let term: Value = r.json().await.unwrap();
+    let id = term["id"].as_str().unwrap().to_string();
+    assert_eq!(term["kind"], "command");
+    assert_eq!(term["title"], "Sign in · Claude · Work");
+    assert_eq!(term["meta"], json!({"signIn": true, "provider": "claude-work", "restartable": true}));
+    let argv: Vec<&str> = term["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert_eq!(argv[argv.len() - 2..], ["auth", "login"]);
+    assert!(work_home.is_dir(), "the account's folder is made, for a CLI that refuses a missing one");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&work_home).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+    let logins = || log_lines(&work_log, "AUTH login");
+    wait_long("the login to start", 10, || logins().len() == 1).await;
+    assert_eq!(logins()[0], format!("AUTH login config={}", work_home.display()), "the login ran for the account's folder, not the default one");
+    // A second click shows the sign-in that is open.
+    let again: Value = call(reqwest::Method::POST, "/api/agents/signin/claude-work").await.unwrap().json().await.unwrap();
+    assert_eq!(again["id"], id.as_str());
+    assert_eq!(logins().len(), 1);
+    // The CLI waits for the code the person pastes; then it ends, and the account is signed in.
+    assert!(!work_home.join("signed-in").exists());
+    t.send_text(&id, "code-123", true).await.unwrap();
+    wait_long("the login to end", 10, || t.info(&id).is_some_and(|i| i.status == super::TerminalStatus::Exited)).await;
+    assert_eq!(t.info(&id).unwrap().exit.and_then(|e| e.code), Some(0));
+    let s: Value = get("/api/agents/signin?refresh=1").await;
+    assert_eq!(s["accounts"]["claude-work"]["state"], "signedIn");
+    assert_eq!(s["accounts"]["claude-work"]["method"], "Claude subscription");
+    assert_eq!(s["accounts"]["claude"]["state"], "signedIn");
+    assert!(!s.to_string().contains("person@example.com"), "{s}");
+
+    // Restarting the sign-in runs it again for the same account, not the default one.
+    let r = call(reqwest::Method::POST, &format!("/api/terminals/{id}/restart")).await.unwrap();
+    assert_eq!(r.status(), 200);
+    wait_long("the login to start again", 10, || logins().len() == 2).await;
+    assert_eq!(logins()[1], logins()[0]);
+    t.send_text(&id, "code-456", true).await.unwrap();
+    wait_long("the second login to end", 10, || t.info(&id).is_some_and(|i| i.status == super::TerminalStatus::Exited)).await;
+    // Once it has ended a click starts a new one.
+    let third: Value = call(reqwest::Method::POST, "/api/agents/signin/claude-work").await.unwrap().json().await.unwrap();
+    assert_ne!(third["id"], id.as_str());
+
+    // What cannot be signed in to says why.
+    let refused = |path: &'static str, status: u16, word: &'static str| {
+        let call = &call;
+        async move {
+            let r = call(reqwest::Method::POST, path).await.unwrap();
+            assert_eq!(r.status().as_u16(), status, "{path}");
+            let body = r.text().await.unwrap();
+            assert!(body.contains(word), "{path}: {body}");
+        }
+    };
+    refused("/api/agents/signin/claude-local", 400, "model server").await;
+    refused("/api/agents/signin/aider", 400, "no login").await;
+    refused("/api/agents/signin/gemini", 412, "was not found").await;
+    refused("/api/agents/signin/ghost", 412, "no agent provider").await;
+
+    // An agent's own credentials may not sign accounts in or ask about them.
+    let agent_token = state.auth.issue_agent_token(&id);
+    for (method, path) in [(reqwest::Method::GET, "/api/agents/signin"), (reqwest::Method::POST, "/api/agents/signin/claude-work")] {
+        let r = http.request(method, format!("{origin}{path}")).header("authorization", format!("Bearer {agent_token}")).json(&json!({})).send().await.unwrap();
+        assert!(matches!(r.status().as_u16(), 401 | 403), "{path}: {}", r.status());
+    }
+    for i in t.list() {
+        let _ = t.kill(&i.id).await;
+    }
+}
