@@ -357,27 +357,31 @@ and exit.
   running core; **Resume**, the step buttons and *Run to Cursor* work as in any session.
 - The header shows the server and where gdb is connected (`OpenOCD · 127.0.0.1:28329`).
 - **Ask agent about this stop** hands the stop, the stack and the variables to an agent;
-  an agent can also read and steer the session itself ([Agents](#agents)).
+  an agent can also start, read and drive a session itself ([Agents](#agents)).
 - **Rerun** stops everything and starts it again: the build, the server (on new ports),
   the download. **Stop** disconnects gdb and ends the server; what the chip does then is up
   to the server and the target.
 
 ## Agents
 
-An agent can see and steer the session you started; it cannot start one.
+Agents can drive the debugger, with no setting to turn on.
 
-- `debug_state` reads it: where it stopped, the stack, the locals, the CPU registers (with
-  `registers`) and the console's tail, including the server's and the channels' output.
-- `debug_control` continues, pauses, steps (`next`, `stepIn`, `stepOut`), runs to a line or
-  stops the session, and answers with the new state, so a loop "step, look, step" is one
-  call each. It waits for the program to stop again (`waitSeconds`, default 15).
-- `debug_breakpoints` lists, adds, removes, sets, mutes and clears the project's plain line
-  and function breakpoints; the editor shows them at once.
-- These are writes: the agent's own permission prompt applies, the Activity view marks
-  them, and they act only on the agent's own project. Starting, attaching, rerunning,
-  **evaluating expressions** and **conditional breakpoints or log points** are not offered
-  to agents: a gdb expression can run a shell command (`$_shell(...)`), and a start runs a
-  configuration's build step and debug server. You do those from the window.
+- `debug_state` reads a session: where it stopped, the stack, the locals, the CPU registers
+  (with `registers`) and the console's tail, including the server's and the channels' output.
+- `debug_start` starts a configuration by name (its build step, debug server and debugger run,
+  as when you press Debug), `debug_attach` attaches to a process, `debug_restart` reruns a
+  session. Each waits for the program to stop (`waitSeconds`, default 60) and answers with the
+  state, so "start, look" is one call.
+- `debug_control` continues, pauses, steps, runs to a line and stops; `debug_evaluate`
+  evaluates an expression in a stopped session (`watch`) or runs a debugger command (`repl`,
+  echoed into your console as `> command   (agent)`); `debug_breakpoints` edits the project's
+  breakpoints, conditions and log messages included.
+- These are writes: the agent's own permission prompt applies, the Activity view marks them,
+  and they may name any project (`projectId`), the agent's own is the default.
+- Workbench does not hold a sandboxed agent (Codex) back itself: the debugger runs on
+  your computer, so a start, an attach or an expression it asks for runs outside that agent's
+  sandbox (a gdb expression can call `$_shell(...)`). What stops it is Codex's own sandbox
+  and approval prompts for the tool call, so keep them on if you want that.
 
 ## Troubleshooting
 
@@ -428,6 +432,6 @@ container, a firmware built with container paths), and `source_map`.
 A server's command comes only from `config.toml` or a preset, never from a repository. A
 repository's configuration can add arguments, a `connect` address and gdb commands; like
 `pre_launch` they run only when you start that configuration, and the Start view shows
-them first. Nothing starts by itself. Agents steer a session you started and cannot start,
-attach, evaluate expressions or set conditions ([Agents](#agents)); the register map's
-routes are closed to them.
+them first. Nothing starts by itself, except where an agent starts a session with its tool
+([Agents](#agents)). The register map's routes are closed to agents: reading a register can
+change the chip.

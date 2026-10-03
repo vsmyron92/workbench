@@ -21,14 +21,18 @@ model is in [the architecture](ARCHITECTURE.md#security-model).
 ## What agents can and cannot do
 
 - A hosted session gets its own token, valid only for Workbench's hooks and MCP endpoint,
-  and every MCP tool is confined to the session's project.
-- Agents never answer permission requests, deploy, run destructive git operations, start
-  a language server or a debug session, query a database, or update or restart Workbench
-  through Workbench. Run configurations that deploy or release are refused to them.
-- Agents can steer a debug session you started (continue, pause, step, stop, plain
-  breakpoints): those tools are writes, so the agent's permission prompts and the Activity
-  view treat them as such. They cannot evaluate expressions or set conditional
-  breakpoints and log points, because a debugger's expressions can run commands.
+  and every MCP tool but the debug ones is confined to the session's project.
+- Agents never answer permission requests, deploy, run destructive git operations, start a
+  language server, query a database, or update or restart Workbench through Workbench. Run
+  configurations that deploy or release are refused to them.
+- Agents drive the debugger: start, attach, rerun, step, evaluate expressions and set
+  conditional breakpoints (`debug_*`). These are writes, so the agent's own permission prompts
+  and the Activity view treat them as such. They are not confined to the session's project:
+  an agent may name any project. A debugger's expressions can run commands and a
+  start runs the configuration's build step, on your computer and outside any sandbox the
+  agent's CLI keeps its own commands in: Workbench does not refuse a sandboxed agent (Codex)
+  these, so that CLI's sandbox and approvals are what hold it. A pre-launch run that deploys
+  or reaches another host is refused to everyone.
 - Workspace reports an agent writes are served sandboxed: they cannot read Workbench's
   cookies, storage or API.
 

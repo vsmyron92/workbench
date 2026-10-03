@@ -1518,9 +1518,10 @@ server = "fakesrv"
     drop(taken);
 }
 
-/// Agents may read what servers exist, never start a remote session.
+/// The REST routes refuse an in-process caller (an agent's own request): an agent starts a
+/// session through its tool, which is flagged as a write.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn agents_cannot_start_remote_sessions() {
+async fn the_rest_routes_refuse_agents_a_session_start() {
     if !have_python() {
         eprintln!("skipped: Python 3 is not installed");
         return;
@@ -1781,14 +1782,13 @@ impl Env {
     }
 }
 
-/// What agents may do to a debugger — and nothing that runs code. A tool that starts a
-/// session, attaches, reruns or evaluates is a decision about the security model (gdb
-/// expressions can call `$_shell`, a start runs a build command): it is not added here by
-/// accident.
+/// The tools agents have for the debugger: `debug_state` reads; every other tool changes a
+/// session or the breakpoints, so it is flagged as a write (the agent's own permission prompt,
+/// the Activity badge).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn agents_get_exactly_the_tools_that_run_no_new_code() {
+async fn agents_have_the_debug_tools_and_the_writes_are_flagged() {
     let names: Vec<String> = crate::debug::mcp_tools().into_iter().map(|t| t.name).collect();
-    assert_eq!(names, ["debug_state", "debug_control", "debug_breakpoints"]);
+    assert_eq!(names, ["debug_state", "debug_start", "debug_attach", "debug_restart", "debug_evaluate", "debug_control", "debug_breakpoints"]);
     for t in crate::debug::mcp_tools() {
         assert_eq!(t.mutating, t.name != "debug_state", "{}: what changes a session is flagged as a write", t.name);
     }
@@ -1861,23 +1861,21 @@ async fn agents_steer_the_session_the_user_started() {
     assert!(v["breakpoints"].as_array().unwrap().is_empty());
 }
 
-/// What would make the debugger evaluate (a condition, a log message) is the user's to set;
-/// a session is confined to its own project; several live sessions need naming.
+/// Conditions and log messages are the agent's to set too; the debug tools reach any project;
+/// several live sessions need naming.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn agents_set_no_expressions_and_stay_in_their_project() {
+async fn agents_set_conditions_reach_any_project_and_name_the_session() {
     if !have_python() {
         eprintln!("skipped: Python 3 is not installed");
         return;
     }
     let env = setup("").await;
-    for bp in [json!({ "line": 5, "condition": "x > 1" }), json!({ "line": 5, "logMessage": "x={x}" })] {
-        let err = env.agent("debug_breakpoints", json!({ "action": "add", "path": "src/main.c", "breakpoints": [bp] })).await.unwrap_err();
-        assert_eq!(err.code, "forbidden", "{bp}");
-        assert!(err.message.contains("ask the user"), "{}", err.message);
-    }
-    let err = env.agent("debug_breakpoints", json!({ "action": "functions", "breakpoints": [{ "name": "main", "condition": "argc > 1" }] })).await.unwrap_err();
-    assert_eq!(err.code, "forbidden");
-    // A plain function breakpoint, and a hit count (the adapter's counter, not an expression the agent supplies).
+    let v = env.agent("debug_breakpoints", json!({ "action": "add", "path": "src/main.c", "breakpoints": [{ "line": 5, "condition": "x > 1" }, { "line": 8, "logMessage": "x={x}" }] })).await.unwrap();
+    let at = |line: u64| v["breakpoints"].as_array().unwrap().iter().find(|b| b["line"] == line).unwrap().clone();
+    assert_eq!(at(5)["condition"], "x > 1");
+    assert_eq!(at(8)["logMessage"], "x={x}");
+    let v = env.agent("debug_breakpoints", json!({ "action": "functions", "breakpoints": [{ "name": "main", "condition": "argc > 1" }] })).await.unwrap();
+    assert_eq!(v["functionBreakpoints"][0]["condition"], "argc > 1", "{v}");
     env.agent("debug_breakpoints", json!({ "action": "functions", "breakpoints": [{ "name": "main" }] })).await.unwrap();
     env.agent("debug_breakpoints", json!({ "action": "add", "path": "src/main.c", "breakpoints": [{ "line": 5, "hitCondition": "2" }] })).await.unwrap();
     // The user's own conditional breakpoint is left alone by an unrelated add.
@@ -1885,11 +1883,12 @@ async fn agents_set_no_expressions_and_stay_in_their_project() {
     let v = env.agent("debug_breakpoints", json!({ "action": "add", "path": "src/main.c", "breakpoints": [{ "line": 9 }] })).await.unwrap();
     assert!(v["breakpoints"].as_array().unwrap().iter().any(|b| b["path"] == "src/other.c" && b["condition"] == "y"), "{v}");
 
-    // Another project is not theirs.
+    // Not confined to their own project: a session of another project names this one (and a project that does not exist is not found).
     let err = env.agent_in("proj", "debug_breakpoints", json!({ "action": "list", "projectId": "elsewhere" })).await.unwrap_err();
-    assert_eq!(err.code, "forbidden");
+    assert_eq!(err.code, "not_found");
+    env.agent_in("elsewhere", "debug_breakpoints", json!({ "action": "list", "projectId": "proj" })).await.unwrap();
     let err = env.agent_in("elsewhere", "debug_control", json!({ "action": "continue", "projectId": "proj" })).await.unwrap_err();
-    assert_eq!(err.code, "forbidden");
+    assert_eq!(err.code, "conflict", "{}", err.message);
 
     // Two live sessions: name one.
     let a = env.start("fake").await;
@@ -2650,4 +2649,74 @@ source_map = [["/a\nb", "/c"]]
         "the pairs, then the program"
     );
     env.post(&format!("sessions/{sid}/stop"), json!({})).await;
+}
+
+/// An agent starts a configuration, evaluates in the stopped session, reruns it and attaches
+/// to a process; each answers with the state, and what it ran is told to the user's console.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_start_evaluate_rerun_and_attach() {
+    if !have_python() {
+        eprintln!("skipped: Python 3 is not installed");
+        return;
+    }
+    let env = setup("").await;
+    // Nothing to evaluate in yet.
+    let err = env.agent("debug_evaluate", json!({ "expression": "x" })).await.unwrap_err();
+    assert_eq!(err.code, "conflict", "{}", err.message);
+    // Start: the answer is the stop at the breakpoint the agent set.
+    env.agent("debug_breakpoints", json!({ "action": "add", "path": "src/main.c", "breakpoints": [{ "line": 5 }] })).await.unwrap();
+    let r = env.agent("debug_start", json!({ "config": "fake", "waitSeconds": 20 })).await.unwrap();
+    assert_eq!((r["state"].clone(), r["settled"].clone()), (json!("stopped"), json!(true)), "{r}");
+    assert!(r["stack"].as_array().is_some_and(|s| !s.is_empty()), "{r}");
+    let sid = r["sessionId"].as_str().unwrap().to_string();
+    // A start of a configuration that is not there, and without one.
+    let err = env.agent("debug_start", json!({ "config": "nope" })).await.unwrap_err();
+    assert!(err.message.contains("nope"), "{}", err.message);
+    assert_eq!(env.agent("debug_start", json!({})).await.unwrap_err().code, "bad_request");
+
+    // Evaluate: the same value the user's own evaluation gets; a failing one says why.
+    let mine = env.post(&format!("sessions/{sid}/evaluate"), json!({ "expression": "x", "context": "watch" })).await;
+    let v = env.agent("debug_evaluate", json!({ "expression": "x" })).await.unwrap();
+    assert_eq!((v["context"].clone(), v["result"]["value"].clone()), (json!("watch"), mine["value"].clone()), "{v}");
+    let v = env.agent("debug_evaluate", json!({ "expression": "x", "frame": 1, "threadId": 1 })).await.unwrap();
+    assert_eq!(v["result"]["value"], mine["value"], "{v}");
+    let err = env.agent("debug_evaluate", json!({ "expression": "boom" })).await.unwrap_err();
+    assert!(err.message.contains("No symbol"), "{}", err.message);
+    for bad in [json!(""), json!("a\u{0}b"), json!("x".repeat(10_001))] {
+        assert_eq!(env.agent("debug_evaluate", json!({ "expression": bad })).await.unwrap_err().code, "bad_request");
+    }
+    // A console command is echoed into the user's console, marked as the agent's.
+    env.agent("debug_evaluate", json!({ "expression": "x", "context": "repl" })).await.unwrap();
+    let console = env.console(&sid).await;
+    assert!(console.contains("> x   (agent)"), "{console}");
+
+    // Rerun: a new session, the old one gone.
+    let r = env.agent("debug_restart", json!({ "waitSeconds": 20 })).await.unwrap();
+    let new = r["sessionId"].as_str().unwrap().to_string();
+    assert_ne!(new, sid);
+    assert_eq!(r["state"], "stopped", "{r}");
+    let listed = env.get("sessions").await;
+    assert!(listed.as_array().unwrap().iter().all(|s| s["id"] != sid.as_str()), "{listed}");
+    env.post(&format!("sessions/{new}/stop"), json!({})).await;
+
+    // Attach: not to Workbench or to init, the pid is needed, and a process answers with the attach.
+    for bad in [json!({}), json!({ "pid": 1 }), json!({ "pid": std::process::id() })] {
+        assert_eq!(env.agent("debug_attach", bad).await.unwrap_err().code, "bad_request");
+    }
+    let mut victim = sleeper();
+    let r = env.agent("debug_attach", json!({ "pid": victim.id(), "adapter": "fake", "waitSeconds": 20 })).await.unwrap();
+    assert_eq!(r["request"], "attach", "{r}");
+    assert_eq!(env.requests("attach")[0]["arguments"]["processId"], victim.id());
+    env.agent("debug_control", json!({ "action": "stop" })).await.unwrap();
+    let _ = victim.kill();
+    let _ = victim.wait();
+
+    // A session of another project starts this project's configuration by naming it.
+    let r = env.agent_in("elsewhere", "debug_start", json!({ "config": "fake", "projectId": "proj", "waitSeconds": 20 })).await.unwrap();
+    assert_eq!(r["state"], "stopped", "{r}");
+    env.agent_in("elsewhere", "debug_control", json!({ "action": "stop", "projectId": "proj" })).await.unwrap();
+    // Without a project of its own and without projectId there is nothing to act on.
+    let tool = crate::mcp::all_tools().into_iter().find(|t| t.name == "debug_start").unwrap();
+    let err = (tool.handler)(env.state.clone(), crate::mcp::McpCtx::default(), json!({ "config": "fake" })).await.err().unwrap();
+    assert_eq!(err.code, "bad_request");
 }
