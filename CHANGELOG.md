@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 - 2026-10-03
 
 - **Hosted APIs.** An account can use a hosted model API with an API key: DeepSeek, OpenRouter, Z.ai,
   Moonshot, Fireworks, the Anthropic and OpenAI APIs, or any compatible service, for Claude Code,
