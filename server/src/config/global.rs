@@ -140,6 +140,11 @@ pub struct AgentsConfig {
     /// its limit also continues on the next account, as a new session).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failover: Option<String>,
+    /// What a session moved to another account takes along: `conversation` (the default: the
+    /// conversation itself when the CLI is the same, else its text as a Markdown file) or
+    /// `notes` (a short note on where it stopped).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<String>,
     /// Agent CLIs besides Claude Code: the built-in `codex` and `kimi` presets, or any
     /// command (`[agents.providers.aider] command = "aider"`). The fields above stay the
     /// Claude Code defaults. Must stay the last field: TOML tables follow plain values.
@@ -161,6 +166,7 @@ impl Default for AgentsConfig {
             permission_wait: 600,
             default_provider: None,
             failover: None,
+            transfer: None,
             providers: BTreeMap::new(),
         }
     }
@@ -224,6 +230,10 @@ pub struct LocalModelConfig {
     pub server: String,
     /// The server's address, such as `http://localhost:11434`. Empty: the server's usual one.
     pub url: String,
+    /// The model's context window in tokens, when it is not the 200 000 Claude Code assumes
+    /// for a model it does not know (a local model often has 32 000 to 128 000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -436,3 +436,22 @@ export function formatUntil(ms: number, now: number = Date.now()): string {
 export function usageTone(pct: number): 'ok' | 'warn' | 'full' {
   return pct >= 99.5 ? 'full' : pct >= 80 ? 'warn' : 'ok'
 }
+
+/** Why `text` cannot be a context window in tokens (`null`: it can; empty is "not set"). Mirrors the server's range. */
+export function contextError(text: string): string | null {
+  const t = text.trim().replace(/[_,\s]/g, '')
+  if (!t) return null
+  const m = /^(\d+(?:\.\d+)?)([kKmM]?)$/.exec(t)
+  if (!m) return 'A number of tokens, such as 32768 or 32k'
+  const n = parseContext(text)
+  return n !== null && n >= 2048 && n <= 10_000_000 ? null : 'Between 2048 and 10 000 000 tokens'
+}
+
+/** "32k" → 32768, "128000" → 128000, "1m" → 1048576; `null` when empty or not a number. */
+export function parseContext(text: string): number | null {
+  const t = text.trim().replace(/[_,\s]/g, '')
+  const m = /^(\d+(?:\.\d+)?)([kKmM]?)$/.exec(t)
+  if (!m) return null
+  const unit = m[2].toLowerCase() === 'k' ? 1024 : m[2].toLowerCase() === 'm' ? 1024 * 1024 : 1
+  return Math.round(Number(m[1]) * unit)
+}

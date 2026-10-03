@@ -5,15 +5,15 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Radio } from 'lucide-react'
 import { subscribe } from '@/api/events'
-import { qk } from '@/api/queries'
+import { qk, useTerminals } from '@/api/queries'
 import type { AgentState, PendingPermission, TerminalInfo } from '@/api/types'
 import { toast, toastError } from '@/shell/actions'
 import { useUi } from '@/state/store'
-import { Button, Field, Input, Modal, Select } from '@/ui'
-import { openTerminal, switchAccount, terminalsApi, type AgentDefaults } from './api'
+import { Button, Field, Input, Loading, Modal, Select } from '@/ui'
+import { openTerminal, switchAccount, terminalsApi, useAgentDefaults, type AgentDefaults, type ProviderInfo } from './api'
 import { HistoryList } from './AgentsHome'
 import { glanceText, oneTapAllow, summaryParts, summaryShowsAll } from './lib/permission'
-import { displayLabel, limitEnds } from './lib/providers'
+import { carryKind, carryText, displayLabel, limitEnds, limitNote, movedToast, providerIdOf, providerKindOf } from './lib/providers'
 import { removeTerminal, upsertTerminal } from './lib/sessions'
 import { NewSessionForm } from './NewSession'
 import { answerPermission } from './Permission'
@@ -77,7 +77,7 @@ interface Limit {
   providerLabel: string
   until: number | null
   fallback: { id: string; label: string } | null
-  movedTo: { terminalId: string; providerId: string | null } | null
+  movedTo: { terminalId: string; providerId: string | null; transfer?: string | null } | null
 }
 
 /** Toasts for what the accounts' usage did: a session started elsewhere, or one that can continue. */
@@ -107,8 +107,9 @@ export function AccountNotifier({ children }: { children?: ReactNode }) {
       const account = nameOf(l.providerId, l.providerLabel)
       if (l.movedTo) {
         const to = l.movedTo
-        toast('info', `${l.title} continues on ${l.fallback ? nameOf(l.fallback.id, l.fallback.label) : 'another account'}`, {
-          detail: `${account} reached its usage limit${ends(l.until)}.`,
+        const how = movedToast(to.transfer, l.fallback ? nameOf(l.fallback.id, l.fallback.label) : 'another account')
+        toast('info', `${l.title}: ${how.title.toLowerCase()}`, {
+          detail: `${account} reached its usage limit${ends(l.until)}. ${how.detail}`,
           action: { label: 'Open', run: () => open(to.terminalId, l.title) },
           timeout: 10000,
         })
@@ -129,7 +130,11 @@ export function AccountNotifier({ children }: { children?: ReactNode }) {
             variant: 'primary',
             run: () =>
               void switchAccount(l.terminalId, to.id)
-                .then((t) => openTerminal(t))
+                .then((t) => {
+                  const m = movedToast((t.meta?.transfer as { mode?: string } | undefined)?.mode, toName)
+                  toast('success', m.title, { detail: m.detail })
+                  openTerminal(t)
+                })
                 .catch((e) => toastError(e, 'Could not continue on that account')),
           },
           { label: 'Open', run: () => open(l.terminalId, l.title) },
@@ -262,6 +267,95 @@ function RemoteControlDialog({ projectId, onClose }: { projectId: string; onClos
   )
 }
 
+/** Move a session's work to another account: what each one would carry, and how. */
+function TransferDialog({ terminalId, onClose }: { terminalId: string; onClose: () => void }) {
+  const terminals = useTerminals()
+  const t = terminals.data?.find((x) => x.id === terminalId)
+  const defaults = useAgentDefaults(t?.projectId ?? null)
+  const [pick, setPick] = useState<string | null>(null)
+  const [carry, setCarry] = useState<'conversation' | 'notes' | null>(null)
+  const [busy, setBusy] = useState(false)
+  if (!t || !defaults.data) {
+    return (
+      <Modal title="Continue on another account" onClose={onClose}>
+        <Loading />
+      </Modal>
+    )
+  }
+  const providers = defaults.data.providers
+  const fromId = providerIdOf(t)
+  const fromKind = providerKindOf(t)
+  const transfer = carry ?? defaults.data.transfer ?? 'conversation'
+  const targets = providers.filter((p) => p.id !== fromId && p.enabled && p.kind !== 'custom')
+  const chosen: ProviderInfo | undefined = targets.find((p) => p.id === pick)
+  const how = chosen ? carryKind(fromKind, chosen.kind, transfer) : null
+  const go = async () => {
+    if (!chosen) return
+    setBusy(true)
+    try {
+      const next = await switchAccount(t.id, chosen.id, transfer)
+      const m = movedToast((next.meta?.transfer as { mode?: string } | undefined)?.mode, displayLabel(chosen))
+      toast('success', m.title, { detail: m.detail })
+      openTerminal(next)
+      onClose()
+    } catch (e) {
+      toastError(e, 'Could not move the session')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal
+      title="Continue on another account"
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" disabled={!chosen || !chosen.available} loading={busy} onClick={() => void go()}>
+            Continue there
+          </Button>
+        </>
+      }
+    >
+      <div className="wb-muted wb-small">
+        Starts a new session in the same folder on the account you pick. {t.title} stays as it is, and keeps running if it still can.
+      </div>
+      <div className="wb-ag-targets" role="radiogroup" aria-label="Account">
+        {targets.map((p) => {
+          const limit = limitNote(p)
+          return (
+            <button
+              key={p.id}
+              role="radio"
+              aria-checked={p.id === pick}
+              disabled={!p.available}
+              className={['wb-ag-target', p.id === pick && 'active'].filter(Boolean).join(' ')}
+              onClick={() => setPick(p.id)}
+            >
+              <span className="wb-ag-target-name">{displayLabel(p)}</span>
+              {p.local && <span className="wb-ag-provider-note">local</span>}
+              {limit && <span className="wb-ag-provider-note">{limit}</span>}
+              {!p.available && <span className="wb-ag-provider-note">not installed</span>}
+            </button>
+          )
+        })}
+        {targets.length === 0 && <div className="wb-muted wb-small">No other account is set up: add one in Settings → Agents.</div>}
+      </div>
+      {chosen && how && (
+        <div className="wb-small">
+          <b>{how === 'resume' ? 'Resumes the conversation.' : how === 'digest' ? 'Sends the conversation as text.' : 'Sends a short note.'}</b> {carryText(how, chosen, fromKind)}
+        </div>
+      )}
+      <Field label="What to carry" hint={transfer === 'notes' ? 'Only a note about where it stopped, none of the conversation.' : 'The conversation, as far as this CLI’s files can be read.'}>
+        <Select value={transfer} onChange={(e) => setCarry(e.target.value as 'conversation' | 'notes')}>
+          <option value="conversation">The conversation</option>
+          <option value="notes">Only a short note</option>
+        </Select>
+      </Field>
+    </Modal>
+  )
+}
+
 export function AgentDialogs({ children }: { children?: ReactNode }) {
   const dialog = useAgentsUi((s) => s.dialog)
   const close = () => useAgentsUi.getState().openDialog(null)
@@ -281,6 +375,8 @@ export function AgentDialogs({ children }: { children?: ReactNode }) {
     )
   } else if (dialog?.kind === 'remote' && projectId) {
     node = <RemoteControlDialog projectId={projectId} onClose={close} />
+  } else if (dialog?.kind === 'transfer') {
+    node = <TransferDialog terminalId={dialog.terminalId} onClose={close} />
   }
   return (
     <>

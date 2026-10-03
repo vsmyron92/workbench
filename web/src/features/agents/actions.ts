@@ -4,6 +4,7 @@ import {
   Copy,
   ExternalLink,
   Eraser,
+  ArrowRightLeft,
   FileDiff,
   Palette,
   Pencil,
@@ -23,6 +24,7 @@ import { closePanel, confirmDialog, isPanelOpen, openPanel, promptDialog, showTo
 import type { MenuEntry } from '@/ui'
 import { openTerminal, terminalsApi } from './api'
 import { resumes } from './lib/providers'
+import { useAgentsUi } from './store'
 import { canKill, isRunning, lingering, restartMode, TAB_COLORS, terminalPanelId } from './lib/sessions'
 
 export async function renameTerminal(t: TerminalInfo) {
@@ -231,6 +233,10 @@ export function terminalMenu(t: TerminalInfo, opts: { open?: boolean; onReplaced
   }
   // What the session changed (files slice: Local History's agent attribution).
   if (agent && t.projectId) items.push({ label: 'Review Changes', icon: FileDiff, run: () => reviewChanges(t) })
+  // The same work on another account (a second subscription, a model of your own).
+  if (agent && t.projectId) {
+    items.push({ label: 'Continue on another account…', icon: ArrowRightLeft, run: () => useAgentsUi.getState().openDialog({ kind: 'transfer', terminalId: t.id }) })
+  }
   items.push(
     'separator',
     { label: 'Rename…', icon: Pencil, run: () => void renameTerminal(t) },

@@ -10,12 +10,14 @@ import {
   accountIdError,
   accountKind,
   accountName,
+  contextError,
   fallbackCandidates,
   formatUntil,
   LOCAL_BY_KIND,
   LOCAL_SERVERS,
   localUrlError,
   moveItem,
+  parseContext,
   suggestAccountId,
   suggestLocalId,
   usageTone,
@@ -162,6 +164,7 @@ function AccountEditor({
   const [server, setServer] = useState(initial?.local?.server ?? servers[0] ?? 'ollama')
   const [url, setUrl] = useState(initial?.local?.url ?? '')
   const [model, setModel] = useState(initial?.model ?? '')
+  const [context, setContext] = useState(initial?.local?.context ? String(initial.local.context) : '')
   const [found, setFound] = useState<{ models: string[]; error?: string } | null>(null)
   const [detecting, setDetecting] = useState(false)
   const [label, setLabel] = useState(initial?.label ?? '')
@@ -180,7 +183,8 @@ function AccountEditor({
   const others = rows.filter((r) => r.id !== editId && r.kind?.kind === kind && r.home).map((r) => ({ id: r.id, home: r.home }))
   const idError = editing ? null : accountIdError(effectiveId, Object.keys(providers))
   const homeError = needsHome ? accountHomeError(kind, effectiveHome, others) : null
-  const localError = local && !builtIn ? (localUrlError(server, url) ?? (model.trim() ? null : 'Enter the model the server runs')) : null
+  const takesContext = kind === 'claude' || kind === 'codex'
+  const localError = local && !builtIn ? (localUrlError(server, url) ?? (model.trim() ? (takesContext ? contextError(context) : null) : 'Enter the model the server runs')) : null
   const error = builtIn ? null : (idError ?? homeError ?? localError)
 
   const detect = async () => {
@@ -224,7 +228,7 @@ function AccountEditor({
           fallback,
           env,
           model: local ? model.trim() : (initial?.model ?? null),
-          local: local ? { server, url: url.trim() } : null,
+          local: local ? { server, url: url.trim(), context: takesContext ? parseContext(context) : null } : null,
         }
       }
       await onSave(builtIn ? editId : effectiveId, tidy(config))
@@ -316,6 +320,16 @@ function AccountEditor({
                   Find models
                 </Button>
               </div>
+              {takesContext && (
+                <>
+                  <label className="wb-small wb-muted">Context window (optional)</label>
+                  <Input className="mono" value={context} onChange={(e) => setContext(e.target.value)} placeholder="32768 or 32k" />
+                  <div className="wb-small wb-muted">
+                    Tokens the model can take. {kind === 'claude' ? 'Claude Code assumes 200 000 for a model it does not know, and compacts late.' : 'Codex assumes a large window.'} Use 64k or more: Claude Code’s own
+                    instructions and tools fill a small window (at 32k it compacted the conversation at once in a test). Set the same on the server: Ollama starts at 4096 and cuts off what does not fit (<code>OLLAMA_CONTEXT_LENGTH</code>).
+                  </div>
+                </>
+              )}
               <datalist id="wb-local-models">
                 {found?.models.map((m) => (
                   <option key={m} value={m} />
@@ -422,6 +436,7 @@ export function AccountsGroup() {
   const [editor, setEditor] = useState<{ id: string | null; config: ProviderSettings | null } | null>(null)
   const providers: Providers = settings.data?.config.agents.providers ?? {}
   const rows = accountRows(providers)
+  const transfer: 'conversation' | 'notes' = settings.data?.config.agents.transfer === 'notes' ? 'notes' : 'conversation'
   const mode: FailoverMode = (FAILOVER.find((f) => f.value === settings.data?.config.agents.failover)?.value ?? 'new') as FailoverMode
 
   const save = async (next: Providers, what: string) => {
@@ -452,6 +467,14 @@ export function AccountsGroup() {
       next[x] = c.fallback?.includes(id) ? tidy({ ...c, fallback: c.fallback.filter((f) => f !== id) }) : c
     }
     await save(next, `${label} removed`).catch(() => {})
+  }
+
+  const setTransfer = async (value: 'conversation' | 'notes') => {
+    try {
+      reportApply(await patchSettings({ agents: { transfer: value } }, settings.data?.hash), 'Saved')
+    } catch (e) {
+      toastError(e, 'Could not save')
+    }
   }
 
   const setMode = async (value: FailoverMode) => {
@@ -507,6 +530,7 @@ export function AccountsGroup() {
                     ) : l ? (
                       <>
                         {LOCAL_SERVERS[l.server]?.label ?? l.server} · <span className="mono">{r.config.model}</span> · <span className="mono">{l.url || LOCAL_SERVERS[l.server]?.url}</span>
+                        {l.context ? ` · ${Math.round(l.context / 1024)}k context` : ''}
                       </>
                     ) : (
                       <>
@@ -529,7 +553,7 @@ export function AccountsGroup() {
         )}
       </Group>
       <Group
-        title="Usage limits"
+        title="When an account is at its limit"
         description="Usage comes from what each CLI reports about itself: Claude Code’s status line and Codex’s session log. Workbench asks no vendor and reads no login."
       >
         <Row label="When an account is at its limit" hint={FAILOVER.find((f) => f.value === mode)?.hint}>
@@ -539,6 +563,19 @@ export function AccountsGroup() {
                 {f.label}
               </option>
             ))}
+          </Select>
+        </Row>
+        <Row
+          label="What a moved session carries"
+          hint={
+            transfer === 'notes'
+              ? 'Only a short note on where it stopped.'
+              : 'The same CLI resumes the conversation itself, also on a model of your own. Another CLI is sent what was said as a text file. The CLI’s files are copied between the accounts’ folders; no login is read.'
+          }
+        >
+          <Select value={transfer} onChange={(e) => void setTransfer(e.target.value as 'conversation' | 'notes')}>
+            <option value="conversation">The conversation</option>
+            <option value="notes">Only a short note</option>
           </Select>
         </Row>
       </Group>

@@ -90,7 +90,7 @@ packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows rele
 ## Configuration
 
 - `~/.config/workbench/config.toml` (`%APPDATA%\workbench\config.toml` on Windows) holds global settings (`config/global.rs`). It is written with detected defaults on first run.
-  - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions`, `permission_wait` and `failover`) and `[agents.providers.*]` (also `fallback` and `[agents.providers.<name>.local]`), `[terminals]` (`shell`: the argv of new shells; default `$SHELL -l`, on Windows PowerShell), `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[update]` (`check`, `repo`, `api`: see "Updates"), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`, `[debug.servers.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
+  - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions`, `permission_wait` and `failover`) and `[agents.providers.*]` (also `fallback` and `[agents.providers.<name>.local]`) and `transfer`, `[terminals]` (`shell`: the argv of new shells; default `$SHELL -l`, on Windows PowerShell), `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[update]` (`check`, `repo`, `api`: see "Updates"), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`, `[debug.servers.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
   - Settings saves edit config.toml in place (`platform::config_edit`): comments and layout survive, for every section.
   - Settings saves apply at once. Edits made outside Workbench (an editor, a setup hint followed by hand) apply too: `platform::settings::watch_config` watches the config directory and applies a valid `config.toml` like a raw save (config swapped, secret cache cleared, projects reloaded, `settings.changed`). A file that does not parse or fails the hard checks is reported once (`ui.notify`) and the running config stays; the watcher never writes the file.
 - **Project ids** are the directory name as a slug (`api`, then `api-2`… for another directory of that name) and are bound to the directory for good in `data_dir/project-ids.json` (canonical path → id). Everything keyed by an id belongs to that directory: the overlay `projects/<id>.toml` with its secrets, `data_dir/workspace/<id>`, terminals and agent sessions (`projectId`, hence their MCP confinement). Scan order (roots, then includes) only decides the id the first time a directory is seen; adding a root with a same-named repository or removing the first of two never moves an id, and a new directory never gets an id the file gives to another one, even one that is gone or excluded. A moved repository therefore gets a new id: rename its overlay to follow it.
@@ -383,7 +383,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `ui.notify` | `{level, message}` | anyone |
 | `terminal.created` / `terminal.updated` / `terminal.exited` / `terminal.removed` | `TerminalInfo` (removed: `{id}`) | terminals |
 | `agent.usage` | `{providerId, usage}`: an account's usage windows or limit changed (`GET /api/agents/usage` entry) | terminals |
-| `agent.limit` | `{terminalId, title, providerId, providerLabel, reason, until, fallback: {id, label}\|null, movedTo: {terminalId, providerId}\|null}`: a session's account refused a turn for its usage; announced once per session and limit | terminals |
+| `agent.limit` | `{terminalId, title, providerId, providerLabel, reason, until, fallback: {id, label}\|null, movedTo: {terminalId, providerId, transfer}\|null}`: a session's account refused a turn for its usage; announced once per session and limit (`transfer`: how the conversation was carried) | terminals |
 | `agent.failover` | `{terminalId, title, from, fromLabel, to, toLabel, reason, until}`: a new session started on another account because the one asked for was at its limit | terminals |
 | `agent.attention` | `{terminalId, state, message, title, permission}`; `permission`: the `PendingPermission` Workbench can answer, or null (each answerable request gets its own event) | terminals |
 | `fs.changed` | `{paths: string[], overflow?}` (project-relative, `/`-separated on every OS; `overflow`: too many to list, or the watcher lost events, refresh everything) | files |
@@ -427,7 +427,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 |---|---|
 | `/api/health`, `/api/auth/**`, `/api/projects` (list/add/reload/detail/delete; `POST {path, create?}`: a missing directory answers `not_found` unless `create: true` makes it, and the UI asks first), `/api/events/ws` | core |
 | `/api/fs/dirs?path=&hidden=` (subfolder names of any readable folder, empty path: home; the folder picker of Add project; devices only, since agent tokens are not valid under `/api`) | files |
-| `/api/terminals/**`, `/api/agents/**` (incl. `POST /api/agents/{id}/permission`, `POST /api/agents/{id}/switch`, `PUT /api/agents/usage/{provider}` and `POST /api/agents/local-models`, devices only; `GET /api/agents/usage`), `/api/hooks/**` | terminals |
+| `/api/terminals/**`, `/api/agents/**` (incl. `POST /api/agents/{id}/permission`, `POST /api/agents/{id}/switch {provider?, transfer?}`, `PUT /api/agents/usage/{provider}` and `POST /api/agents/local-models`, devices only; `GET /api/agents/usage`), `/api/hooks/**` | terminals |
 | `/api/projects/{pid}/files/**` (incl. `files/history/**`: Local History), `/api/projects/{pid}/search`, `/api/fs/**` | files |
 | `/api/projects/{pid}/lsp/**` (incl. the `lsp/ws` editor socket) | lsp |
 | `/api/projects/{pid}/debug/**` | debug |
@@ -833,13 +833,32 @@ always for custom CLIs.
   `fallback` list (transitively, once each) that is not limited and whose command is installed
   (`providers::pick`), adjusting the request (`carry_request`: model and effort only between vendor
   accounts of one CLI, permission mode only within one CLI); a resumed session stays on its account.
-  With `session`, a session whose turn is refused is continued by `switch_account`: a new session in the
-  same folder with a handoff prompt (title, last message as quoted notes, the transcript's path), the
-  old one untouched and `meta.movedTo` set; it is also `POST /api/agents/{id}/switch {provider?}`
-  (idempotent per target). Conversations are not carried between accounts: resuming a transcript
-  copied into another account's folder is undocumented, so it is not relied on. Accounts are managed
+  With `session`, a session whose turn is refused is continued by `switch_account` (see "Conversation
+  transfer"): a new session in the same folder, the old one untouched and `meta.movedTo` set; it is also
+  `POST /api/agents/{id}/switch {provider?, transfer?}` (idempotent per target). Accounts are managed
   only by devices (`PUT /api/agents/usage/{provider} {limitedUntil|null}` marks one limited or usable).
   `GET /api/agents/defaults` gives each provider `usage`, `fallback`, `local`, `localError`.
+- **Conversation transfer** (`conversation`, `failover::switch_account`). Moving a session to another
+  account (automatically with `failover = "session"`, from the toast, or from the session menu's
+  "Continue on another account…") starts a new session in the same folder and carries the
+  conversation by `conversation::how(from kind, to kind, transfer, file found)`: **resume** for the
+  same CLI (Claude Code to Claude Code, Codex to Codex, also onto a local model): the transcript
+  (`projects/<slug>/<id>.jsonl` plus the `<id>/` folder of large tool outputs and sub-agent work,
+  without following links, up to 128 MB) or rollout (`sessions/Y/M/D/rollout-…-<id>.jsonl`) is copied,
+  cut to whole lines, into the other account's folder (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`, 0600) and
+  the new session resumes the same id. Verified with Claude Code 2.1.288 and Codex 0.160.0 against
+  mock servers (the history arrives in the request of the resumed session), and with Workbench
+  driving real Claude Code between two local-model accounts. **digest** for another CLI whose source
+  is Claude Code or Codex: the user's and assistant's text with one line per tool call and no tool
+  output (credentials masked by `permission::redact_patterns`), the first turn and as many of the
+  latest as fit in 60 000 characters, written to `data_dir/handoffs/<random>/conversation.md`
+  (0600 in a 0700 folder, pruned after 14 days) that the new session may read (`--add-dir`), or
+  inline in the prompt up to 7 000 characters (and always for a CLI that takes no folders). **notes**
+  otherwise (`[agents] transfer = "notes"`, no file found, or a source CLI whose files are not read:
+  Kimi, Gemini, Aider, custom): the short handoff. A step that fails falls to the next. The new
+  terminal has `meta.transfer {from, mode, turns, of}`, the old one `meta.movedTo`. A conversation the
+  target already runs is not copied over (409); the same move twice finds the first. Moving a
+  conversation to another vendor sends it there; the fallback lists and the dialog say so.
 - **REST.** `POST /api/agents` and `/api/agents/ask` take `provider`; `ask` without one uses
   the most recent session of any provider that can take a prompt unasked: Claude Code when its
   state accepts one; Codex and Kimi only when idle after a turn of that process ended, with

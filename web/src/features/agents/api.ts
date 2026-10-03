@@ -111,6 +111,8 @@ export interface AgentDefaults {
   providerWarnings: string[]
   /** What an account at its usage limit does: `off`, `new` or `session`. */
   failover?: 'off' | 'new' | 'session'
+  /** What a session moved to another account takes along (`[agents] transfer`). */
+  transfer?: 'conversation' | 'notes'
 }
 
 export interface NewAgentRequest {
@@ -185,8 +187,8 @@ export function openTerminal(t: Pick<TerminalInfo, 'id' | 'title'>, focus = true
 }
 
 /** Continue a session's work on another account (default: the next one that is free), as a new session. */
-export function switchAccount(terminalId: string, provider?: string) {
-  return api.post<TerminalInfo>(`/api/agents/${encodeURIComponent(terminalId)}/switch`, { provider })
+export function switchAccount(terminalId: string, provider?: string, transfer?: 'conversation' | 'notes') {
+  return api.post<TerminalInfo>(`/api/agents/${encodeURIComponent(terminalId)}/switch`, { provider, transfer })
 }
 
 export const terminalsApi = {

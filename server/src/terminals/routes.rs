@@ -524,6 +524,8 @@ async fn set_limit(
 struct SwitchBody {
     /// The account to continue on (default: the next one that is free).
     provider: Option<String>,
+    /// `conversation` or `notes` (default: `[agents] transfer`).
+    transfer: Option<String>,
 }
 
 /// `POST /api/agents/{id}/switch {provider?}`: continue a session's work on another account,
@@ -537,7 +539,11 @@ async fn switch_account(
     require_device(&caller)?;
     check_id(&id)?;
     let to = b.provider.as_deref().map(str::trim).filter(|p| !p.is_empty());
-    Ok(Json(state.terminals.switch_account(&state, &id, to).await?))
+    let transfer = match b.transfer.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => Some(super::conversation::Transfer::parse(t).ok_or_else(|| ApiError::bad_request("transfer must be conversation or notes"))?),
+        None => None,
+    };
+    Ok(Json(state.terminals.switch_account(&state, &id, to, transfer).await?))
 }
 
 #[derive(Deserialize)]
@@ -612,6 +618,10 @@ async fn defaults(State(state): State<AppState>, Query(q): Query<DefaultsQuery>)
         "providers": described,
         "defaultProvider": default_provider,
         "providerWarnings": warnings,
+        "transfer": match super::conversation::Transfer::of(&cfg) {
+            super::conversation::Transfer::Conversation => "conversation",
+            super::conversation::Transfer::Notes => "notes",
+        },
         "failover": match providers::Failover::of(&cfg) {
             providers::Failover::Off => "off",
             providers::Failover::New => "new",

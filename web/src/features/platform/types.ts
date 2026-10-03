@@ -30,6 +30,8 @@ export interface ProviderSettings {
 export interface LocalModelSettings {
   server: string
   url: string
+  /** The model's context window in tokens (Claude Code assumes 200 000 for a model it does not know). */
+  context?: number | null
 }
 
 /** terminals/usage.rs Window */
@@ -84,6 +86,8 @@ export interface GlobalConfig {
     default_provider?: string | null
     /** `off` | `new` (default) | `session`: what an account at its usage limit does. */
     failover?: string | null
+    /** `conversation` (default) | `notes`: what a session moved to another account takes along. */
+    transfer?: string | null
     /** `[agents.providers.<id>]`: extra accounts of a CLI, other CLIs, tweaks to the presets. */
     providers?: Record<string, ProviderSettings>
   }

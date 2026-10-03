@@ -4,6 +4,8 @@ import {
   accountIdError,
   accountKind,
   accountName,
+  contextError,
+  parseContext,
   fallbackCandidates,
   formatUntil,
   LOCAL_BY_KIND,
@@ -343,5 +345,25 @@ describe('local models and fallback', () => {
     expect(usageTone(10)).toBe('ok')
     expect(usageTone(85)).toBe('warn')
     expect(usageTone(100)).toBe('full')
+  })
+})
+
+describe('context window', () => {
+  it('reads sizes people write', () => {
+    expect(parseContext('32768')).toBe(32768)
+    expect(parseContext('32k')).toBe(32768)
+    expect(parseContext(' 128 K ')).toBe(131072)
+    expect(parseContext('1m')).toBe(1048576)
+    expect(parseContext('131,072')).toBe(131072)
+    expect(parseContext('')).toBeNull()
+    expect(parseContext('big')).toBeNull()
+  })
+
+  it('accepts the server’s range only', () => {
+    expect(contextError('')).toBeNull()
+    expect(contextError('32k')).toBeNull()
+    expect(contextError('1000')).toMatch(/Between/)
+    expect(contextError('99m')).toMatch(/Between/)
+    expect(contextError('lots')).toMatch(/number of tokens/)
   })
 })

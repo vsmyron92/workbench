@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Conversation transfer.** A session can continue on another account with its conversation:
+  **Continue on another account…** in its menu, the toast of a session that hit its limit, or
+  `failover = "session"`. Between accounts of the same CLI (Claude Code to Claude Code, Codex to Codex,
+  also onto a local model) the conversation itself is resumed, by copying the session's file into the
+  other account's folder; to another CLI, what was said is written out as text for the new session to
+  read. `[agents] transfer = "notes"` carries only a short note. Checked against the real Claude Code
+  and Codex: the history reaches the model of the resumed session.
+- Local models: an optional **context window** (`local.context`) is passed to Claude Code
+  (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`) and Codex (`model_context_window`), and Claude Code's sub-agents
+  use the local model too.
+
 - **Local models.** Claude Code, Codex and Aider can run on a model server of your own (Ollama,
   LM Studio, llama.cpp, vLLM…): **Settings → Agents → Accounts → Add local model**, with **Find
   models** to list what the server serves. Nothing of the vendor's login or API key is passed on, and
@@ -10,8 +21,8 @@
   (from Claude Code's status line and Codex's session log) and when a limit ends. Give an account a
   `fallback` list and a new session skips an account that is at its limit: a second subscription, then
   perhaps a local model. `failover = "session"` also continues a running session that hits its limit on
-  the next account, as a new session told where the old one stopped; otherwise its toast offers
-  **Continue on …**. Conversations themselves are not moved between accounts.
+  the next account, as a new session that carries the conversation; otherwise its toast offers
+  **Continue on …**.
 
 - **Several accounts of one agent CLI.** Run Claude Code, Codex, Kimi Code, Gemini CLI or
   Aider under more than one login (Aider: more than one `.env` of API keys), such as a work and a personal subscription. **Settings → Agents → Accounts** adds

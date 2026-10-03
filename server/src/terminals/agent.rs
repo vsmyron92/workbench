@@ -517,7 +517,7 @@ struct KimiWatch {
 }
 
 impl Terminals {
-    fn find_agent_by_session(&self, provider_id: &str, session_id: &str) -> Option<Arc<Entry>> {
+    pub(super) fn find_agent_by_session(&self, provider_id: &str, session_id: &str) -> Option<Arc<Entry>> {
         if session_id.is_empty() {
             return None;
         }

@@ -143,3 +143,42 @@ args = ["--no-auto-commits"]
 command = "opencode"
 label = "OpenCode"
 install_hint = "npm install -g opencode-ai"`
+
+/** How a conversation goes to another account: itself, as text, or as a short note. */
+export type Carry = 'resume' | 'digest' | 'notes'
+
+/**
+ * What a move from a `from` CLI to a `to` CLI carries (the server's `conversation::how`): the same CLI
+ * resumes the conversation itself; Claude Code and Codex are read and sent as text to another CLI;
+ * the others' files are not read.
+ */
+export function carryKind(from: AgentProvider, to: AgentProvider, transfer: 'conversation' | 'notes' = 'conversation'): Carry {
+  const readable = from === 'claude' || from === 'codex'
+  if (transfer === 'notes' || !readable) return 'notes'
+  return from === to ? 'resume' : 'digest'
+}
+
+/** What the move dialog says about a target. */
+export function carryText(c: Carry, to: Pick<ProviderInfo, 'local' | 'kind'>, from: AgentProvider): string {
+  const where = to.local ? 'It stays on your network.' : from === to.kind ? '' : 'It is sent to that CLI’s service.'
+  switch (c) {
+    case 'resume':
+      return `The conversation itself continues there.${where ? ` ${where}` : ''}`
+    case 'digest':
+      return `What was said, and a line for each tool call, is written out as text for the new session to read. ${where}`.trim()
+    default:
+      return 'Only a short note on where it stopped.'
+  }
+}
+
+/** The toast for a finished move, by how the server carried it (`meta.transfer.mode`). */
+export function movedToast(mode: unknown, to: string): { title: string; detail: string } {
+  switch (mode) {
+    case 'resume':
+      return { title: `Continued on ${to}`, detail: 'The same conversation, resumed.' }
+    case 'digest':
+      return { title: `Continued on ${to}`, detail: 'The conversation was written out as text for it to read.' }
+    default:
+      return { title: `Started on ${to}`, detail: 'It got a short note on where the old session stopped.' }
+  }
+}

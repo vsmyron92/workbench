@@ -40,6 +40,7 @@
 mod activity;
 mod agent;
 mod codex;
+mod conversation;
 mod failover;
 mod gemini;
 mod hooks;
@@ -1431,6 +1432,11 @@ pub async fn start(state: &AppState) {
         attachments: state.paths.data_dir.join("attachments"),
     });
     t.usage.open(&state.paths.data_dir);
+    {
+        // Conversation digests written for moved sessions are not kept for long.
+        let handoffs = state.paths.data_dir.join("handoffs");
+        tokio::task::spawn_blocking(move || conversation::prune(&handoffs, Duration::from_secs(14 * 24 * 3600)));
+    }
     let loaded = tokio::task::spawn_blocking(move || store::load_all(&root)).await.unwrap_or_default();
     let now = util::now_ms();
     for (mut rec, screen) in loaded {

@@ -119,6 +119,21 @@ the vendor. Claude Code needs a server with the Anthropic Messages API (Ollama 0
 llama.cpp, vLLM, or a gateway); Codex needs `/v1/responses` (Ollama 0.13.4+, LM Studio 0.3.29+); Ollama
 recommends a context of 64k or more for both. Local sessions have no Remote Control and no usage limits.
 
+Set the model's **context window** (64k or more; Claude Code's own instructions and tools fill a small
+one, and at 32k it compacted the conversation at once in a test) and give the server the same
+(`OLLAMA_CONTEXT_LENGTH`; Ollama starts at 4096 and cuts off what does not fit).
+
+**DeepSeek and other open models.** Any model your server serves can be named, so DeepSeek, Qwen,
+GLM, Kimi, gpt-oss or Devstral run as long as the server can make **tool calls** with them, which an
+agent needs (Aider does not). On Ollama that is a capability a model has or has not, shown by
+`ollama show <model>`: from its source and third-party listings, `qwen3-coder`, `gpt-oss`, `glm-4.6`,
+`kimi-k2`, `devstral` and `deepseek-v3.1`/`v3.2` have it, recent pulls of `deepseek-r1` do (small
+ones work poorly for agents), `deepseek-v3` and `deepseek-coder-v2` do not. llama.cpp needs `--jinja`;
+vLLM needs `--enable-auto-tool-choice` and a `--tool-call-parser` for the model (`deepseek_v3` for
+DeepSeek), and a served model name without `/`. **Hosted** APIs such as DeepSeek's own
+(`https://api.deepseek.com/anthropic`), OpenRouter, Z.ai, Moonshot or Fireworks are not supported
+yet: they need an API key, and Workbench keeps no key in an account's settings.
+
 ```toml
 [agents.providers.claude-local]
 kind = "claude"
@@ -145,10 +160,29 @@ fallback = ["claude-work", "claude-local"]
 With `new`, a session you start (or an agent starts) skips an account that is at its limit and runs on
 the first one of the list that is not, and says so. With `session`, a running session that hits its limit
 also continues on the next account: a new session in the same folder, told what the old one was doing and
-where its conversation is; the old one is left as it is. Conversations are not moved between accounts,
-because a CLI resumes only what its own account's folder holds. Without `session`, the toast of a session
+where its conversation is; the old one is left as it is. Without `session`, the toast of a session
 that hit its limit offers **Continue on …**. If the CLIs' reports are wrong or not enough, mark an account
 at its limit or usable by hand in its **Edit** dialog.
+
+## Moving a conversation to another account
+
+**Continue on another account…** in a session's menu (or the toast of a session that hit its limit, or
+`failover = "session"`) starts a new session in the same folder on the account you pick. What it carries
+depends on the two CLIs:
+
+- **The same CLI** (Claude Code to another Claude Code account, Codex to Codex, also onto a local
+  model): the conversation itself. Workbench copies the session's own file into the other account's
+  folder and resumes it, so the model sees the whole history, tool calls included. No login is read or
+  copied, only the conversation file.
+- **A different CLI** (Claude Code or Codex to Codex, Aider, Kimi…): what was said, as text. The user's
+  and the assistant's words and one line per tool call, without tool output, are written to a Markdown
+  file the new session reads first (short conversations go in its prompt). The first turn and the most
+  recent ones are kept when it is long. The conversation goes to that CLI's service, or stays on your
+  network for a local model.
+- **Otherwise** (Kimi, Gemini, Aider or a custom CLI as the source, or **Only a short note** chosen):
+  a note on where the old session stopped.
+
+The old session is left as it is. `[agents] transfer = "notes"` makes the note the default.
 
 ## On Windows
 

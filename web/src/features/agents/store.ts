@@ -38,7 +38,7 @@ interface AgentsUi {
   historyProvider: string | null
   /** Phone: the terminal shown full screen, if any. */
   mobileTerminal: string | null
-  dialog: { kind: 'new'; prefill?: NewSessionPrefill } | { kind: 'resume' } | { kind: 'remote' } | null
+  dialog: { kind: 'new'; prefill?: NewSessionPrefill } | { kind: 'resume' } | { kind: 'remote' } | { kind: 'transfer'; terminalId: string } | null
   setAllProjects: (v: boolean) => void
   selectColumnTab: (project: string, terminalId: string | null) => void
   addColumnExtra: (project: string, terminalId: string) => void

@@ -49,7 +49,7 @@ async fn three_accounts(dir: &Path, failover: Option<&str>) -> (AppState, std::n
     let (b, cb) = account(dir, &fake, "claude-b", |_| {});
     let (l, cl) = account(dir, &fake, "claude-local", |c| {
         c.model = Some("qwen3-coder".into());
-        c.local = Some(LocalModelConfig { server: "ollama".into(), url: "http://127.0.0.1:9".into() });
+        c.local = Some(LocalModelConfig { server: "ollama".into(), url: "http://127.0.0.1:9".into(), context: Some(32768) });
     });
     let failover = failover.map(str::to_string);
     let (state, addr, pid) = served_with(dir, &fake, |cfg| {
@@ -112,7 +112,7 @@ async fn a_new_session_skips_accounts_at_their_limit_and_ends_on_a_local_model()
     assert_eq!((got.model.as_deref(), got.effort.as_deref()), (Some("qwen3-coder"), None));
     wait_long("the local session", 10, || log_lines(&accts[2].log, "ENV ").len() == 1).await;
     let env = env_line(&accts[2].log);
-    for want in ["ANTHROPIC_BASE_URL=http://127.0.0.1:9", "ANTHROPIC_AUTH_TOKEN=ollama", "ANTHROPIC_API_KEY=<unset>", "ANTHROPIC_MODEL=qwen3-coder", "ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3-coder"] {
+    for want in ["ANTHROPIC_BASE_URL=http://127.0.0.1:9", "ANTHROPIC_AUTH_TOKEN=ollama", "ANTHROPIC_API_KEY=<unset>", "ANTHROPIC_MODEL=qwen3-coder", "ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3-coder", "CLAUDE_CODE_SUBAGENT_MODEL=qwen3-coder", "CLAUDE_CODE_MAX_CONTEXT_TOKENS=32768"] {
         assert!(env.contains(want), "{want} in {env}");
     }
     assert!(log_lines(&accts[2].log, "ARGS ")[0].contains("--model qwen3-coder"), "{:?}", log_lines(&accts[2].log, "ARGS "));
@@ -297,4 +297,180 @@ async fn codex_windows_and_a_refused_turn_mark_the_account() {
     t.note_codex_usage(&state, &entry, vec![], Some("You\u{2019}ve hit your usage limit for GPT-5-Codex. Switch to another model now.".into())).await;
     assert!(t.usage.limited("claude-b", now).is_none());
     let _ = t.kill(&a.id).await;
+}
+
+// ---------------------------------------------------------------- conversation transfer
+
+use super::conversation::Transfer;
+use super::transcript;
+
+/// Claude Code and a second account of it, and a Codex account, all fakes with their own folders and logs.
+async fn transfer_accounts(dir: &Path) -> (AppState, std::net::SocketAddr, String, Vec<Account>, PathBuf) {
+    let fake = fake_cli(dir, "claude");
+    let (a, ca) = account(dir, &fake, "claude", |c| {
+        c.kind = None;
+        c.fallback = vec!["claude-b".into(), "codex-x".into()];
+    });
+    let (b, cb) = account(dir, &fake, "claude-b", |_| {});
+    let fake_codex = fake_cli(dir, "codex");
+    let codex_home = dir.join("codex-home");
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let codex_log = dir.join("codex.log");
+    let cx = ProviderConfig {
+        kind: Some("codex".into()),
+        command: Some(fake_codex.display().to_string()),
+        env: [
+            ("CODEX_HOME".to_string(), codex_home.display().to_string()),
+            ("FAKE_CODEX_LOG".to_string(), codex_log.display().to_string()),
+            ("FAKE_CODEX_TURN_SECS".to_string(), "0.2".to_string()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let (state, addr, pid) = served_with(dir, &fake, |cfg| {
+        for (id, c) in [("claude", ca), ("claude-b", cb), ("codex-x", cx)] {
+            cfg.agents.providers.insert(id.into(), c);
+        }
+    })
+    .await;
+    (state, addr, pid, vec![a, b], codex_log)
+}
+
+/// A Claude Code transcript of `turns` (user, assistant, user, …) where `claude --resume` of the account at `home` looks for it.
+fn write_transcript(home: &Path, cwd: &str, id: &str, turns: &[String]) -> PathBuf {
+    let path = transcript::transcript_path(home, Path::new(cwd), id);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut out = String::new();
+    for (i, t) in turns.iter().enumerate() {
+        let rec = if i % 2 == 0 {
+            json!({"type": "user", "isSidechain": false, "message": {"role": "user", "content": t}, "sessionId": id})
+        } else {
+            json!({"type": "assistant", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "text", "text": t}]}, "sessionId": id})
+        };
+        out.push_str(&rec.to_string());
+        out.push('\n');
+    }
+    std::fs::write(&path, out).unwrap();
+    path
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_conversation_resumes_on_another_account_of_the_same_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _addr, pid, accts, _codex) = transfer_accounts(dir.path()).await;
+    let t = &state.terminals;
+    let a = t.spawn_agent(&state, ask(&pid, Some("claude"))).await.unwrap();
+    wait_long("the session", 10, || agent_of(&state, &a.id).state == AgentState::Idle).await;
+    let sid = agent_of(&state, &a.id).session_id;
+    let cwd = t.info(&a.id).unwrap().cwd;
+    let src = write_transcript(&dir.path().join("home-claude"), &cwd, &sid, &["rename the module".into(), "Renamed it.".into(), "and the tests".into()]);
+
+    let moved = t.switch_account(&state, &a.id, Some("claude-b"), None).await.unwrap();
+    // The other account's folder now holds the conversation, and the new session resumes it.
+    let dest = transcript::transcript_path(&dir.path().join("home-claude-b"), Path::new(&cwd), &sid);
+    assert_eq!(std::fs::read(&dest).unwrap(), std::fs::read(&src).unwrap());
+    assert_eq!(moved.meta["transfer"]["mode"], "resume");
+    assert_eq!(moved.agent.as_ref().map(|g| (g.provider_id.as_deref(), g.session_id.as_str())), Some((Some("claude-b"), sid.as_str())));
+    wait_long("its start", 10, || !log_lines(&accts[1].log, "ARGS ").is_empty()).await;
+    let args = log_lines(&accts[1].log, "ARGS ")[0].clone();
+    assert!(args.contains(&format!("--resume {sid}")) && args.contains("same conversation"), "{args}");
+    assert!(!args.contains("--session-id"), "{args}");
+    assert_eq!(t.info(&a.id).unwrap().meta["movedTo"], moved.id.as_str());
+    // The old session keeps its own file.
+    assert!(src.is_file());
+    // The same move again finds the session already there.
+    assert_eq!(t.switch_account(&state, &a.id, Some("claude-b"), None).await.unwrap().id, moved.id);
+    // A conversation the target already runs is not copied over.
+    t.update(&t.get(&a.id).unwrap(), |rec| {
+        rec.info.meta.as_object_mut().unwrap().remove("movedTo");
+        true
+    });
+    let err = t.switch_account(&state, &a.id, Some("claude-b"), None).await.unwrap_err();
+    assert!(err.to_string().contains("already runs this conversation"), "{err}");
+    for i in t.list() {
+        let _ = t.kill(&i.id).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_conversation_goes_to_another_cli_as_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _addr, pid, _accts, codex_log) = transfer_accounts(dir.path()).await;
+    let t = &state.terminals;
+
+    // A long one: a file the new session is allowed to read.
+    let a = t.spawn_agent(&state, ask(&pid, Some("claude"))).await.unwrap();
+    wait_long("the session", 10, || agent_of(&state, &a.id).state == AgentState::Idle).await;
+    let sid = agent_of(&state, &a.id).session_id;
+    let cwd = t.info(&a.id).unwrap().cwd;
+    let turns: Vec<String> = (0..40).map(|i| format!("{} {i} {}", if i % 2 == 0 { "question" } else { "answer" }, "word ".repeat(400))).collect();
+    write_transcript(&dir.path().join("home-claude"), &cwd, &sid, &turns);
+    let moved = t.switch_account(&state, &a.id, Some("codex-x"), None).await.unwrap();
+    assert_eq!(moved.meta["transfer"]["mode"], "digest");
+    assert!(moved.meta["transfer"]["turns"].as_u64().unwrap() < moved.meta["transfer"]["of"].as_u64().unwrap(), "{}", moved.meta["transfer"]);
+    wait_long("codex to start", 10, || std::fs::read_to_string(&codex_log).is_ok_and(|l| l.contains("conversation.md"))).await;
+    let line = std::fs::read_to_string(&codex_log).unwrap();
+    let file = line.split_whitespace().find(|w| w.ends_with("conversation.md")).expect("the file in the prompt").to_string();
+    let dir_of_file = Path::new(&file).parent().unwrap().display().to_string();
+    assert!(line.contains(&format!("--add-dir {dir_of_file}")), "the new session may read it: {line}");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("## User\nquestion 0 ") && text.contains("answer 39 ") && text.contains("earlier turns left out"), "{}", &text[..300.min(text.len())]);
+    assert!(text.len() <= conversation_budget() + 2000, "{}", text.len());
+    #[cfg(unix)]
+    assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&file).unwrap().permissions()) & 0o777, 0o600);
+
+    // A short one: in the prompt itself, no file.
+    std::fs::write(&codex_log, "").unwrap();
+    let b = t.spawn_agent(&state, ask(&pid, Some("claude"))).await.unwrap();
+    wait_long("the second session", 10, || agent_of(&state, &b.id).state == AgentState::Idle).await;
+    let sid_b = agent_of(&state, &b.id).session_id;
+    write_transcript(&dir.path().join("home-claude"), &cwd, &sid_b, &["rename the module".into(), "Renamed it.".into()]);
+    let moved = t.switch_account(&state, &b.id, Some("codex-x"), None).await.unwrap();
+    assert_eq!(moved.meta["transfer"]["mode"], "digest");
+    wait_long("codex to start again", 10, || std::fs::read_to_string(&codex_log).is_ok_and(|l| l.contains("rename the module"))).await;
+    let line = std::fs::read_to_string(&codex_log).unwrap();
+    assert!(line.contains("Renamed it.") && !line.contains("conversation.md"), "{line}");
+    for i in t.list() {
+        let _ = t.kill(&i.id).await;
+    }
+}
+
+fn conversation_budget() -> usize {
+    super::conversation::FILE_BUDGET
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn notes_only_moves_no_conversation_and_a_bad_setting_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, addr, pid, accts, _codex) = transfer_accounts(dir.path()).await;
+    let t = &state.terminals;
+    let a = t.spawn_agent(&state, ask(&pid, Some("claude"))).await.unwrap();
+    wait_long("the session", 10, || agent_of(&state, &a.id).state == AgentState::Idle).await;
+    let sid = agent_of(&state, &a.id).session_id;
+    let cwd = t.info(&a.id).unwrap().cwd;
+    write_transcript(&dir.path().join("home-claude"), &cwd, &sid, &["secret plans".into(), "ok".into()]);
+
+    let moved = t.switch_account(&state, &a.id, Some("claude-b"), Some(Transfer::Notes)).await.unwrap();
+    assert_eq!(moved.meta["transfer"]["mode"], "notes");
+    assert!(!transcript::transcript_path(&dir.path().join("home-claude-b"), Path::new(&cwd), &sid).exists(), "nothing was copied");
+    wait_long("its start", 10, || !log_lines(&accts[1].log, "ARGS ")[..].is_empty()).await;
+    let args = log_lines(&accts[1].log, "ARGS ")[0].clone();
+    assert!(!args.contains("--resume") && !args.contains("secret plans"), "{args}");
+
+    // The REST call refuses a transfer it does not know.
+    let (cookie, key) = sign_in(&state, addr).await;
+    let origin = format!("http://{addr}");
+    let r = reqwest::Client::new()
+        .post(format!("{origin}/api/agents/{}/switch", a.id))
+        .header("cookie", &cookie)
+        .header("origin", &origin)
+        .header(crate::auth::KEY_HEADER, &key)
+        .json(&json!({"provider": "claude-b", "transfer": "everything"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    for i in t.list() {
+        let _ = t.kill(&i.id).await;
+    }
 }

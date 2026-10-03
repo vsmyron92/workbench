@@ -3,7 +3,10 @@ import type { AgentInfo, AgentProvider } from '@/api/types'
 import type { ProviderInfo } from '../api'
 import {
   dialogSeenOnScreen,
+  carryKind,
+  carryText,
   displayLabel,
+  movedToast,
   limitEnds,
   limitNote,
   historyProviders,
@@ -142,5 +145,32 @@ describe('limitNote', () => {
     expect(limitNote(usage(true, now - 1), now)).toBeNull()
     expect(limitNote({}, now)).toBeNull()
     expect(limitEnds(new Date(2026, 9, 20, 9, 0).getTime(), now)).toMatch(/20/)
+  })
+})
+
+describe('carrying a conversation', () => {
+  it('resumes it for the same CLI and writes it out for another', () => {
+    expect(carryKind('claude', 'claude')).toBe('resume')
+    expect(carryKind('codex', 'codex')).toBe('resume')
+    expect(carryKind('claude', 'codex')).toBe('digest')
+    expect(carryKind('codex', 'aider')).toBe('digest')
+    expect(carryKind('gemini', 'claude')).toBe('notes')
+    expect(carryKind('aider', 'aider')).toBe('notes')
+    expect(carryKind('claude', 'claude', 'notes')).toBe('notes')
+  })
+
+  it('says what goes where', () => {
+    expect(carryText('resume', { kind: 'claude', local: null }, 'claude')).toBe('The conversation itself continues there.')
+    expect(carryText('resume', { kind: 'claude', local: { server: 'ollama', url: '' } }, 'claude')).toMatch(/stays on your network/)
+    expect(carryText('digest', { kind: 'codex', local: null }, 'claude')).toMatch(/sent to that CLI’s service/)
+    expect(carryText('digest', { kind: 'aider', local: { server: 'ollama', url: '' } }, 'claude')).toMatch(/stays on your network/)
+    expect(carryText('notes', { kind: 'codex', local: null }, 'claude')).toMatch(/short note/)
+  })
+
+  it('titles the toast by how it was carried', () => {
+    expect(movedToast('resume', 'Claude · Work')).toEqual({ title: 'Continued on Claude · Work', detail: 'The same conversation, resumed.' })
+    expect(movedToast('digest', 'Codex').detail).toMatch(/as text/)
+    expect(movedToast('notes', 'Codex').title).toBe('Started on Codex')
+    expect(movedToast(undefined, 'X').title).toBe('Started on X')
   })
 })

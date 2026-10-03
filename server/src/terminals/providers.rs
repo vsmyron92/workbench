@@ -448,6 +448,11 @@ pub fn list(agents: &AgentsConfig) -> (Vec<Provider>, Vec<String>) {
             warnings.push(format!("agents.failover: {f:?} is not one of off, new, session; new is used"));
         }
     }
+    if let Some(t) = agents.transfer.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        if super::conversation::Transfer::parse(t).is_none() {
+            warnings.push(format!("agents.transfer: {t:?} is not one of conversation, notes; conversation is used"));
+        }
+    }
     for p in &out {
         for f in &p.fallback {
             match out.iter().find(|x| &x.id == f) {
@@ -930,6 +935,10 @@ pub fn dialog_on_screen(kind: ProviderKind, screen: &str) -> Option<(super::Agen
 /// The name of the provider a local Codex session defines for itself.
 const CODEX_LOCAL_PROVIDER: &str = "workbench_local";
 
+/// The context windows `context` may name (tokens).
+const MIN_CONTEXT: u64 = 2_048;
+const MAX_CONTEXT: u64 = 10_000_000;
+
 /// A server's usual address.
 pub fn default_local_url(server: &str) -> &'static str {
     match server {
@@ -989,6 +998,9 @@ pub fn local_setup(p: &Provider, model: Option<&str>) -> Result<Option<LocalSetu
         return Err(format!("{at}: url must be http:// or https:// and carry no user name or password"));
     }
     let model = model.map(str::trim).filter(|m| !m.is_empty()).ok_or_else(|| format!("{at}: set `model` (the server's model name) for {}", p.label))?;
+    if let Some(c) = l.context.filter(|c| !(MIN_CONTEXT..=MAX_CONTEXT).contains(c)) {
+        return Err(format!("{at}: context {c} should be between {MIN_CONTEXT} and {MAX_CONTEXT} tokens"));
+    }
     let base = url.trim_end_matches('/');
     let set = |k: &str, v: &str| (k.to_string(), Some(v.to_string()));
     let unset = |k: &str| (k.to_string(), None);
@@ -1012,10 +1024,15 @@ pub fn local_setup(p: &Provider, model: Option<&str>) -> Result<Option<LocalSetu
                     set("ANTHROPIC_DEFAULT_OPUS_MODEL", model),
                     set("ANTHROPIC_DEFAULT_SONNET_MODEL", model),
                     set("ANTHROPIC_DEFAULT_HAIKU_MODEL", model),
+                    set("CLAUDE_CODE_SUBAGENT_MODEL", model),
                     set("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
                     // A header that changes with every request would keep the server from reusing its prompt cache.
                     set("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
-                ],
+                ]
+                .into_iter()
+                // Claude Code assumes 200K for a model it does not know and compacts late.
+                .chain(l.context.map(|c| set("CLAUDE_CODE_MAX_CONTEXT_TOKENS", &c.to_string())))
+                .collect(),
                 model: model.to_string(),
                 url: root,
                 args: vec![],
@@ -1052,6 +1069,10 @@ pub fn local_setup(p: &Provider, model: Option<&str>) -> Result<Option<LocalSetu
             args.extend(c("model_provider", CODEX_LOCAL_PROVIDER));
             args.extend(c(&format!("model_providers.{CODEX_LOCAL_PROVIDER}.name"), &p.label));
             args.extend(c(&format!("model_providers.{CODEX_LOCAL_PROVIDER}.base_url"), &v1));
+            if let Some(n) = l.context {
+                // A number, not a string.
+                args.extend(["-c".to_string(), format!("model_context_window={n}")]);
+            }
             LocalSetup { env: vec![], model: model.to_string(), url: v1, args }
         }
         _ => LocalSetup { env: vec![], model: model.to_string(), url: base.to_string(), args: vec![] },
@@ -1080,7 +1101,7 @@ pub fn describe(p: &Provider, available: Option<&PathBuf>) -> Value {
         "reason": reason,
         "installHint": (!p.install_hint.is_empty()).then(|| p.install_hint.clone()),
         // The account's folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`…); absent: the CLI's default account.
-        "local": p.local.as_ref().map(|l| json!({ "server": l.server.trim().to_lowercase(), "url": local_url_of(p) })),
+        "local": p.local.as_ref().map(|l| json!({ "server": l.server.trim().to_lowercase(), "url": local_url_of(p), "context": l.context })),
         "localError": local_setup(p, p.model.as_deref().or(Some("-"))).err(),
         "localServers": k.local_servers(),
         "fallback": p.fallback,
@@ -1490,6 +1511,14 @@ mod tests {
             kind = "codex"
             model = "qwen3:8b"
             local = { server = "ollama", url = "http://10.0.0.5:11434" }
+            [agents.providers.claude-small]
+            kind = "claude"
+            model = "qwen"
+            local = { server = "ollama", context = 32768 }
+            [agents.providers.codex-small]
+            kind = "codex"
+            model = "qwen"
+            local = { server = "ollama", context = 32768 }
             "#,
         );
         assert!(w.is_empty(), "{w:?}");
@@ -1530,6 +1559,14 @@ mod tests {
             ]
         );
         assert!(!s.args.iter().any(|a| a.contains("oss")) && s.env.is_empty());
+        // A small window is told to both CLIs; without one, neither is.
+        let s = local_setup(get("claude-small"), Some("qwen")).unwrap().unwrap();
+        assert_eq!(env(&s, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some(Some("32768".into())));
+        assert_eq!(env(&s, "CLAUDE_CODE_SUBAGENT_MODEL"), Some(Some("qwen".into())));
+        let s = local_setup(get("codex-small"), Some("qwen")).unwrap().unwrap();
+        assert!(s.args.windows(2).any(|w| w == ["-c", "model_context_window=32768"]), "{:?}", s.args);
+        assert_eq!(env(&local_setup(get("claude-local"), Some("qwen3-coder")).unwrap().unwrap(), "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), None);
+        assert!(!local_setup(get("codex-local"), Some("qwen3:8b")).unwrap().unwrap().args.iter().any(|a| a.contains("context")));
         // No local section: nothing to add.
         assert_eq!(local_setup(get("codex"), None), Ok(None));
     }
@@ -1557,6 +1594,10 @@ mod tests {
             kind = "aider"
             model = "m"
             local = { server = "openai" }
+            [agents.providers.tiny-window]
+            kind = "claude"
+            model = "m"
+            local = { server = "ollama", context = 10 }
             "#,
         );
         let get = |id: &str| list.iter().find(|p| p.id == id).unwrap();
@@ -1565,7 +1606,8 @@ mod tests {
         assert!(local_setup(get("wrong-server"), Some("m")).unwrap_err().contains("ollama, lmstudio, anthropic"));
         assert!(local_setup(get("kimi-local"), Some("m")).unwrap_err().contains("cannot run on a model server"));
         assert!(local_setup(get("needs-url"), Some("m")).unwrap_err().contains("`url` is needed"));
-        assert_eq!(w.len(), 5, "{w:?}");
+        assert!(local_setup(get("tiny-window"), Some("m")).unwrap_err().contains("context 10 should be between"));
+        assert_eq!(w.len(), 6, "{w:?}");
         assert!(w.iter().all(|x| x.contains("does not start")), "{w:?}");
         assert!(describe(get("bad-url"), None)["localError"].is_string());
         assert!(!valid_local_url("ftp://x") && !valid_local_url("http://") && valid_local_url("https://gpu.lan:8443/v1"));
