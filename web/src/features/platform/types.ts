@@ -18,8 +18,50 @@ export interface ProviderSettings {
   model?: string | null
   effort?: string | null
   permission_mode?: string | null
+  /** Accounts to use, in order, when this one is at its usage limit. */
+  fallback?: string[]
   env?: Record<string, string>
   install_hint?: string | null
+  /** A model server of your own instead of the vendor's. */
+  local?: LocalModelSettings | null
+}
+
+/** config/global.rs LocalModelConfig */
+export interface LocalModelSettings {
+  server: string
+  url: string
+}
+
+/** terminals/usage.rs Window */
+export interface UsageWindow {
+  name: string
+  label: string
+  usedPct: number
+  /** ms */
+  resetsAt: number | null
+}
+
+/** One account's entry of GET /api/agents/usage. */
+export interface AccountUsage {
+  windows: UsageWindow[]
+  limited: boolean
+  limitedUntil: number | null
+  reason: string | null
+  updatedAt: number
+}
+
+export type FailoverMode = 'off' | 'new' | 'session'
+
+/** GET /api/agents/usage */
+export interface UsageInfo {
+  usage: Record<string, AccountUsage>
+  failover: FailoverMode
+}
+
+/** POST /api/agents/local-models */
+export interface LocalModels {
+  models: string[]
+  error?: string
 }
 
 /** config/global.rs GlobalConfig */
@@ -40,6 +82,8 @@ export interface GlobalConfig {
     restore_on_start: boolean
     statusline: boolean
     default_provider?: string | null
+    /** `off` | `new` (default) | `session`: what an account at its usage limit does. */
+    failover?: string | null
     /** `[agents.providers.<id>]`: extra accounts of a CLI, other CLIs, tweaks to the presets. */
     providers?: Record<string, ProviderSettings>
   }

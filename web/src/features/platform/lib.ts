@@ -352,3 +352,87 @@ export function accountHomeError(kind: AccountKind, home: string, others: { id: 
   const clash = others.find((o) => sameFolder(o.home, h))
   return clash ? `Already the ${noun} of “${clash.id}”` : null
 }
+
+// ---------------------------------------------------------------- local models
+
+/** The model servers an agent CLI can run on (`[agents.providers.<name>.local]`), by CLI. */
+export const LOCAL_SERVERS: Record<string, { label: string; url: string; hint: string }> = {
+  ollama: { label: 'Ollama', url: 'http://localhost:11434', hint: 'Ollama 0.14 or newer for Claude Code, 0.13.4 for Codex. It recommends a context of 64k or more.' },
+  lmstudio: { label: 'LM Studio', url: 'http://localhost:1234', hint: 'Start its local server (LM Studio 0.4.1 or newer for Claude Code).' },
+  openai: { label: 'OpenAI-compatible', url: '', hint: 'llama.cpp’s llama-server, vLLM and the like. Codex needs one that serves /v1/responses.' },
+  anthropic: { label: 'Anthropic-compatible', url: '', hint: 'A server or gateway with the Anthropic Messages API (/v1/messages).' },
+}
+
+export const LOCAL_BY_KIND: Record<AccountKind, string[]> = {
+  claude: ['ollama', 'lmstudio', 'anthropic'],
+  codex: ['ollama', 'lmstudio', 'openai'],
+  aider: ['ollama', 'lmstudio', 'openai'],
+  kimi: [],
+  gemini: [],
+}
+
+/** Why `url` cannot be a model server's address (`null`: it can; empty is the server's usual one). */
+export function localUrlError(server: string, url: string): string | null {
+  const u = url.trim()
+  if (!u) return LOCAL_SERVERS[server]?.url ? null : 'Enter the address of the server'
+  if (!/^https?:\/\/[^\s/?#@]+(?:[/?#]\S*)?$/i.test(u)) return 'http:// or https:// and an address, without a user name or password'
+  return null
+}
+
+/** `claude` + `ollama` + `qwen3-coder:30b` → `claude-ollama-qwen3-coder`: a provider name (the model without its tag). */
+export function suggestLocalId(kind: AccountKind, server: string, model: string): string {
+  const slug = (t: string) =>
+    t
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+  return [kind, server, slug(model.split(':')[0])].filter(Boolean).join('-').slice(0, 32).replace(/-+$/, '')
+}
+
+// ---------------------------------------------------------------- usage and fallback
+
+const PRESET_LABEL: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', kimi: 'Kimi Code', gemini: 'Gemini CLI', aider: 'Aider' }
+
+/** What an account is called in lists: `Claude · Work` for an account, the CLI's name for a built-in. */
+export function accountName(id: string, providers: Record<string, { kind?: string | null; label?: string | null }>): string {
+  const c = providers[id]
+  const base = PRESET_LABEL[id]
+  const label = c?.label?.trim()
+  if (base && !label) return base
+  if (!c) return base ?? id
+  const kindLabel = accountKind(c.kind)?.label
+  const text = label || id
+  if (!kindLabel || text.toLowerCase().includes(kindLabel.split(' ')[0].toLowerCase())) return text
+  return `${kindLabel.split(' ')[0]} · ${text}`
+}
+
+/** The accounts `id` may fall back to: every other configured one and the built-in CLIs. */
+export function fallbackCandidates(id: string, providers: Record<string, { kind?: string | null; label?: string | null; enabled?: boolean | null }>): { id: string; label: string }[] {
+  const ids = [...new Set([...Object.keys(PRESET_LABEL), ...Object.keys(providers)])]
+  return ids.filter((x) => x !== id && providers[x]?.enabled !== false).map((x) => ({ id: x, label: accountName(x, providers) }))
+}
+
+/** `list` with the item at `from` moved by `by` places (a no-op at the ends). */
+export function moveItem<T>(list: T[], from: number, by: number): T[] {
+  const to = from + by
+  if (from < 0 || from >= list.length || to < 0 || to >= list.length) return list
+  const out = [...list]
+  const [x] = out.splice(from, 1)
+  out.splice(to, 0, x)
+  return out
+}
+
+/** "3:45 PM" today, "Mon 12:00 AM" within the week, else "Oct 9, 3:00 PM". */
+export function formatUntil(ms: number, now: number = Date.now()): string {
+  const d = new Date(ms)
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  const sameDay = d.toDateString() === new Date(now).toDateString()
+  if (sameDay) return time
+  if (ms - now < 6 * 24 * 3600 * 1000) return `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`
+}
+
+/** The colour of a usage bar. */
+export function usageTone(pct: number): 'ok' | 'warn' | 'full' {
+  return pct >= 99.5 ? 'full' : pct >= 80 ? 'warn' : 'ok'
+}

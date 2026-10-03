@@ -22,7 +22,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -54,6 +54,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/agents/history", get(history))
         .route("/api/agents/external", get(external))
         .route("/api/agents/defaults", get(defaults))
+        .route("/api/agents/usage", get(usage_snapshot))
+        .route("/api/agents/usage/{provider}", put(set_limit))
+        .route("/api/agents/local-models", post(local_models))
+        .route("/api/agents/{id}/switch", post(switch_account))
         .route("/api/agents/remote-control", post(remote_control))
         .route("/api/agents/{id}/permission", post(answer_permission))
         // Tool payloads (file contents) can be large; hooks must never fail on size.
@@ -469,6 +473,93 @@ async fn external(State(state): State<AppState>) -> Json<Vec<transcript::Externa
     Json(state.terminals.external(&state).await)
 }
 
+/// Only a signed-in device decides about accounts: an agent cannot clear its own limit or
+/// move itself.
+fn require_device(caller: &Option<axum::extract::Extension<crate::auth::Caller>>) -> ApiResult<()> {
+    if matches!(caller.as_ref().map(|c| &c.0), Some(crate::auth::Caller::Device { .. })) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("accounts are managed from a signed-in device"))
+    }
+}
+
+/// `GET /api/agents/usage` → `{usage: {<provider>: {windows, limited, limitedUntil, reason}}, failover}`.
+async fn usage_snapshot(State(state): State<AppState>) -> Json<Value> {
+    let failover = match providers::Failover::of(&state.config.read().agents) {
+        providers::Failover::Off => "off",
+        providers::Failover::New => "new",
+        providers::Failover::Session => "session",
+    };
+    Json(json!({ "usage": state.terminals.usage.snapshot(util::now_ms()), "failover": failover }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LimitBody {
+    /// Out of use until then (ms); `null`: usable again.
+    limited_until: Option<i64>,
+}
+
+/// `PUT /api/agents/usage/{provider} {limitedUntil}`: say an account is at its limit (until
+/// a time), or usable again, when what the CLIs reported is wrong or not enough.
+async fn set_limit(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    caller: Option<axum::extract::Extension<crate::auth::Caller>>,
+    Json(b): Json<LimitBody>,
+) -> ApiResult<Json<Value>> {
+    require_device(&caller)?;
+    let p = agent::find_provider(&state.config.read().agents, Some(&provider))?;
+    let now = util::now_ms();
+    match b.limited_until {
+        Some(t) if t > now => state.terminals.mark_limited_by_user(&p.id, t, now),
+        Some(_) => return Err(ApiError::bad_request("limitedUntil must be in the future")),
+        None => state.terminals.clear_limited_by_user(&p.id, now),
+    }
+    Ok(Json(json!({ "usage": state.terminals.usage.describe(&p.id, now) })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SwitchBody {
+    /// The account to continue on (default: the next one that is free).
+    provider: Option<String>,
+}
+
+/// `POST /api/agents/{id}/switch {provider?}`: continue a session's work on another account,
+/// as a new session in the same folder. Returns the new session.
+async fn switch_account(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    caller: Option<axum::extract::Extension<crate::auth::Caller>>,
+    Json(b): Json<SwitchBody>,
+) -> ApiResult<Json<TerminalInfo>> {
+    require_device(&caller)?;
+    check_id(&id)?;
+    let to = b.provider.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    Ok(Json(state.terminals.switch_account(&state, &id, to).await?))
+}
+
+#[derive(Deserialize)]
+struct LocalModelsBody {
+    server: String,
+    #[serde(default)]
+    url: String,
+}
+
+/// `POST /api/agents/local-models {server, url?}` → `{models}` or `{error}`: what a model
+/// server of your own serves.
+async fn local_models(
+    caller: Option<axum::extract::Extension<crate::auth::Caller>>,
+    Json(b): Json<LocalModelsBody>,
+) -> ApiResult<Json<Value>> {
+    require_device(&caller)?;
+    Ok(Json(match super::local::probe(&b.server, &b.url).await {
+        Ok(models) => json!({ "models": models }),
+        Err(error) => json!({ "models": [], "error": error }),
+    }))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DefaultsQuery {
@@ -497,6 +588,7 @@ async fn defaults(State(state): State<AppState>, Query(q): Query<DefaultsQuery>)
         .zip(found.iter())
         .map(|(p, path)| {
             let mut v = providers::describe(p, path.as_ref());
+            v["usage"] = state.terminals.usage.describe(&p.id, util::now_ms());
             if p.kind == providers::ProviderKind::Claude {
                 // Project [agent] settings are Claude Code settings.
                 let d = &mut v["defaults"];
@@ -520,6 +612,11 @@ async fn defaults(State(state): State<AppState>, Query(q): Query<DefaultsQuery>)
         "providers": described,
         "defaultProvider": default_provider,
         "providerWarnings": warnings,
+        "failover": match providers::Failover::of(&cfg) {
+            providers::Failover::Off => "off",
+            providers::Failover::New => "new",
+            providers::Failover::Session => "session",
+        },
         "command": cfg.command,
         "commandFound": command.is_some(),
         "model": pa.model.or(cfg.model),
@@ -572,6 +669,9 @@ async fn hook(State(state): State<AppState>, Path(id): Path<String>, headers: He
                 return Ok(Json(state.terminals.permission_request(&state, &id, &v).await?));
             }
             state.terminals.apply_hook(&id, &v)?;
+            if v.get("hook_event_name").and_then(Value::as_str) == Some("StopFailure") {
+                state.terminals.claude_turn_failed(&state, &id, &v);
+            }
             // Local History attributes the files this session's tools wrote.
             crate::files::history::agent_hook(&state, &id, &v);
         }
@@ -626,6 +726,7 @@ async fn status_line(State(state): State<AppState>, Path(id): Path<String>, head
     authorize_hook(&state, &headers, &id)?;
     if let Ok(v) = serde_json::from_slice::<Value>(&body) {
         state.terminals.apply_status(&id, &v)?;
+        state.terminals.note_status_usage(&id, &v);
     }
     Ok(Json(json!({})))
 }

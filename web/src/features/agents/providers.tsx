@@ -10,9 +10,10 @@ import type { AgentState, PendingPermission, TerminalInfo } from '@/api/types'
 import { toast, toastError } from '@/shell/actions'
 import { useUi } from '@/state/store'
 import { Button, Field, Input, Modal, Select } from '@/ui'
-import { openTerminal, terminalsApi } from './api'
+import { openTerminal, switchAccount, terminalsApi, type AgentDefaults } from './api'
 import { HistoryList } from './AgentsHome'
 import { glanceText, oneTapAllow, summaryParts, summaryShowsAll } from './lib/permission'
+import { displayLabel, limitEnds } from './lib/providers'
 import { removeTerminal, upsertTerminal } from './lib/sessions'
 import { NewSessionForm } from './NewSession'
 import { answerPermission } from './Permission'
@@ -49,8 +50,96 @@ export function TerminalsSync({ children }: { children?: ReactNode }) {
       subscribe('resync', () => void qc.invalidateQueries({ queryKey: qk.terminals })),
       // Providers are configured in config.toml: a saved config may add, remove or fix one.
       subscribe('settings.changed', () => void qc.invalidateQueries({ queryKey: ['agents', 'defaults'] })),
+      // An account reached its usage limit, or is usable again: the picker shows it.
+      subscribe('agent.usage', () => void qc.invalidateQueries({ queryKey: ['agents', 'defaults'] })),
     ]
     return () => offs.forEach((o) => o())
+  }, [qc])
+  return <>{children}</>
+}
+
+/** `agent.failover`: a new session started on another account than the one asked for. */
+interface Failover {
+  terminalId: string
+  title: string
+  from: string
+  fromLabel: string
+  to: string
+  toLabel: string
+  until: number | null
+}
+
+/** `agent.limit`: a session's account reached its usage limit. */
+interface Limit {
+  terminalId: string
+  title: string
+  providerId: string
+  providerLabel: string
+  until: number | null
+  fallback: { id: string; label: string } | null
+  movedTo: { terminalId: string; providerId: string | null } | null
+}
+
+/** Toasts for what the accounts' usage did: a session started elsewhere, or one that can continue. */
+export function AccountNotifier({ children }: { children?: ReactNode }) {
+  const qc = useQueryClient()
+  useEffect(() => {
+    // An account as the picker names it ("Claude · Work"), from the providers last fetched.
+    const nameOf = (id: string, label: string) => {
+      for (const [, d] of qc.getQueriesData<AgentDefaults>({ queryKey: ['agents', 'defaults'] })) {
+        const p = d?.providers.find((x) => x.id === id)
+        if (p) return displayLabel(p)
+      }
+      return label
+    }
+    const ends = (until: number | null) => (until ? ` until ${limitEnds(until)}` : '')
+    const offFailover = subscribe('agent.failover', (ev) => {
+      const f = ev.data as Failover
+      toast('info', `Started on ${nameOf(f.to, f.toLabel)}`, {
+        detail: `${nameOf(f.from, f.fromLabel)} is at its usage limit${ends(f.until)}.`,
+        action: { label: 'Open', run: () => openTerminal({ id: f.terminalId, title: f.title }) },
+        timeout: 8000,
+      })
+    })
+    const offLimit = subscribe('agent.limit', (ev) => {
+      const l = ev.data as Limit
+      const open = (id: string, title: string) => openTerminal({ id, title })
+      const account = nameOf(l.providerId, l.providerLabel)
+      if (l.movedTo) {
+        const to = l.movedTo
+        toast('info', `${l.title} continues on ${l.fallback ? nameOf(l.fallback.id, l.fallback.label) : 'another account'}`, {
+          detail: `${account} reached its usage limit${ends(l.until)}.`,
+          action: { label: 'Open', run: () => open(to.terminalId, l.title) },
+          timeout: 10000,
+        })
+        return
+      }
+      if (!l.fallback) {
+        toast('warning', `${account} reached its usage limit${ends(l.until)}`, { detail: `${l.title}: no other account is free.`, timeout: 10000 })
+        return
+      }
+      const to = l.fallback
+      const toName = nameOf(to.id, to.label)
+      toast('warning', `${account} reached its usage limit${ends(l.until)}`, {
+        detail: `${l.title} can continue on ${toName}.`,
+        timeout: 0,
+        actions: [
+          {
+            label: `Continue on ${toName}`,
+            variant: 'primary',
+            run: () =>
+              void switchAccount(l.terminalId, to.id)
+                .then((t) => openTerminal(t))
+                .catch((e) => toastError(e, 'Could not continue on that account')),
+          },
+          { label: 'Open', run: () => open(l.terminalId, l.title) },
+        ],
+      })
+    })
+    return () => {
+      offFailover()
+      offLimit()
+    }
   }, [qc])
   return <>{children}</>
 }

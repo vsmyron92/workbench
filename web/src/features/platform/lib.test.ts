@@ -3,6 +3,14 @@ import {
   accountHomeError,
   accountIdError,
   accountKind,
+  accountName,
+  fallbackCandidates,
+  formatUntil,
+  LOCAL_BY_KIND,
+  localUrlError,
+  moveItem,
+  suggestLocalId,
+  usageTone,
   desktopNotifiesHere,
   formatCountdown,
   formatMs,
@@ -274,5 +282,66 @@ describe('accounts', () => {
     expect(accountKind('aider')?.suggest('work')).toBe('~/.aider-work.env')
     expect(accountKind('gemini')?.homeVar).toBe('GEMINI_CLI_HOME')
     expect(accountKind('custom')).toBeUndefined()
+  })
+})
+
+describe('local models and fallback', () => {
+  it('knows which servers each CLI can run on', () => {
+    expect(LOCAL_BY_KIND.claude).toEqual(['ollama', 'lmstudio', 'anthropic'])
+    expect(LOCAL_BY_KIND.codex).not.toContain('anthropic')
+    expect(LOCAL_BY_KIND.gemini).toEqual([])
+  })
+
+  it('checks a server address', () => {
+    expect(localUrlError('ollama', '')).toBeNull()
+    expect(localUrlError('openai', '')).toMatch(/Enter/)
+    expect(localUrlError('openai', 'http://gpu.lan:8080/v1')).toBeNull()
+    expect(localUrlError('ollama', 'https://[::1]:11434')).toBeNull()
+    expect(localUrlError('ollama', 'localhost:11434')).toMatch(/http/)
+    expect(localUrlError('ollama', 'http://user:pw@host')).toMatch(/user name/)
+    expect(localUrlError('ollama', 'ftp://host')).toMatch(/http/)
+  })
+
+  it('names a local account from its parts', () => {
+    expect(suggestLocalId('claude', 'ollama', 'qwen3-coder:30b')).toBe('claude-ollama-qwen3-coder')
+    expect(suggestLocalId('aider', 'lmstudio', '')).toBe('aider-lmstudio')
+    expect(suggestLocalId('codex', 'openai', 'x'.repeat(60))).toHaveLength(32)
+  })
+
+  it('names accounts, and offers every other one to fall back to', () => {
+    const providers = {
+      'claude-work': { kind: 'claude', label: 'Work' },
+      'claude-ollama': { kind: 'claude', label: 'Claude on Ollama' },
+      'aider-off': { kind: 'aider', enabled: false },
+      opencode: { label: 'OpenCode' },
+    }
+    expect(accountName('claude', providers)).toBe('Claude Code')
+    expect(accountName('claude-work', providers)).toBe('Claude · Work')
+    expect(accountName('claude-ollama', providers)).toBe('Claude on Ollama')
+    expect(accountName('opencode', providers)).toBe('OpenCode')
+    expect(accountName('ghost', providers)).toBe('ghost')
+    const ids = fallbackCandidates('claude-work', providers).map((c) => c.id)
+    expect(ids).toContain('claude')
+    expect(ids).toContain('opencode')
+    expect(ids).not.toContain('claude-work')
+    expect(ids).not.toContain('aider-off')
+  })
+
+  it('moves items inside the list only', () => {
+    expect(moveItem(['a', 'b', 'c'], 1, -1)).toEqual(['b', 'a', 'c'])
+    expect(moveItem(['a', 'b', 'c'], 1, 1)).toEqual(['a', 'c', 'b'])
+    const l = ['a', 'b']
+    expect(moveItem(l, 0, -1)).toBe(l)
+    expect(moveItem(l, 1, 1)).toBe(l)
+  })
+
+  it('says when a limit ends and how full a window is', () => {
+    const now = new Date(2026, 9, 3, 14, 0).getTime()
+    expect(formatUntil(new Date(2026, 9, 3, 15, 45).getTime(), now)).toMatch(/^3:45\s?PM$/i)
+    expect(formatUntil(new Date(2026, 9, 5, 0, 0).getTime(), now)).toMatch(/12:00\s?AM$/i)
+    expect(formatUntil(new Date(2026, 9, 20, 9, 0).getTime(), now)).toMatch(/20/)
+    expect(usageTone(10)).toBe('ok')
+    expect(usageTone(85)).toBe('warn')
+    expect(usageTone(100)).toBe('full')
   })
 })

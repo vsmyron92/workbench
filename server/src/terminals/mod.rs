@@ -33,15 +33,19 @@
 //! * `transcript` — Claude's files on disk; `codex`, `kimi`, `gemini` — theirs;
 //! * `activity` — the output-activity heuristic for CLIs that report nothing;
 //! * `routes` — REST + WebSocket; `input` — sanitising and attachments;
+//! * `usage` — which agent accounts are at their usage limit; `failover` — what that does
+//!   to new sessions and to running ones;
 //! * `statusline` — the `workbench statusline` helper; `tools` — MCP tools.
 
 mod activity;
 mod agent;
 mod codex;
+mod failover;
 mod gemini;
 mod hooks;
 mod input;
 mod kimi;
+mod local;
 mod permission;
 mod providers;
 mod pty;
@@ -50,6 +54,7 @@ mod statusline;
 mod store;
 mod tools;
 mod transcript;
+mod usage;
 mod viewers;
 
 use std::collections::HashMap;
@@ -418,6 +423,8 @@ pub struct Terminals {
     codex_history: Mutex<codex::HistoryCache>,
     /// Optional Codex flags per executable, from its `--help` (keyed by path and mtime).
     codex_features: Mutex<HashMap<PathBuf, (std::time::SystemTime, providers::CodexFeatures)>>,
+    /// Which agent accounts are at their usage limit, and how full their windows are.
+    pub(crate) usage: usage::Usage,
 }
 
 enum Write {
@@ -1423,6 +1430,7 @@ pub async fn start(state: &AppState) {
         root: root.clone(),
         attachments: state.paths.data_dir.join("attachments"),
     });
+    t.usage.open(&state.paths.data_dir);
     let loaded = tokio::task::spawn_blocking(move || store::load_all(&root)).await.unwrap_or_default();
     let now = util::now_ms();
     for (mut rec, screen) in loaded {
@@ -1714,5 +1722,7 @@ mod tests {
 
 #[cfg(test)]
 mod e2e;
+#[cfg(test)]
+mod e2e_accounts;
 #[cfg(test)]
 mod e2e_agents;

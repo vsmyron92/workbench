@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Local models.** Claude Code, Codex and Aider can run on a model server of your own (Ollama,
+  LM Studio, llama.cpp, vLLM…): **Settings → Agents → Accounts → Add local model**, with **Find
+  models** to list what the server serves. Nothing of the vendor's login or API key is passed on, and
+  a session never falls back to the vendor if the server's setup is incomplete.
+- **Usage limits and automatic failover.** Accounts show how full their 5-hour and weekly windows are
+  (from Claude Code's status line and Codex's session log) and when a limit ends. Give an account a
+  `fallback` list and a new session skips an account that is at its limit: a second subscription, then
+  perhaps a local model. `failover = "session"` also continues a running session that hits its limit on
+  the next account, as a new session told where the old one stopped; otherwise its toast offers
+  **Continue on …**. Conversations themselves are not moved between accounts.
+
 - **Several accounts of one agent CLI.** Run Claude Code, Codex, Kimi Code, Gemini CLI or
   Aider under more than one login (Aider: more than one `.env` of API keys), such as a work and a personal subscription. **Settings → Agents → Accounts** adds
   an account (a name, a label and a folder of its own); it appears in the new session picker

@@ -345,6 +345,10 @@
   color: var(--fg);
   font-weight: 600;
 }
+.wb-ag-provider.limited {
+  border-color: var(--warning);
+  color: var(--fg-muted);
+}
 .wb-ag-provider.unavailable {
   border-style: dashed;
   color: var(--fg-subtle);

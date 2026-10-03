@@ -67,6 +67,21 @@ export function initialProvider(providers: ProviderInfo[], remembered: string | 
   return usable(remembered)?.id ?? usable(defaultId)?.id ?? providers.find((p) => p.enabled && p.available)?.id ?? providers.find((p) => p.enabled)?.id ?? null
 }
 
+/** When an account's limit ends: "3:45 PM" today, "Mon 12:00 AM" within the week, else "Oct 9, 3:00 PM". */
+export function limitEnds(ms: number, now: number = Date.now()): string {
+  const d = new Date(ms)
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (d.toDateString() === new Date(now).toDateString()) return time
+  if (ms - now < 6 * 24 * 3600 * 1000) return `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`
+}
+
+/** What the picker says about an account that is at its limit (`null`: nothing). */
+export function limitNote(p: Pick<ProviderInfo, 'usage'>, now: number = Date.now()): string | null {
+  const u = p.usage
+  return u?.limited && u.limitedUntil && u.limitedUntil > now ? `at limit until ${limitEnds(u.limitedUntil, now)}` : null
+}
+
 /** Providers shown in the picker: enabled ones, available first (stable otherwise). */
 export function pickerProviders(providers: ProviderInfo[]): ProviderInfo[] {
   const on = providers.filter((p) => p.enabled)

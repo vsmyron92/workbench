@@ -9,7 +9,7 @@ import { confirmDialog, openPanel, openSettings } from '@/shell/actions'
 import { useUi } from '@/state/store'
 import { Button, Checkbox, ErrorBox, IconButton, Input, Kbd, Select, TextArea } from '@/ui'
 import { startAgent, useAgentDefaults, useContainerAgents, type AgentDefaults, type ProviderInfo } from './api'
-import { displayLabel, initialProvider, isDangerous, pickerProviders, presetOf, PROVIDER_CONFIG_EXAMPLE, stateNote } from './lib/providers'
+import { displayLabel, initialProvider, limitNote, isDangerous, pickerProviders, presetOf, PROVIDER_CONFIG_EXAMPLE, stateNote } from './lib/providers'
 import { ProviderIcon } from './parts'
 import { useAgentsUi, type NewSessionPrefill } from './store'
 
@@ -34,23 +34,40 @@ function openRawConfig() {
 
 /** The provider chips. Unavailable ones stay selectable to show how to install them. */
 function ProviderPicker({ providers, value, onChange }: { providers: ProviderInfo[]; value: string | null; onChange: (id: string) => void }) {
+  const byId = new Map(providers.map((p) => [p.id, p]))
+  /** What a new session of `p` would start as instead, when it is at its limit. */
+  const instead = (p: ProviderInfo): ProviderInfo | undefined => (p.fallback ?? []).map((f) => byId.get(f)).find((f) => f && f.enabled && f.available && !limitNote(f))
   return (
     <div className="wb-ag-providers">
       <div className="wb-ag-providers-group" role="radiogroup" aria-label="Agent">
-        {providers.map((p) => (
-          <button
-            key={p.id}
-            role="radio"
-            aria-checked={p.id === value}
-            className={['wb-ag-provider', p.id === value && 'active', !p.available && 'unavailable'].filter(Boolean).join(' ')}
-            title={p.available ? `${displayLabel(p)} (${p.command})` : (p.reason ?? `${displayLabel(p)} is not available`)}
-            onClick={() => onChange(p.id)}
-          >
-            <ProviderIcon kind={p.kind} />
-            <span>{displayLabel(p)}</span>
-            {!p.available && <span className="wb-ag-provider-note">not installed</span>}
-          </button>
-        ))}
+        {providers.map((p) => {
+          const limit = limitNote(p)
+          const next = limit ? instead(p) : undefined
+          return (
+            <button
+              key={p.id}
+              role="radio"
+              aria-checked={p.id === value}
+              className={['wb-ag-provider', p.id === value && 'active', !p.available && 'unavailable', limit && 'limited'].filter(Boolean).join(' ')}
+              title={
+                !p.available
+                  ? (p.reason ?? `${displayLabel(p)} is not available`)
+                  : limit
+                    ? `${displayLabel(p)} is ${limit}${next ? `: a new session starts on ${displayLabel(next)}` : ''}`
+                    : p.local
+                      ? `${displayLabel(p)} (${p.command}) on ${p.local.url || p.local.server}`
+                      : `${displayLabel(p)} (${p.command})`
+              }
+              onClick={() => onChange(p.id)}
+            >
+              <ProviderIcon kind={p.kind} />
+              <span>{displayLabel(p)}</span>
+              {!p.available && <span className="wb-ag-provider-note">not installed</span>}
+              {p.available && limit && <span className="wb-ag-provider-note">{limit}</span>}
+              {p.available && !limit && p.local && <span className="wb-ag-provider-note">local</span>}
+            </button>
+          )
+        })}
       </div>
       <button
         className="wb-ag-provider add"

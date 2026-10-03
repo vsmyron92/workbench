@@ -47,6 +47,13 @@ export interface ProviderInfo {
   home?: string | null
   /** Aider's `home` is its keys file, not a folder. */
   homeIsFile?: boolean
+  /** Runs on a model server of your own (`[agents.providers.<id>.local]`); `localError`: why it cannot start. */
+  local?: { server: string; url: string } | null
+  localError?: string | null
+  /** The accounts to use, in order, when this one is at its usage limit. */
+  fallback?: string[]
+  /** What the CLI reported about the account's usage; `limited` until `limitedUntil` (ms). */
+  usage?: { limited: boolean; limitedUntil: number | null; reason: string | null; windows: { name: string; label: string; usedPct: number; resetsAt: number | null }[] }
   /** hooks (Claude), rollout (Codex), activity (Kimi, custom: an estimate from output). */
   stateSource: 'hooks' | 'rollout' | 'activity'
   initialPrompt: 'argv' | 'paste'
@@ -102,6 +109,8 @@ export interface AgentDefaults {
   defaultProvider: string
   /** `[agents.providers]` entries that were left out, and why. */
   providerWarnings: string[]
+  /** What an account at its usage limit does: `off`, `new` or `session`. */
+  failover?: 'off' | 'new' | 'session'
 }
 
 export interface NewAgentRequest {
@@ -173,6 +182,11 @@ export function useAgentDefaults(projectId: string | null) {
 /** Show a terminal as a tab of the agents column (on a phone: full screen in the Agents tab). */
 export function openTerminal(t: Pick<TerminalInfo, 'id' | 'title'>, focus = true) {
   openPanel({ kind: 'terminal', id: terminalPanelId(t.id), title: t.title, params: { terminalId: t.id }, focus })
+}
+
+/** Continue a session's work on another account (default: the next one that is free), as a new session. */
+export function switchAccount(terminalId: string, provider?: string) {
+  return api.post<TerminalInfo>(`/api/agents/${encodeURIComponent(terminalId)}/switch`, { provider })
 }
 
 export const terminalsApi = {

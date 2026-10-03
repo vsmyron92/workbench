@@ -90,7 +90,7 @@ packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows rele
 ## Configuration
 
 - `~/.config/workbench/config.toml` (`%APPDATA%\workbench\config.toml` on Windows) holds global settings (`config/global.rs`). It is written with detected defaults on first run.
-  - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions` and `permission_wait`) and `[agents.providers.*]`, `[terminals]` (`shell`: the argv of new shells; default `$SHELL -l`, on Windows PowerShell), `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[update]` (`check`, `repo`, `api`: see "Updates"), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`, `[debug.servers.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
+  - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions`, `permission_wait` and `failover`) and `[agents.providers.*]` (also `fallback` and `[agents.providers.<name>.local]`), `[terminals]` (`shell`: the argv of new shells; default `$SHELL -l`, on Windows PowerShell), `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[update]` (`check`, `repo`, `api`: see "Updates"), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`, `[debug.servers.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
   - Settings saves edit config.toml in place (`platform::config_edit`): comments and layout survive, for every section.
   - Settings saves apply at once. Edits made outside Workbench (an editor, a setup hint followed by hand) apply too: `platform::settings::watch_config` watches the config directory and applies a valid `config.toml` like a raw save (config swapped, secret cache cleared, projects reloaded, `settings.changed`). A file that does not parse or fails the hard checks is reported once (`ui.notify`) and the running config stays; the watcher never writes the file.
 - **Project ids** are the directory name as a slug (`api`, then `api-2`… for another directory of that name) and are bound to the directory for good in `data_dir/project-ids.json` (canonical path → id). Everything keyed by an id belongs to that directory: the overlay `projects/<id>.toml` with its secrets, `data_dir/workspace/<id>`, terminals and agent sessions (`projectId`, hence their MCP confinement). Scan order (roots, then includes) only decides the id the first time a directory is seen; adding a root with a same-named repository or removing the first of two never moves an id, and a new directory never gets an id the file gives to another one, even one that is gone or excluded. A moved repository therefore gets a new id: rename its overlay to follow it.
@@ -382,6 +382,9 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `ui.open` | `{panel, params, title?, id?}`; `id` is the stable panel id (`events.ui_open_id`) | core helper; files, git, gitlab and platform MCP tools |
 | `ui.notify` | `{level, message}` | anyone |
 | `terminal.created` / `terminal.updated` / `terminal.exited` / `terminal.removed` | `TerminalInfo` (removed: `{id}`) | terminals |
+| `agent.usage` | `{providerId, usage}`: an account's usage windows or limit changed (`GET /api/agents/usage` entry) | terminals |
+| `agent.limit` | `{terminalId, title, providerId, providerLabel, reason, until, fallback: {id, label}\|null, movedTo: {terminalId, providerId}\|null}`: a session's account refused a turn for its usage; announced once per session and limit | terminals |
+| `agent.failover` | `{terminalId, title, from, fromLabel, to, toLabel, reason, until}`: a new session started on another account because the one asked for was at its limit | terminals |
 | `agent.attention` | `{terminalId, state, message, title, permission}`; `permission`: the `PendingPermission` Workbench can answer, or null (each answerable request gets its own event) | terminals |
 | `fs.changed` | `{paths: string[], overflow?}` (project-relative, `/`-separated on every OS; `overflow`: too many to list, or the watcher lost events, refresh everything) | files |
 | `files.history` | `{paths}` (Local History recorded versions or labels of these paths) | files |
@@ -424,7 +427,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 |---|---|
 | `/api/health`, `/api/auth/**`, `/api/projects` (list/add/reload/detail/delete; `POST {path, create?}`: a missing directory answers `not_found` unless `create: true` makes it, and the UI asks first), `/api/events/ws` | core |
 | `/api/fs/dirs?path=&hidden=` (subfolder names of any readable folder, empty path: home; the folder picker of Add project; devices only, since agent tokens are not valid under `/api`) | files |
-| `/api/terminals/**`, `/api/agents/**` (incl. `POST /api/agents/{id}/permission`, devices only), `/api/hooks/**` | terminals |
+| `/api/terminals/**`, `/api/agents/**` (incl. `POST /api/agents/{id}/permission`, `POST /api/agents/{id}/switch`, `PUT /api/agents/usage/{provider}` and `POST /api/agents/local-models`, devices only; `GET /api/agents/usage`), `/api/hooks/**` | terminals |
 | `/api/projects/{pid}/files/**` (incl. `files/history/**`: Local History), `/api/projects/{pid}/search`, `/api/fs/**` | files |
 | `/api/projects/{pid}/lsp/**` (incl. the `lsp/ws` editor socket) | lsp |
 | `/api/projects/{pid}/debug/**` | debug |
@@ -799,6 +802,44 @@ always for custom CLIs.
   `homeIsFile` and `home`. Settings → Agents → Accounts (`platform/sections/Accounts.tsx`) edits the
   `agents.providers` map through `PATCH /api/settings` (`agents` merges field by field, so
   the map is sent whole); entries of other kinds in it are kept as they are.
+- **Local models** (`[agents.providers.<name>.local] server = "ollama"|"lmstudio"|"openai"|"anthropic"`,
+  `url`; `model` names the model). `providers::local_setup` turns it into what the CLI needs: Claude
+  Code gets `ANTHROPIC_BASE_URL` (without `/v1`), a placeholder `ANTHROPIC_AUTH_TOKEN`, the model as
+  `ANTHROPIC_MODEL` and as the Opus/Sonnet/Haiku defaults (its helper model would otherwise ask the
+  server for a Claude model), `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and
+  `CLAUDE_CODE_ATTRIBUTION_HEADER=0`, and `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` *removed*, so
+  no credential of the vendor's reaches your server; Codex gets a provider of its own through
+  `-c model_provider=…` / `model_providers.workbench_local.{name,base_url}` (not `--oss`, which probes
+  the server and pulls models; the built-in `ollama` / `lmstudio` ids cannot be repointed), and its
+  server must serve `/v1/responses`; Aider gets `OLLAMA_API_BASE` + `ollama_chat/<model>`,
+  `LM_STUDIO_API_BASE` + a dummy key + `lm_studio/<model>`, or `OPENAI_API_BASE` + `openai/<model>`.
+  Kimi, Gemini and custom CLIs have no local mode. A provider with `local` never starts without it
+  (`prepare_launch` fails when the section is incomplete: falling back to the vendor would send code
+  where the user chose not to), has no Remote Control, and the server never sees the vendor's key.
+  `POST /api/agents/local-models {server, url?}` (devices only) does one bounded GET (no redirects, 5 s,
+  1 MB) of `/api/tags` (Ollama) or `/v1/models` and returns only model names that pass `valid_model`.
+- **Usage and failover** (`usage`, `failover`). `usage::Usage` keeps, per provider name, the usage
+  windows an account reports and a `limited_until` (`usage.json` of the data folder, 0600). Sources:
+  Claude Code's status line `rate_limits.five_hour` / `seven_day` (`used_percentage`, `resets_at`;
+  subscribers only, so absent for API keys and local models, which says nothing); a `StopFailure`
+  hook with `rate_limit` or `billing_error`, whose payload and screen (read 400 ms later) are searched
+  for "You've hit your session limit · resets 3:45pm" (`usage::limit_notice`; a limit named for one
+  model, such as Opus, leaves the account usable); Codex's `token_count.rate_limits.primary` /
+  `secondary` (`resets_at` as epoch seconds, an RFC 3339 string or the old `resets_in_seconds`) and a
+  failed turn with `codex_error_info = "usage_limit_exceeded"`. A report with no full window ends a
+  refusal seen before it; a full window is a limit until its reset; a limit whose time could not be read
+  lasts 30 minutes. `[agents] failover` (`off` | `new`, the default | `session`): `spawn_agent`
+  (so also `ask` and the MCP tools) runs a *new* session on the first account of the provider's
+  `fallback` list (transitively, once each) that is not limited and whose command is installed
+  (`providers::pick`), adjusting the request (`carry_request`: model and effort only between vendor
+  accounts of one CLI, permission mode only within one CLI); a resumed session stays on its account.
+  With `session`, a session whose turn is refused is continued by `switch_account`: a new session in the
+  same folder with a handoff prompt (title, last message as quoted notes, the transcript's path), the
+  old one untouched and `meta.movedTo` set; it is also `POST /api/agents/{id}/switch {provider?}`
+  (idempotent per target). Conversations are not carried between accounts: resuming a transcript
+  copied into another account's folder is undocumented, so it is not relied on. Accounts are managed
+  only by devices (`PUT /api/agents/usage/{provider} {limitedUntil|null}` marks one limited or usable).
+  `GET /api/agents/defaults` gives each provider `usage`, `fallback`, `local`, `localError`.
 - **REST.** `POST /api/agents` and `/api/agents/ask` take `provider`; `ask` without one uses
   the most recent session of any provider that can take a prompt unasked: Claude Code when its
   state accepts one; Codex and Kimi only when idle after a turn of that process ended, with

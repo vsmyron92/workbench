@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::config::global::{AgentsConfig, ProviderConfig};
+use crate::config::global::{AgentsConfig, LocalModelConfig, ProviderConfig};
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -119,6 +119,17 @@ impl ProviderKind {
             // Read last and overriding the home and repository `.env` files (`--env-file`).
             Self::Aider => Some("AIDER_ENV_FILE"),
             Self::Custom => None,
+        }
+    }
+
+    /// The kinds of model server the CLI can be pointed at (`[agents.providers.<name>.local]`).
+    /// Claude Code speaks the Anthropic Messages API, which Ollama and LM Studio serve;
+    /// the others speak the OpenAI API.
+    pub fn local_servers(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["ollama", "lmstudio", "anthropic"],
+            Self::Codex | Self::Aider => &["ollama", "lmstudio", "openai"],
+            Self::Kimi | Self::Gemini | Self::Custom => &[],
         }
     }
 
@@ -286,6 +297,10 @@ pub struct Provider {
     pub permission_mode: Option<String>,
     pub env: BTreeMap<String, String>,
     pub install_hint: String,
+    /// Accounts to use when this one is at its usage limit, in order.
+    pub fallback: Vec<String>,
+    /// A model server of your own instead of the vendor's.
+    pub local: Option<LocalModelConfig>,
 }
 
 impl Provider {
@@ -362,6 +377,8 @@ fn build(id: &str, kind: ProviderKind, c: Option<&ProviderConfig>, agents: &Agen
         permission_mode,
         env: c.env.clone(),
         install_hint: non_empty(&c.install_hint).unwrap_or_else(|| kind.default_install_hint().to_string()),
+        fallback: c.fallback.iter().map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect(),
+        local: c.local.clone(),
     }
 }
 
@@ -426,7 +443,100 @@ pub fn list(agents: &AgentsConfig) -> (Vec<Provider>, Vec<String>) {
             Some(_) => {}
         }
     }
+    if let Some(f) = agents.failover.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+        if Failover::parse(f).is_none() {
+            warnings.push(format!("agents.failover: {f:?} is not one of off, new, session; new is used"));
+        }
+    }
+    for p in &out {
+        for f in &p.fallback {
+            match out.iter().find(|x| &x.id == f) {
+                _ if *f == p.id => warnings.push(format!("agents.providers.{}.fallback: an account cannot fall back to itself", p.id)),
+                None => warnings.push(format!("agents.providers.{}.fallback: {f:?} is not a configured provider; it is skipped", p.id)),
+                Some(x) if !x.enabled => warnings.push(format!("agents.providers.{}.fallback: {f:?} is disabled; it is skipped", p.id)),
+                Some(_) => {}
+            }
+        }
+        if p.local.is_some() {
+            if let Err(e) = local_setup(p, p.model.as_deref().or(Some("-"))) {
+                warnings.push(format!("{e}; the provider does not start"));
+            } else if p.model.is_none() {
+                warnings.push(format!("agents.providers.{}: set `model` to the model your server runs; the provider does not start without it", p.id));
+            }
+        }
+    }
     (out, warnings)
+}
+
+// ---------------------------------------------------------------- failover
+
+/// `[agents] failover`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failover {
+    /// Usage is shown, nothing is decided.
+    Off,
+    /// A new session starts on the first account that is not at its limit.
+    New,
+    /// And a running session that hits its limit continues on the next account.
+    Session,
+}
+
+impl Failover {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "off" => Some(Self::Off),
+            "new" => Some(Self::New),
+            "session" => Some(Self::Session),
+            _ => None,
+        }
+    }
+
+    pub fn of(agents: &AgentsConfig) -> Self {
+        agents.failover.as_deref().and_then(Self::parse).unwrap_or(Self::New)
+    }
+}
+
+/// The accounts to try for `first`, in order: itself, then its `fallback` list, then theirs
+/// (each only once). Accounts that are disabled or do not exist are left out.
+pub fn chain(all: &[Provider], first: &Provider) -> Vec<Provider> {
+    let mut out: Vec<Provider> = vec![first.clone()];
+    let mut i = 0;
+    while i < out.len() && out.len() < 16 {
+        let fallback = out[i].fallback.clone();
+        for f in fallback {
+            if let Some(p) = all.iter().find(|p| p.id == f && p.enabled) {
+                if !out.iter().any(|o| o.id == p.id) {
+                    out.push(p.clone());
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// What a new session of `first` should run as.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pick {
+    pub provider: Provider,
+    /// The accounts skipped on the way, with why (empty: `first` itself).
+    pub skipped: Vec<(String, String)>,
+    /// Every account of the chain is at its limit: `first` is used and shows it.
+    pub all_limited: bool,
+}
+
+/// The first account of `first`'s chain that is not at its limit and can start (`usable`:
+/// its command is installed, say). `limit` says why an account is out of use.
+pub fn pick(all: &[Provider], first: &Provider, limit: impl Fn(&str) -> Option<String>, usable: impl Fn(&Provider) -> bool) -> Pick {
+    let mut skipped = vec![];
+    for p in chain(all, first) {
+        if let Some(why) = limit(&p.id) {
+            skipped.push((p.id.clone(), why));
+        } else if p.id == first.id || usable(&p) {
+            return Pick { provider: p, skipped, all_limited: false };
+        }
+    }
+    Pick { provider: first.clone(), skipped, all_limited: true }
 }
 
 fn list_unchecked_default(agents: &AgentsConfig) -> (Vec<Provider>, Vec<String>) {
@@ -815,6 +925,139 @@ pub fn dialog_on_screen(kind: ProviderKind, screen: &str) -> Option<(super::Agen
     }
 }
 
+// ---------------------------------------------------------------- local models
+
+/// The name of the provider a local Codex session defines for itself.
+const CODEX_LOCAL_PROVIDER: &str = "workbench_local";
+
+/// A server's usual address.
+pub fn default_local_url(server: &str) -> &'static str {
+    match server {
+        "ollama" => "http://localhost:11434",
+        "lmstudio" => "http://localhost:1234",
+        _ => "",
+    }
+}
+
+/// An `http(s)` address without credentials in it, which `config.toml` would keep in plain text.
+pub fn valid_local_url(u: &str) -> bool {
+    let Some(rest) = u.strip_prefix("http://").or_else(|| u.strip_prefix("https://")) else { return false };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !authority.is_empty() && !authority.contains('@') && !u.contains(char::is_whitespace) && u.len() <= 300
+}
+
+/// The address of a provider's model server (its own, else the server's usual one).
+pub fn local_url_of(p: &Provider) -> String {
+    p.local
+        .as_ref()
+        .map(|l| Some(l.url.trim()).filter(|u| !u.is_empty()).map_or_else(|| default_local_url(&l.server.trim().to_lowercase()).to_string(), str::to_string))
+        .unwrap_or_default()
+}
+
+/// What a session of a provider that runs on a model of your own needs added to its launch.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LocalSetup {
+    /// Environment (`None`: removed, so a credential of the vendor's account never goes to your server).
+    pub env: Vec<(String, Option<String>)>,
+    /// The model name as the CLI is told it (Aider wants a provider prefix).
+    pub model: String,
+    /// The server address with its API root, as the CLI wants it.
+    pub url: String,
+    /// Arguments for the command line (Codex takes its provider that way).
+    pub args: Vec<String>,
+}
+
+/// Why a provider's `local` section cannot be used, or the setup it asks for. A provider
+/// with a `local` section never starts without it: falling back to the vendor would send
+/// your code where you chose not to.
+pub fn local_setup(p: &Provider, model: Option<&str>) -> Result<Option<LocalSetup>, String> {
+    let Some(l) = &p.local else { return Ok(None) };
+    let server = l.server.trim().to_lowercase();
+    let at = format!("agents.providers.{}.local", p.id);
+    if !p.kind.local_servers().contains(&server.as_str()) {
+        return Err(if p.kind.local_servers().is_empty() {
+            format!("{at}: {} cannot run on a model server of your own", p.label)
+        } else {
+            format!("{at}: server must be one of {} for {}", p.kind.local_servers().join(", "), p.label)
+        });
+    }
+    let url = Some(l.url.trim()).filter(|u| !u.is_empty()).map_or_else(|| default_local_url(&server).to_string(), str::to_string);
+    if url.is_empty() {
+        return Err(format!("{at}: `url` is needed for a {server} server"));
+    }
+    if !valid_local_url(&url) {
+        return Err(format!("{at}: url must be http:// or https:// and carry no user name or password"));
+    }
+    let model = model.map(str::trim).filter(|m| !m.is_empty()).ok_or_else(|| format!("{at}: set `model` (the server's model name) for {}", p.label))?;
+    let base = url.trim_end_matches('/');
+    let set = |k: &str, v: &str| (k.to_string(), Some(v.to_string()));
+    let unset = |k: &str| (k.to_string(), None);
+    let token = match server.as_str() {
+        "ollama" => "ollama",
+        "lmstudio" => "lmstudio",
+        _ => "local",
+    };
+    Ok(Some(match p.kind {
+        ProviderKind::Claude => {
+            // Claude Code adds `/v1/messages` itself.
+            let root = base.strip_suffix("/v1").unwrap_or(base).to_string();
+            LocalSetup {
+                env: vec![
+                    set("ANTHROPIC_BASE_URL", &root),
+                    set("ANTHROPIC_AUTH_TOKEN", token),
+                    unset("ANTHROPIC_API_KEY"),
+                    unset("CLAUDE_CODE_OAUTH_TOKEN"),
+                    set("ANTHROPIC_MODEL", model),
+                    // Its helper model and sub-agents would otherwise ask the server for a Claude model.
+                    set("ANTHROPIC_DEFAULT_OPUS_MODEL", model),
+                    set("ANTHROPIC_DEFAULT_SONNET_MODEL", model),
+                    set("ANTHROPIC_DEFAULT_HAIKU_MODEL", model),
+                    set("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+                    // A header that changes with every request would keep the server from reusing its prompt cache.
+                    set("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
+                ],
+                model: model.to_string(),
+                url: root,
+                args: vec![],
+            }
+        }
+        ProviderKind::Aider => {
+            let v1 = if base.ends_with("/v1") { base.to_string() } else { format!("{base}/v1") };
+            let prefixed = |prefix: &str| if model.contains('/') { model.to_string() } else { format!("{prefix}/{model}") };
+            match server.as_str() {
+                // Ollama's own API, without `/v1`.
+                "ollama" => LocalSetup {
+                    env: vec![set("OLLAMA_API_BASE", base), unset("OPENAI_API_BASE")],
+                    model: prefixed("ollama_chat"),
+                    url: base.to_string(),
+                    args: vec![],
+                },
+                // Aider wants a dummy key here, or it sends an empty one.
+                "lmstudio" => LocalSetup {
+                    env: vec![set("LM_STUDIO_API_BASE", &v1), set("LM_STUDIO_API_KEY", "dummy-api-key")],
+                    model: prefixed("lm_studio"),
+                    url: v1,
+                    args: vec![],
+                },
+                _ => LocalSetup { env: vec![set("OPENAI_API_BASE", &v1), set("OPENAI_API_KEY", token)], model: prefixed("openai"), url: v1, args: vec![] },
+            }
+        }
+        // Codex takes a provider of its own, defined on the command line: `--oss` would also
+        // probe the server and pull a missing model, and the built-in `ollama` and `lmstudio`
+        // providers cannot be pointed at another address.
+        ProviderKind::Codex => {
+            let v1 = if base.ends_with("/v1") { base.to_string() } else { format!("{base}/v1") };
+            let c = |k: &str, v: &str| ["-c".to_string(), format!("{k}={}", toml_str(v))];
+            let mut args = vec![];
+            args.extend(c("model_provider", CODEX_LOCAL_PROVIDER));
+            args.extend(c(&format!("model_providers.{CODEX_LOCAL_PROVIDER}.name"), &p.label));
+            args.extend(c(&format!("model_providers.{CODEX_LOCAL_PROVIDER}.base_url"), &v1));
+            LocalSetup { env: vec![], model: model.to_string(), url: v1, args }
+        }
+        _ => LocalSetup { env: vec![], model: model.to_string(), url: base.to_string(), args: vec![] },
+    }))
+}
+
 // ---------------------------------------------------------------- what the UI needs
 
 /// `GET /api/agents/defaults` → `providers[]`.
@@ -837,6 +1080,10 @@ pub fn describe(p: &Provider, available: Option<&PathBuf>) -> Value {
         "reason": reason,
         "installHint": (!p.install_hint.is_empty()).then(|| p.install_hint.clone()),
         // The account's folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`…); absent: the CLI's default account.
+        "local": p.local.as_ref().map(|l| json!({ "server": l.server.trim().to_lowercase(), "url": local_url_of(p) })),
+        "localError": local_setup(p, p.model.as_deref().or(Some("-"))).err(),
+        "localServers": k.local_servers(),
+        "fallback": p.fallback,
         "homeVar": k.home_var(),
         "homeIsFile": k.home_is_file(),
         "home": p.home(),
@@ -1207,5 +1454,166 @@ mod tests {
         assert_eq!(f, CodexFeatures { no_daemon: false, no_alt_screen: true });
         assert_eq!(toml_str("a\"b\\c"), "\"a\\\"b\\\\c\"");
         assert!(valid_provider_id("codex-work") && valid_provider_id("aider") && !valid_provider_id("-x") && !valid_provider_id("A"));
+    }
+
+    fn providers_of(toml_text: &str) -> (AgentsConfig, Vec<Provider>, Vec<String>) {
+        let a = cfg(toml_text);
+        let (list, warnings) = list(&a);
+        (a, list, warnings)
+    }
+
+    #[test]
+    fn local_models_get_the_environment_their_cli_needs() {
+        let (_, list, w) = providers_of(
+            r#"
+            [agents.providers.claude-local]
+            kind = "claude"
+            model = "qwen3-coder"
+            local = { server = "ollama" }
+            [agents.providers.claude-lm]
+            kind = "claude"
+            model = "qwen"
+            local = { server = "lmstudio", url = "http://gpu.lan:1234/v1/" }
+            [agents.providers.aider-local]
+            kind = "aider"
+            model = "llama3.1:8b"
+            local = { server = "ollama", url = "http://10.0.0.5:11434/" }
+            [agents.providers.aider-lm]
+            kind = "aider"
+            model = "openai/custom"
+            local = { server = "openai", url = "http://localhost:8080" }
+            [agents.providers.aider-studio]
+            kind = "aider"
+            model = "qwen2.5-coder"
+            local = { server = "lmstudio" }
+            [agents.providers.codex-local]
+            kind = "codex"
+            model = "qwen3:8b"
+            local = { server = "ollama", url = "http://10.0.0.5:11434" }
+            "#,
+        );
+        assert!(w.is_empty(), "{w:?}");
+        let get = |id: &str| list.iter().find(|p| p.id == id).unwrap();
+        let env = |s: &LocalSetup, k: &str| s.env.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let s = local_setup(get("claude-local"), Some("qwen3-coder")).unwrap().unwrap();
+        assert_eq!(env(&s, "ANTHROPIC_BASE_URL"), Some(Some("http://localhost:11434".into())));
+        assert_eq!(env(&s, "ANTHROPIC_AUTH_TOKEN"), Some(Some("ollama".into())));
+        // The vendor's credentials never go to your server, and its helper models are yours too.
+        assert_eq!(env(&s, "ANTHROPIC_API_KEY"), Some(None));
+        assert_eq!(env(&s, "CLAUDE_CODE_OAUTH_TOKEN"), Some(None));
+        for k in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"] {
+            assert_eq!(env(&s, k), Some(Some("qwen3-coder".into())), "{k}");
+        }
+        assert_eq!(env(&s, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"), Some(Some("1".into())));
+        assert_eq!(env(&s, "CLAUDE_CODE_ATTRIBUTION_HEADER"), Some(Some("0".into())));
+        // `/v1` and a trailing slash are not part of the address Claude Code wants.
+        let s = local_setup(get("claude-lm"), Some("qwen")).unwrap().unwrap();
+        assert_eq!(env(&s, "ANTHROPIC_BASE_URL"), Some(Some("http://gpu.lan:1234".into())));
+        assert_eq!(env(&s, "ANTHROPIC_AUTH_TOKEN"), Some(Some("lmstudio".into())));
+        // Aider names the server in the model.
+        let s = local_setup(get("aider-local"), Some("llama3.1:8b")).unwrap().unwrap();
+        assert_eq!((s.model.as_str(), env(&s, "OLLAMA_API_BASE")), ("ollama_chat/llama3.1:8b", Some(Some("http://10.0.0.5:11434".into()))));
+        let s = local_setup(get("aider-lm"), Some("openai/custom")).unwrap().unwrap();
+        assert_eq!((s.model.as_str(), env(&s, "OPENAI_API_BASE")), ("openai/custom", Some(Some("http://localhost:8080/v1".into()))));
+        assert!(env(&s, "OPENAI_API_KEY").flatten().is_some());
+        let s = local_setup(get("aider-studio"), Some("qwen2.5-coder")).unwrap().unwrap();
+        assert_eq!(s.model, "lm_studio/qwen2.5-coder");
+        assert_eq!((env(&s, "LM_STUDIO_API_BASE"), env(&s, "LM_STUDIO_API_KEY")), (Some(Some("http://localhost:1234/v1".into())), Some(Some("dummy-api-key".into()))));
+        // Codex gets a provider of its own on the command line, not `--oss` (which pulls models).
+        let s = local_setup(get("codex-local"), Some("qwen3:8b")).unwrap().unwrap();
+        assert_eq!(
+            s.args,
+            [
+                "-c", "model_provider=\"workbench_local\"",
+                "-c", "model_providers.workbench_local.name=\"codex-local\"",
+                "-c", "model_providers.workbench_local.base_url=\"http://10.0.0.5:11434/v1\"",
+            ]
+        );
+        assert!(!s.args.iter().any(|a| a.contains("oss")) && s.env.is_empty());
+        // No local section: nothing to add.
+        assert_eq!(local_setup(get("codex"), None), Ok(None));
+    }
+
+    #[test]
+    fn a_local_provider_that_cannot_be_set_up_never_falls_back_to_the_vendor() {
+        let (_, list, w) = providers_of(
+            r#"
+            [agents.providers.no-model]
+            kind = "claude"
+            local = { server = "ollama" }
+            [agents.providers.bad-url]
+            kind = "claude"
+            model = "m"
+            local = { server = "ollama", url = "http://user:pass@host:1" }
+            [agents.providers.wrong-server]
+            kind = "claude"
+            model = "m"
+            local = { server = "openai" }
+            [agents.providers.kimi-local]
+            kind = "kimi"
+            model = "m"
+            local = { server = "ollama" }
+            [agents.providers.needs-url]
+            kind = "aider"
+            model = "m"
+            local = { server = "openai" }
+            "#,
+        );
+        let get = |id: &str| list.iter().find(|p| p.id == id).unwrap();
+        assert!(local_setup(get("no-model"), None).unwrap_err().contains("set `model`"));
+        assert!(local_setup(get("bad-url"), Some("m")).unwrap_err().contains("no user name or password"));
+        assert!(local_setup(get("wrong-server"), Some("m")).unwrap_err().contains("ollama, lmstudio, anthropic"));
+        assert!(local_setup(get("kimi-local"), Some("m")).unwrap_err().contains("cannot run on a model server"));
+        assert!(local_setup(get("needs-url"), Some("m")).unwrap_err().contains("`url` is needed"));
+        assert_eq!(w.len(), 5, "{w:?}");
+        assert!(w.iter().all(|x| x.contains("does not start")), "{w:?}");
+        assert!(describe(get("bad-url"), None)["localError"].is_string());
+        assert!(!valid_local_url("ftp://x") && !valid_local_url("http://") && valid_local_url("https://gpu.lan:8443/v1"));
+    }
+
+    #[test]
+    fn accounts_fall_back_in_order_and_only_to_usable_ones() {
+        let (a, list, w) = providers_of(
+            r#"
+            [agents]
+            failover = "session"
+            [agents.providers.claude]
+            fallback = ["claude-b", "claude-local", "ghost"]
+            [agents.providers.claude-b]
+            kind = "claude"
+            fallback = ["claude"]
+            [agents.providers.claude-local]
+            kind = "claude"
+            model = "qwen"
+            local = { server = "ollama" }
+            fallback = ["claude-local", "claude-off"]
+            [agents.providers.claude-off]
+            kind = "claude"
+            enabled = false
+            "#,
+        );
+        assert_eq!(Failover::of(&a), Failover::Session);
+        assert_eq!(w.iter().filter(|x| x.contains("fallback")).count(), 3, "{w:?}");
+        assert!(w.iter().any(|x| x.contains("ghost")) && w.iter().any(|x| x.contains("itself")) && w.iter().any(|x| x.contains("claude-off") && x.contains("disabled")));
+        let claude = list.iter().find(|p| p.id == "claude").unwrap();
+        // Cycles and disabled accounts do not lead anywhere.
+        assert_eq!(chain(&list, claude).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["claude", "claude-b", "claude-local"]);
+        let limited = |ids: &'static [&'static str]| move |id: &str| ids.contains(&id).then(|| "session limit used up".to_string());
+        let all_usable = |_: &Provider| true;
+        // Not at its limit: itself.
+        let p = pick(&list, claude, limited(&[]), all_usable);
+        assert_eq!((p.provider.id.as_str(), p.skipped.len(), p.all_limited), ("claude", 0, false));
+        // The first account is out: the second.
+        let p = pick(&list, claude, limited(&["claude"]), all_usable);
+        assert_eq!((p.provider.id.as_str(), p.skipped.clone()), ("claude-b", vec![("claude".to_string(), "session limit used up".to_string())]));
+        // Two are out: the local model.
+        assert_eq!(pick(&list, claude, limited(&["claude", "claude-b"]), all_usable).provider.id, "claude-local");
+        // One that cannot start (not installed) is passed over, as is a limited one.
+        assert_eq!(pick(&list, claude, limited(&["claude"]), |p: &Provider| p.id != "claude-b").provider.id, "claude-local");
+        // Nothing is free: the account asked for, which shows its own limit.
+        let p = pick(&list, claude, limited(&["claude", "claude-b", "claude-local"]), all_usable);
+        assert_eq!((p.provider.id.as_str(), p.skipped.len(), p.all_limited), ("claude", 3, true));
+        assert_eq!(Failover::of(&AgentsConfig::default()), Failover::New);
+        assert!(providers_of("[agents]\nfailover = \"sometimes\"\n").2.iter().any(|x| x.contains("failover")));
     }
 }

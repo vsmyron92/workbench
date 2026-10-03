@@ -4,6 +4,8 @@ import type { ProviderInfo } from '../api'
 import {
   dialogSeenOnScreen,
   displayLabel,
+  limitEnds,
+  limitNote,
   historyProviders,
   initialProvider,
   isDangerous,
@@ -125,5 +127,20 @@ describe('displayLabel', () => {
     const list = [provider('claude', 'claude', { label: 'Claude Code' }), provider('claude-work', 'claude', { label: 'Work', home: '~/.claude-work' })]
     expect(providerLabel(withAgent({ provider: 'claude', providerId: 'claude-work' }), list)).toBe('Claude · Work')
     expect(providerLabel(withAgent({ provider: 'claude', providerId: null }), list)).toBe('Claude')
+  })
+})
+
+describe('limitNote', () => {
+  const now = new Date(2026, 9, 3, 14, 0).getTime()
+  const usage = (limited: boolean, until: number | null) => ({ usage: { limited, limitedUntil: until, reason: null, windows: [] } })
+  it('says when an account at its limit is usable again', () => {
+    expect(limitNote(usage(true, new Date(2026, 9, 3, 15, 45).getTime()), now)).toMatch(/^at limit until 3:45\s?PM$/i)
+    expect(limitNote(usage(true, new Date(2026, 9, 5, 0, 0).getTime()), now)).toMatch(/^at limit until \w{3} 12:00\s?AM$/i)
+  })
+  it('says nothing about an account that is usable, or whose limit has passed', () => {
+    expect(limitNote(usage(false, null), now)).toBeNull()
+    expect(limitNote(usage(true, now - 1), now)).toBeNull()
+    expect(limitNote({}, now)).toBeNull()
+    expect(limitEnds(new Date(2026, 9, 20, 9, 0).getTime(), now)).toMatch(/20/)
   })
 })

@@ -108,6 +108,48 @@ session's account. Workbench never reads or copies a login or a key. An Aider ac
 must exist before a session starts (Aider would otherwise run on the default keys without
 saying so); Aider keeps its chat history in each repository, shared by all its accounts.
 
+## Local models
+
+Claude Code, Codex and Aider can run on a model of your own: **Settings → Agents → Accounts → Add
+local model** takes the server (Ollama, LM Studio, or any OpenAI- or Anthropic-compatible one such as
+llama.cpp's `llama-server` or vLLM), its address and a model, and **Find models** lists what the server
+serves. Sessions of that account talk only to your server: nothing of the vendor's login or API key is
+passed on, and a session does not start at all if the server's setup is incomplete, instead of reaching
+the vendor. Claude Code needs a server with the Anthropic Messages API (Ollama 0.14+, LM Studio 0.4.1+,
+llama.cpp, vLLM, or a gateway); Codex needs `/v1/responses` (Ollama 0.13.4+, LM Studio 0.3.29+); Ollama
+recommends a context of 64k or more for both. Local sessions have no Remote Control and no usage limits.
+
+```toml
+[agents.providers.claude-local]
+kind = "claude"
+model = "qwen3-coder:30b"
+env = { CLAUDE_CONFIG_DIR = "~/.claude-local" }   # its own sessions and history
+local = { server = "ollama" }                     # url defaults to http://localhost:11434
+```
+
+## Usage limits and failover
+
+Workbench shows how full each account is and, when one is at its limit, can use the next. It learns
+the usage from what the CLIs report about themselves (Claude Code's status line, Codex's session log,
+and the message a CLI prints when it refuses a turn); it asks no vendor and reads no login. Give an
+account a `fallback` list, in Settings (**Edit**, or the built-in Claude Code row) or in `config.toml`:
+
+```toml
+[agents]
+failover = "new"                  # "off", "new" (default) or "session"
+
+[agents.providers.claude]         # the default login
+fallback = ["claude-work", "claude-local"]
+```
+
+With `new`, a session you start (or an agent starts) skips an account that is at its limit and runs on
+the first one of the list that is not, and says so. With `session`, a running session that hits its limit
+also continues on the next account: a new session in the same folder, told what the old one was doing and
+where its conversation is; the old one is left as it is. Conversations are not moved between accounts,
+because a CLI resumes only what its own account's folder holds. Without `session`, the toast of a session
+that hit its limit offers **Continue on …**. If the CLIs' reports are wrong or not enough, mark an account
+at its limit or usable by hand in its **Edit** dialog.
+
 ## On Windows
 
 Windows support is in progress ([windows-port.md](windows-port.md)); this is how agents and

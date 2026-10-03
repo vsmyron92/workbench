@@ -21,6 +21,7 @@ use super::permission;
 use super::providers::{self, Continue, LaunchArgs, Provider, ProviderKind};
 use super::store::AgentLaunch;
 use super::transcript::{self, HistoryEntry, LineBuffer, Record};
+use super::usage;
 use super::{
     AGENT_SCROLLBACK, AgentInfo, AgentState, Entry, TerminalInfo, TerminalKind, TerminalStatus, Terminals, base_env, codex, gemini,
     kimi, new_id, pty, resolve_cwd, store,
@@ -77,6 +78,10 @@ pub struct AgentRequest {
     pub rows: Option<u16>,
     /// Run the session in the project's running dev container (its CLI must exist there).
     pub in_container: bool,
+    /// Use exactly `provider`, whatever its usage: an account was chosen on purpose
+    /// (moving a session to another account). Not part of the REST body.
+    #[serde(skip)]
+    pub exact: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -338,7 +343,7 @@ pub fn resolve_launch(provider: &Provider, cfg: &AgentsConfig, project: &Project
         model,
         effort,
         permission_mode,
-        remote_control: claude && req.remote_control.unwrap_or(pa.remote_control || cfg.remote_control),
+        remote_control: claude && provider.local.is_none() && req.remote_control.unwrap_or(pa.remote_control || cfg.remote_control),
         add_dirs,
     })
 }
@@ -485,6 +490,8 @@ struct Prepared {
     add_dirs: Vec<String>,
     /// The session runs in the project's dev container (`command` is its path there).
     container: Option<crate::devcontainer::ExecTarget>,
+    /// The provider runs on a model server of your own (`[agents.providers.<name>.local]`).
+    local: Option<providers::LocalSetup>,
 }
 
 /// A Codex session's rollout, as the watcher follows it.
@@ -522,10 +529,20 @@ impl Terminals {
 
     /// Start a new agent session of any provider (or resume/fork one).
     pub(crate) async fn spawn_agent(&self, state: &AppState, req: AgentRequest) -> Result<TerminalInfo, ApiError> {
+        let mut req = req;
         let project = state.projects.require(&req.project_id)?;
         let cwd = resolve_cwd(&project.root, req.cwd.as_deref())?;
         let cfg = state.config.read().agents.clone();
-        let provider = find_provider(&cfg, req.provider.as_deref())?;
+        let mut provider = find_provider(&cfg, req.provider.as_deref())?;
+        // A new session runs on the first account of its fallback list that is not at its
+        // usage limit; a resumed one stays where its conversation is.
+        let mut switched = None;
+        if !req.exact && req.resume.is_none() && !req.fork {
+            if let Some((to, s)) = self.apply_to_request(&cfg, &provider, &mut req) {
+                provider = to;
+                switched = Some(s);
+            }
+        }
         let kind = provider.kind;
         if let Some(r) = &req.resume {
             if !kind.resumes() {
@@ -633,6 +650,9 @@ impl Terminals {
                     Continue::Fork(from) => json!({ "forkedFrom": from }),
                     _ => json!({}),
                 };
+                if let Some(s) = &switched {
+                    m["failover"] = json!({ "from": s.from, "reason": s.reason, "until": s.until });
+                }
                 if let Some(t) = &container {
                     m["inContainer"] = json!(true);
                     m["container"] = t.describe();
@@ -651,6 +671,9 @@ impl Terminals {
         };
         let entry = self.insert(rec, AGENT_SCROLLBACK);
         self.emit("terminal.created", &entry);
+        if let Some(s) = &switched {
+            self.announce_failover(&entry, &provider, s);
+        }
         let _l = entry.lifecycle.lock().await;
         self.launch_agent(state, &entry, cont, prompt, true, false).await?;
         Ok(entry.info())
@@ -721,8 +744,15 @@ impl Terminals {
             (resolve_command(&provider.command).ok_or_else(|| missing_command(&provider))?, None)
         };
 
-        // Environment: base, the provider's (config.toml), then the project overlay's.
+        // A provider on a model server of your own never starts without it: it would
+        // otherwise reach the vendor, where you chose not to send your code.
+        let local = providers::local_setup(&provider, launch.model.as_deref()).map_err(ApiError::not_configured)?;
+
+        // Environment: base, the local model's, the provider's (config.toml), then the project overlay's.
         let mut env = base_env(state, &entry.id);
+        if let Some(l) = &local {
+            env.extend(l.env.iter().cloned());
+        }
         for (k, v) in &provider.env {
             let v = if crate::util::os::path::home_relative(v).is_some() { crate::config::expand_tilde(v).display().to_string() } else { v.clone() };
             env.push((k.clone(), Some(v)));
@@ -772,7 +802,7 @@ impl Terminals {
                 }
             }
         }
-        Ok(Prepared { cwd, launch, project, provider, command, env, dir, token, add_dirs, container })
+        Ok(Prepared { cwd, launch, project, provider, command, env, dir, token, add_dirs, container, local })
     }
 
     async fn launch_claude(
@@ -1000,7 +1030,7 @@ impl Terminals {
         prompt: Option<String>,
         submit_prompt: bool,
     ) -> Result<(), ApiError> {
-        let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, .. } = prep;
+        let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, local, .. } = prep;
         let home = codex::codex_home(env_value(&env, "CODEX_HOME").as_deref());
         let features = self.codex_features(&command).await;
         // Resuming needs the rollout; a session that never had a turn has none: start fresh.
@@ -1031,12 +1061,14 @@ impl Terminals {
         env.push(("WORKBENCH_AGENT_TOKEN".into(), Some(token)));
         let mcp_url = format!("{}/mcp", state.local_base_url());
         let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt, is_batch(&command));
+        // A model server of your own is a provider Codex is told about on the command line.
+        let extra: Vec<String> = local.as_ref().map(|l| l.args.clone()).unwrap_or_default().into_iter().chain(provider.args.iter().cloned()).collect();
         let args = LaunchArgs {
             model: launch.model.as_deref(),
             effort: launch.effort.as_deref(),
             permission: launch.permission_mode.as_deref().and_then(|m| provider.permission_preset(m)),
             add_dirs: &add_dirs,
-            extra_args: &provider.args,
+            extra_args: &extra,
             mcp: Some((&mcp_url, &entry.id)),
             prompt: argv_prompt.as_deref(),
         };
@@ -1112,7 +1144,7 @@ impl Terminals {
         submit_prompt: bool,
         restarted: bool,
     ) -> Result<(), ApiError> {
-        let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, container, .. } = prep;
+        let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, container, local, .. } = prep;
         let kind = provider.kind;
         // Not used by these CLIs themselves; there for a user's own MCP setup to reference.
         env.push(("WORKBENCH_AGENT_TOKEN".into(), Some(token)));
@@ -1134,8 +1166,10 @@ impl Terminals {
             }
             _ => (Continue::New, String::new()),
         };
+        // Aider names the server in the model (`ollama_chat/qwen3`).
+        let model = local.as_ref().map(|l| l.model.as_str()).or(launch.model.as_deref());
         let args = LaunchArgs {
-            model: launch.model.as_deref(),
+            model,
             effort: None,
             permission: launch.permission_mode.as_deref().and_then(|m| provider.permission_preset(m)),
             add_dirs: &add_dirs,
@@ -2569,7 +2603,12 @@ async fn codex_loop(state: AppState, entry: Arc<Entry>, pty: Arc<pty::Pty>, mut 
                 .filter(|l| oldest.is_none_or(|min| codex::line_time(l).is_none_or(|t| t >= min)))
                 .flat_map(|l| codex::parse_line(l))
                 .collect();
+            let usage = codex_usage_of(&events);
             state.terminals.apply_codex(&entry, events);
+            if usage.is_some() {
+                let (windows, limit) = usage.unwrap_or_default();
+                state.terminals.note_codex_usage(&state, &entry, windows, limit).await;
+            }
         }
         // Approval prompts, questions and the trust prompt never reach the rollout.
         if alive {
@@ -2652,6 +2691,20 @@ async fn activity_loop(state: AppState, entry: Arc<Entry>, pty: Arc<pty::Pty>, m
             }
         }
     }
+}
+
+/// The account usage a batch of rollout events carries: the latest windows, and the text of
+/// a turn refused for usage.
+fn codex_usage_of(events: &[codex::Event]) -> Option<(Vec<usage::Reported>, Option<String>)> {
+    let windows = events.iter().rev().find_map(|e| match e {
+        codex::Event::RateLimits(w) => Some(w.clone()),
+        _ => None,
+    });
+    let limit = events.iter().find_map(|e| match e {
+        codex::Event::UsageLimit(m) => Some(m.clone()),
+        _ => None,
+    });
+    (windows.is_some() || limit.is_some()).then(|| (windows.unwrap_or_default(), limit))
 }
 
 /// The folders of every enabled Claude Code account (the default one first), without repeats.
