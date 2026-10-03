@@ -474,3 +474,84 @@ async fn notes_only_moves_no_conversation_and_a_bad_setting_is_refused() {
         let _ = t.kill(&i.id).await;
     }
 }
+
+// ---------------------------------------------------------------- hosted APIs
+
+use crate::config::global::ApiConfig;
+use crate::config::project::SecretRef;
+
+const DEEPSEEK_KEY: &str = "sk-test-0123456789abcdefghijklmnopqrstuvwxyz";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hosted_api_key_comes_from_secrets_reaches_only_the_environment_and_is_masked() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    // The key lives in a private file the config only names.
+    let key_file = dir.path().join("deepseek.key");
+    std::fs::write(&key_file, format!("{DEEPSEEK_KEY}\n")).unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&key_file, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let (ds, c) = account(dir.path(), &fake, "claude-ds", |c| {
+        c.model = Some("deepseek-v4-pro".into());
+        c.api = Some(ApiConfig { service: "deepseek".into(), url: String::new(), key: "deepseek".into(), context: Some(131072) });
+    });
+    let (missing, cm) = account(dir.path(), &fake, "claude-nokey", |c| {
+        c.model = Some("m".into());
+        c.api = Some(ApiConfig { service: "deepseek".into(), url: String::new(), key: "not-defined".into(), context: None });
+    });
+    let _ = &missing;
+    let (state, addr, pid) = served_with(dir.path(), &fake, |cfg| {
+        cfg.secrets.insert("deepseek".into(), SecretRef::File(key_file.display().to_string()));
+        cfg.agents.providers.insert("claude-ds".into(), c);
+        cfg.agents.providers.insert("claude-nokey".into(), cm);
+    })
+    .await;
+    let t = &state.terminals;
+
+    let a = t.spawn_agent(&state, ask(&pid, Some("claude-ds"))).await.unwrap();
+    wait_long("the session", 10, || agent_of(&state, &a.id).state == AgentState::Idle).await;
+    let env = env_line(&ds.log);
+    // In the environment of the process, as the service wants it…
+    for want in [
+        format!("ANTHROPIC_AUTH_TOKEN={DEEPSEEK_KEY}"),
+        "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic".to_string(),
+        "ANTHROPIC_MODEL=deepseek-v4-pro".to_string(),
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072".to_string(),
+    ] {
+        assert!(env.contains(&want), "{want} in {env}");
+    }
+    // …and nowhere else: not the command line, the record, or the logged argv.
+    let info = t.info(&a.id).unwrap();
+    assert!(!serde_json::to_string(&info).unwrap().contains(DEEPSEEK_KEY));
+    assert!(!log_lines(&ds.log, "ARGS ")[0].contains(DEEPSEEK_KEY));
+    assert!(!info.agent.as_ref().unwrap().remote_control, "Remote Control needs claude.ai");
+
+    // A session that prints the key does not show it.
+    t.send_text(&a.id, &format!("echo {DEEPSEEK_KEY}"), true).await.unwrap();
+    wait_long("the dialog", 10, || t.screen_text(&a.id, 30).is_some_and(|s| s.contains("echo")) ).await;
+    let screen = t.screen_text(&a.id, 30).unwrap();
+    assert!(!screen.contains(DEEPSEEK_KEY) && !screen.contains("0123456789abcdef"), "{screen}");
+    assert!(screen.contains("echo ••••"), "the key was printed, and masked: {screen}");
+
+    // What the UI is told names the secret, never its value.
+    let (cookie, key) = sign_in(&state, addr).await;
+    let origin = format!("http://{addr}");
+    let get = |path: String| {
+        reqwest::Client::new().get(format!("{origin}{path}")).header("cookie", &cookie).header("origin", &origin).header(crate::auth::KEY_HEADER, &key).send()
+    };
+    let defaults = get(format!("/api/agents/defaults?projectId={pid}")).await.unwrap().text().await.unwrap();
+    let settings = get("/api/settings".to_string()).await.unwrap().text().await.unwrap();
+    for body in [&defaults, &settings] {
+        assert!(!body.contains(DEEPSEEK_KEY) && body.contains("\"deepseek\""));
+    }
+    let d: Value = serde_json::from_str(&defaults).unwrap();
+    let p = d["providers"].as_array().unwrap().iter().find(|p| p["id"] == "claude-ds").unwrap();
+    assert_eq!((p["api"]["key"].as_str(), p["api"]["serviceLabel"].as_str(), p["apiError"].is_null()), (Some("deepseek"), Some("DeepSeek"), true));
+
+    // A key that is not defined stops the start, naming the secret and nothing else.
+    let err = t.spawn_agent(&state, ask(&pid, Some("claude-nokey"))).await.err().expect("no key, no session");
+    assert!(err.to_string().contains("not-defined") && err.to_string().contains("API key"), "{err}");
+    for i in t.list() {
+        let _ = t.kill(&i.id).await;
+    }
+}

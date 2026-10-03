@@ -4,6 +4,10 @@ import {
   accountIdError,
   accountKind,
   accountName,
+  apiKeyError,
+  apiUrlError,
+  API_BY_KIND,
+  suggestApiId,
   contextError,
   parseContext,
   fallbackCandidates,
@@ -365,5 +369,41 @@ describe('context window', () => {
     expect(contextError('1000')).toMatch(/Between/)
     expect(contextError('99m')).toMatch(/Between/)
     expect(contextError('lots')).toMatch(/number of tokens/)
+  })
+})
+
+describe('hosted APIs', () => {
+  it('knows which services each CLI can use', () => {
+    expect(API_BY_KIND.claude).toContain('deepseek')
+    expect(API_BY_KIND.claude).not.toContain('openai')
+    expect(API_BY_KIND.codex).toEqual(['openai', 'custom'])
+    expect(API_BY_KIND.gemini).toEqual([])
+  })
+
+  it('wants https, except for this computer', () => {
+    expect(apiUrlError('claude', 'deepseek', '')).toBeNull()
+    expect(apiUrlError('claude', 'custom', '')).toMatch(/Enter/)
+    expect(apiUrlError('claude', 'anthropic', '')).toBeNull()
+    expect(apiUrlError('codex', 'custom', '')).toMatch(/Enter/)
+    expect(apiUrlError('codex', 'openai', '')).toBeNull()
+    expect(apiUrlError('aider', 'custom', '')).toMatch(/Enter/)
+    expect(apiUrlError('claude', 'custom', 'https://gw.example.com/v1')).toBeNull()
+    expect(apiUrlError('claude', 'custom', 'http://gw.example.com')).toMatch(/https:\/\/ only/)
+    expect(apiUrlError('claude', 'custom', 'http://localhost:4000')).toBeNull()
+    expect(apiUrlError('claude', 'custom', 'http://127.0.0.1:4000/x')).toBeNull()
+    expect(apiUrlError('claude', 'custom', 'https://u:p@host')).toMatch(/user name/)
+    expect(apiUrlError('claude', 'custom', 'gw.example.com')).toMatch(/https/)
+  })
+
+  it('wants a secret that exists', () => {
+    expect(apiKeyError('', ['deepseek'])).toMatch(/Choose/)
+    expect(apiKeyError('deepseek', ['deepseek'])).toBeNull()
+    expect(apiKeyError('other', ['deepseek'])).toMatch(/not defined/)
+  })
+
+  it('names the account', () => {
+    expect(suggestApiId('claude', 'deepseek', '')).toBe('claude-deepseek')
+    expect(suggestApiId('claude', 'deepseek', 'Cheap')).toBe('claude-cheap')
+    expect(suggestApiId('aider', 'openrouter', '')).toBe('aider-openrouter')
   })
 })

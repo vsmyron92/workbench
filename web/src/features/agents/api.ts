@@ -50,6 +50,9 @@ export interface ProviderInfo {
   /** Runs on a model server of your own (`[agents.providers.<id>.local]`); `localError`: why it cannot start. */
   local?: { server: string; url: string } | null
   localError?: string | null
+  /** Uses a hosted API with a key from `[secrets]` (the name only: the key never leaves the server). */
+  api?: { service: string; serviceLabel: string; url: string; key: string; context?: number | null } | null
+  apiError?: string | null
   /** The accounts to use, in order, when this one is at its usage limit. */
   fallback?: string[]
   /** What the CLI reported about the account's usage; `limited` until `limitedUntil` (ms). */

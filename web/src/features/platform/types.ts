@@ -24,6 +24,16 @@ export interface ProviderSettings {
   install_hint?: string | null
   /** A model server of your own instead of the vendor's. */
   local?: LocalModelSettings | null
+  /** A hosted model API reached with an API key. */
+  api?: ApiSettings | null
+}
+
+/** config/global.rs ApiConfig. `key` is the name of a `[secrets]` entry, never the key. */
+export interface ApiSettings {
+  service: string
+  url: string
+  key: string
+  context?: number | null
 }
 
 /** config/global.rs LocalModelConfig */

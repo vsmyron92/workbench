@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { ArrowDown, ArrowUp, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react'
 import { confirmDialog, toast, toastError } from '@/shell/actions'
-import { Badge, Button, Checkbox, EmptyState, IconButton, Input, Modal, Select } from '@/ui'
+import { Badge, Button, Checkbox, EmptyState, IconButton, Input, Modal, Select, showMenuAt } from '@/ui'
 import { patchSettings, probeLocalModels, reportApply, setAccountLimit, useAccountUsage, useSettings } from '../api'
 import { Group, Note, Row } from '../common'
 import {
@@ -10,6 +10,10 @@ import {
   accountIdError,
   accountKind,
   accountName,
+  API_BY_KIND,
+  API_SERVICES,
+  apiKeyError,
+  apiUrlError,
   contextError,
   fallbackCandidates,
   formatUntil,
@@ -19,6 +23,7 @@ import {
   moveItem,
   parseContext,
   suggestAccountId,
+  suggestApiId,
   suggestLocalId,
   usageTone,
   type AccountKind,
@@ -143,28 +148,38 @@ function AccountEditor({
   id: editId,
   initial,
   providers,
+  secrets,
   usage,
   onClose,
   onSave,
+  onGoto,
 }: {
   id: string | null
   initial: ProviderSettings | null
   providers: Providers
+  /** The names of the `[secrets]` entries. */
+  secrets: string[]
   usage: AccountUsage | undefined
   onClose: () => void
   onSave: (id: string, config: ProviderSettings) => Promise<void>
+  onGoto: (section: string) => void
 }) {
   const editing = editId !== null
   const builtIn = editId !== null && BUILT_IN.includes(editId)
   const rows = accountRows(providers)
-  const [local, setLocal] = useState(!!initial?.local)
+  const [mode, setMode] = useState<'login' | 'local' | 'api'>(initial?.local ? 'local' : initial?.api ? 'api' : 'login')
+  const local = mode === 'local'
+  const api = mode === 'api'
   const [kind, setKind] = useState<AccountKind>((accountKind(initial?.kind ?? editId)?.kind ?? 'claude') as AccountKind)
   const k = accountKind(kind)!
   const servers = LOCAL_BY_KIND[kind]
   const [server, setServer] = useState(initial?.local?.server ?? servers[0] ?? 'ollama')
   const [url, setUrl] = useState(initial?.local?.url ?? '')
   const [model, setModel] = useState(initial?.model ?? '')
-  const [context, setContext] = useState(initial?.local?.context ? String(initial.local.context) : '')
+  const [context, setContext] = useState(String(initial?.local?.context ?? initial?.api?.context ?? ''))
+  const [apiService, setApiService] = useState(initial?.api?.service ?? API_BY_KIND[(accountKind(initial?.kind ?? editId)?.kind ?? 'claude') as AccountKind][0] ?? 'custom')
+  const [apiUrl, setApiUrl] = useState(initial?.api?.url ?? '')
+  const [apiKey, setApiKey] = useState(initial?.api?.key ?? '')
   const [found, setFound] = useState<{ models: string[]; error?: string } | null>(null)
   const [detecting, setDetecting] = useState(false)
   const [label, setLabel] = useState(initial?.label ?? '')
@@ -177,15 +192,16 @@ function AccountEditor({
   const [busy, setBusy] = useState(false)
 
   // Aider on a model server needs no keys file; every other CLI keeps its files in a folder of its own.
-  const needsHome = !builtIn && !(local && kind === 'aider')
-  const effectiveId = idTouched ? id : label.trim() ? suggestAccountId(kind, label) : local ? suggestLocalId(kind, server, model) : ''
+  const needsHome = !builtIn && !((local || api) && kind === 'aider')
+  const effectiveId = idTouched ? id : label.trim() ? suggestAccountId(kind, label) : local ? suggestLocalId(kind, server, model) : api ? suggestApiId(kind, apiService, '') : ''
   const effectiveHome = homeTouched ? home : effectiveId ? k.suggest(effectiveId.replace(`${kind}-`, '')) : ''
   const others = rows.filter((r) => r.id !== editId && r.kind?.kind === kind && r.home).map((r) => ({ id: r.id, home: r.home }))
   const idError = editing ? null : accountIdError(effectiveId, Object.keys(providers))
   const homeError = needsHome ? accountHomeError(kind, effectiveHome, others) : null
   const takesContext = kind === 'claude' || kind === 'codex'
   const localError = local && !builtIn ? (localUrlError(server, url) ?? (model.trim() ? (takesContext ? contextError(context) : null) : 'Enter the model the server runs')) : null
-  const error = builtIn ? null : (idError ?? homeError ?? localError)
+  const apiError = api && !builtIn ? (apiUrlError(kind, apiService, apiUrl) ?? apiKeyError(apiKey, secrets) ?? (model.trim() || (kind === 'claude' && apiService === 'anthropic') ? (takesContext ? contextError(context) : null) : 'Enter the model, as the service names it')) : null
+  const error = builtIn ? null : (idError ?? homeError ?? localError ?? apiError)
 
   const detect = async () => {
     setDetecting(true)
@@ -200,11 +216,14 @@ function AccountEditor({
     }
   }
 
-  const pickLocal = (toLocal: boolean) => {
-    const nextKind: AccountKind = toLocal && !LOCAL_BY_KIND[kind].length ? 'claude' : kind
-    setLocal(toLocal)
+  const pickMode = (next: 'login' | 'local' | 'api') => {
+    // A CLI that cannot do what was chosen is swapped for Claude Code.
+    const can = (kk: AccountKind) => (next === 'local' ? LOCAL_BY_KIND[kk].length > 0 : next === 'api' ? API_BY_KIND[kk].length > 0 : true)
+    const nextKind: AccountKind = can(kind) ? kind : 'claude'
+    setMode(next)
     setKind(nextKind)
     setServer(LOCAL_BY_KIND[nextKind][0] ?? 'ollama')
+    setApiService(API_BY_KIND[nextKind][0] ?? 'custom')
     setFound(null)
   }
 
@@ -223,12 +242,13 @@ function AccountEditor({
         config = {
           ...initial,
           kind,
-          label: label.trim() || (local ? `${model.trim()} on ${LOCAL_SERVERS[server].label}` : null),
+          label: label.trim() || (local ? `${model.trim()} on ${LOCAL_SERVERS[server].label}` : api ? `${API_SERVICES[apiService].label}${model.trim() ? ` ${model.trim()}` : ''}` : null),
           enabled: enabled ? null : false,
           fallback,
           env,
-          model: local ? model.trim() : (initial?.model ?? null),
+          model: local || api ? model.trim() : (initial?.model ?? null),
           local: local ? { server, url: url.trim(), context: takesContext ? parseContext(context) : null } : null,
+          api: api ? { service: apiService, url: apiUrl.trim(), key: apiKey, context: takesContext ? parseContext(context) : null } : null,
         }
       }
       await onSave(builtIn ? editId : effectiveId, tidy(config))
@@ -242,7 +262,7 @@ function AccountEditor({
 
   const self = builtIn ? editId : effectiveId
   const candidates = fallbackCandidates(self, providers)
-  const title = builtIn ? `${accountName(editId, providers)} (built in)` : editing ? `Account “${editId}”` : local ? 'Add a local model' : 'Add an account'
+  const title = builtIn ? `${accountName(editId, providers)} (built in)` : editing ? `Account “${editId}”` : local ? 'Add a local model' : api ? 'Add a hosted API' : 'Add an account'
 
   return (
     <Modal
@@ -264,8 +284,9 @@ function AccountEditor({
           {!editing && (
             <>
               <label className="wb-small wb-muted">Runs on</label>
-              <Select value={local ? 'local' : 'login'} onChange={(e) => pickLocal(e.target.value === 'local')}>
-                <option value="login">A subscription or API login</option>
+              <Select value={mode} onChange={(e) => pickMode(e.target.value as 'login' | 'local' | 'api')}>
+                <option value="login">A subscription login</option>
+                <option value="api">A hosted API with an API key</option>
                 <option value="local">A model on this computer or my network</option>
               </Select>
             </>
@@ -273,7 +294,9 @@ function AccountEditor({
           <div className="wb-small wb-muted">
             {local
               ? 'The CLI talks to a model server of your own instead of the vendor’s. Nothing of the vendor’s account is sent to it, and a session never falls back to the vendor if the server is missing.'
-              : k.file
+              : api
+                ? `The CLI talks to ${apiService === 'custom' ? 'the service' : (API_SERVICES[apiService]?.label ?? 'the service')} with an API key instead of a login. Your code and conversation go to that service, billed to the key. The key stays in Secrets: a session reads it when it starts and never shows it.`
+                : k.file
                 ? 'Another set of API keys for Aider, such as a work and a personal one. Aider has no login: the keys live in a .env file of your own.'
                 : 'Another login of the same CLI, for a second subscription. Its sessions, history and settings live in their own folder, next to the default one.'}
           </div>
@@ -285,10 +308,11 @@ function AccountEditor({
               const next = e.target.value as AccountKind
               setKind(next)
               setServer(LOCAL_BY_KIND[next][0] ?? 'ollama')
+              setApiService(API_BY_KIND[next][0] ?? 'custom')
               setFound(null)
             }}
           >
-            {ACCOUNT_KINDS.filter((x) => !local || LOCAL_BY_KIND[x.kind].length > 0).map((x) => (
+            {ACCOUNT_KINDS.filter((x) => (local ? LOCAL_BY_KIND[x.kind].length > 0 : api ? API_BY_KIND[x.kind].length > 0 : true)).map((x) => (
               <option key={x.kind} value={x.kind}>
                 {x.label}
               </option>
@@ -343,9 +367,62 @@ function AccountEditor({
               )}
             </>
           )}
+          {api && (
+            <>
+              <label className="wb-small wb-muted">Service</label>
+              <Select value={apiService} onChange={(e) => setApiService(e.target.value)}>
+                {API_BY_KIND[kind].map((sv) => (
+                  <option key={sv} value={sv}>
+                    {API_SERVICES[sv].label}
+                  </option>
+                ))}
+              </Select>
+              <div className="wb-small wb-muted">{API_SERVICES[apiService]?.hint}</div>
+              <label className="wb-small wb-muted">Address{apiService === 'custom' ? '' : ' (optional)'}</label>
+              <Input
+                className="mono"
+                value={apiUrl}
+                onChange={(e) => setApiUrl(e.target.value)}
+                placeholder={(kind === 'claude' ? API_SERVICES[apiService]?.url : '') || (kind === 'codex' && apiService === 'openai' ? 'https://api.openai.com/v1' : 'https://host/v1')}
+              />
+              <label className="wb-small wb-muted">Model{kind === 'claude' && apiService === 'anthropic' ? ' (optional)' : ''}</label>
+              <Input className="mono" value={model} onChange={(e) => setModel(e.target.value)} placeholder="the model, as the service names it" />
+              {takesContext && (
+                <>
+                  <label className="wb-small wb-muted">Context window (optional)</label>
+                  <Input className="mono" value={context} onChange={(e) => setContext(e.target.value)} placeholder="200k or 1m" />
+                  <div className="wb-small wb-muted">Tokens the model can take, when the CLI would otherwise assume the wrong window for a model it does not know.</div>
+                </>
+              )}
+              <label className="wb-small wb-muted">API key</label>
+              <Select value={apiKey} onChange={(e) => setApiKey(e.target.value)} aria-label="The secret that holds the API key">
+                <option value="">{secrets.length ? 'Choose a secret…' : 'No secrets defined yet'}</option>
+                {secrets.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+                {apiKey && !secrets.includes(apiKey) && <option value={apiKey}>{apiKey} (not defined)</option>}
+              </Select>
+              <div className="wb-small wb-muted">
+                The key is not stored here: a secret says where it lives (a file, an environment variable, the keyring…).{' '}
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    onClose()
+                    onGoto('secrets')
+                  }}
+                >
+                  Define a secret
+                </a>
+                .
+              </div>
+            </>
+          )}
           <label className="wb-small wb-muted">Label</label>
-          <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={local ? `${model.trim() || 'qwen3-coder'} on ${LOCAL_SERVERS[server].label}` : 'Work'} autoFocus={!editing && !local} />
-          <div className="wb-small wb-muted">Shown in the new session picker and on sessions.{local ? '' : ' Empty: the name below.'}</div>
+          <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={local ? `${model.trim() || 'qwen3-coder'} on ${LOCAL_SERVERS[server].label}` : api ? `${API_SERVICES[apiService]?.label ?? 'API'}${model.trim() ? ` ${model.trim()}` : ''}` : 'Work'} autoFocus={!editing && !local && !api} />
+          <div className="wb-small wb-muted">Shown in the new session picker and on sessions.{local || api ? '' : ' Empty: the name below.'}</div>
           <label className="wb-small wb-muted">Name</label>
           <Input
             className="mono"
@@ -371,8 +448,8 @@ function AccountEditor({
               />
               <div className="wb-small wb-muted">
                 Becomes <code>{k.homeVar}</code> for this account’s sessions.{' '}
-                {local
-                  ? 'Keeps this model’s sessions and history apart from your logins.'
+                {local || api
+                  ? 'Keeps this account’s sessions and history apart from your logins.'
                   : k.file
                     ? 'Create the file yourself, with KEY=value lines such as OPENAI_API_KEY, and keep it private: Workbench passes only its path and never reads it. Sessions refuse to start while it is missing. Aider keeps its chat history in each repository, shared by all accounts.'
                     : kind === 'gemini'
@@ -396,13 +473,13 @@ function AccountEditor({
           Offer this account when starting a session
         </Checkbox>
       )}
-      {error && (effectiveId || effectiveHome || local) && <div className="wb-field-error">{error}</div>}
+      {error && (effectiveId || effectiveHome || local || api) && <div className="wb-field-error">{error}</div>}
     </Modal>
   )
 }
 
-function UsageCell({ usage }: { usage: AccountUsage | undefined }) {
-  if (!usage || (usage.windows.length === 0 && !usage.limited)) return <span className="wb-subtle wb-small">No data yet</span>
+function UsageCell({ usage, none = 'No data yet' }: { usage: AccountUsage | undefined; none?: string }) {
+  if (!usage || (usage.windows.length === 0 && !usage.limited)) return <span className="wb-subtle wb-small">{none}</span>
   return (
     <div className="wb-usage">
       {usage.limited && (
@@ -430,12 +507,13 @@ const FAILOVER: { value: FailoverMode; label: string; hint: string }[] = [
 ]
 
 /** Accounts of the agent CLIs: more than one login, models of your own, their usage, and what to fall back to. */
-export function AccountsGroup() {
+export function AccountsGroup({ onGoto }: { onGoto: (section: string) => void }) {
   const settings = useSettings()
   const usage = useAccountUsage()
   const [editor, setEditor] = useState<{ id: string | null; config: ProviderSettings | null } | null>(null)
   const providers: Providers = settings.data?.config.agents.providers ?? {}
   const rows = accountRows(providers)
+  const secretNames = Object.keys(settings.data?.config.secrets ?? {}).sort()
   const transfer: 'conversation' | 'notes' = settings.data?.config.agents.transfer === 'notes' ? 'notes' : 'conversation'
   const mode: FailoverMode = (FAILOVER.find((f) => f.value === settings.data?.config.agents.failover)?.value ?? 'new') as FailoverMode
 
@@ -491,16 +569,20 @@ export function AccountsGroup() {
     <>
       <Group
         title="Accounts"
-        description="Run Claude Code, Codex, Kimi Code, Gemini CLI or Aider under more than one login, such as a work and a personal subscription, or on a model of your own. Each account keeps its login, history and settings in its own folder (Aider: its own keys file), and appears next to the CLI when you start a session. When an account reaches its usage limit, Workbench can move on to the next one."
+        description="Run Claude Code, Codex, Kimi Code, Gemini CLI or Aider under more than one login, such as a work and a personal subscription, on a hosted API with an API key, or on a model of your own. Each account keeps its login, history and settings in its own folder (Aider: its own keys file), and appears next to the CLI when you start a session. When an account reaches its usage limit, Workbench can move on to the next one."
         actions={
-          <>
-            <Button icon={Plus} onClick={() => setEditor({ id: null, config: null })}>
-              Add account
-            </Button>
-            <Button icon={Plus} onClick={() => setEditor({ id: null, config: { kind: 'claude', local: { server: 'ollama', url: '' } } })}>
-              Add local model
-            </Button>
-          </>
+          <Button
+            icon={Plus}
+            onClick={(e) =>
+              showMenuAt(e.currentTarget, [
+                { label: 'A subscription login…', run: () => setEditor({ id: null, config: null }) },
+                { label: 'A hosted API with an API key…', run: () => setEditor({ id: null, config: { kind: 'claude', api: { service: 'deepseek', url: '', key: '' } } }) },
+                { label: 'A model on this computer or my network…', run: () => setEditor({ id: null, config: { kind: 'claude', local: { server: 'ollama', url: '' } } }) },
+              ])
+            }
+          >
+            Add…
+          </Button>
         }
         flush
       >
@@ -513,12 +595,13 @@ export function AccountsGroup() {
             {rows.map((r) => {
               const name = accountName(r.id, providers)
               const l = r.config.local
+              const ap = r.config.api
               return (
                 <div key={r.id} className="wb-acct">
                   <div className="wb-row">
                     <div className="wb-grow">
                       <span className="wb-acct-name">{name}</span>{' '}
-                      {r.builtIn && <Badge>built in</Badge>} {l && <Badge tone="accent">local</Badge>} {r.config.enabled === false && <Badge>hidden</Badge>}{' '}
+                      {r.builtIn && <Badge>built in</Badge>} {l && <Badge tone="accent">local</Badge>} {ap && <Badge tone="accent">API</Badge>} {r.config.enabled === false && <Badge>hidden</Badge>}{' '}
                       <span className="mono wb-subtle wb-small">{r.id}</span>
                     </div>
                     <IconButton icon={Pencil} label="Edit" onClick={() => setEditor({ id: r.id, config: r.config })} />
@@ -532,6 +615,11 @@ export function AccountsGroup() {
                         {LOCAL_SERVERS[l.server]?.label ?? l.server} · <span className="mono">{r.config.model}</span> · <span className="mono">{l.url || LOCAL_SERVERS[l.server]?.url}</span>
                         {l.context ? ` · ${Math.round(l.context / 1024)}k context` : ''}
                       </>
+                    ) : ap ? (
+                      <>
+                        {API_SERVICES[ap.service]?.label ?? ap.service}
+                        {r.config.model ? <> · <span className="mono">{r.config.model}</span></> : null} · key from secret <span className="mono">{ap.key}</span>
+                      </>
                     ) : (
                       <>
                         {r.kind?.file ? 'Keys in ' : 'Folder '}
@@ -539,7 +627,8 @@ export function AccountsGroup() {
                       </>
                     )}
                   </div>
-                  {!l && <UsageCell usage={usageOf(r.id)} />}
+                  {!l && !ap && <UsageCell usage={usageOf(r.id)} />}
+                  {ap && <UsageCell usage={usageOf(r.id)} none="Billed to the key: no subscription limits. Running out of credit moves on." />}
                   {r.config.fallback?.length ? (
                     <div className="wb-small wb-acct-line">
                       <span className="wb-subtle">At its limit, use </span>
@@ -590,12 +679,14 @@ export function AccountsGroup() {
           id={editor.id}
           initial={editor.config}
           providers={providers}
+          secrets={secretNames}
+          onGoto={onGoto}
           usage={editor.id ? usageOf(editor.id) : undefined}
           onClose={() => setEditor(null)}
           onSave={(id, config) => {
             const label = accountName(id, { ...providers, [id]: config })
             return save({ ...providers, [id]: config }, editor.id ? `${label} saved` : `${label} added`).then(() => {
-              if (!editor.id && config.local) toast('info', `Start a session with ${label} to try it`)
+              if (!editor.id && (config.local || config.api)) toast('info', `Start a session with ${label} to try it`)
             })
           }}
         />

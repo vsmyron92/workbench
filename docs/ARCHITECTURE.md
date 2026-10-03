@@ -90,7 +90,7 @@ packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows rele
 ## Configuration
 
 - `~/.config/workbench/config.toml` (`%APPDATA%\workbench\config.toml` on Windows) holds global settings (`config/global.rs`). It is written with detected defaults on first run.
-  - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions`, `permission_wait` and `failover`) and `[agents.providers.*]` (also `fallback` and `[agents.providers.<name>.local]`) and `transfer`, `[terminals]` (`shell`: the argv of new shells; default `$SHELL -l`, on Windows PowerShell), `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[update]` (`check`, `repo`, `api`: see "Updates"), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`, `[debug.servers.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
+  - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions`, `permission_wait` and `failover`) and `[agents.providers.*]` (also `fallback`, `[agents.providers.<name>.local]` and `.api`) and `transfer`, `[terminals]` (`shell`: the argv of new shells; default `$SHELL -l`, on Windows PowerShell), `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[update]` (`check`, `repo`, `api`: see "Updates"), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`, `[debug.servers.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
   - Settings saves edit config.toml in place (`platform::config_edit`): comments and layout survive, for every section.
   - Settings saves apply at once. Edits made outside Workbench (an editor, a setup hint followed by hand) apply too: `platform::settings::watch_config` watches the config directory and applies a valid `config.toml` like a raw save (config swapped, secret cache cleared, projects reloaded, `settings.changed`). A file that does not parse or fails the hard checks is reported once (`ui.notify`) and the running config stays; the watcher never writes the file.
 - **Project ids** are the directory name as a slug (`api`, then `api-2`… for another directory of that name) and are bound to the directory for good in `data_dir/project-ids.json` (canonical path → id). Everything keyed by an id belongs to that directory: the overlay `projects/<id>.toml` with its secrets, `data_dir/workspace/<id>`, terminals and agent sessions (`projectId`, hence their MCP confinement). Scan order (roots, then includes) only decides the id the first time a directory is seen; adding a root with a same-named repository or removing the first of two never moves an id, and a new directory never gets an id the file gives to another one, even one that is gone or excluded. A moved repository therefore gets a new id: rename its overlay to follow it.
@@ -818,6 +818,28 @@ always for custom CLIs.
   where the user chose not to), has no Remote Control, and the server never sees the vendor's key.
   `POST /api/agents/local-models {server, url?}` (devices only) does one bounded GET (no redirects, 5 s,
   1 MB) of `/api/tags` (Ollama) or `/v1/models` and returns only model names that pass `valid_model`.
+- **Hosted APIs** (`[agents.providers.<name>.api] service, url, key, context`; `model` names the model).
+  `providers::api_setup` maps a service to what each CLI needs (`ProviderKind::api_services`): Claude Code
+  needs the Anthropic Messages API (`deepseek` `https://api.deepseek.com/anthropic`, `openrouter`
+  `https://openrouter.ai/api`, `zai`, `moonshot`, `fireworks`, `anthropic` = Claude Code's own default
+  endpoint with the key as `x-api-key` in `ANTHROPIC_API_KEY`, `custom` + `url`), as a bearer token in
+  `ANTHROPIC_AUTH_TOKEN` with `ANTHROPIC_API_KEY` set *blank* and the model envs of a local model
+  (`claude_model_env`); Codex needs the Responses API (`openai`, `custom` + `url`): a provider defined with
+  `-c model_providers.workbench_api.{name,base_url,env_key}` and the key in `WORKBENCH_API_KEY`; Aider
+  (LiteLLM) uses the service's own variable (`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`,
+  `ANTHROPIC_API_KEY`) and model prefix, `custom` = `OPENAI_API_BASE` + `openai/<model>`. `key` is the
+  **name of a `[secrets]` entry** (never the key: `valid_secret_name`); `prepare_launch` reads it with
+  `state.secret(None, name)`, puts it into the process environment only (never argv, the record or the
+  providers API, which shows the name), and adds it to `entry.redact`, so a session that prints it shows
+  `••••••`. An address must be `https://` (plain `http://` only for localhost, `valid_api_url`) and carry
+  no credentials, since the key goes there. Like `local`, a provider with `api` never starts without it
+  (it would run on the CLI's own login), has no Remote Control, and `local` + `api` together are refused.
+  `check_global` warns when `key` names a secret that is not defined. A `billing_error` stop moves a
+  session to the next account (`failover`). Checked against the real binaries with mock servers: Codex sent
+  `Authorization: Bearer <key>` with these arguments; Claude Code through Workbench sent the gateway key as
+  a bearer token and, in print mode, the Anthropic key as `x-api-key`. Not checked: Claude Code's
+  interactive approval of an environment API key (the sandbox's host-managed Claude Code supplies its own
+  login), Aider, and the services themselves.
 - **Usage and failover** (`usage`, `failover`). `usage::Usage` keeps, per provider name, the usage
   windows an account reports and a `limited_until` (`usage.json` of the data folder, 0600). Sources:
   Claude Code's status line `rate_limits.five_hour` / `seven_day` (`used_percentage`, `resets_at`;

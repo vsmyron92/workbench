@@ -455,3 +455,48 @@ export function parseContext(text: string): number | null {
   const unit = m[2].toLowerCase() === 'k' ? 1024 : m[2].toLowerCase() === 'm' ? 1024 * 1024 : 1
   return Math.round(Number(m[1]) * unit)
 }
+
+// ---------------------------------------------------------------- hosted APIs
+
+/** The hosted services an agent CLI can use with an API key (the server's `ProviderKind::api_services`). */
+export const API_SERVICES: Record<string, { label: string; url: string; hint: string }> = {
+  deepseek: { label: 'DeepSeek', url: 'https://api.deepseek.com/anthropic', hint: 'DeepSeek’s models through its own Anthropic-compatible endpoint.' },
+  openrouter: { label: 'OpenRouter', url: 'https://openrouter.ai/api', hint: 'Many providers’ models behind one key. The model is named as OpenRouter names it.' },
+  zai: { label: 'Z.ai', url: 'https://api.z.ai/api/anthropic', hint: 'GLM models.' },
+  moonshot: { label: 'Moonshot', url: 'https://api.moonshot.ai/anthropic', hint: 'Kimi models.' },
+  fireworks: { label: 'Fireworks', url: 'https://api.fireworks.ai/inference', hint: 'Open models hosted by Fireworks.' },
+  anthropic: { label: 'Anthropic API', url: '', hint: 'Pay per token with an Anthropic API key instead of a subscription. Claude Code may ask once whether to use the key: answer Yes.' },
+  openai: { label: 'OpenAI API', url: '', hint: 'Pay per token with an OpenAI API key.' },
+  custom: { label: 'Other', url: '', hint: 'Any service with the right API: Anthropic Messages for Claude Code, Responses for Codex, OpenAI-compatible for Aider.' },
+}
+
+export const API_BY_KIND: Record<AccountKind, string[]> = {
+  claude: ['deepseek', 'openrouter', 'zai', 'moonshot', 'fireworks', 'anthropic', 'custom'],
+  codex: ['openai', 'custom'],
+  aider: ['deepseek', 'openrouter', 'openai', 'anthropic', 'custom'],
+  kimi: [],
+  gemini: [],
+}
+
+/** Why `url` cannot be a hosted API's address (`null`: it can; empty is the service's usual one where it has one). */
+export function apiUrlError(kind: AccountKind, service: string, url: string): string | null {
+  const u = url.trim()
+  const usual = kind === 'claude' ? (API_SERVICES[service]?.url ?? '') : kind === 'codex' && service === 'openai' ? 'x' : ''
+  if (!u) return service === 'custom' || (kind === 'codex' && !usual) ? 'Enter the address of the API' : null
+  const m = /^(https?):\/\/([^\s/?#@]+)(?:[/?#]\S*)?$/i.exec(u)
+  if (!m) return 'https:// and an address, without a user name or password'
+  const host = m[2].replace(/:\d+$/, '').toLowerCase()
+  if (m[1].toLowerCase() === 'http' && !['localhost', '127.0.0.1', '[::1]'].includes(host)) return 'https:// only: the key is sent there (http:// is for this computer)'
+  return null
+}
+
+/** Why `name` cannot name the secret that holds the key (`null`: it can), given the secrets defined. */
+export function apiKeyError(name: string, secrets: string[]): string | null {
+  if (!name.trim()) return 'Choose the secret that holds the API key'
+  return secrets.includes(name) ? null : `“${name}” is not defined under Secrets`
+}
+
+/** `claude` + `deepseek` + "Work" → `claude-work`; without a label `claude-deepseek`. */
+export function suggestApiId(kind: AccountKind, service: string, label: string): string {
+  return label.trim() ? suggestAccountId(kind, label) : `${kind}-${service}`.slice(0, 32)
+}

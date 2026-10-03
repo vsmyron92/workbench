@@ -118,7 +118,7 @@ export function AgentsSection({ onGoto }: { onGoto: (section: string) => void })
       </Group>
 
       <div style={{ marginTop: 16 }}>
-        <AccountsGroup />
+        <AccountsGroup onGoto={onGoto} />
       </div>
 
       <div style={{ marginTop: 16 }}>

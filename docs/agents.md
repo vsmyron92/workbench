@@ -130,9 +130,7 @@ agent needs (Aider does not). On Ollama that is a capability a model has or has 
 `kimi-k2`, `devstral` and `deepseek-v3.1`/`v3.2` have it, recent pulls of `deepseek-r1` do (small
 ones work poorly for agents), `deepseek-v3` and `deepseek-coder-v2` do not. llama.cpp needs `--jinja`;
 vLLM needs `--enable-auto-tool-choice` and a `--tool-call-parser` for the model (`deepseek_v3` for
-DeepSeek), and a served model name without `/`. **Hosted** APIs such as DeepSeek's own
-(`https://api.deepseek.com/anthropic`), OpenRouter, Z.ai, Moonshot or Fireworks are not supported
-yet: they need an API key, and Workbench keeps no key in an account's settings.
+DeepSeek), and a served model name without `/`. **Hosted** DeepSeek and other open-model services work with an API key: see "Hosted APIs" below.
 
 ```toml
 [agents.providers.claude-local]
@@ -163,6 +161,42 @@ also continues on the next account: a new session in the same folder, told what 
 where its conversation is; the old one is left as it is. Without `session`, the toast of a session
 that hit its limit offers **Continue on …**. If the CLIs' reports are wrong or not enough, mark an account
 at its limit or usable by hand in its **Edit** dialog.
+
+## Hosted APIs
+
+An account can use a hosted model API with an API key instead of a subscription login: **Settings →
+Agents → Accounts → Add… → A hosted API with an API key**. Pick the CLI, the service, the model as the
+service names it, and the **secret** that holds the key.
+
+| CLI | Services |
+|---|---|
+| Claude Code | DeepSeek, OpenRouter, Z.ai, Moonshot, Fireworks (all through their Anthropic-compatible endpoints), the Anthropic API, or any other service with the Anthropic Messages API |
+| Codex | the OpenAI API, or any service with the Responses API (`/v1/responses`) |
+| Aider | DeepSeek, OpenRouter, the OpenAI API, the Anthropic API, or any OpenAI-compatible service |
+
+The key is never in `config.toml`: `key` names an entry of `[secrets]`, which says where the key lives
+(a file, an environment variable, the keyring, a command). The server reads it when a session starts,
+passes it to the CLI in its environment (not on its command line), and masks it if the session prints it;
+the browser only ever sees the secret's name. Your code and conversation go to that service, billed to the
+key. If the key cannot be read, or the account's settings are incomplete, the session does not start (it
+never falls back to the CLI's own login). A service that reports an exhausted balance moves new sessions
+on to the next account, like a usage limit.
+
+```toml
+[secrets]
+deepseek = { file = "~/.deepseek-key" }          # keep it private: chmod 600
+
+[agents.providers.claude-deepseek]
+kind = "claude"
+model = "deepseek-v4-pro"                         # as DeepSeek's documentation names it
+env = { CLAUDE_CONFIG_DIR = "~/.claude-deepseek" }
+api = { service = "deepseek", key = "deepseek", context = 131072 }
+```
+
+Service addresses are those the services document for Claude Code; change `url` if a service moves
+them, and check the service's own page for its model names. An address must be `https://` (plain
+`http://` only for this computer). With the Anthropic API Claude Code may ask once, in the terminal,
+whether to use the key: answer Yes.
 
 ## Moving a conversation to another account
 

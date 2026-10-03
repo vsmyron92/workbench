@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::config::global::{AgentsConfig, LocalModelConfig, ProviderConfig};
+use crate::config::global::{AgentsConfig, ApiConfig, LocalModelConfig, ProviderConfig};
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -129,6 +129,18 @@ impl ProviderKind {
         match self {
             Self::Claude => &["ollama", "lmstudio", "anthropic"],
             Self::Codex | Self::Aider => &["ollama", "lmstudio", "openai"],
+            Self::Kimi | Self::Gemini | Self::Custom => &[],
+        }
+    }
+
+    /// The hosted services the CLI can use with an API key (`[agents.providers.<name>.api]`):
+    /// those that speak the API it needs. Claude Code needs the Anthropic Messages API, Codex the
+    /// Responses API, Aider goes through LiteLLM's providers.
+    pub fn api_services(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["deepseek", "openrouter", "zai", "moonshot", "fireworks", "anthropic", "custom"],
+            Self::Codex => &["openai", "custom"],
+            Self::Aider => &["deepseek", "openrouter", "openai", "anthropic", "custom"],
             Self::Kimi | Self::Gemini | Self::Custom => &[],
         }
     }
@@ -301,6 +313,8 @@ pub struct Provider {
     pub fallback: Vec<String>,
     /// A model server of your own instead of the vendor's.
     pub local: Option<LocalModelConfig>,
+    /// A hosted model API reached with an API key.
+    pub api: Option<ApiConfig>,
 }
 
 impl Provider {
@@ -379,6 +393,7 @@ fn build(id: &str, kind: ProviderKind, c: Option<&ProviderConfig>, agents: &Agen
         install_hint: non_empty(&c.install_hint).unwrap_or_else(|| kind.default_install_hint().to_string()),
         fallback: c.fallback.iter().map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect(),
         local: c.local.clone(),
+        api: c.api.clone(),
     }
 }
 
@@ -460,6 +475,14 @@ pub fn list(agents: &AgentsConfig) -> (Vec<Provider>, Vec<String>) {
                 None => warnings.push(format!("agents.providers.{}.fallback: {f:?} is not a configured provider; it is skipped", p.id)),
                 Some(x) if !x.enabled => warnings.push(format!("agents.providers.{}.fallback: {f:?} is disabled; it is skipped", p.id)),
                 Some(_) => {}
+            }
+        }
+        if p.api.is_some() {
+            let model_optional = p.kind == ProviderKind::Claude && p.api.as_ref().is_some_and(|a| a.service.trim().eq_ignore_ascii_case("anthropic"));
+            if let Err(e) = api_setup(p, p.model.as_deref().or(Some("-"))) {
+                warnings.push(format!("{e}; the provider does not start"));
+            } else if p.model.is_none() && !model_optional {
+                warnings.push(format!("agents.providers.{}: set `model` to the model the service calls it; the provider does not start without it", p.id));
             }
         }
         if p.local.is_some() {
@@ -930,14 +953,218 @@ pub fn dialog_on_screen(kind: ProviderKind, screen: &str) -> Option<(super::Agen
     }
 }
 
-// ---------------------------------------------------------------- local models
+// ---------------------------------------------------------------- models behind another endpoint
 
-/// The name of the provider a local Codex session defines for itself.
-const CODEX_LOCAL_PROVIDER: &str = "workbench_local";
+/// What Claude Code needs to ask `model` of an endpoint that is not Anthropic's: its helper
+/// model and sub-agents would otherwise ask for a Claude model, and it assumes 200K tokens of
+/// context for a model it does not know.
+fn claude_model_env(model: &str, context: Option<u64>) -> Vec<(String, Option<String>)> {
+    let set = |k: &str, v: &str| (k.to_string(), Some(v.to_string()));
+    [
+        set("ANTHROPIC_MODEL", model),
+        set("ANTHROPIC_DEFAULT_OPUS_MODEL", model),
+        set("ANTHROPIC_DEFAULT_SONNET_MODEL", model),
+        set("ANTHROPIC_DEFAULT_HAIKU_MODEL", model),
+        set("CLAUDE_CODE_SUBAGENT_MODEL", model),
+        set("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+        // A header that changes with every request would keep the server from reusing its prompt cache.
+        set("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
+    ]
+    .into_iter()
+    .chain(context.map(|c| set("CLAUDE_CODE_MAX_CONTEXT_TOKENS", &c.to_string())))
+    .collect()
+}
 
 /// The context windows `context` may name (tokens).
 const MIN_CONTEXT: u64 = 2_048;
 const MAX_CONTEXT: u64 = 10_000_000;
+
+fn check_context(at: &str, context: Option<u64>) -> Result<(), String> {
+    match context.filter(|c| !(MIN_CONTEXT..=MAX_CONTEXT).contains(c)) {
+        Some(c) => Err(format!("{at}: context {c} should be between {MIN_CONTEXT} and {MAX_CONTEXT} tokens")),
+        None => Ok(()),
+    }
+}
+
+/// The name of the provider a hosted-API Codex session defines for itself, and the variable its key is in.
+const CODEX_API_PROVIDER: &str = "workbench_api";
+const CODEX_API_KEY_VAR: &str = "WORKBENCH_API_KEY";
+
+// ---------------------------------------------------------------- hosted APIs
+
+/// A service's name to people.
+pub fn service_label(id: &str) -> &'static str {
+    match id {
+        "deepseek" => "DeepSeek",
+        "openrouter" => "OpenRouter",
+        "zai" => "Z.ai",
+        "moonshot" => "Moonshot",
+        "fireworks" => "Fireworks",
+        "anthropic" => "Anthropic API",
+        "openai" => "OpenAI API",
+        _ => "Other API",
+    }
+}
+
+/// Where a service serves the Anthropic Messages API (what Claude Code needs). From the
+/// services' own documentation as far as it could be read; `anthropic` is Claude Code's own default.
+fn anthropic_endpoint(service: &str) -> Option<&'static str> {
+    match service {
+        "deepseek" => Some("https://api.deepseek.com/anthropic"),
+        "openrouter" => Some("https://openrouter.ai/api"),
+        "zai" => Some("https://api.z.ai/api/anthropic"),
+        "moonshot" => Some("https://api.moonshot.ai/anthropic"),
+        "fireworks" => Some("https://api.fireworks.ai/inference"),
+        _ => None,
+    }
+}
+
+/// Aider (through LiteLLM): the variable a service's key goes in, and the prefix of its model names.
+fn aider_service(service: &str) -> Option<(&'static str, &'static str)> {
+    match service {
+        "deepseek" => Some(("DEEPSEEK_API_KEY", "deepseek")),
+        "openrouter" => Some(("OPENROUTER_API_KEY", "openrouter")),
+        "openai" => Some(("OPENAI_API_KEY", "")),
+        "anthropic" => Some(("ANTHROPIC_API_KEY", "")),
+        "custom" => Some(("OPENAI_API_KEY", "openai")),
+        _ => None,
+    }
+}
+
+/// An `https://` address (plain `http://` only for this computer), without credentials in it: an
+/// API key goes to it, so it must not travel in the clear.
+pub fn valid_api_url(u: &str) -> bool {
+    let local = |rest: &str| {
+        let host = rest.split(['/', '?', '#']).next().unwrap_or("").rsplit_once(':').map_or_else(|| rest.split(['/', '?', '#']).next().unwrap_or(""), |(h, _)| h);
+        matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+    };
+    match (u.strip_prefix("https://"), u.strip_prefix("http://")) {
+        (Some(rest), _) => valid_local_url(u) && !rest.is_empty(),
+        (None, Some(rest)) => valid_local_url(u) && local(rest),
+        _ => false,
+    }
+}
+
+/// Valid names of a `[secrets]` entry.
+pub fn valid_secret_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 64 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+}
+
+/// What a session of a provider that uses a hosted API needs added to its launch.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ApiSetup {
+    /// Environment (`None`: removed). The key is not in it: see `key_var`.
+    pub env: Vec<(String, Option<String>)>,
+    /// Arguments for the command line (Codex defines its provider there).
+    pub args: Vec<String>,
+    /// The model as the CLI is told it (Aider wants a provider prefix); `None`: as asked.
+    pub model: Option<String>,
+    /// The API's address.
+    pub url: String,
+    /// The variable the key goes in, and the `[secrets]` entry that holds it. The launch reads
+    /// the secret and puts it into the process environment, never into the command line.
+    pub key_var: String,
+    pub key_secret: String,
+}
+
+/// Why a provider's `api` section cannot be used, or the setup it asks for. Like `local`, a provider
+/// with an `api` section never starts without it: it would otherwise run on the CLI's own login.
+pub fn api_setup(p: &Provider, model: Option<&str>) -> Result<Option<ApiSetup>, String> {
+    let Some(a) = &p.api else { return Ok(None) };
+    let at = format!("agents.providers.{}.api", p.id);
+    if p.local.is_some() {
+        return Err(format!("agents.providers.{}: `local` and `api` cannot both be set", p.id));
+    }
+    let service = a.service.trim().to_lowercase();
+    if !p.kind.api_services().contains(&service.as_str()) {
+        return Err(if p.kind.api_services().is_empty() {
+            format!("{at}: {} cannot use a hosted API with a key", p.label)
+        } else {
+            format!("{at}: service must be one of {} for {}", p.kind.api_services().join(", "), p.label)
+        });
+    }
+    let key = a.key.trim();
+    if key.is_empty() {
+        return Err(format!("{at}: `key` names the [secrets] entry that holds the API key"));
+    }
+    if !valid_secret_name(key) {
+        return Err(format!("{at}: `key` is the name of a [secrets] entry (letters, digits, - _ and .), not the key itself"));
+    }
+    check_context(&at, a.context)?;
+    let given = Some(a.url.trim()).filter(|u| !u.is_empty());
+    let url = match given {
+        Some(u) => u.to_string(),
+        None => match (p.kind, service.as_str()) {
+            // Anthropic's own API is Claude Code's default endpoint: no address to set.
+            (ProviderKind::Claude, s) => anthropic_endpoint(s).unwrap_or_default().to_string(),
+            (ProviderKind::Codex, "openai") => "https://api.openai.com/v1".to_string(),
+            _ => String::new(),
+        },
+    };
+    let needs_url = service == "custom" || (p.kind == ProviderKind::Codex && url.is_empty());
+    if needs_url && url.is_empty() {
+        return Err(format!("{at}: `url` is needed for {}", service_label(&service)));
+    }
+    if !url.is_empty() && !valid_api_url(&url) {
+        return Err(format!("{at}: url must be https:// (http:// only for this computer) and carry no user name or password"));
+    }
+    let optional_model = p.kind == ProviderKind::Claude && service == "anthropic";
+    let model = model.map(str::trim).filter(|m| !m.is_empty());
+    if model.is_none() && !optional_model {
+        return Err(format!("{at}: set `model` to the model the service calls it for {}", p.label));
+    }
+    let base = url.trim_end_matches('/').to_string();
+    let set = |k: &str, v: &str| (k.to_string(), Some(v.to_string()));
+    let unset = |k: &str| (k.to_string(), None);
+    let mut out = ApiSetup { url: base.clone(), key_secret: key.to_string(), ..Default::default() };
+    match p.kind {
+        ProviderKind::Claude if service == "anthropic" => {
+            // Anthropic's own API with a key: Claude Code's default endpoint, the key as `x-api-key`.
+            out.key_var = "ANTHROPIC_API_KEY".into();
+            out.env = vec![unset("ANTHROPIC_AUTH_TOKEN"), unset("CLAUDE_CODE_OAUTH_TOKEN")];
+            out.env.push(if given.is_some() { set("ANTHROPIC_BASE_URL", &base) } else { unset("ANTHROPIC_BASE_URL") });
+            if let Some(m) = model {
+                out.env.push(set("ANTHROPIC_MODEL", m));
+            }
+            out.env.extend(a.context.map(|c| set("CLAUDE_CODE_MAX_CONTEXT_TOKENS", &c.to_string())));
+        }
+        ProviderKind::Claude => {
+            // A gateway: the key as a bearer token, `ANTHROPIC_API_KEY` blank (not just unset) so no stored key is used.
+            let root = base.strip_suffix("/v1").unwrap_or(&base).to_string();
+            out.key_var = "ANTHROPIC_AUTH_TOKEN".into();
+            out.env = vec![set("ANTHROPIC_BASE_URL", &root), set("ANTHROPIC_API_KEY", ""), unset("CLAUDE_CODE_OAUTH_TOKEN")];
+            out.env.extend(claude_model_env(model.unwrap_or_default(), a.context));
+            out.url = root;
+        }
+        ProviderKind::Codex => {
+            let c = |k: &str, v: &str| ["-c".to_string(), format!("{k}={}", toml_str(v))];
+            out.key_var = CODEX_API_KEY_VAR.into();
+            out.args.extend(c("model_provider", CODEX_API_PROVIDER));
+            out.args.extend(c(&format!("model_providers.{CODEX_API_PROVIDER}.name"), service_label(&service)));
+            out.args.extend(c(&format!("model_providers.{CODEX_API_PROVIDER}.base_url"), &base));
+            out.args.extend(c(&format!("model_providers.{CODEX_API_PROVIDER}.env_key"), CODEX_API_KEY_VAR));
+            if let Some(n) = a.context {
+                out.args.extend(["-c".to_string(), format!("model_context_window={n}")]);
+            }
+        }
+        ProviderKind::Aider => {
+            let (var, prefix) = aider_service(&service).ok_or_else(|| format!("{at}: {} is not a service Aider can use", service_label(&service)))?;
+            out.key_var = var.into();
+            let m = model.unwrap_or_default();
+            out.model = Some(if prefix.is_empty() || m.contains('/') { m.to_string() } else { format!("{prefix}/{m}") });
+            if service == "custom" || given.is_some() {
+                out.env.push(set("OPENAI_API_BASE", &base));
+            }
+        }
+        _ => unreachable!("api_services is empty for the other kinds"),
+    }
+    Ok(Some(out))
+}
+
+// ---------------------------------------------------------------- local models
+
+/// The name of the provider a local Codex session defines for itself.
+const CODEX_LOCAL_PROVIDER: &str = "workbench_local";
 
 /// A server's usual address.
 pub fn default_local_url(server: &str) -> &'static str {
@@ -998,9 +1225,7 @@ pub fn local_setup(p: &Provider, model: Option<&str>) -> Result<Option<LocalSetu
         return Err(format!("{at}: url must be http:// or https:// and carry no user name or password"));
     }
     let model = model.map(str::trim).filter(|m| !m.is_empty()).ok_or_else(|| format!("{at}: set `model` (the server's model name) for {}", p.label))?;
-    if let Some(c) = l.context.filter(|c| !(MIN_CONTEXT..=MAX_CONTEXT).contains(c)) {
-        return Err(format!("{at}: context {c} should be between {MIN_CONTEXT} and {MAX_CONTEXT} tokens"));
-    }
+    check_context(&at, l.context)?;
     let base = url.trim_end_matches('/');
     let set = |k: &str, v: &str| (k.to_string(), Some(v.to_string()));
     let unset = |k: &str| (k.to_string(), None);
@@ -1013,30 +1238,9 @@ pub fn local_setup(p: &Provider, model: Option<&str>) -> Result<Option<LocalSetu
         ProviderKind::Claude => {
             // Claude Code adds `/v1/messages` itself.
             let root = base.strip_suffix("/v1").unwrap_or(base).to_string();
-            LocalSetup {
-                env: vec![
-                    set("ANTHROPIC_BASE_URL", &root),
-                    set("ANTHROPIC_AUTH_TOKEN", token),
-                    unset("ANTHROPIC_API_KEY"),
-                    unset("CLAUDE_CODE_OAUTH_TOKEN"),
-                    set("ANTHROPIC_MODEL", model),
-                    // Its helper model and sub-agents would otherwise ask the server for a Claude model.
-                    set("ANTHROPIC_DEFAULT_OPUS_MODEL", model),
-                    set("ANTHROPIC_DEFAULT_SONNET_MODEL", model),
-                    set("ANTHROPIC_DEFAULT_HAIKU_MODEL", model),
-                    set("CLAUDE_CODE_SUBAGENT_MODEL", model),
-                    set("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
-                    // A header that changes with every request would keep the server from reusing its prompt cache.
-                    set("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
-                ]
-                .into_iter()
-                // Claude Code assumes 200K for a model it does not know and compacts late.
-                .chain(l.context.map(|c| set("CLAUDE_CODE_MAX_CONTEXT_TOKENS", &c.to_string())))
-                .collect(),
-                model: model.to_string(),
-                url: root,
-                args: vec![],
-            }
+            let mut env = vec![set("ANTHROPIC_BASE_URL", &root), set("ANTHROPIC_AUTH_TOKEN", token), unset("ANTHROPIC_API_KEY"), unset("CLAUDE_CODE_OAUTH_TOKEN")];
+            env.extend(claude_model_env(model, l.context));
+            LocalSetup { env, model: model.to_string(), url: root, args: vec![] }
         }
         ProviderKind::Aider => {
             let v1 = if base.ends_with("/v1") { base.to_string() } else { format!("{base}/v1") };
@@ -1103,6 +1307,16 @@ pub fn describe(p: &Provider, available: Option<&PathBuf>) -> Value {
         // The account's folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`…); absent: the CLI's default account.
         "local": p.local.as_ref().map(|l| json!({ "server": l.server.trim().to_lowercase(), "url": local_url_of(p), "context": l.context })),
         "localError": local_setup(p, p.model.as_deref().or(Some("-"))).err(),
+        // The key is named by a [secrets] entry; its value never leaves the server.
+        "api": p.api.as_ref().map(|a| json!({
+            "service": a.service.trim().to_lowercase(),
+            "serviceLabel": service_label(&a.service.trim().to_lowercase()),
+            "url": a.url.trim(),
+            "key": a.key.trim(),
+            "context": a.context,
+        })),
+        "apiError": api_setup(p, p.model.as_deref().or(Some("-"))).err(),
+        "apiServices": k.api_services(),
         "localServers": k.local_servers(),
         "fallback": p.fallback,
         "homeVar": k.home_var(),
@@ -1657,5 +1871,162 @@ mod tests {
         assert_eq!((p.provider.id.as_str(), p.skipped.len(), p.all_limited), ("claude", 3, true));
         assert_eq!(Failover::of(&AgentsConfig::default()), Failover::New);
         assert!(providers_of("[agents]\nfailover = \"sometimes\"\n").2.iter().any(|x| x.contains("failover")));
+    }
+
+    #[test]
+    fn hosted_apis_get_what_each_cli_needs_and_the_key_stays_a_name() {
+        let (_, list, w) = providers_of(
+            r#"
+            [agents.providers.claude-ds]
+            kind = "claude"
+            model = "deepseek-v4-pro"
+            api = { service = "deepseek", key = "deepseek", context = 131072 }
+            [agents.providers.claude-or]
+            kind = "claude"
+            model = "anthropic/claude-sonnet"
+            api = { service = "openrouter", key = "openrouter" }
+            [agents.providers.claude-key]
+            kind = "claude"
+            api = { service = "anthropic", key = "anthropic-api" }
+            [agents.providers.claude-gw]
+            kind = "claude"
+            model = "m"
+            api = { service = "custom", url = "https://gw.example.com/v1/", key = "gw" }
+            [agents.providers.codex-key]
+            kind = "codex"
+            model = "gpt-5.5"
+            api = { service = "openai", key = "openai", context = 200000 }
+            [agents.providers.codex-gw]
+            kind = "codex"
+            model = "m"
+            api = { service = "custom", url = "https://llm.example.com/v1", key = "gw" }
+            [agents.providers.aider-ds]
+            kind = "aider"
+            model = "deepseek-chat"
+            api = { service = "deepseek", key = "deepseek" }
+            [agents.providers.aider-oa]
+            kind = "aider"
+            model = "gpt-4o"
+            api = { service = "openai", key = "openai" }
+            [agents.providers.aider-gw]
+            kind = "aider"
+            model = "m"
+            api = { service = "custom", url = "https://llm.example.com/v1", key = "gw" }
+            "#,
+        );
+        assert!(w.is_empty(), "{w:?}");
+        let get = |id: &str| list.iter().find(|p| p.id == id).unwrap();
+        let setup = |id: &str| api_setup(get(id), get(id).model.as_deref()).unwrap().unwrap();
+        let env = |s: &ApiSetup, k: &str| s.env.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+
+        // Claude Code on a gateway: the key is a bearer token, the blank API key keeps any stored one out.
+        let s = setup("claude-ds");
+        assert_eq!((s.key_var.as_str(), s.key_secret.as_str(), s.url.as_str()), ("ANTHROPIC_AUTH_TOKEN", "deepseek", "https://api.deepseek.com/anthropic"));
+        assert_eq!(env(&s, "ANTHROPIC_BASE_URL"), Some(Some("https://api.deepseek.com/anthropic".into())));
+        assert_eq!(env(&s, "ANTHROPIC_API_KEY"), Some(Some(String::new())), "blank, not unset");
+        assert_eq!(env(&s, "CLAUDE_CODE_OAUTH_TOKEN"), Some(None));
+        for k in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"] {
+            assert_eq!(env(&s, k), Some(Some("deepseek-v4-pro".into())), "{k}");
+        }
+        assert_eq!(env(&s, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some(Some("131072".into())));
+        // No env entry holds a key: it is read from [secrets] at launch.
+        assert!(!s.env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN"));
+        assert_eq!(setup("claude-or").url, "https://openrouter.ai/api");
+        // A custom address loses `/v1` (Claude Code adds `/v1/messages`).
+        assert_eq!(env(&setup("claude-gw"), "ANTHROPIC_BASE_URL"), Some(Some("https://gw.example.com".into())));
+        // Anthropic's own API: the key as `x-api-key`, Claude Code's default endpoint, any inherited gateway removed.
+        let s = setup("claude-key");
+        assert_eq!(s.key_var, "ANTHROPIC_API_KEY");
+        assert_eq!((env(&s, "ANTHROPIC_BASE_URL"), env(&s, "ANTHROPIC_AUTH_TOKEN"), env(&s, "ANTHROPIC_MODEL")), (Some(None), Some(None), None));
+        assert!(env(&s, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").is_none(), "it is the real service");
+        // Codex defines a provider of its own whose key comes from a variable.
+        let s = setup("codex-key");
+        assert_eq!(s.key_var, "WORKBENCH_API_KEY");
+        assert_eq!(
+            s.args,
+            [
+                "-c", "model_provider=\"workbench_api\"",
+                "-c", "model_providers.workbench_api.name=\"OpenAI API\"",
+                "-c", "model_providers.workbench_api.base_url=\"https://api.openai.com/v1\"",
+                "-c", "model_providers.workbench_api.env_key=\"WORKBENCH_API_KEY\"",
+                "-c", "model_context_window=200000",
+            ]
+        );
+        assert!(setup("codex-gw").args.iter().any(|a| a == "model_providers.workbench_api.base_url=\"https://llm.example.com/v1\""));
+        // Aider: the service's own variable, and a model name LiteLLM understands.
+        let s = setup("aider-ds");
+        assert_eq!((s.key_var.as_str(), s.model.as_deref()), ("DEEPSEEK_API_KEY", Some("deepseek/deepseek-chat")));
+        let s = setup("aider-oa");
+        assert_eq!((s.key_var.as_str(), s.model.as_deref()), ("OPENAI_API_KEY", Some("gpt-4o")));
+        let s = setup("aider-gw");
+        assert_eq!((s.key_var.as_str(), s.model.as_deref(), env(&s, "OPENAI_API_BASE")), ("OPENAI_API_KEY", Some("openai/m"), Some(Some("https://llm.example.com/v1".into()))));
+        // What the UI is shown holds the secret's name and nothing more.
+        let d = describe(get("claude-ds"), None);
+        assert_eq!((d["api"]["service"].as_str(), d["api"]["key"].as_str(), d["api"]["serviceLabel"].as_str()), (Some("deepseek"), Some("deepseek"), Some("DeepSeek")));
+        assert!(d["apiError"].is_null());
+    }
+
+    #[test]
+    fn a_hosted_api_that_cannot_be_set_up_never_runs_on_the_clis_own_login() {
+        let (_, list, w) = providers_of(
+            r#"
+            [agents.providers.no-key]
+            kind = "claude"
+            model = "m"
+            api = { service = "deepseek" }
+            [agents.providers.key-pasted]
+            kind = "claude"
+            model = "m"
+            api = { service = "deepseek", key = "sk-abc def" }
+            [agents.providers.wrong-service]
+            kind = "codex"
+            model = "m"
+            api = { service = "deepseek", key = "k" }
+            [agents.providers.plain-http]
+            kind = "claude"
+            model = "m"
+            api = { service = "custom", url = "http://gw.example.com", key = "k" }
+            [agents.providers.userinfo]
+            kind = "claude"
+            model = "m"
+            api = { service = "custom", url = "https://u:p@gw.example.com", key = "k" }
+            [agents.providers.custom-no-url]
+            kind = "aider"
+            model = "m"
+            api = { service = "custom", key = "k" }
+            [agents.providers.no-model]
+            kind = "aider"
+            api = { service = "deepseek", key = "k" }
+            [agents.providers.kimi-api]
+            kind = "kimi"
+            model = "m"
+            api = { service = "deepseek", key = "k" }
+            [agents.providers.both]
+            kind = "claude"
+            model = "m"
+            local = { server = "ollama" }
+            api = { service = "deepseek", key = "k" }
+            [agents.providers.loopback-ok]
+            kind = "claude"
+            model = "m"
+            api = { service = "custom", url = "http://localhost:4000", key = "k" }
+            "#,
+        );
+        let get = |id: &str| list.iter().find(|p| p.id == id).unwrap();
+        let err = |id: &str, model: Option<&str>| api_setup(get(id), model).unwrap_err();
+        assert!(err("no-key", Some("m")).contains("names the [secrets] entry"));
+        assert!(err("key-pasted", Some("m")).contains("not the key itself"));
+        assert!(err("wrong-service", Some("m")).contains("service must be one of openai, custom"));
+        assert!(err("plain-http", Some("m")).contains("https://"));
+        assert!(err("userinfo", Some("m")).contains("no user name or password"));
+        assert!(err("custom-no-url", Some("m")).contains("`url` is needed"));
+        assert!(err("no-model", None).contains("set `model`"));
+        assert!(err("kimi-api", Some("m")).contains("cannot use a hosted API"));
+        assert!(err("both", Some("m")).contains("cannot both be set"));
+        // This computer may be reached in the clear.
+        assert!(api_setup(get("loopback-ok"), Some("m")).unwrap().is_some());
+        assert_eq!(w.iter().filter(|x| x.contains("does not start")).count(), 9, "{w:?}");
+        assert!(!valid_api_url("http://example.com") && valid_api_url("https://example.com/v1") && valid_api_url("http://127.0.0.1:8080") && valid_api_url("http://[::1]:1/x"));
+        assert!(valid_secret_name("deepseek-key_2.prod") && !valid_secret_name("") && !valid_secret_name("a b") && !valid_secret_name(&"x".repeat(65)));
     }
 }

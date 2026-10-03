@@ -165,6 +165,10 @@ describe('carrying a conversation', () => {
     expect(carryText('digest', { kind: 'codex', local: null }, 'claude')).toMatch(/sent to that CLI’s service/)
     expect(carryText('digest', { kind: 'aider', local: { server: 'ollama', url: '' } }, 'claude')).toMatch(/stays on your network/)
     expect(carryText('notes', { kind: 'codex', local: null }, 'claude')).toMatch(/short note/)
+    // A hosted API is a third party, also for the same CLI.
+    const ds = { kind: 'claude' as const, local: null, api: { service: 'deepseek', serviceLabel: 'DeepSeek', url: '', key: 'k' } }
+    expect(carryText('resume', ds, 'claude')).toBe('The conversation itself continues there. It is sent to DeepSeek.')
+    expect(carryText('digest', { ...ds, kind: 'aider' as const }, 'claude')).toMatch(/sent to DeepSeek/)
   })
 
   it('titles the toast by how it was carried', () => {

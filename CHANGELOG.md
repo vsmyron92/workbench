@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Hosted APIs.** An account can use a hosted model API with an API key: DeepSeek, OpenRouter, Z.ai,
+  Moonshot, Fireworks, the Anthropic and OpenAI APIs, or any compatible service, for Claude Code,
+  Codex and Aider (**Settings → Agents → Accounts → Add…**). The key is named by a `[secrets]` entry,
+  read by the server when a session starts, passed in the CLI's environment only and masked in its
+  output; the browser sees only the secret's name. Combine them with fallback lists, so a cheap API
+  account can take over when a subscription is at its limit.
+
 - **Conversation transfer.** A session can continue on another account with its conversation:
   **Continue on another account…** in its menu, the toast of a session that hit its limit, or
   `failover = "session"`. Between accounts of the same CLI (Claude Code to Claude Code, Codex to Codex,

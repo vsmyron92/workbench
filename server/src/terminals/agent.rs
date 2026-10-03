@@ -343,7 +343,7 @@ pub fn resolve_launch(provider: &Provider, cfg: &AgentsConfig, project: &Project
         model,
         effort,
         permission_mode,
-        remote_control: claude && provider.local.is_none() && req.remote_control.unwrap_or(pa.remote_control || cfg.remote_control),
+        remote_control: claude && provider.local.is_none() && provider.api.is_none() && req.remote_control.unwrap_or(pa.remote_control || cfg.remote_control),
         add_dirs,
     })
 }
@@ -492,6 +492,8 @@ struct Prepared {
     container: Option<crate::devcontainer::ExecTarget>,
     /// The provider runs on a model server of your own (`[agents.providers.<name>.local]`).
     local: Option<providers::LocalSetup>,
+    /// The provider uses a hosted API with a key (`[agents.providers.<name>.api]`).
+    api: Option<providers::ApiSetup>,
 }
 
 /// A Codex session's rollout, as the watcher follows it.
@@ -747,17 +749,30 @@ impl Terminals {
         // A provider on a model server of your own never starts without it: it would
         // otherwise reach the vendor, where you chose not to send your code.
         let local = providers::local_setup(&provider, launch.model.as_deref()).map_err(ApiError::not_configured)?;
+        // Likewise a hosted API: its key is read here from `[secrets]`, goes into the process
+        // environment only (never the command line), and is masked in the session's output.
+        let api = providers::api_setup(&provider, launch.model.as_deref()).map_err(ApiError::not_configured)?;
 
         // Environment: base, the local model's, the provider's (config.toml), then the project overlay's.
         let mut env = base_env(state, &entry.id);
         if let Some(l) = &local {
             env.extend(l.env.iter().cloned());
         }
+        if let Some(a) = &api {
+            env.extend(a.env.iter().cloned());
+        }
         for (k, v) in &provider.env {
             let v = if crate::util::os::path::home_relative(v).is_some() { crate::config::expand_tilde(v).display().to_string() } else { v.clone() };
             env.push((k.clone(), Some(v)));
         }
         let mut secrets = vec![];
+        if let Some(a) = &api {
+            let key = state
+                .secret(None, &a.key_secret)
+                .map_err(|e| ApiError::not_configured(format!("{}: its API key could not be read: {e}", provider.label)))?;
+            env.push((a.key_var.clone(), Some(key.expose().to_string())));
+            secrets.push(key);
+        }
         if let Some(p) = &project {
             for (k, v) in &p.config.agent.env {
                 env.push((k.clone(), Some(expand_env_value(state, p, v, &mut secrets)?)));
@@ -802,7 +817,7 @@ impl Terminals {
                 }
             }
         }
-        Ok(Prepared { cwd, launch, project, provider, command, env, dir, token, add_dirs, container, local })
+        Ok(Prepared { cwd, launch, project, provider, command, env, dir, token, add_dirs, container, local, api })
     }
 
     async fn launch_claude(
@@ -1030,7 +1045,7 @@ impl Terminals {
         prompt: Option<String>,
         submit_prompt: bool,
     ) -> Result<(), ApiError> {
-        let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, local, .. } = prep;
+        let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, local, api, .. } = prep;
         let home = codex::codex_home(env_value(&env, "CODEX_HOME").as_deref());
         let features = self.codex_features(&command).await;
         // Resuming needs the rollout; a session that never had a turn has none: start fresh.
@@ -1062,7 +1077,13 @@ impl Terminals {
         let mcp_url = format!("{}/mcp", state.local_base_url());
         let (argv_prompt, paste_prompt) = split_prompt(prompt, submit_prompt, is_batch(&command));
         // A model server of your own is a provider Codex is told about on the command line.
-        let extra: Vec<String> = local.as_ref().map(|l| l.args.clone()).unwrap_or_default().into_iter().chain(provider.args.iter().cloned()).collect();
+        let extra: Vec<String> = local
+            .iter()
+            .flat_map(|l| l.args.iter())
+            .chain(api.iter().flat_map(|a| a.args.iter()))
+            .chain(provider.args.iter())
+            .cloned()
+            .collect();
         let args = LaunchArgs {
             model: launch.model.as_deref(),
             effort: launch.effort.as_deref(),
@@ -1144,7 +1165,7 @@ impl Terminals {
         submit_prompt: bool,
         restarted: bool,
     ) -> Result<(), ApiError> {
-        let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, container, local, .. } = prep;
+        let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, container, local, api, .. } = prep;
         let kind = provider.kind;
         // Not used by these CLIs themselves; there for a user's own MCP setup to reference.
         env.push(("WORKBENCH_AGENT_TOKEN".into(), Some(token)));
@@ -1167,7 +1188,7 @@ impl Terminals {
             _ => (Continue::New, String::new()),
         };
         // Aider names the server in the model (`ollama_chat/qwen3`).
-        let model = local.as_ref().map(|l| l.model.as_str()).or(launch.model.as_deref());
+        let model = api.as_ref().and_then(|a| a.model.as_deref()).or(local.as_ref().map(|l| l.model.as_str())).or(launch.model.as_deref());
         let args = LaunchArgs {
             model,
             effort: None,

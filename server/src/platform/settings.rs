@@ -165,6 +165,16 @@ pub fn check_global(cfg: &GlobalConfig) -> (Vec<String>, Vec<String>) {
             warnings.push("atlassian.site should look like https://<site>.atlassian.net".into());
         }
     }
+    for (name, p) in &cfg.agents.providers {
+        if let Some(a) = &p.api {
+            let key = a.key.trim();
+            if !key.is_empty() && !cfg.secrets.contains_key(key) {
+                warnings.push(format!(
+                    "agents.providers.{name}.api.key names the secret {key:?}, which is not defined under [secrets]; the provider does not start until it is"
+                ));
+            }
+        }
+    }
     if let Some(e) = &cfg.agents.effort {
         if !["low", "medium", "high", "xhigh", "max"].contains(&e.as_str()) {
             warnings.push(format!("agents.effort {e:?} is not one of low, medium, high, xhigh, max"));

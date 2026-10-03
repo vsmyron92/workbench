@@ -159,8 +159,14 @@ export function carryKind(from: AgentProvider, to: AgentProvider, transfer: 'con
 }
 
 /** What the move dialog says about a target. */
-export function carryText(c: Carry, to: Pick<ProviderInfo, 'local' | 'kind'>, from: AgentProvider): string {
-  const where = to.local ? 'It stays on your network.' : from === to.kind ? '' : 'It is sent to that CLI’s service.'
+export function carryText(c: Carry, to: Pick<ProviderInfo, 'local' | 'kind' | 'api'>, from: AgentProvider): string {
+  const where = to.local
+    ? 'It stays on your network.'
+    : to.api
+      ? `It is sent to ${to.api.serviceLabel}.`
+      : from === to.kind
+        ? ''
+        : 'It is sent to that CLI’s service.'
   switch (c) {
     case 'resume':
       return `The conversation itself continues there.${where ? ` ${where}` : ''}`

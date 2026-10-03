@@ -56,7 +56,9 @@ function ProviderPicker({ providers, value, onChange }: { providers: ProviderInf
                     ? `${displayLabel(p)} is ${limit}${next ? `: a new session starts on ${displayLabel(next)}` : ''}`
                     : p.local
                       ? `${displayLabel(p)} (${p.command}) on ${p.local.url || p.local.server}`
-                      : `${displayLabel(p)} (${p.command})`
+                      : p.api
+                        ? `${displayLabel(p)} (${p.command}) through ${p.api.serviceLabel} with an API key`
+                        : `${displayLabel(p)} (${p.command})`
               }
               onClick={() => onChange(p.id)}
             >
@@ -65,6 +67,7 @@ function ProviderPicker({ providers, value, onChange }: { providers: ProviderInf
               {!p.available && <span className="wb-ag-provider-note">not installed</span>}
               {p.available && limit && <span className="wb-ag-provider-note">{limit}</span>}
               {p.available && !limit && p.local && <span className="wb-ag-provider-note">local</span>}
+              {p.available && !limit && p.api && <span className="wb-ag-provider-note">API</span>}
             </button>
           )
         })}

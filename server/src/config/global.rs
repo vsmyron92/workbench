@@ -219,6 +219,27 @@ pub struct ProviderConfig {
     /// OpenAI-compatible server) instead of the vendor's. `model` names the model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local: Option<LocalModelConfig>,
+    /// Use a hosted model API (DeepSeek, OpenRouter, an Anthropic or OpenAI API key…) with an
+    /// API key instead of a subscription login. `model` names the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api: Option<ApiConfig>,
+}
+
+/// `[agents.providers.<name>.api]`: a hosted model API reached with an API key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ApiConfig {
+    /// `deepseek`, `openrouter`, `zai`, `moonshot`, `fireworks`, `anthropic`, `openai` or
+    /// `custom` (which needs `url`). Which of them a CLI can use depends on the API it speaks.
+    pub service: String,
+    /// The API's address. Empty: the service's usual one. Always `https://` (plain `http://` only
+    /// for this computer).
+    pub url: String,
+    /// Name of a `[secrets]` entry that holds the API key: the key itself is never in this file.
+    pub key: String,
+    /// The model's context window in tokens (see `local.context`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
 }
 
 /// `[agents.providers.<name>.local]`: a model server on this machine or your network.

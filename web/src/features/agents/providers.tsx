@@ -334,6 +334,7 @@ function TransferDialog({ terminalId, onClose }: { terminalId: string; onClose: 
             >
               <span className="wb-ag-target-name">{displayLabel(p)}</span>
               {p.local && <span className="wb-ag-provider-note">local</span>}
+              {p.api && <span className="wb-ag-provider-note">API</span>}
               {limit && <span className="wb-ag-provider-note">{limit}</span>}
               {!p.available && <span className="wb-ag-provider-note">not installed</span>}
             </button>
