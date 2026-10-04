@@ -9,7 +9,10 @@ PORT=hex:<hex>) serves that output to every client that connects to PORT (`\\n` 
 like an RTT or UART port; it may be given more than once. --say <text> prints a line to
 stderr at once (`\\n` separates lines; repeatable), --chatter <interval>:<count>:<text> prints
 <text> <count> times <interval> seconds apart once it listens (what a real server prints while
-its probe stops answering).
+its probe stops answering). --tcl <port> serves OpenOCD's Tcl RPC (`read_memory A W C`, each
+command ended by 0x1a, the answer too) and appends every command it gets to --tcl-log <file>:
+the word at an address is `address * 7 + the number of reads of it so far`, 0x20000010 is a
+float (1.5 + 0.5 per read), and 0xdead0000 and up cannot be read.
 """
 import os
 import signal
@@ -22,6 +25,7 @@ args = sys.argv[1:]
 opt = {}
 flags = set()
 channels = []
+tcl_ports = []
 says = []
 chatter = []
 i = 0
@@ -31,6 +35,9 @@ while i < len(args):
         i += 1
     elif args[i] == "--channel":
         channels.append(args[i + 1])
+        i += 2
+    elif args[i] == "--tcl":
+        tcl_ports.append(args[i + 1])
         i += 2
     elif args[i] == "--say":
         says.append(args[i + 1])
@@ -90,6 +97,60 @@ for spec in channels:
 for key in ("--port", "--also"):
     if key in opt:
         threading.Thread(target=serve, args=(opt[key],), daemon=True).start()
+tcl_reads = {}
+
+
+def tcl_answer(cmd):
+    parts = cmd.split()
+    if len(parts) == 4 and parts[0] == "read_memory":
+        addr, width, count = int(parts[1], 0), int(parts[2]), int(parts[3])
+        if addr >= 0xDEAD0000:
+            return "read_memory: failed to read memory"
+        n = tcl_reads[addr] = tcl_reads.get(addr, 0) + 1
+        step = width // 8
+        mask = (1 << width) - 1
+        words = []
+        for k in range(count):
+            a = addr + k * step
+            if a == 0x20000010 and width == 32:
+                import struct
+                words.append(struct.unpack("<I", struct.pack("<f", 1.5 + 0.5 * n))[0])
+            else:
+                words.append((a * 7 + n) & mask)
+        return " ".join("0x%0*x" % (width // 4, w) for w in words)
+    return 'invalid command name "%s"' % (parts[0] if parts else "")
+
+
+def tcl_client(c):
+    buf = b""
+    while True:
+        d = c.recv(1024)
+        if not d:
+            return
+        buf += d
+        while b"\x1a" in buf:
+            cmd, buf = buf.split(b"\x1a", 1)
+            cmd = cmd.decode()
+            if opt.get("--tcl-log"):
+                with open(opt["--tcl-log"], "a") as f:
+                    f.write(cmd + "\n")
+            c.sendall(tcl_answer(cmd).encode() + b"\x1a")
+
+
+def serve_tcl(port):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", int(port)))
+    s.listen(5)
+    while True:
+        c, _ = s.accept()
+        threading.Thread(target=tcl_client, args=(c,), daemon=True).start()
+
+
+for port in tcl_ports:
+    threading.Thread(target=serve_tcl, args=(port,), daemon=True).start()
+
+
 def talk(spec):
     interval, count, text = spec.split(":", 2)
     for _ in range(int(count)):

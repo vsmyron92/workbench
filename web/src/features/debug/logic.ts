@@ -394,3 +394,74 @@ export function agentPrompt(o: {
   lines.push('', '(The debug_state tool shows the live session.) ')
   return lines.join('\n')
 }
+
+// ---------------------------------------------------------------- live watch
+
+/** Readings kept per watched expression (the sparkline's width in samples). */
+export const LIVE_HISTORY = 120
+
+export type Radix = 'dec' | 'hex' | 'bin'
+
+/** The number a reading stands for, for the sparkline: numbers, booleans (0 or 1) and numeric text (64-bit values). */
+export function numericValue(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (typeof v === 'boolean') return v ? 1 : 0
+  if (typeof v === 'string' && /^-?\d+$/.test(v)) return Number(v)
+  return null
+}
+
+/** `v` appended to `list`, keeping the newest `max`. */
+export function pushSample<T>(list: readonly T[] | undefined, v: T, max = LIVE_HISTORY): T[] {
+  const next = list ? [...list, v] : [v]
+  return next.length > max ? next.slice(next.length - max) : next
+}
+
+const pad = (digits: string, width: number) => digits.padStart(width, '0')
+
+/** A watched value as shown. Integers follow `radix` (a negative one in hex or binary is its two's complement
+ *  in `size` bytes); a pointer is hex; a float has up to seven digits; bytes are as they came. */
+export function formatLiveValue(kind: string, size: number, v: unknown, radix: Radix = 'dec'): string {
+  if (v === undefined || v === null) return '—'
+  if (typeof v === 'boolean') return v ? 'true' : 'false'
+  if (kind === 'bytes') return String(v)
+  if (kind === 'float') {
+    if (typeof v === 'number') return String(Number(v.toPrecision(7)))
+    return String(v)
+  }
+  if (typeof v !== 'number' && typeof v !== 'string') return String(v)
+  let n: bigint
+  try {
+    n = BigInt(v)
+  } catch {
+    return String(v)
+  }
+  const bits = Math.max(1, size) * 8
+  const unsigned = BigInt.asUintN(bits, n)
+  if (kind === 'ptr' || radix === 'hex') return `0x${pad(unsigned.toString(16), bits / 4)}`
+  if (radix === 'bin') return `0b${pad(unsigned.toString(2), bits).replace(/(.{4})(?=.)/g, '$1_')}`
+  return n.toString()
+}
+
+/** The points of a sparkline's polyline in a `w`×`h` box (`pad` inside the edges): the oldest reading on
+ *  the left, the largest value on top. A constant series is a line across the middle; a gap (a failed
+ *  reading) splits the line, so the result is one polyline per run. */
+export function sparklineRuns(values: readonly (number | null)[], w: number, h: number, pad = 2): string[] {
+  const nums = values.filter((x): x is number => x !== null)
+  if (!nums.length) return []
+  const lo = Math.min(...nums)
+  const hi = Math.max(...nums)
+  const x = (i: number) => (values.length < 2 ? w / 2 : pad + (i * (w - 2 * pad)) / (values.length - 1))
+  const y = (v: number) => (hi === lo ? h / 2 : h - pad - ((v - lo) * (h - 2 * pad)) / (hi - lo))
+  const runs: string[] = []
+  let cur: string[] = []
+  values.forEach((v, i) => {
+    if (v === null) {
+      if (cur.length) runs.push(cur.join(' '))
+      cur = []
+    } else {
+      cur.push(`${x(i).toFixed(1)},${y(v).toFixed(1)}`)
+    }
+  })
+  if (cur.length) runs.push(cur.join(' '))
+  return runs
+}

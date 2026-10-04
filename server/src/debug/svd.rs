@@ -148,6 +148,17 @@ impl Register {
 }
 
 impl Svd {
+    /// The register that covers `address` and its peripheral, if the file describes one there.
+    pub fn register_at(&self, address: u64) -> Option<(&Peripheral, &Register)> {
+        self.peripherals.iter().find_map(|p| {
+            p.registers.iter().find_map(|r| {
+                let start = p.base.checked_add(r.offset)?;
+                let end = start.checked_add(u64::from(r.size.max(8) / 8))?;
+                (start..end).contains(&address).then_some((p, r))
+            })
+        })
+    }
+
     /// A peripheral by name (case-insensitive).
     pub fn peripheral(&self, name: &str) -> Option<&Peripheral> {
         self.peripherals.iter().find(|p| p.name.eq_ignore_ascii_case(name))
@@ -657,6 +668,14 @@ mod tests {
 
     fn register<'a>(p: &'a Peripheral, name: &str) -> &'a Register {
         p.register(name).unwrap_or_else(|| panic!("no register {name} in {}: {:?}", p.name, p.registers.iter().map(|r| &r.name).collect::<Vec<_>>()))
+    }
+
+    #[test]
+    fn an_address_finds_the_register_that_covers_it() {
+        let svd = parse(CHIP).unwrap();
+        let (p, r) = svd.register_at(0x4001_0002).expect("inside the 32-bit CR1 at 0x40010000");
+        assert_eq!((p.name.as_str(), r.name.as_str()), ("TIM1", "CR1"));
+        assert!(svd.register_at(0x2000_0000).is_none() && svd.register_at(u64::MAX).is_none());
     }
 
     #[test]

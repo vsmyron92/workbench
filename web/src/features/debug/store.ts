@@ -92,7 +92,7 @@ export const useDebug = create<DebugStore>()((set) => ({
   setOutput: (sid, lines) => set((st) => ({ output: { ...st.output, [sid]: lines.slice(-MAX_CONSOLE) } })),
 }))
 
-export type DebugTab = 'frames' | 'console' | 'breakpoints' | 'peripherals'
+export type DebugTab = 'frames' | 'console' | 'breakpoints' | 'peripherals' | 'live'
 
 export type PickerKind = 'debug' | 'attach'
 

@@ -20,7 +20,7 @@
 //!   `PUT breakpoints/mute {muted}`, `POST breakpoints/clear`; `PUT watches {expressions}`.
 
 use axum::extract::{Extension, Path, Query, State};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -56,6 +56,8 @@ pub fn router() -> Router<AppState> {
         .route(&format!("{b}/sessions/{{sid}}/evaluate"), post(evaluate))
         .route(&format!("{b}/sessions/{{sid}}/set-variable"), post(set_variable))
         .route(&format!("{b}/sessions/{{sid}}/completions"), post(completions))
+        .route(&format!("{b}/sessions/{{sid}}/live"), get(live_list).post(live_add).put(live_interval))
+        .route(&format!("{b}/sessions/{{sid}}/live/{{id}}"), delete(live_remove))
         .route(&format!("{b}/sessions/{{sid}}/svd"), get(super::peripherals::list))
         .route(&format!("{b}/sessions/{{sid}}/svd/{{peripheral}}"), get(super::peripherals::detail))
         .route(&format!("{b}/sessions/{{sid}}/svd/{{peripheral}}/{{register}}"), put(super::peripherals::write))
@@ -666,6 +668,44 @@ async fn breakpoints_clear(State(state): State<AppState>, caller: C, Path(pid): 
     state.projects.require(&pid)?;
     session::clear_breakpoints(&state, &pid).await?;
     Ok(Json(session::breakpoints_view(&state, &pid)))
+}
+
+// ---------------------------------------------------------------- live watch
+
+async fn live_list(State(state): State<AppState>, Path((pid, sid)): Path<(String, String)>) -> ApiResult<Json<Value>> {
+    let s = session_of(&state, &pid, &sid)?;
+    Ok(Json(super::live::snapshot(&s)?))
+}
+
+#[derive(Deserialize)]
+struct LiveAddBody {
+    expression: String,
+}
+
+async fn live_add(State(state): State<AppState>, caller: C, Path((pid, sid)): Path<(String, String)>, Json(b): Json<LiveAddBody>) -> ApiResult<Json<Value>> {
+    user_only(&caller)?;
+    let s = session_of(&state, &pid, &sid)?;
+    Ok(Json(json!(super::live::add(&state, &s, &b.expression).await?)))
+}
+
+async fn live_remove(State(state): State<AppState>, caller: C, Path((pid, sid, id)): Path<(String, String, u32)>) -> ApiResult<Json<Value>> {
+    user_only(&caller)?;
+    let s = session_of(&state, &pid, &sid)?;
+    super::live::remove(&state, &s, id).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveIntervalBody {
+    interval_ms: u64,
+}
+
+async fn live_interval(State(state): State<AppState>, caller: C, Path((pid, sid)): Path<(String, String)>, Json(b): Json<LiveIntervalBody>) -> ApiResult<Json<Value>> {
+    user_only(&caller)?;
+    let s = session_of(&state, &pid, &sid)?;
+    super::live::set_interval(&state, &s, b.interval_ms)?;
+    Ok(Json(json!({ "intervalMs": b.interval_ms })))
 }
 
 #[derive(Deserialize)]

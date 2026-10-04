@@ -63,6 +63,8 @@ pub struct ProjectDebug {
     /// Enabled exception filter ids per adapter id (absent: the adapter's defaults).
     pub exception_filters: BTreeMap<String, Vec<String>>,
     pub watches: Vec<String>,
+    /// Expressions of the Live Watch (read from a running target), brought back by every session.
+    pub live_watches: Vec<String>,
     /// "Mute breakpoints": sessions get none while set.
     pub muted: bool,
     /// The launch configuration last started, for the Debug button.
@@ -168,6 +170,15 @@ impl ProjectDebug {
             }
         }
         self.function_breakpoints = out;
+        Ok(())
+    }
+
+    pub fn set_live_watches(&mut self, list: Vec<String>) -> Result<(), ApiError> {
+        let list: Vec<String> = list.into_iter().map(|w| w.trim().to_string()).filter(|w| !w.is_empty()).collect();
+        if list.len() > super::live::MAX_ITEMS || list.iter().any(|w| w.len() > MAX_TEXT || w.contains('\0')) {
+            return Err(ApiError::bad_request(format!("at most {} live watches of up to {MAX_TEXT} characters", super::live::MAX_ITEMS)));
+        }
+        self.live_watches = list;
         Ok(())
     }
 

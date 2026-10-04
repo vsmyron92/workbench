@@ -142,6 +142,11 @@ pub(super) async fn report(s: &std::sync::Arc<super::session::Session>, frame_in
             }
         }
     }
+    // What the Live tab watches, with each value as last read from the running target.
+    let live = s.live.values();
+    if !live.is_empty() {
+        v["live"] = json!(live);
+    }
     let (lines, _) = s.output_after(info.output_seq.saturating_sub(40), 40);
     let text: String = lines.iter().filter(|l| l.category != "telemetry").map(|l| l.text.as_str()).collect();
     v["console"] = json!(tail(&text, 4000));

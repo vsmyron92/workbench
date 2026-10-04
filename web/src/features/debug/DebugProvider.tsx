@@ -13,9 +13,10 @@ import { applyBreakpoints, debugApi, debugKeys, setDebugQueryClient } from './ap
 import { BreakpointDialogHost } from './BreakpointDialog'
 import { installEditorIntegration } from './editor'
 import { isLive, revealFrame } from './logic'
+import { useLive } from './liveStore'
 import { PickerHost } from './Pickers'
 import { useDebug } from './store'
-import type { BreakpointsView, DebugSession, OutputLine } from './types'
+import type { BreakpointsView, DebugSession, LiveEvent, OutputLine } from './types'
 
 /** Load the stack of the selected thread of a suspended session (once per epoch). */
 async function loadStack(s: DebugSession, reveal: boolean) {
@@ -137,6 +138,7 @@ export function DebugProvider({ children }: { children?: ReactNode }) {
     const d = ev.data
     if ('removed' in d) {
       useDebug.getState().remove(d.id)
+      useLive.getState().forget(d.id)
       return
     }
     const st = useDebug.getState()
@@ -176,6 +178,8 @@ export function DebugProvider({ children }: { children?: ReactNode }) {
     }
     useDebug.getState().appendOutput(sessionId, lines)
   })
+
+  useEvent<LiveEvent>('debug.live', (ev) => useLive.getState().apply(ev.data))
 
   useEvent<BreakpointsView>('debug.breakpoints', (ev) => {
     if (ev.projectId) applyBreakpoints(ev.projectId, ev.data)

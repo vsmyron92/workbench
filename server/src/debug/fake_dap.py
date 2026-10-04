@@ -27,6 +27,37 @@ import sys
 import threading
 import time
 
+if "-batch" in sys.argv:
+    # Asked as a batch gdb that reads a program's symbols (Live Watch): `python WB_EXPR = "<expr>"; exec(...)`.
+    if os.environ.get("FAKE_LOG"):
+        with open(os.environ["FAKE_LOG"], "a") as f:
+            f.write(json.dumps({"_batch": sys.argv[1:]}) + "\n")
+    command = [a for a in sys.argv if a.startswith("python WB_EXPR = ")][-1]
+    expr, _ = json.JSONDecoder().raw_decode(command[len("python WB_EXPR = "):])
+    known = {
+        "ticks": (0x20000000, 4, "uint", "volatile uint32_t"),
+        "temperature": (0x20000010, 4, "float", "float"),
+        "offset": (0x20000020, 2, "int", "int16_t"),
+        "samples": (0x20000030, 8, "bytes", "uint8_t [8]"),
+        "cr1": (0x40000000, 4, "uint", "volatile uint32_t"),
+        "sr": (0x40000004, 2, "uint", "volatile uint16_t"),
+        "faulty": (0xDEAD0000, 4, "uint", "uint32_t"),
+        "huge": (0x20001000, 100, "bytes", "char [100]"),
+    }
+    import re
+    numbered = re.fullmatch(r"v(\d+)", expr)
+    if numbered:
+        known[expr] = (0x20002000 + 4 * int(numbered.group(1)), 4, "uint", "uint32_t")
+    if expr in known:
+        a, size, kind, type_name = known[expr]
+        out = {"addr": a, "size": size, "kind": kind, "type": type_name}
+    elif expr == "noaddr":
+        out = {"error": "it has no address in memory: only variables and memory can be watched live"}
+    else:
+        out = {"error": 'No symbol "%s" in current context.' % expr}
+    print("WBLIVE " + json.dumps(out))
+    sys.exit(0)
+
 inp = sys.stdin.buffer
 out = sys.stdout.buffer
 log = open(os.environ["FAKE_LOG"], "a") if os.environ.get("FAKE_LOG") else None

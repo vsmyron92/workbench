@@ -3,7 +3,7 @@
 
 import { useQuery, type QueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
-import type { AdapterView, BreakpointsView, CompletionItem, DebugSession, Frame, FunctionBreakpoint, LaunchConfig, LineBreakpoint, OutputLine, ProcessList, Scope, ServerView, SvdList, SvdPeripheral, SvdRegister, Variable } from './types'
+import type { AdapterView, BreakpointsView, CompletionItem, DebugSession, Frame, FunctionBreakpoint, LaunchConfig, LineBreakpoint, LiveItem, LiveSnapshot, OutputLine, ProcessList, Scope, ServerView, SvdList, SvdPeripheral, SvdRegister, Variable } from './types'
 
 const enc = encodeURIComponent
 export const base = (pid: string) => `/api/projects/${enc(pid)}/debug`
@@ -100,6 +100,11 @@ export const debugApi = {
     api.post<Variable>(`${sbase(pid, sid)}/evaluate`, { expression, context, frameId }),
   setVariable: (pid: string, sid: string, variablesReference: number, name: string, value: string) =>
     api.post<Variable>(`${sbase(pid, sid)}/set-variable`, { variablesReference, name, value }),
+  /** What the Live tab watches (read from the running target by the debug server's Tcl port). */
+  liveList: (pid: string, sid: string, signal?: AbortSignal) => api.get<LiveSnapshot>(`${sbase(pid, sid)}/live`, undefined, signal),
+  liveAdd: (pid: string, sid: string, expression: string) => api.post<LiveItem>(`${sbase(pid, sid)}/live`, { expression }),
+  liveRemove: (pid: string, sid: string, id: number) => api.del<{ ok: true }>(`${sbase(pid, sid)}/live/${id}`),
+  liveInterval: (pid: string, sid: string, intervalMs: number) => api.put<{ intervalMs: number }>(`${sbase(pid, sid)}/live`, { intervalMs }),
   /** The chip's register map (the configuration's `svd`). */
   svd: (pid: string, sid: string, signal?: AbortSignal) => api.get<SvdList>(`${sbase(pid, sid)}/svd`, undefined, signal),
   /** A peripheral's registers; `read` reads them (the program must be suspended), `force` names

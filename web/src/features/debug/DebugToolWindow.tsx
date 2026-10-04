@@ -31,6 +31,7 @@ import { BreakpointsView } from './BreakpointsView'
 import { ConsoleView } from './ConsoleView'
 import { lastFocusedEditor } from './editor'
 import { FramesView } from './FramesView'
+import { LiveWatchView } from './LiveWatchView'
 import { PeripheralsView } from './PeripheralsView'
 import { configIcon } from './icons'
 import { configTitle, defaultConfig, groupConfigs, isLive, remoteChip, stateLabel, stateTone } from './logic'
@@ -175,13 +176,15 @@ export function DebugToolWindow({ projectId }: { projectId: string | null }) {
   if (!projectId) return <EmptyState title="No project selected" />
   const bpCount = (bps.data?.breakpoints.length ?? 0) + (bps.data?.functionBreakpoints.length ?? 0)
   // A remembered Peripherals tab shows the first tab while this session has no register map.
-  const shown: DebugTab = tab === 'peripherals' && !s?.peripherals ? 'frames' : tab
+  const shown: DebugTab = (tab === 'peripherals' && !s?.peripherals) || (tab === 'live' && !s?.live) ? 'frames' : tab
   const tabs: { id: DebugTab; label: string; badge?: ReactNode }[] = [
     { id: 'frames', label: s ? 'Threads & Variables' : 'Start' },
     { id: 'console', label: 'Console', badge: s && (output[s.id]?.length ?? 0) > 0 && tab !== 'console' ? <span className="wb-dbg-tabdot" /> : undefined },
     { id: 'breakpoints', label: 'Breakpoints', badge: bpCount ? <span className="wb-subtle wb-small"> {bpCount}</span> : undefined },
     // The chip's register map: only for a session whose configuration names an SVD file.
     ...(s?.peripherals ? [{ id: 'peripherals' as const, label: 'Peripherals' }] : []),
+    // Variables read from the running program: only where the debug server has a Tcl port (OpenOCD).
+    ...(s?.live ? [{ id: 'live' as const, label: 'Live' }] : []),
   ]
   return (
     <div className="wb-dbg">
@@ -207,6 +210,7 @@ export function DebugToolWindow({ projectId }: { projectId: string | null }) {
         {shown === 'console' && (s ? <ConsoleView s={s} /> : <EmptyState title="No debug session">Output of the program and the debugger shows here.</EmptyState>)}
         {shown === 'breakpoints' && <BreakpointsView projectId={projectId} />}
         {shown === 'peripherals' && s && <PeripheralsView s={s} />}
+        {shown === 'live' && s && <LiveWatchView s={s} />}
       </div>
     </div>
   )
