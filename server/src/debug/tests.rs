@@ -455,6 +455,51 @@ program = "prog.bin"
     assert_eq!(s, 404);
 }
 
+/// The tab of a pre-launch step goes when the step worked (its output stays in the terminal
+/// history, reachable from the Debug header), stays open when it failed so the error can be
+/// read, and is replaced by the next run of the same step: builds do not pile up in the column.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pre_launch_tab_goes_when_the_step_worked_and_stays_when_it_failed() {
+    if !have_python() {
+        eprintln!("skipped: Python 3 is not installed");
+        return;
+    }
+    let env = setup(
+        r#"pre_launch = "echo built > built.txt"
+
+[[debug]]
+name = "broken"
+adapter = "fake"
+program = "prog.bin"
+preLaunch = "echo compiling; exit 7"
+"#,
+    )
+    .await;
+    let tab = |id: &str| env.state.terminals.info(id).map(|i| (i.open, i.status));
+    let worked = env.post("sessions", json!({ "config": "fake" })).await;
+    let end = env.wait_session(worked["id"].as_str().unwrap(), "the end", |v| v["state"] == "terminated").await;
+    let first = end["prelaunchTerminalId"].as_str().unwrap().to_string();
+    // Hidden, not forgotten: the Debug header's button can still show what the build said.
+    assert_eq!(tab(&first), Some((false, crate::terminals::TerminalStatus::Exited)), "a step that worked leaves no tab");
+
+    let a = env.post("sessions", json!({ "config": "broken" })).await;
+    let end = env.wait_session(a["id"].as_str().unwrap(), "the failure", |v| v["state"] == "failed").await;
+    let failed = end["prelaunchTerminalId"].as_str().unwrap().to_string();
+    assert_eq!(tab(&failed), Some((true, crate::terminals::TerminalStatus::Exited)), "a failed step keeps its tab to be read");
+
+    // Run again: the stale failure's tab is replaced by the new one.
+    let b = env.post("sessions", json!({ "config": "broken" })).await;
+    let end = env.wait_session(b["id"].as_str().unwrap(), "the second failure", |v| v["state"] == "failed").await;
+    let again = end["prelaunchTerminalId"].as_str().unwrap().to_string();
+    assert_ne!(again, failed);
+    assert_eq!(tab(&failed).map(|t| t.0), Some(false), "the earlier failure's tab was replaced");
+    assert_eq!(tab(&again).map(|t| t.0), Some(true));
+    // And a worked step of another configuration does not touch it.
+    let c = env.post("sessions", json!({ "config": "fake" })).await;
+    env.wait_session(c["id"].as_str().unwrap(), "the end", |v| v["state"] == "terminated").await;
+    assert_eq!(tab(&again).map(|t| t.0), Some(true));
+}
+
 /// A pre-launch run configuration whose terminal is killed (or closed) was terminated: the
 /// error says so, not "failed (exit code 1)" with the code portable-pty gives a signal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

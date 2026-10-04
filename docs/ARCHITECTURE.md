@@ -1638,7 +1638,10 @@ placeholders and `${workspaceFolder}` expand), `module` (Python `-m`), `args`, `
 `pre_launch` (alias `preLaunch`: a run configuration's name, started through the apps
 slice and waited for until it exits 0 or is ready, or a command run in the run shell
 (`bash -lc`; PowerShell on Windows) in a Command terminal; runs that need confirmation
-are refused), `stop_on_entry` (alias
+are refused; the command's terminal tab, titled `Before debugging: <name>`, is closed (hidden, its
+output kept in the terminal history and reachable from `prelaunchTerminalId`) when it exits 0 unless it
+left background processes, and a failed one keeps its tab until the next run of the same step closes it
+in turn: `session::run_in_terminal`), `stop_on_entry` (alias
 `stopOnEntry`; for gdb it means "stop at `main`": `stopAtBeginningOfMainSubprogram`),
 `console` (`terminal` — the default where the adapter supports `runInTerminal` — or
 `console`), `pid` (attach), `extra` (adapter arguments merged last). Derived ones, after

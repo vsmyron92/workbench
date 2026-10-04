@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.1 - 2026-10-04
+
+- **Debug build tabs no longer pile up.** The terminal tab of a configuration's `pre_launch`
+  step ("Before debugging: …", and Cargo's "Build …") closed only when you closed it, so every
+  configuration left up to three finished tabs in the Agents column. A step that succeeds now
+  closes its own tab (its output stays in the terminal history, and the terminal button in the
+  Debug window's header opens it), a step that fails keeps its tab so the error can be read, and
+  the next run of the same step replaces the old failed tab. A step that left background
+  processes running keeps its tab, since closing it would end them.
+
 ## 0.9.0 - 2026-10-04
 
 - **Sign an account in from Settings.** **Settings → Agents → Accounts** shows whether each account's
