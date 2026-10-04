@@ -2222,6 +2222,54 @@ channels = [{{ name = "UART", port = "{{port3}}" }}, {{ name = "SWO", port = "{{
     env.post(&format!("sessions/{sid}/stop"), json!({})).await;
 }
 
+/// A debug server that says it does not know the chip gets a line in the console about what
+/// that means; one whose probe stops answering (repeated USB timeouts) ends the session at
+/// once with the reason, instead of leaving it to wait out the adapter's timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_debug_server_that_knows_no_chip_or_loses_its_probe_is_noticed() {
+    if !have_python() {
+        eprintln!("skipped: Python 3 is not installed");
+        return;
+    }
+    let env = remote_env(
+        r#"
+[[debug]]
+name = "unknown chip"
+adapter = "fakegdb"
+program = "prog.bin"
+[debug.remote]
+server = "fakesrv"
+download = false
+stop_at = "reset"
+server_args = ["--say", "2026-10-04T12:14:37 WARN common.c: unknown chip id! 0x44d"]
+
+[[debug]]
+name = "stuck probe"
+adapter = "fakegdb"
+program = "prog.bin"
+[debug.remote]
+server = "fakesrv"
+download = false
+stop_at = "reset"
+server_args = ["--chatter", "1.2:4:2026-10-04T12:14:41 ERROR usb.c: READMEM_32BIT send request failed: LIBUSB_ERROR_TIMEOUT"]
+"#,
+    )
+    .await;
+    let sid = env.start("unknown chip").await;
+    env.wait_session(&sid, "the halt", |v| v["state"] == "stopped" || v["state"] == "failed").await;
+    let console = env.console(&sid).await;
+    assert!(console.contains("[workbench]The debug server does not know this chip (id 0x44d)"), "{console}");
+    assert_eq!(env.get(&format!("sessions/{sid}")).await["state"], "stopped", "a hint does not end the session");
+    env.post(&format!("sessions/{sid}/stop"), json!({})).await;
+
+    let sid = env.start("stuck probe").await;
+    env.wait_session(&sid, "the halt", |v| v["state"] == "stopped").await;
+    // The third timeout, seconds later, ends it with the reason and the server's own line.
+    let end = env.wait_session_for(&sid, "the stuck probe", Duration::from_secs(20), |v| v["state"] == "failed").await;
+    let error = end["error"].as_str().unwrap();
+    assert!(error.contains("debug probe") && error.contains("unplug") && error.contains("LIBUSB_ERROR_TIMEOUT"), "{error}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn output_channel_mistakes_are_told_before_anything_runs() {
     if !have_python() {

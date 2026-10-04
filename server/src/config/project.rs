@@ -351,6 +351,12 @@ pub struct RemoteTarget {
     /// Extended, running the program: its path on the remote (default: `program`).
     #[serde(default, alias = "execFile", skip_serializing_if = "Option::is_none")]
     pub exec_file: Option<String>,
+    /// What the target does when the session is stopped: `resume` (the default: it carries on, the
+    /// firmware keeps running) or `halt` (it stays stopped where it was). Done by the debug
+    /// server: built into the OpenOCD preset; J-Link, pyOCD and st-util are left to their own
+    /// behaviour (st-util lets the target run).
+    #[serde(default, alias = "onStop", skip_serializing_if = "Option::is_none")]
+    pub on_stop: Option<String>,
     /// Where the program stops first: `main` (what `stop_on_entry` alone means), `reset`
     /// (halted at the reset vector) or any gdb location (`app_main`, `file.c:42`).
     /// Naming a place stops there without `stop_on_entry`.

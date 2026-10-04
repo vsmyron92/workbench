@@ -74,6 +74,7 @@ or after the session starts; they are placed as soon as gdb has the program's sy
 | `svd` | A CMSIS-SVD file, the chip vendor's register map (project-relative, absolute or `~/`). It adds the **Peripherals** tab ([below](#peripherals-registers-by-name)). |
 | `channels` | Text the program streams out of band (RTT, SWO, a UART on a socket): `[[debug.remote.channels]]`, [below](#output-channels-uart-rtt-swo). |
 | `extended` | Connect with `target extended-remote`: `gdbserver --multi` and Black Magic Probe, [below](#extended-remote-black-magic-probe-gdbserver---multi). With `attach` (a process id or a probe's target number) and `exec_file`. |
+| `on_stop` | What the target does when you press Stop: `resume` (the default: the firmware carries on) or `halt` (it stays stopped where it was). Done by the debug server, so it is built into the OpenOCD preset, which otherwise leaves the core halted when gdb detaches; st-util already lets the target run, and J-Link and pyOCD are left to their own behaviour (not verified). A server you define yourself is yours to configure (OpenOCD: `$_TARGETNAME configure -event gdb-detach { resume }`). |
 | `stop_at` | Where the program stops first: `main` (what `stop_on_entry` means), `reset` (halted at the reset vector, for debugging startup code) or any gdb location (`app_main`, `src/main.c:42`). Naming a place stops there without `stop_on_entry`. |
 
 `init` and `reset` take their defaults from the server; an empty list (`reset = []`)
@@ -393,6 +394,14 @@ Agents can drive the debugger, with no setting to turn on.
   port in `port`, or give a slow server more time with `ready_timeout_s`.
 - *"port 3333 is already in use"*: a `port` you fixed is taken, often by an OpenOCD from
   an earlier run. Stop it, or drop `port` and let Workbench pick one.
+- *"The debug server does not know this chip (id 0x…)"*: the Console says so when the server
+  prints `unknown chip id` (st-util does for chips newer than its tables). The session goes on,
+  but reads and flash writes may fail or hang. Use a newer version of the tool, or add a
+  description of the chip to it.
+- *"The debug server has stopped getting answers from the debug probe"*: three USB timeouts
+  (`LIBUSB_ERROR_TIMEOUT`) within half a minute end the session at once. The probe is stuck:
+  unplug the board's USB cable and plug it back in, then start again. (Without this the session
+  waits out the debugger's own timeout, minutes, with the reason hidden among the server's lines.)
 - *"gdb could not connect to …"*: the server listens but gdb cannot talk to it; the
   console has both sides' words.
 - *"this GDB has no DAP support: GDB 14 or newer is needed"* or *"built without Python"*:

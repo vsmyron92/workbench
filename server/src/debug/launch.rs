@@ -254,6 +254,13 @@ pub async fn adapter_for(state: &AppState, l: &DebugLaunch, language: &str) -> R
 
 // ---------------------------------------------------------------- remote targets
 
+/// What the target does when the session is stopped (`on_stop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnStop {
+    Resume,
+    Halt,
+}
+
 /// Where the program stops first when a remote configuration says `stop_on_entry`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopAt {
@@ -458,7 +465,17 @@ pub fn remote_plan(state: &AppState, project: &Project, l: &DebugLaunch, r: &Rem
     let port = r.port.filter(|p| *p != 0).or_else(|| connect.as_deref().and_then(connect_loopback_port));
     let vars = remote_vars(project, program);
     let own = server.as_ref().map(|s| s.args.as_slice()).unwrap_or_default();
-    let server_args: Vec<String> = own.iter().chain(&r.server_args).map(|a| expand_server_arg(project, &vars, a)).collect();
+    let on_stop = match r.on_stop.as_deref().map(str::trim) {
+        None | Some("") | Some("resume") => OnStop::Resume,
+        Some("halt") => OnStop::Halt,
+        Some(other) => return Err(ApiError::bad_request(format!("{:?}: `on_stop` is `resume` or `halt`, not {other:?}", l.name))),
+    };
+    // What goes after the user's arguments: what needs the target their files define.
+    let post: &[String] = match (&on_stop, &server) {
+        (OnStop::Resume, Some(s)) => &s.post_args,
+        _ => &[],
+    };
+    let server_args: Vec<String> = own.iter().chain(&r.server_args).chain(post).map(|a| expand_server_arg(project, &vars, a)).collect();
     let mut plan = RemotePlan {
         init: r.init.clone().or_else(|| server.as_ref().map(|s| s.init.clone())).unwrap_or_default(),
         reset: r.reset.clone().or_else(|| server.as_ref().map(|s| s.reset.clone())).unwrap_or_default(),
@@ -1287,7 +1304,14 @@ mod tests {
         let fw = d.path().join("fw.elf").display().to_string();
         let all = &r.server_args;
         assert!(all[..6].iter().any(|a| a == "gdb_port {port}"), "the preset's arguments come first, the ports left for the server: {all:?}");
-        assert_eq!(all[6..], ["-f".to_string(), format!("{root}/board.cfg"), "-c".into(), format!("x {fw}"), "-c".into(), format!("y {root}")], "{{root}}, {{program}} and ${{workspaceFolder}} expand");
+        assert_eq!(all[6..12], ["-f".to_string(), format!("{root}/board.cfg"), "-c".into(), format!("x {fw}"), "-c".into(), format!("y {root}")], "{{root}}, {{program}} and ${{workspaceFolder}} expand");
+        // After the user's arguments (their files define the target): let the core run when gdb detaches.
+        assert_eq!(all[12..], ["-c".to_string(), "foreach t [target names] { $t configure -event gdb-detach { resume } }".into()], "{all:?}");
+        // `on_stop = "halt"` leaves it halted; `resume` is the default spelled out; others have no such hook.
+        let tail = |extra: &str| plan(&format!("name = \"a\"\nprogram = \"fw.elf\"\n[remote]\nserver = \"openocd\"\n{extra}")).unwrap().server_args.len();
+        assert_eq!((tail("on_stop = \"halt\""), tail("on_stop = \"resume\""), tail("onStop = \"halt\"")), (6, 8, 6));
+        assert_eq!(plan("name = \"a\"\nprogram = \"fw.elf\"\n[remote]\nserver = \"st-util\"").unwrap().server_args, ["-p", "{port}"]);
+        assert!(plan("name = \"a\"\nprogram = \"fw.elf\"\n[remote]\nserver = \"openocd\"\non_stop = \"explode\"").unwrap_err().message.contains("`on_stop` is `resume` or `halt`"));
         // Overrides: an explicit empty list, no download, another place to stop.
         let r = plan("name = \"a\"\nprogram = \"fw.elf\"\n[remote]\nserver = \"openocd\"\nreset = []\ndownload = false\nstop_at = \"app_main\"").unwrap();
         assert_eq!((r.reset, r.download, r.stop_at), (vec![], false, StopAt::Location("app_main".into())));

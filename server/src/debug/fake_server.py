@@ -6,7 +6,10 @@ connects (a readiness probe must not be one). --fail <text> prints the text to s
 and exits 1 before listening, --die-after <s> exits 7 later, --ignore-term makes it
 shrug off SIGTERM, --pidfile <path> records its pid. --channel PORT=text:<text> (or
 PORT=hex:<hex>) serves that output to every client that connects to PORT (`\\n` is a newline),
-like an RTT or UART port; it may be given more than once.
+like an RTT or UART port; it may be given more than once. --say <text> prints a line to
+stderr at once (`\\n` separates lines; repeatable), --chatter <interval>:<count>:<text> prints
+<text> <count> times <interval> seconds apart once it listens (what a real server prints while
+its probe stops answering).
 """
 import os
 import signal
@@ -19,6 +22,8 @@ args = sys.argv[1:]
 opt = {}
 flags = set()
 channels = []
+says = []
+chatter = []
 i = 0
 while i < len(args):
     if args[i] == "--ignore-term":
@@ -26,6 +31,12 @@ while i < len(args):
         i += 1
     elif args[i] == "--channel":
         channels.append(args[i + 1])
+        i += 2
+    elif args[i] == "--say":
+        says.append(args[i + 1])
+        i += 2
+    elif args[i] == "--chatter":
+        chatter.append(args[i + 1])
         i += 2
     else:
         opt[args[i]] = args[i + 1] if i + 1 < len(args) else ""
@@ -38,6 +49,8 @@ if "ignore-term" in flags and hasattr(signal, "SIGTERM"):
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 print("fake server starting", flush=True)
 sys.stderr.write("fake server note\n")
+for text in says:
+    sys.stderr.write(text.replace("\\n", "\n") + "\n")
 sys.stderr.flush()
 if "--fail" in opt:
     sys.stderr.write(opt["--fail"] + "\n")
@@ -77,6 +90,16 @@ for spec in channels:
 for key in ("--port", "--also"):
     if key in opt:
         threading.Thread(target=serve, args=(opt[key],), daemon=True).start()
+def talk(spec):
+    interval, count, text = spec.split(":", 2)
+    for _ in range(int(count)):
+        time.sleep(float(interval))
+        sys.stderr.write(text + "\n")
+        sys.stderr.flush()
+
+
+for spec in chatter:
+    threading.Thread(target=talk, args=(spec,), daemon=True).start()
 if "--die-after" in opt:
     time.sleep(float(opt["--die-after"]))
     sys.exit(7)

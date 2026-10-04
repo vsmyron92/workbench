@@ -143,6 +143,28 @@ const SERVER_PORTS: std::ops::Range<u32> = 20000..30000;
 /// handed out in the last two minutes. Whoever uses them binds them soon: they are only
 /// checked, not held.
 pub fn free_ports(n: usize) -> std::io::Result<Vec<u16>> {
+    pick_ports(n, bindable)
+}
+
+/// Whether this computer lets us listen on `port`. Windows keeps port ranges for itself
+/// (Hyper-V, WinNAT: `netsh int ipv4 show excludedportrange`) and refuses to bind them with
+/// "forbidden by its access permissions" (WSAEACCES, 10013): a debug server told to listen
+/// there fails to start, and which ranges are kept differs from computer to computer. Nothing
+/// in our range is reserved elsewhere, and there a probe that bound the port would be a
+/// listener for a moment, which a forking thread copies until it execs (see `pick_ports`).
+#[cfg(windows)]
+fn bindable(port: u16) -> bool {
+    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
+#[cfg(not(windows))]
+fn bindable(_port: u16) -> bool {
+    true
+}
+
+/// `n` ports of `SERVER_PORTS` that nothing listens on, that `usable` accepts and that this
+/// process has not issued lately.
+fn pick_ports(n: usize, usable: impl Fn(u16) -> bool) -> std::io::Result<Vec<u16>> {
     use rand::RngCore;
     let mut issued = ISSUED_PORTS.lock();
     issued.retain(|(_, at)| at.elapsed() < Duration::from_secs(120));
@@ -155,7 +177,7 @@ pub fn free_ports(n: usize) -> std::io::Result<Vec<u16>> {
         let port = (SERVER_PORTS.start + rng.next_u32() % (SERVER_PORTS.end - SERVER_PORTS.start)) as u16;
         // (`listening_on` asks the kernel; a probe that bound the port would be a listener
         // for a moment, and one that a forking thread copies stays one until it execs.)
-        let taken = out.contains(&port) || issued.iter().any(|(p, _)| *p == port) || listening_on(port).is_some();
+        let taken = out.contains(&port) || issued.iter().any(|(p, _)| *p == port) || listening_on(port).is_some() || !usable(port);
         if !taken {
             out.push(port);
         }
@@ -488,6 +510,26 @@ pub fn forward_lines<R: tokio::io::AsyncRead + Unpin + Send + 'static>(r: R, mut
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows refuses to bind the port ranges it keeps for itself: a port the computer will
+    /// not let us listen on is never handed to a debug server, however often it is drawn.
+    #[test]
+    fn ports_the_computer_will_not_let_us_bind_are_never_issued() {
+        // Half the range is "reserved": even ports.
+        for _ in 0..20 {
+            let ports = pick_ports(6, |p| p % 2 == 1).unwrap();
+            assert_eq!(ports.len(), 6);
+            assert!(ports.iter().all(|p| p % 2 == 1 && SERVER_PORTS.contains(&u32::from(*p))), "{ports:?}");
+            let mut sorted = ports.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(sorted.len(), 6, "no port twice: {ports:?}");
+        }
+        // Everything in our range is reserved: the system's own choice, like a crowded range.
+        let ports = pick_ports(2, |_| false).unwrap();
+        assert_eq!(ports.len(), 2);
+        assert!(ports.iter().all(|p| !SERVER_PORTS.contains(&u32::from(*p))), "{ports:?}");
+    }
 
     #[test]
     fn docker_exec_loses_its_tty() {

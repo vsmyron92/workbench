@@ -1103,11 +1103,31 @@ async fn start_server(state: &AppState, s: &Arc<Session>, plan: &Plan, r: &launc
     let args = servers::substitute_ports(&args, &ports);
     s.log("workbench", format!("$ {} {}\n", server.command, args.join(" ")), None);
     s.flush(state);
-    let (st, s2) = (state.clone(), s.clone());
+    // The server's own words about a problem that will not fix itself (a chip it does not know,
+    // a probe that stopped answering): said in the console, and for a stuck probe the end of the
+    // session once it is up, instead of the adapter's timeout minutes later.
+    let (st, s2, rt) = (state.clone(), s.clone(), tokio::runtime::Handle::current());
+    let watch = Arc::new(parking_lot::Mutex::new(servers::ServerWatch::default()));
+    let started = Arc::new(AtomicBool::new(false));
+    let started2 = started.clone();
     let proc_ = process::spawn_server(server, &args, &plan.cwd, &plan.env, move |line| {
         s2.note_server_line(&line);
         if !line.trim().is_empty() {
             s2.log("server", format!("{line}\n"), None);
+            match watch.lock().line(&line, std::time::Instant::now()) {
+                Some(servers::Finding::Hint(m)) => s2.log("workbench", format!("{m}\n"), None),
+                Some(servers::Finding::Fatal(m)) if started2.load(Ordering::SeqCst) => {
+                    let (st, s3) = (st.clone(), s2.clone());
+                    rt.spawn(async move {
+                        let tail = s3.server_tail_text();
+                        s3.fail(&st, format!("{m}{tail}"));
+                        finish(&st, &s3).await;
+                    });
+                }
+                // Still starting: its end is told by the startup, with the same lines.
+                Some(servers::Finding::Fatal(m)) => s2.log("workbench", format!("{m}\n"), None),
+                None => {}
+            }
             s2.flush(&st);
         }
     })?;
@@ -1128,6 +1148,7 @@ async fn start_server(state: &AppState, s: &Arc<Session>, plan: &Plan, r: &launc
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
+    started.store(true, Ordering::SeqCst);
     spawn_channels(state, s, r, &ports);
     // From now on its end is the session's (a pulled USB cable, a crash).
     let (st, s2, label, mut gone) = (state.clone(), s.clone(), server.label.clone(), proc_.watch());
@@ -1391,10 +1412,11 @@ async fn run_in_terminal(state: &AppState, s: &Arc<Session>, plan: &Plan, title:
         meta,
     };
     // An earlier run of this step left its finished tab (a failure, which stays open to be read):
-    // this run replaces it. The output of a finished step stays in the terminal history.
+    // this run replaces it, and so goes any finished one nobody has looked at for a day (its
+    // configuration was renamed or removed). The output stays in the terminal history.
+    let now = crate::util::now_ms();
     for t in state.terminals.list() {
-        let ours = t.project_id.as_deref() == Some(s.project_id.as_str()) && t.meta.get("debugPreLaunch") == Some(&Value::Bool(true));
-        if ours && t.title == title && t.open && t.status == crate::terminals::TerminalStatus::Exited {
+        if gives_way(&t, &s.project_id, title, now) {
             let _ = state.terminals.close(state, &t.id, false).await;
         }
     }
@@ -1429,6 +1451,19 @@ async fn run_in_terminal(state: &AppState, s: &Arc<Session>, plan: &Plan, title:
         )),
         None => Err("the pre-launch terminal ended".into()),
     }
+}
+
+/// How long a finished pre-launch tab may stay open when no run of its step replaces it.
+const STALE_PRELAUNCH_MS: i64 = 24 * 3600 * 1000;
+
+/// Whether the open terminal `t` is a finished pre-launch tab of `project` that gives way to a new
+/// run of the step called `title`: the same step's, or one that finished over a day ago.
+fn gives_way(t: &crate::terminals::TerminalInfo, project: &str, title: &str, now: i64) -> bool {
+    t.project_id.as_deref() == Some(project)
+        && t.meta.get("debugPreLaunch") == Some(&Value::Bool(true))
+        && t.open
+        && t.status == crate::terminals::TerminalStatus::Exited
+        && (t.title == title || t.exit.as_ref().is_some_and(|x| now - x.at > STALE_PRELAUNCH_MS))
 }
 
 /// Build a Cargo target in a terminal and return the executable (as the adapter sees it).
@@ -2339,6 +2374,41 @@ pub async fn shutdown(state: &AppState) {
 
 #[cfg(test)]
 mod tests {
+    use crate::terminals::{TerminalInfo, TerminalKind, TerminalStatus};
+
+    fn tab(project: &str, title: &str, status: TerminalStatus, finished_at: Option<i64>, open: bool, meta: Value) -> TerminalInfo {
+        serde_json::from_value(json!({
+            "id": "t", "kind": TerminalKind::Command, "title": title, "projectId": project, "cwd": "/", "argv": [],
+            "status": status, "exit": finished_at.map(|at| json!({ "code": 0, "signal": null, "at": at })),
+            "createdAt": 0, "lastOutputAt": 0, "cols": 80, "rows": 24, "open": open, "pinned": false, "color": null,
+            "order": 0, "agent": null, "meta": meta,
+        }))
+        .unwrap()
+    }
+
+    /// A finished pre-launch tab gives way to the next run of its own step, or goes once it has
+    /// stood a day (a renamed or removed configuration's); nothing else is touched.
+    #[test]
+    fn finished_pre_launch_tabs_give_way_to_their_step_or_to_time() {
+        let now = 10 * STALE_PRELAUNCH_MS;
+        let pre = || json!({ "debug": "d1", "debugPreLaunch": true });
+        let done = |title: &str, ago: i64| tab("proj", title, TerminalStatus::Exited, Some(now - ago), true, pre());
+        let hour = 3600 * 1000;
+        // The same step's: replaced at once.
+        assert!(gives_way(&done("Before debugging: a", hour), "proj", "Before debugging: a", now));
+        // Another step's, finished recently: stays (a failure being read).
+        assert!(!gives_way(&done("Before debugging: b", hour), "proj", "Before debugging: a", now));
+        // Another step's, finished over a day ago: an orphan.
+        assert!(gives_way(&done("Before debugging: gone", STALE_PRELAUNCH_MS + 1), "proj", "Before debugging: a", now));
+        assert!(!gives_way(&done("Before debugging: gone", STALE_PRELAUNCH_MS), "proj", "Before debugging: a", now));
+        // Not a pre-launch tab, another project's, still running, already hidden: untouched.
+        let other = |t: TerminalInfo| gives_way(&t, "proj", "Before debugging: a", now);
+        assert!(!other(tab("proj", "Before debugging: a", TerminalStatus::Exited, Some(0), true, json!({ "run": "a" }))));
+        assert!(!other(tab("elsewhere", "Before debugging: a", TerminalStatus::Exited, Some(0), true, pre())));
+        assert!(!other(tab("proj", "Before debugging: a", TerminalStatus::Running, None, true, pre())));
+        assert!(!other(tab("proj", "Before debugging: a", TerminalStatus::Exited, Some(0), false, pre())));
+    }
+
     use super::*;
 
     #[test]
