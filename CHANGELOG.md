@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1 - 2026-10-04
 
 - **Sign an account in from Settings.** **Settings → Agents → Accounts** shows whether each account's
   CLI is signed in ("Signed in · Claude subscription · max", or "Signed out") and has a **Sign in**
