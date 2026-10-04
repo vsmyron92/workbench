@@ -1390,6 +1390,14 @@ async fn run_in_terminal(state: &AppState, s: &Arc<Session>, plan: &Plan, title:
         rows: None,
         meta,
     };
+    // An earlier run of this step left its finished tab (a failure, which stays open to be read):
+    // this run replaces it. The output of a finished step stays in the terminal history.
+    for t in state.terminals.list() {
+        let ours = t.project_id.as_deref() == Some(s.project_id.as_str()) && t.meta.get("debugPreLaunch") == Some(&Value::Bool(true));
+        if ours && t.title == title && t.open && t.status == crate::terminals::TerminalStatus::Exited {
+            let _ = state.terminals.close(state, &t.id, false).await;
+        }
+    }
     s.log("workbench", format!("$ {command}\n"), None);
     let info = state.terminals.spawn(state, spec).await.map_err(|e| format!("could not start the pre-launch step: {}", e.message))?;
     let id = info.id.clone();
@@ -1402,7 +1410,15 @@ async fn run_in_terminal(state: &AppState, s: &Arc<Session>, plan: &Plan, title:
         .map_err(|_| "the pre-launch terminal vanished".to_string())?
         .clone();
     match exit {
-        Some(e) if e.code == Some(0) => Ok(id),
+        Some(e) if e.code == Some(0) => {
+            // A step that worked has nothing left to say: its tab goes (the output stays in the
+            // terminal history, and the Debug header opens it), so builds do not pile up in the
+            // Agents column. Unless it left background processes: closing the tab would end them.
+            if state.terminals.info(&id).is_some_and(|i| i.lingering == 0) {
+                let _ = state.terminals.close(state, &id, false).await;
+            }
+            Ok(id)
+        }
         Some(e) => Err(format!(
             "the pre-launch step failed ({}); its output is in the terminal \"{title}\"",
             match (e.code, e.signal) {
