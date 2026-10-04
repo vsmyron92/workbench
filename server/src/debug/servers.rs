@@ -48,6 +48,11 @@ pub struct ServerConfig {
     /// How long to wait for the stub's port (default 30).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_timeout_s: Option<u64>,
+    /// The `{port2}` … `{port9}` placeholder that `args` give an OpenOCD-style Tcl RPC port: with
+    /// one, the Debug window's Live tab reads variables of the running program through it. The
+    /// OpenOCD preset has `{port3}`; an empty string turns it off.
+    #[serde(default, alias = "livePort", skip_serializing_if = "Option::is_none")]
+    pub live_port: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub install_hint: Option<String>,
 }
@@ -64,6 +69,9 @@ pub struct Server {
     /// target the user's files define (OpenOCD's `gdb-detach` handler). Not configurable.
     #[serde(skip)]
     pub post_args: Vec<String>,
+    /// See [`ServerConfig::live_port`].
+    #[serde(skip)]
+    pub live_port: Option<String>,
     pub enabled: bool,
     pub builtin: bool,
     #[serde(skip)]
@@ -98,6 +106,7 @@ fn preset(id: &str) -> Option<Server> {
         command: command.into(),
         args: s(args),
         post_args: vec![],
+        live_port: None,
         enabled: true,
         builtin: true,
         env: vec![],
@@ -119,6 +128,7 @@ fn preset(id: &str) -> Option<Server> {
                 "Install OpenOCD (`sudo apt install openocd`, or your vendor's or xPack's build) and name the probe and the chip in `server_args`, e.g. [\"-f\", \"interface/stlink.cfg\", \"-f\", \"target/stm32f4x.cfg\"]. Set [debug.servers.openocd] command when it is not on PATH.",
             );
             o.post_args = s(&["-c", OPENOCD_RESUME_ON_DETACH]);
+            o.live_port = Some("{port3}".into());
             o
         }
         "jlink" => make(
@@ -187,6 +197,9 @@ fn apply(a: &mut Server, c: &ServerConfig) {
     if let Some(t) = c.ready_timeout_s {
         a.ready_timeout = Duration::from_secs(t.clamp(1, 300));
     }
+    if let Some(p) = &c.live_port {
+        a.live_port = Some(p.trim().to_string()).filter(|p| !p.is_empty());
+    }
     if let Some(h) = &c.install_hint {
         a.install_hint = h.clone();
     }
@@ -222,6 +235,7 @@ pub fn all(configured: &BTreeMap<String, ServerConfig>) -> (Vec<Server>, Vec<Str
             command,
             args: vec![],
             post_args: vec![],
+            live_port: None,
             enabled: true,
             builtin: false,
             env: vec![],

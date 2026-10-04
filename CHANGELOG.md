@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.10.0 - 2026-10-04
+
+- **Live Watch.** The Debug window's new **Live** tab shows variables of the program *while it
+  runs*, without stopping it: type a variable (`ticks`, `cfg.limit`, `buf[3]`) or a fixed address
+  (`*(uint32_t*)0x50000014`) and press Enter, and its value is read every 250 ms (50 ms to 5 s) and
+  drawn as a line of its recent readings. A counter climbs, an LED flag draws a square wave. The
+  values come from OpenOCD's Tcl port, which reads memory over SWD while the core runs, so it needs
+  OpenOCD (its preset has it; another OpenOCD takes `live_port` in `[debug.servers.<id>]`). Integers,
+  floats, booleans, pointers and enums are shown by type, as decimal, hex or binary.
+- Only things at a fixed address can be watched: a pointer's target moves, so `*ptr` and `p->x`
+  are refused with the reason. A peripheral register that clears when read is refused when the
+  project's SVD file says so; the others carry a warning. The expressions are remembered per project
+  and come back with the next session, and agents see the latest values in `debug_state`.
+- Checked on a NUCLEO-C092RC: a running blinky's `ticks`, `blink_count` and the LED's output register
+  read live, in both themes.
+
 ## 0.9.2 - 2026-10-04
 
 - **Stop leaves the firmware running.** OpenOCD leaves the core halted when gdb detaches, so Stop

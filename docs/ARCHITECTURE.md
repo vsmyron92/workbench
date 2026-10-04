@@ -1799,6 +1799,37 @@ does not): a crash or SIGKILL never leaves an OpenOCD holding the probe. Rerun p
 new ports included. A child session never inherits the remote plan. Refused with the way out:
 an adapter that is not a gdb.
 
+*Live Watch* (`live.rs`, `tcl.rs`; web `LiveWatchView.tsx`, `liveStore.ts`). gdb's DAP refuses `evaluate` and
+`readMemory` while the program runs (`notStopped`), so a running target is read through OpenOCD's Tcl RPC
+port (a command and `0x1a`, the reply and `0x1a`, no status: a failure is the message). `Server::live_port`
+names it (`{port3}` in the OpenOCD preset; `[debug.servers.<id>] live_port` for another OpenOCD; validated
+in `remote_plan`: a `{port2}`…`{port9}` the arguments use), `start_server` stores the issued port in
+`Session::live` and calls `live::start`. **Trust:** that port runs any OpenOCD command (`exec`); `TclClient`
+can only build `read_memory <addr> <8|16|32|64> <n>` from numbers (its `call` is private), OpenOCD 0.12
+listens on loopback, the routes that add, remove or retime are user-only, and the batch gdb below runs
+in `data_dir/debug/tmp` (Python would import `json.py` from a project directory) with `-nx`,
+`auto-load off` and no debuginfod. *Finding the address:* `resolve` runs the session's own gdb (adapter
+command and arguments minus `-i dap`) as `-batch` on the ELF with a one-line `python WB_EXPR = "<expr>";
+exec(<code>)` that prints `WBLIVE {addr,size,kind,type}` (lvalues only; `kind` from the type code:
+`int`/`uint` by casting -1, `float`, `bool`, `ptr`, `enum`, else `bytes`); it needs no target, so it works
+while the program runs. The address of the ELF is a link-time one, so `fixed_address_only` refuses what
+follows a pointer or an index held in memory (gdb would answer from the file's initial value). At most 16
+items of at most 64 bytes; `peripheral_note` refuses an address inside an SVD register with `readAction`
+and flags the peripheral regions. *Reading:* one poller task per session (`poll`: every `interval_ms`,
+default 250, 50-5000; idle while the session is `Starting`) reads each resolved item with the widest
+aligned access (`tcl::plan_read`), decodes it (`live::decode`: numbers, 64-bit values and bytes as
+text), keeps the last sample, and emits `debug.live {sessionId, samples|items|intervalMs}`; a transport
+failure drops the connection and reconnects next cycle, a command failure is that item's error.
+*Persistence:* the expressions are `ProjectDebug.live_watches`; a new session re-adds them in the
+background after its server is up, an unresolvable one stays with its reason. REST: `GET|POST|PUT
+sessions/{sid}/live` (snapshot, `{expression}`, `{intervalMs}`), `DELETE sessions/{sid}/live/{id}`; `409`
+when the session has no Tcl port. `debug_state` carries `live` (expression, type, value) for agents.
+`SessionInfo.live` turns the web tab on. **Verified:** a fake Tcl server and a fake batch gdb through the
+real session code (values move, kinds, refusals, only `read_memory` on the wire, restore, agents);
+`tcl`/`live` unit tests; on a NUCLEO-C092RC with the real OpenOCD preset and gdb-multiarch: variables of the
+running blinky (`ticks` 500 ms apart, the LED's `ODR` toggling), the Live tab in headless Chrome in both
+themes. **Not verified:** a vendor OpenOCD with `live_port`, a 64-bit target, big-endian parts.
+
 *Server output* (`servers::ServerWatch`, fed by `start_server` for every line of the debug server). An
 `unknown chip id` line (st-util on a chip newer than its tables: it connects, then hangs on the first
 memory read) adds a one-time hint to the console. Three `LIBUSB_ERROR_TIMEOUT` lines within 30 s (a stuck

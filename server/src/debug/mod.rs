@@ -19,12 +19,13 @@
 //! TCP), `adapters` (presets, config, availability), `launch` (launch
 //! configurations, plans, adapter dialects), `servers` (debug servers for remote
 //! targets), `elf` (a program's architecture), `derive` (Cargo, CMake, Python, Go),
+//! `live` and `tcl` (variables read from a running target through OpenOCD's Tcl port),
 //! `breakpoints` (the per-project store), `session` (session manager and event
 //! loop), `procs` (attach picker), `routes`, `tools` (MCP `debug_state`), `agent` (MCP `debug_control`,
 //! `debug_breakpoints`).
 //!
 //! Routes: `/api/projects/{pid}/debug/**` (see `routes`). Events: `debug.session`,
-//! `debug.output`, `debug.breakpoints`.
+//! `debug.output`, `debug.breakpoints`, `debug.live`.
 
 pub mod adapters;
 mod agent;
@@ -35,6 +36,7 @@ pub mod derive;
 pub mod elf;
 pub mod itm;
 pub mod launch;
+pub mod live;
 mod peripherals;
 pub mod process;
 pub mod procs;
@@ -43,6 +45,7 @@ mod routes;
 pub mod servers;
 pub mod session;
 pub mod svd;
+pub mod tcl;
 #[cfg(test)]
 mod tests;
 mod tools;

@@ -69,6 +69,50 @@ export interface DebugSession {
   remote?: { server?: string; target?: string }
   /** The configuration names an SVD file: the Peripherals tab has a register map. */
   peripherals?: boolean
+  /** The Live tab can read variables of the running program (the debug server has a Tcl port). */
+  live?: boolean
+}
+
+// ---------------------------------------------------------------- live watch
+
+export type LiveKind = 'int' | 'uint' | 'float' | 'bool' | 'ptr' | 'enum' | 'bytes'
+
+export interface LiveItem {
+  id: number
+  expression: string
+  /** Absent: it could not be resolved (`error` says why). */
+  address?: number
+  size: number
+  kind: LiveKind
+  typeName: string
+  /** A peripheral register: reading some of them changes the chip. */
+  peripheral?: string
+  error?: string
+}
+
+/** A number, or a string for what a JSON number cannot hold exactly (64-bit values, bytes). */
+export type LiveRaw = number | string | boolean
+
+export interface LiveSample {
+  id: number
+  /** Milliseconds since the epoch. */
+  t: number
+  v?: LiveRaw
+  e?: string
+}
+
+export interface LiveSnapshot {
+  items: LiveItem[]
+  intervalMs: number
+  last: Record<string, LiveSample>
+}
+
+/** `debug.live`: the list changed (`items`), the interval changed, or one round of readings. */
+export interface LiveEvent {
+  sessionId: string
+  items?: LiveItem[]
+  intervalMs?: number
+  samples?: LiveSample[]
 }
 
 export interface OutputLine {

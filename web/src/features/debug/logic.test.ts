@@ -16,6 +16,11 @@ import {
   remoteChip,
   remoteLines,
   fieldRange,
+  formatLiveValue,
+  LIVE_HISTORY,
+  numericValue,
+  pushSample,
+  sparklineRuns,
   fieldValueText,
   filterPeripherals,
   filterRegisters,
@@ -480,5 +485,74 @@ describe('peripherals', () => {
     expect(registerNote(reg())).toBe('')
     // A value wins over a stale note.
     expect(registerNote(reg({ value: '0x0', skipped: 'x' }))).toBe('')
+  })
+})
+
+describe('live watch', () => {
+  it('turns a reading into the number a sparkline plots', () => {
+    expect(numericValue(42)).toBe(42)
+    expect(numericValue(-1.5)).toBe(-1.5)
+    expect(numericValue(true)).toBe(1)
+    expect(numericValue(false)).toBe(0)
+    expect(numericValue('18446744073709551615')).toBe(18446744073709552000)
+    expect(numericValue('-7')).toBe(-7)
+    // Bytes, NaN and a missing reading are not plotted.
+    expect(numericValue('01 ab ff')).toBeNull()
+    expect(numericValue('NaN')).toBeNull()
+    expect(numericValue(Number.NaN)).toBeNull()
+    expect(numericValue(undefined)).toBeNull()
+  })
+
+  it('keeps the newest readings', () => {
+    expect(pushSample(undefined, 1)).toEqual([1])
+    expect(pushSample([1, 2], 3)).toEqual([1, 2, 3])
+    const full = Array.from({ length: LIVE_HISTORY }, (_, i) => i)
+    const next = pushSample(full, 999)
+    expect(next).toHaveLength(LIVE_HISTORY)
+    expect([next[0], next[next.length - 1]]).toEqual([1, 999])
+    expect(pushSample([1, 2, 3], 4, 3)).toEqual([2, 3, 4])
+  })
+
+  it('shows integers in the radix asked for, a negative one as its two\'s complement', () => {
+    expect(formatLiveValue('uint', 4, 1307)).toBe('1307')
+    expect(formatLiveValue('uint', 4, 1307, 'hex')).toBe('0x0000051b')
+    expect(formatLiveValue('uint', 1, 5, 'bin')).toBe('0b0000_0101')
+    expect(formatLiveValue('int', 2, -16, 'dec')).toBe('-16')
+    expect(formatLiveValue('int', 2, -16, 'hex')).toBe('0xfff0')
+    expect(formatLiveValue('int', 1, -1, 'bin')).toBe('0b1111_1111')
+    expect(formatLiveValue('uint', 8, '18446744073709551615', 'hex')).toBe('0xffffffffffffffff')
+    expect(formatLiveValue('uint', 8, '18446744073709551615')).toBe('18446744073709551615')
+    expect(formatLiveValue('enum', 4, 2)).toBe('2')
+    // A pointer is always hex, sized by the target.
+    expect(formatLiveValue('ptr', 4, 0x20000000)).toBe('0x20000000')
+    expect(formatLiveValue('ptr', 4, 0)).toBe('0x00000000')
+  })
+
+  it('shows the other kinds as they are', () => {
+    expect(formatLiveValue('bool', 1, true)).toBe('true')
+    expect(formatLiveValue('bool', 1, false)).toBe('false')
+    expect(formatLiveValue('float', 4, 1.5)).toBe('1.5')
+    expect(formatLiveValue('float', 4, 0.1 + 0.2)).toBe('0.3')
+    expect(formatLiveValue('float', 8, 3.141592653589793)).toBe('3.141593')
+    expect(formatLiveValue('float', 4, 'NaN')).toBe('NaN')
+    expect(formatLiveValue('float', 4, '-inf')).toBe('-inf')
+    expect(formatLiveValue('bytes', 3, '01 ab ff')).toBe('01 ab ff')
+    expect(formatLiveValue('uint', 4, undefined)).toBe('—')
+    expect(formatLiveValue('uint', 4, 'not a number')).toBe('not a number')
+  })
+
+  it('draws the readings as runs of a polyline, split where a reading failed', () => {
+    expect(sparklineRuns([], 100, 20)).toEqual([])
+    expect(sparklineRuns([null, null], 100, 20)).toEqual([])
+    // A constant series sits in the middle; one point is a run of one.
+    expect(sparklineRuns([5, 5, 5], 100, 20)).toEqual(['2.0,10.0 50.0,10.0 98.0,10.0'])
+    expect(sparklineRuns([7], 100, 20)).toEqual(['50.0,10.0'])
+    // The smallest value is at the bottom, the largest at the top, the oldest on the left.
+    expect(sparklineRuns([0, 10], 100, 20)).toEqual(['2.0,18.0 98.0,2.0'])
+    // A gap splits the line in two.
+    const runs = sparklineRuns([1, 2, null, 3, 4], 100, 20)
+    expect(runs).toHaveLength(2)
+    expect(runs[0].split(' ')).toHaveLength(2)
+    expect(runs[1].split(' ')).toHaveLength(2)
   })
 })

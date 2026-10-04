@@ -340,11 +340,43 @@ A configuration with `server = "gdbserver"` and the program's path then debugs i
 gdbserver, the way a remote Linux target is debugged.
 
 `command`, `args`, `label`, `env`, `enabled`, `init`, `reset`, `download`, `ready_timeout_s`
-(how long to wait for the port, default 30) and `install_hint` are the fields. A server
+(how long to wait for the port, default 30), `live_port` (the `{port2}`…`{port9}` your `args` give an
+OpenOCD-style Tcl port, which turns on the [Live tab](#live-watch-variables-of-the-running-program))
+and `install_hint` are the fields. A server
 must listen on `{port}` (or on the `port` or loopback `connect` of the configuration):
 that is how Workbench knows it is ready. It waits for the port without connecting to it,
 because servers such as `st-util`, `gdbserver --once` and pyOCD serve a single connection
 and exit.
+
+## Live Watch: variables of the running program
+
+The **Live** tab shows variables of the program *while it runs*, without stopping it: type a
+name and press Enter, and its value is read every 250 ms (50 ms to 5 s, the menu beside the box)
+and drawn as a line of its recent readings. A counter climbs, a flag draws a square wave, a
+sensor value wanders.
+
+- **How.** gdb cannot read a running target, so the values come from OpenOCD's Tcl port, which
+  reads memory over SWD while the core runs. The OpenOCD preset has it; another OpenOCD (a
+  vendor's build) takes `live_port = "{port3}"` in `[debug.servers.<id>]`. J-Link, pyOCD and
+  st-util have no such port, so no Live tab. Workbench sends that port nothing but `read_memory`.
+- **What can be watched.** Things at a fixed address: a global (`ticks`), a member (`cfg.limit`),
+  an element (`buf[3]`) and a fixed address (`*(uint32_t*)0x50000014`), up to 64 bytes, 16 at
+  once. Integers, floats, booleans, pointers and enums are shown by their type (right-click:
+  decimal, hex or binary; double-click cycles); arrays and structs as bytes. The address is found
+  in the program's ELF by a separate batch gdb, so it works while the program runs. A pointer's
+  target moves, so `*ptr`, `p->x` and `buf[i]` are refused with the reason: watch the pointer
+  itself, or the address.
+- **Peripheral registers** are memory too, and reading some of them changes the chip (a status flag
+  that clears when read). With the configuration's `svd` file such a register is refused by name
+  (read it in the Peripherals tab, when you choose to); any other address in the peripheral
+  regions carries a warning triangle.
+- **Readings are not snapshots.** A 64-bit value or two values read one after the other can
+  tear while the program runs, and values are little-endian (every Cortex-M and RISC-V part is).
+  A value that cannot be read (a bad address, a chip in reset) shows the debug server's message
+  and the others go on.
+- **Remembered.** The expressions belong to the project: the next session watches them again (one
+  that no longer resolves after a rebuild stays in the list with the reason). Agents see the
+  latest values in `debug_state`.
 
 ## While it runs
 

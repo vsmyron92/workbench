@@ -2813,3 +2813,225 @@ async fn agents_start_evaluate_rerun_and_attach() {
     let err = (tool.handler)(env.state.clone(), crate::mcp::McpCtx::default(), json!({ "config": "fake" })).await.err().unwrap();
     assert_eq!(err.code, "bad_request");
 }
+
+
+// ---------------------------------------------------------------- the Live tab
+
+const LIVE_SERVERS: &str = r#"
+[servers.fakelive]
+label = "Fake OpenOCD"
+command = {python}
+args = [{pyargs}{server}, "--port", "{port}", "--also", "{port2}", "--tcl", "{port3}", "--pidfile", {pidfile}]
+live_port = "{port3}"
+download = false
+
+[servers.oops]
+label = "Oops"
+command = {python}
+args = [{pyargs}{server}, "--port", "{port}", "--pidfile", {pidfile}]
+live_port = "{port3}"
+"#;
+
+/// Variables read from the running target through the debug server's Tcl port: found in the ELF by
+/// a batch gdb, read over and over, shown with their kind; what a read would disturb, what cannot
+/// be found and what is too big is refused with the reason; the Tcl port is sent nothing but
+/// `read_memory`; the expressions come back with the next session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_watch_reads_the_running_target_through_the_tcl_port() {
+    if !have_python() {
+        eprintln!("skipped: Python 3 is not installed");
+        return;
+    }
+    let env = setup_with(
+        r#"
+[[debug]]
+name = "board"
+adapter = "fakegdb"
+program = "prog.bin"
+[debug.remote]
+server = "fakelive"
+stop_at = "reset"
+svd = "chip.svd"
+server_args = ["--tcl-log", "{root}/tcl.log"]
+
+[[debug]]
+name = "plain"
+adapter = "fakegdb"
+program = "prog.bin"
+[debug.remote]
+server = "fakesrv"
+download = false
+stop_at = "reset"
+
+[[debug]]
+name = "oops"
+adapter = "fakegdb"
+program = "prog.bin"
+[debug.remote]
+server = "oops"
+"#,
+        Opts { debug_toml: &format!("{REMOTE_DEBUG}\n{LIVE_SERVERS}"), files: &[("chip.svd", CHIP_SVD)], ..Default::default() },
+    )
+    .await;
+    let cfg = env.state.config.read().debug.clone();
+    super::adapters::seed_probe(&env.state, &super::adapters::find(&cfg, "fakegdb").unwrap(), super::adapters::Availability { available: true, path: None, version: Some("fake gdb 99".into()), problem: None });
+    // A `live_port` the server's arguments do not use is a mistake of the configuration.
+    let configs = env.get("configs").await;
+    let problems = configs["configs"].as_array().unwrap().iter().find(|c| c["name"] == "oops").unwrap()["problems"].to_string();
+    assert!(problems.contains("live_port"), "{problems}");
+
+    // A session whose server has no Tcl port has no live view.
+    let plain = env.start("plain").await;
+    let info = env.wait_session(&plain, "the halt", |v| v["state"] == "stopped").await;
+    assert!(info["live"].is_null() || info["live"] == false, "{info}");
+    let (s, v) = env.send(reqwest::Method::GET, &format!("sessions/{plain}/live"), json!({})).await;
+    assert_eq!(s, 409, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("no live view"));
+    env.post(&format!("sessions/{plain}/stop"), json!({})).await;
+
+    let sid = env.start("board").await;
+    let info = env.wait_session(&sid, "the halt", |v| v["state"] == "stopped").await;
+    assert_eq!(info["live"], true, "{info}");
+    let live = || async { env.get(&format!("sessions/{sid}/live")).await };
+    let add = |e: &str| {
+        let (path, body) = (format!("sessions/{sid}/live"), json!({ "expression": e }));
+        let env = &env;
+        async move { env.send(reqwest::Method::POST, &path, body).await }
+    };
+    let wait_value = |id: u64| {
+        let (env, sid) = (&env, sid.clone());
+        async move {
+            for _ in 0..200 {
+                let l = env.get(&format!("sessions/{sid}/live")).await;
+                if let Some(s) = l["last"].get(id.to_string()).filter(|s| s["v"].is_number() || s["v"].is_string() || s["e"].is_string()) {
+                    return s.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!("no sample of {id}: {}", live_dump(&env, &sid).await);
+        }
+    };
+    async fn live_dump(env: &Env, sid: &str) -> String {
+        env.get(&format!("sessions/{sid}/live")).await.to_string()
+    }
+
+    // An unsigned word: found at its address, read again and again, counting up.
+    let (s, ticks) = add("ticks").await;
+    assert_eq!(s, 200, "{ticks}");
+    assert_eq!((ticks["address"].clone(), ticks["size"].clone(), ticks["kind"].clone(), ticks["typeName"].clone()), (json!(0x2000_0000u64), json!(4), json!("uint"), json!("volatile uint32_t")));
+    let id = ticks["id"].as_u64().unwrap();
+    let first = wait_value(id).await["v"].as_u64().unwrap();
+    let mut later = first;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        later = live().await["last"][id.to_string()]["v"].as_u64().unwrap_or(first);
+        if later > first + 2 {
+            break;
+        }
+    }
+    assert!(later > first + 2, "the value moves while the program 'runs': {first} -> {later}");
+    assert_eq!(first & !0xfff, 0xE000_0000 & !0xfff, "the word at 0x20000000 is 0xE0000000 + the number of reads: {first:#x}");
+    // The same expression again is the same item.
+    assert_eq!(add("ticks").await.1["id"], ticks["id"]);
+
+    // Kinds: a float, a signed halfword (read as 16 bits), bytes, a peripheral register.
+    let (_, temperature) = add("temperature").await;
+    let t = wait_value(temperature["id"].as_u64().unwrap()).await["v"].as_f64().unwrap();
+    assert!(t >= 2.0 && (t * 2.0).fract() == 0.0, "1.5 + 0.5 per read: {t}");
+    let (_, offset) = add("offset").await;
+    assert_eq!(offset["kind"], "int");
+    let raw = (wait_value(offset["id"].as_u64().unwrap()).await["v"].as_i64().unwrap() as u64) & 0xffff;
+    assert!(raw.wrapping_sub((0x2000_0020u64 * 7) & 0xffff) & 0xffff < 1000, "the halfword of 0x20000020: {raw:#x}");
+    let (_, samples) = add("samples").await;
+    let bytes = wait_value(samples["id"].as_u64().unwrap()).await["v"].as_str().unwrap().to_string();
+    assert_eq!(bytes.split(' ').count(), 8, "{bytes}");
+    let (s, cr1) = add("cr1").await;
+    assert_eq!((s, cr1["peripheral"].as_str()), (200, Some("TIMX.CR1")), "{cr1}");
+    // A read the server cannot do is that value's error; the others go on.
+    let (_, faulty) = add("faulty").await;
+    let e = wait_value(faulty["id"].as_u64().unwrap()).await;
+    assert!(e["e"].as_str().unwrap().contains("failed to read memory"), "{e}");
+
+    // Refused, with the reason.
+    for (expr, status, needle) in [
+        ("sr", 409, "TIMX.SR changes the chip"),
+        ("*ptr", 400, "fixed place"),
+        ("p->x", 400, "fixed place"),
+        ("nosuch", 400, "No symbol \"nosuch\""),
+        ("noaddr", 400, "no address in memory"),
+        ("huge", 400, "at most 64"),
+        ("two\nlines", 400, "one line"),
+    ] {
+        let (s, v) = add(expr).await;
+        assert_eq!(s, status, "{expr}: {v}");
+        assert!(v["error"]["message"].as_str().unwrap().contains(needle), "{expr}: {v}");
+    }
+    // The cap.
+    let mut n = live().await["items"].as_array().unwrap().len();
+    for i in 0.. {
+        let (s, v) = add(&format!("v{i}")).await;
+        if n == super::live::MAX_ITEMS {
+            assert_eq!(s, 400, "{v}");
+            assert!(v["error"]["message"].as_str().unwrap().contains("at most 16"));
+            break;
+        }
+        assert_eq!(s, 200, "{v}");
+        n += 1;
+    }
+
+    // The interval is bounded.
+    let put = |ms: u64| {
+        let path = format!("sessions/{sid}/live");
+        let env = &env;
+        async move { env.send(reqwest::Method::PUT, &path, json!({ "intervalMs": ms })).await }
+    };
+    assert_eq!(put(50).await.0, 200);
+    assert_eq!(put(10).await.0, 400);
+    assert_eq!(live().await["intervalMs"], 50);
+
+    // Only `read_memory` ever reached the Tcl port.
+    let wire = std::fs::read_to_string(env.root.join("tcl.log")).unwrap();
+    assert!(wire.lines().count() > 20, "polled a good many times");
+    assert!(wire.lines().all(|l| l.starts_with("read_memory 0x") && l.split(' ').count() == 4), "{wire}");
+    assert!(wire.lines().any(|l| l == "read_memory 0x20000000 32 1") && wire.lines().any(|l| l == "read_memory 0x20000020 16 1"));
+    // The batch gdb: the session's own arguments, no init files, no auto-loading.
+    let log = std::fs::read_to_string(&env.log).unwrap();
+    let batch: Vec<Value> = log.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v.get("_batch").cloned()).collect();
+    assert!(batch.len() >= 10, "one per expression: {}", batch.len());
+    let args: Vec<&str> = batch[0].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
+    assert!(args.contains(&"-nx") && args.contains(&"-batch") && args.contains(&"set auto-load off"), "{args:?}");
+
+    // Agents are told the values; they cannot change what is watched.
+    let state = env.agent("debug_state", json!({})).await.unwrap();
+    let mine = state["sessions"].as_array().unwrap().iter().find(|s| s["sessionId"] == sid.as_str()).expect("the session in debug_state");
+    let watched: Vec<&str> = mine["live"].as_array().expect("live values in debug_state").iter().filter_map(|v| v["expression"].as_str()).collect();
+    assert!(watched.contains(&"ticks") && watched.contains(&"temperature"), "{watched:?}");
+    let ctx = crate::mcp::McpCtx::default();
+    let base = format!("/api/projects/{}/debug/sessions/{sid}/live", env.pid());
+    assert!(crate::mcp::call_api(&env.state, axum::http::Method::GET, &base, None, &ctx).await.is_ok());
+    assert_eq!(crate::mcp::call_api(&env.state, axum::http::Method::POST, &base, Some(json!({ "expression": "ticks" })), &ctx).await.unwrap_err().status, 403);
+    assert_eq!(crate::mcp::call_api(&env.state, axum::http::Method::DELETE, &format!("{base}/{id}"), None, &ctx).await.unwrap_err().status, 403);
+
+    // Removing one forgets it for good: the next session of the project brings the rest back.
+    let (s, _) = env.send(reqwest::Method::DELETE, &format!("sessions/{sid}/live/{}", temperature["id"]), json!({})).await;
+    assert_eq!(s, 200);
+    assert_eq!(env.send(reqwest::Method::DELETE, &format!("sessions/{sid}/live/{}", temperature["id"]), json!({})).await.0, 404);
+    let kept = env.state.debug.store.get(&env.state.paths.data_dir, &env.pid()).live_watches;
+    assert_eq!(kept.len(), 15);
+    assert!(kept.contains(&"ticks".to_string()) && !kept.contains(&"temperature".to_string()), "{kept:?}");
+    env.post(&format!("sessions/{sid}/stop"), json!({})).await;
+    let again = env.start("board").await;
+    env.wait_session(&again, "the halt", |v| v["state"] == "stopped").await;
+    let mut resolved = 0;
+    for _ in 0..300 {
+        let l = env.get(&format!("sessions/{again}/live")).await;
+        resolved = l["items"].as_array().unwrap().iter().filter(|i| i["address"].is_number()).count();
+        if resolved == 15 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // All 15 kept expressions are found again (`faulty` resolves too: it fails only when read).
+    assert_eq!(resolved, 15, "all the kept expressions are found again in the new session");
+    env.post(&format!("sessions/{again}/stop"), json!({})).await;
+}

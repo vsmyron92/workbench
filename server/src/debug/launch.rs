@@ -471,6 +471,12 @@ pub fn remote_plan(state: &AppState, project: &Project, l: &DebugLaunch, r: &Rem
         Some(other) => return Err(ApiError::bad_request(format!("{:?}: `on_stop` is `resume` or `halt`, not {other:?}", l.name))),
     };
     // What goes after the user's arguments: what needs the target their files define.
+    if let Some(ph) = server.as_ref().and_then(|s| s.live_port.clone()) {
+        let own_args = server.as_ref().map(|s| s.args.iter().chain(&r.server_args).any(|a| a.contains(&ph))).unwrap_or(false);
+        if servers::port_index(&ph).is_none_or(|i| i == 0) || !own_args {
+            return Err(ApiError::bad_request(format!("{:?}: the server's `live_port` {ph} must be a {{port2}} … {{port9}} placeholder its arguments use for the Tcl port", l.name)));
+        }
+    }
     let post: &[String] = match (&on_stop, &server) {
         (OnStop::Resume, Some(s)) => &s.post_args,
         _ => &[],

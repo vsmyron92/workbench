@@ -198,6 +198,9 @@ pub struct SessionInfo {
     /// The configuration names an SVD file: the Peripherals view has a register map.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub peripherals: bool,
+    /// The Live tab can read variables of the running program (the debug server has a Tcl port).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub live: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -341,6 +344,8 @@ pub struct Session {
     server: Mutex<Option<ServerProc>>,
     /// The chip's SVD file, read once (the error is kept too).
     svd: tokio::sync::OnceCell<Result<Arc<super::svd::Svd>, String>>,
+    /// Variables read from the running target (Live tab).
+    pub(super) live: super::live::LiveWatch,
     initialized: watch::Sender<bool>,
     terminated: AtomicBool,
     finished: AtomicBool,
@@ -417,6 +422,7 @@ impl Session {
             proc_: tokio::sync::Mutex::new(None),
             server: Mutex::new(None),
             svd: tokio::sync::OnceCell::new(),
+            live: super::live::LiveWatch::default(),
             initialized: tx,
             terminated: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -429,6 +435,11 @@ impl Session {
 
     pub fn state(&self) -> SessionState {
         self.data.lock().state.unwrap_or(SessionState::Starting)
+    }
+
+    /// The program's ELF on this computer (the Live tab's batch gdb reads its symbols).
+    pub(super) fn program_path(&self) -> Option<PathBuf> {
+        self.plan.program.clone()
     }
 
     pub fn is_live(&self) -> bool {
@@ -484,6 +495,7 @@ impl Session {
                 target: d.remote_target.clone(),
             }),
             peripherals: self.plan.remote.as_ref().is_some_and(|r| r.svd.is_some()) && self.plan.raw_arguments.is_none(),
+            live: self.live.enabled(),
         }
     }
 
@@ -1149,6 +1161,12 @@ async fn start_server(state: &AppState, s: &Arc<Session>, plan: &Plan, r: &launc
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     started.store(true, Ordering::SeqCst);
+    // The Live tab: variables read through the server's Tcl port while the program runs.
+    if let Some(p) = server.live_port.as_deref().and_then(servers::port_index).and_then(|i| ports.get(i).copied()) {
+        s.live.set_port(p);
+        s.update(|_| {});
+        super::live::start(state, s);
+    }
     spawn_channels(state, s, r, &ports);
     // From now on its end is the session's (a pulled USB cable, a crash).
     let (st, s2, label, mut gone) = (state.clone(), s.clone(), server.label.clone(), proc_.watch());
