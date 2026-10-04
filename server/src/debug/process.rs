@@ -143,7 +143,7 @@ const SERVER_PORTS: std::ops::Range<u32> = 20000..30000;
 /// handed out in the last two minutes. Whoever uses them binds them soon: they are only
 /// checked, not held.
 pub fn free_ports(n: usize) -> std::io::Result<Vec<u16>> {
-    pick_ports(n, bindable)
+    pick_ports(&mut ISSUED_PORTS.lock(), n, bindable)
 }
 
 /// Whether this computer lets us listen on `port`. Windows keeps port ranges for itself
@@ -162,11 +162,11 @@ fn bindable(_port: u16) -> bool {
     true
 }
 
-/// `n` ports of `SERVER_PORTS` that nothing listens on, that `usable` accepts and that this
-/// process has not issued lately.
-fn pick_ports(n: usize, usable: impl Fn(u16) -> bool) -> std::io::Result<Vec<u16>> {
+/// `n` ports of `SERVER_PORTS` that nothing listens on, that `usable` accepts and that are not in
+/// `issued` (what was handed out lately, which this adds to). The caller owns the registry: the
+/// shared one is locked for as long as this runs, which every server start waits for.
+fn pick_ports(issued: &mut Vec<(u16, std::time::Instant)>, n: usize, usable: impl Fn(u16) -> bool) -> std::io::Result<Vec<u16>> {
     use rand::RngCore;
-    let mut issued = ISSUED_PORTS.lock();
     issued.retain(|(_, at)| at.elapsed() < Duration::from_secs(120));
     let mut out: Vec<u16> = vec![];
     let mut rng = rand::rng();
@@ -177,7 +177,7 @@ fn pick_ports(n: usize, usable: impl Fn(u16) -> bool) -> std::io::Result<Vec<u16
         let port = (SERVER_PORTS.start + rng.next_u32() % (SERVER_PORTS.end - SERVER_PORTS.start)) as u16;
         // (`listening_on` asks the kernel; a probe that bound the port would be a listener
         // for a moment, and one that a forking thread copies stays one until it execs.)
-        let taken = out.contains(&port) || issued.iter().any(|(p, _)| *p == port) || listening_on(port).is_some() || !usable(port);
+        let taken = !usable(port) || out.contains(&port) || issued.iter().any(|(p, _)| *p == port) || listening_on(port).is_some();
         if !taken {
             out.push(port);
         }
@@ -515,9 +515,11 @@ mod tests {
     /// not let us listen on is never handed to a debug server, however often it is drawn.
     #[test]
     fn ports_the_computer_will_not_let_us_bind_are_never_issued() {
-        // Half the range is "reserved": even ports.
+        // Half the range is "reserved": even ports. (A registry of its own: the shared one is locked
+        // while ports are picked, and this test's 2000 draws with nothing usable take seconds.)
+        let mut issued = vec![];
         for _ in 0..20 {
-            let ports = pick_ports(6, |p| p % 2 == 1).unwrap();
+            let ports = pick_ports(&mut issued, 6, |p| p % 2 == 1).unwrap();
             assert_eq!(ports.len(), 6);
             assert!(ports.iter().all(|p| p % 2 == 1 && SERVER_PORTS.contains(&u32::from(*p))), "{ports:?}");
             let mut sorted = ports.clone();
@@ -526,7 +528,7 @@ mod tests {
             assert_eq!(sorted.len(), 6, "no port twice: {ports:?}");
         }
         // Everything in our range is reserved: the system's own choice, like a crowded range.
-        let ports = pick_ports(2, |_| false).unwrap();
+        let ports = pick_ports(&mut issued, 2, |_| false).unwrap();
         assert_eq!(ports.len(), 2);
         assert!(ports.iter().all(|p| !SERVER_PORTS.contains(&u32::from(*p))), "{ports:?}");
     }
