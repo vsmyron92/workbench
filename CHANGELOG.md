@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.2 - 2026-10-04
 
 - **Stop leaves the firmware running.** OpenOCD leaves the core halted when gdb detaches, so Stop
   froze the board (the LED stuck). The OpenOCD preset now makes the target resume on Stop; the new
