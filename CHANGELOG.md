@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.2 - 2026-10-04
+
+- **Stop leaves the firmware running.** OpenOCD leaves the core halted when gdb detaches, so Stop
+  froze the board (the LED stuck). The OpenOCD preset now makes the target resume on Stop; the new
+  `on_stop = "halt"` in `[debug.remote]` keeps the old behaviour. st-util already let the target run.
+- **A debug server that goes wrong says so.** The Console explains `unknown chip id` (st-util on a
+  chip newer than its tables) when the server prints it, and a probe that stops answering (three USB
+  timeouts in half a minute) ends the session at once with the reason, instead of hanging until the
+  debugger's own timeout.
+- **Windows: debug servers no longer get a port Windows keeps for itself.** Session ports are drawn
+  at random, and a draw inside a reserved range (`WinError 10013`) made the server fail to start.
+- Finished "Before debugging" tabs of a configuration that was renamed or removed close on the next
+  debug run once they are a day old.
+
 ## 0.9.1 - 2026-10-04
 
 - **Debug build tabs no longer pile up.** The terminal tab of a configuration's `pre_launch`

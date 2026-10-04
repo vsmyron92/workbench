@@ -60,6 +60,10 @@ pub struct Server {
     pub label: String,
     pub command: String,
     pub args: Vec<String>,
+    /// Arguments that go after the configuration's own `server_args`, for what needs the
+    /// target the user's files define (OpenOCD's `gdb-detach` handler). Not configurable.
+    #[serde(skip)]
+    pub post_args: Vec<String>,
     pub enabled: bool,
     pub builtin: bool,
     #[serde(skip)]
@@ -73,6 +77,11 @@ pub struct Server {
 }
 
 pub const PRESETS: &[&str] = &["openocd", "jlink", "pyocd", "st-util", "qemu-arm"];
+
+/// OpenOCD leaves the core halted when gdb detaches (Workbench's Stop), which freezes the
+/// firmware: let it run instead. Goes after the user's `-f` files, whose targets it names;
+/// `on_stop = "halt"` leaves it out. (st-util resumes by itself.)
+const OPENOCD_RESUME_ON_DETACH: &str = "foreach t [target names] { $t configure -event gdb-detach { resume } }";
 
 /// J-Link's command-line GDB server: `JLinkGDBServerCLExe` (`JLinkGDBServerCL` on
 /// Windows); the bare `JLinkGDBServer` opens a window.
@@ -88,6 +97,7 @@ fn preset(id: &str) -> Option<Server> {
         label: label.into(),
         command: command.into(),
         args: s(args),
+        post_args: vec![],
         enabled: true,
         builtin: true,
         env: vec![],
@@ -98,15 +108,19 @@ fn preset(id: &str) -> Option<Server> {
         install_hint: hint.into(),
     };
     Some(match id {
-        "openocd" => make(
-            "OpenOCD",
-            "openocd",
-            &["-c", "gdb_port {port}", "-c", "telnet_port {port2}", "-c", "tcl_port {port3}"],
-            &[],
-            &["monitor reset halt"],
-            true,
-            "Install OpenOCD (`sudo apt install openocd`, or your vendor's or xPack's build) and name the probe and the chip in `server_args`, e.g. [\"-f\", \"interface/stlink.cfg\", \"-f\", \"target/stm32f4x.cfg\"]. Set [debug.servers.openocd] command when it is not on PATH.",
-        ),
+        "openocd" => {
+            let mut o = make(
+                "OpenOCD",
+                "openocd",
+                &["-c", "gdb_port {port}", "-c", "telnet_port {port2}", "-c", "tcl_port {port3}"],
+                &[],
+                &["monitor reset halt"],
+                true,
+                "Install OpenOCD (`sudo apt install openocd`, or your vendor's or xPack's build) and name the probe and the chip in `server_args`, e.g. [\"-f\", \"interface/stlink.cfg\", \"-f\", \"target/stm32f4x.cfg\"]. Set [debug.servers.openocd] command when it is not on PATH.",
+            );
+            o.post_args = s(&["-c", OPENOCD_RESUME_ON_DETACH]);
+            o
+        }
         "jlink" => make(
             "J-Link GDB Server",
             JLINK,
@@ -207,6 +221,7 @@ pub fn all(configured: &BTreeMap<String, ServerConfig>) -> (Vec<Server>, Vec<Str
             label: id.clone(),
             command,
             args: vec![],
+            post_args: vec![],
             enabled: true,
             builtin: false,
             env: vec![],
@@ -318,8 +333,86 @@ pub fn views(state: &AppState) -> (Vec<ServerView>, Vec<String>) {
     (list.into_iter().map(|server| ServerView { availability: probe(state, &server), server }).collect(), warnings)
 }
 
+/// What a debug server's own output says about a problem that will not fix itself.
+#[derive(Debug, PartialEq)]
+pub enum Finding {
+    /// Worth telling the user; the session goes on.
+    Hint(String),
+    /// The session cannot go on.
+    Fatal(String),
+}
+
+/// Reads a debug server's output lines for what its authors print but a person misses among
+/// dozens of `Info:` lines: a chip it has no description of (st-util 1.8.0 on a newer STM32
+/// says `unknown chip id! 0x44d`, connects anyway, and then hangs on the first memory read),
+/// and a probe that stopped answering (`LIBUSB_ERROR_TIMEOUT` over and over). Without this
+/// the session waits out the adapter's own timeout with the reason hidden in the console.
+#[derive(Debug, Default)]
+pub struct ServerWatch {
+    said_unknown_chip: bool,
+    timeouts: std::collections::VecDeque<std::time::Instant>,
+}
+
+/// USB timeouts within [`TIMEOUT_WINDOW`] that mean the probe is stuck, not slow.
+const TIMEOUTS_FATAL: usize = 3;
+const TIMEOUT_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl ServerWatch {
+    pub fn line(&mut self, line: &str, now: std::time::Instant) -> Option<Finding> {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("unknown chip id") {
+            if std::mem::replace(&mut self.said_unknown_chip, true) {
+                return None;
+            }
+            let id = line.split_whitespace().last().filter(|w| w.starts_with("0x")).map(|w| format!(" {w}")).unwrap_or_default();
+            return Some(Finding::Hint(format!(
+                "The debug server does not know this chip (id{id}): its chip table has no entry for it. It may connect but then fail to read or flash memory. Use a newer version of the tool, or add a description of the chip to it."
+            )));
+        }
+        if lower.contains("libusb_error_timeout") {
+            self.timeouts.push_back(now);
+            while self.timeouts.front().is_some_and(|t| now.duration_since(*t) > TIMEOUT_WINDOW) {
+                self.timeouts.pop_front();
+            }
+            if self.timeouts.len() == TIMEOUTS_FATAL {
+                return Some(Finding::Fatal(
+                    "The debug server has stopped getting answers from the debug probe over USB (repeated LIBUSB_ERROR_TIMEOUT): the probe is stuck. End this session, unplug the board's USB cable and plug it back in, then try again.".into(),
+                ));
+            }
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_server_that_cannot_talk_to_its_probe_or_knows_no_chip_is_noticed() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut w = ServerWatch::default();
+        // The chip is named once, with its id; ordinary lines say nothing.
+        assert_eq!(w.line("Info : STLINK V2J46M31 (API v2) VID:PID 0483:3752", t0), None);
+        let hint = w.line("2026-10-04T12:14:37 WARN common.c: unknown chip id! 0x44d", t0);
+        assert!(matches!(&hint, Some(Finding::Hint(m)) if m.contains("0x44d") && m.contains("does not know this chip")), "{hint:?}");
+        assert_eq!(w.line("2026-10-04T12:14:38 WARN common.c: unknown chip id! 0x44d", t0), None, "said once");
+        // Two timeouts are slow; the third within half a minute is a stuck probe, said once.
+        let timeout = "2026-10-04T12:14:41 ERROR usb.c: READMEM_32BIT send request failed: LIBUSB_ERROR_TIMEOUT";
+        assert_eq!(w.line(timeout, t0), None);
+        assert_eq!(w.line(timeout, t0 + Duration::from_secs(3)), None);
+        let fatal = w.line(timeout, t0 + Duration::from_secs(6));
+        assert!(matches!(&fatal, Some(Finding::Fatal(m)) if m.contains("unplug")), "{fatal:?}");
+        assert_eq!(w.line(timeout, t0 + Duration::from_secs(9)), None, "not again");
+        // Timeouts spread over minutes are not a stuck probe.
+        let mut w = ServerWatch::default();
+        for i in 0..6 {
+            assert_eq!(w.line(timeout, t0 + Duration::from_secs(40 * i)), None, "{i}");
+        }
+        // The text is matched whatever its case.
+        let mut w = ServerWatch::default();
+        assert!(matches!(w.line("Error: Unknown Chip ID", t0), Some(Finding::Hint(_))));
+    }
+
     use super::*;
 
     fn cfg(text: &str) -> BTreeMap<String, ServerConfig> {

@@ -1741,7 +1741,10 @@ first). Fields: `server` (a debug server id), `server_args`, `connect` (gdb's `t
 argument; default the server's port on this computer), `port`, `init`, `reset` (one command or a
 list; `[]` overrides the server's default), `download`, `stop_at` (`main`, `reset` or any gdb
 location; naming one implies `stop_on_entry`), `source_map` (`[from, to]` pairs → gdb
-`set substitute-path`, `to` takes `{root}`), `svd`, `channels`, `extended`, `attach`, `exec_file`. **Debug servers** are the presets `openocd`,
+`set substitute-path`, `to` takes `{root}`), `svd`, `channels`, `extended`, `attach`, `exec_file`, `on_stop` (`resume`, the default, or `halt`: the
+OpenOCD preset's `Server::post_args` — a `gdb-detach { resume }` handler for every target, placed after
+the user's `server_args` whose files define the targets — are left out for `halt`; other servers have
+none; `launch::OnStop`). **Debug servers** are the presets `openocd`,
 `jlink`, `pyocd`, `st-util` and `qemu-arm` merged field by field with `[debug.servers.<id>]` of
 config.toml (`label`, `command`, `args`, `enabled`, `env`, `init`, `reset`, `download`,
 `ready_timeout_s`, `install_hint`), plus custom ones (`command` required); `{port}`, `{port2}` …
@@ -1795,6 +1798,16 @@ on Windows), because nothing else tells it its parent is gone (gdb ends on stdin
 does not): a crash or SIGKILL never leaves an OpenOCD holding the probe. Rerun plans again,
 new ports included. A child session never inherits the remote plan. Refused with the way out:
 an adapter that is not a gdb.
+
+*Server output* (`servers::ServerWatch`, fed by `start_server` for every line of the debug server). An
+`unknown chip id` line (st-util on a chip newer than its tables: it connects, then hangs on the first
+memory read) adds a one-time hint to the console. Three `LIBUSB_ERROR_TIMEOUT` lines within 30 s (a stuck
+probe, which the adapter would otherwise wait out for minutes) fail the session at once with the reason
+and the server's tail, once the server is up; while it is still starting the startup reports its own end.
+*Ports*: `process::pick_ports` takes a `usable` rule; on Windows (`bindable`) a candidate must also bind on
+127.0.0.1, because Windows keeps port ranges for itself (WSAEACCES, WinError 10013) and a server told to
+listen there fails to start. Elsewhere nothing in the range is reserved and a bind probe would be a
+listener a forking thread copies.
 
 *Extended-remote* (`extended`). gdb's DAP `attach` issues `target remote` only, so for a stub that
 needs `target extended-remote` Workbench connects itself, through the console's channel, before

@@ -241,6 +241,7 @@ pub struct Rendered {
 }
 
 impl Rendered {
+    #[cfg(test)]
     pub fn truncated(&self) -> bool {
         self.shown < self.total
     }
