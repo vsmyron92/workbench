@@ -50,6 +50,17 @@
   --agent-idle: #6f737a;
   --agent-error: #e55765;
 
+  /* Chart series, in this fixed order and never cycled: a series keeps its slot for good. Eight hues
+     validated for colour-blind readers against --bg-inset (adjacent colour-blind ΔE ≥ 8.4, normal ≥ 19.3). */
+  --plot-1: #3987e5;
+  --plot-2: #d95926;
+  --plot-3: #199e70;
+  --plot-4: #c98500;
+  --plot-5: #d55181;
+  --plot-6: #008300;
+  --plot-7: #9085e9;
+  --plot-8: #e66767;
+
   /* Syntax colours for highlighted code outside Monaco (markdown code blocks). */
   --syn-keyword: #cf8e6d;
   --syn-string: #6aab73;
@@ -111,6 +122,17 @@
   --agent-attention: #a46704;
   --agent-idle: #818594;
   --agent-error: #c7222d;
+
+  /* Same eight hues stepped for a white surface (adjacent colour-blind ΔE ≥ 9.1, normal ≥ 19.6). Three of them
+     (aqua, yellow, pink) are under 3:1 on white, so a chart using them also writes values (legend, table). */
+  --plot-1: #2a78d6;
+  --plot-2: #eb6834;
+  --plot-3: #1baf7a;
+  --plot-4: #eda100;
+  --plot-5: #e87ba4;
+  --plot-6: #008300;
+  --plot-7: #4a3aa7;
+  --plot-8: #e34948;
 
   --syn-keyword: #0033b3;
   --syn-string: #067d17;

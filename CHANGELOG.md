@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.11.0 - 2026-10-05
+
+- **Plots: several watched values on one chart.** The Live tab's new **Plots** button opens a plot in its
+  own panel: pick **New Plot from Watched Values**, or right-click a value and choose **Plot in New Plot** or
+  **Add to …**, and the values are drawn together as lines, each in its own colour, with a crosshair and a
+  tooltip listing every series, a legend with the latest values, Pause, and a table of the same readings
+  (copyable as CSV). Type another variable above the chart to add it; it is watched first if it is not yet.
+- **Plots scroll.** Turn the wheel or drag the chart to move back and forth through everything Workbench has
+  kept (up to 12,000 readings per value), drag the scroll bar under it, hold Ctrl and turn the wheel to zoom
+  (spans from 5 seconds to 30 minutes), and press Follow to go back to the newest readings. Page Up/Down,
+  Home, End and `+`/`-` do the same from the keyboard, and the arrow keys carry the crosshair past the edge.
+- **Several plots per project, kept by Workbench.** Every plot is a saved configuration (name, series, span,
+  scale), so you can keep one per question and dock them side by side, and every browser and device shows the
+  same ones: a change in one appears in the others at once. Plots an earlier build kept in the browser move
+  over the first time. They are also in the palette (New Plot, Open Plot …).
+- **Values of different sizes** share one axis in two ways: **Same axis** (the values' own unit) or **Each as %
+  of range** (every series as a percentage of its own range in view), with the real values in the tooltip.
+- **Reload keeps the history.** Workbench now keeps the last readings of every watched value, so a reloaded
+  page starts with the last minutes, and the Live tab's sparklines show at least the last 30 seconds however
+  fast the readings come (they showed the last 120 readings). 64-bit values show every digit in the tooltip,
+  table and CSV.
+- **Scripts and agents can read them.** `GET …/debug/plots` and `…/plots/<id>/data` (statistics and thinned
+  readings of each series), `…/sessions/<id>/live/history` (the raw readings), and a new read-only
+  `debug_plots` tool for agents. Only you make and change plots.
+- **Live Watch for the rest of the debug servers.** J-Link, pyOCD, st-util, QEMU and an OpenOCD without a Tcl
+  port have no way to read memory while the program runs, so the Live tab is now there for them too, with
+  values blank until you allow **reading by pausing the program**: Workbench stops the program for a few
+  milliseconds, reads and resumes it (every 100 ms or slower). It disturbs the program, so it is off for every
+  session until you allow it, and the Live tab shows how long each read stops the program (on a
+  NUCLEO-C092RC through OpenOCD about 50 ms, 17% of the time at 250 ms). The stop is not shown as a pause;
+  a breakpoint that hits meanwhile, your own Pause or a step of yours is a real motion and is left alone (a read
+  never cuts a step short), and a program that is stopped anyway is read for free, so the values follow your steps.
+- Smaller fixes found on the way: copying a plot with a very long name no longer freezes the page, the y-axis
+  labels no longer clip at seven figures, a project file with one malformed plot no longer loses the project's
+  breakpoints and watches with it, and typing a variable while the saved watches are still coming back at the
+  start of a session no longer lists it twice.
+- Checked on a NUCLEO-C092RC in both themes: through OpenOCD (`ticks` read 1,004 a second against the chip's
+  12 MHz clock, the LED's 500 ms toggle drew as a square wave, 50 ms polling over 5 minutes at about 60 frames
+  a second) and, through an OpenOCD without a Tcl port, reading by pausing (the session stayed "running",
+  nothing was read until allowed, a user pause stayed a real stop, eight steps in a row each ended at their own
+  stop, and the cost shown matched the slowdown of the chip's own tick counter). `st-util` 1.8.0 does not know the STM32C092 and wedged the probe: use OpenOCD
+  for that chip. Scrolling, keyboard stepping, two browsers editing one plot, a session ending and a new one
+  starting, an unwatched series and deleting a plot were checked on a simulated board.
+
 ## 0.10.0 - 2026-10-04
 
 - **Live Watch.** The Debug window's new **Live** tab shows variables of the program *while it

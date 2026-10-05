@@ -1827,15 +1827,15 @@ impl Env {
     }
 }
 
-/// The tools agents have for the debugger: `debug_state` reads; every other tool changes a
+/// The tools agents have for the debugger: `debug_state` and `debug_plots` read; every other tool changes a
 /// session or the breakpoints, so it is flagged as a write (the agent's own permission prompt,
 /// the Activity badge).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agents_have_the_debug_tools_and_the_writes_are_flagged() {
     let names: Vec<String> = crate::debug::mcp_tools().into_iter().map(|t| t.name).collect();
-    assert_eq!(names, ["debug_state", "debug_start", "debug_attach", "debug_restart", "debug_evaluate", "debug_control", "debug_breakpoints"]);
+    assert_eq!(names, ["debug_state", "debug_plots", "debug_start", "debug_attach", "debug_restart", "debug_evaluate", "debug_control", "debug_breakpoints"]);
     for t in crate::debug::mcp_tools() {
-        assert_eq!(t.mutating, t.name != "debug_state", "{}: what changes a session is flagged as a write", t.name);
+        assert_eq!(t.mutating, !matches!(t.name.as_str(), "debug_state" | "debug_plots"), "{}: what changes a session is flagged as a write", t.name);
     }
 }
 
@@ -2832,16 +2832,9 @@ args = [{pyargs}{server}, "--port", "{port}", "--pidfile", {pidfile}]
 live_port = "{port3}"
 "#;
 
-/// Variables read from the running target through the debug server's Tcl port: found in the ELF by
-/// a batch gdb, read over and over, shown with their kind; what a read would disturb, what cannot
-/// be found and what is too big is refused with the reason; the Tcl port is sent nothing but
-/// `read_memory`; the expressions come back with the next session.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn live_watch_reads_the_running_target_through_the_tcl_port() {
-    if !have_python() {
-        eprintln!("skipped: Python 3 is not installed");
-        return;
-    }
+/// An environment with the fake gdb and a fake OpenOCD that has a Tcl port: three configurations (`board` has the live
+/// view, `plain` has none, `oops` is misconfigured), a `chip.svd`.
+async fn live_env() -> Env {
     let env = setup_with(
         r#"
 [[debug]]
@@ -2875,18 +2868,54 @@ server = "oops"
     .await;
     let cfg = env.state.config.read().debug.clone();
     super::adapters::seed_probe(&env.state, &super::adapters::find(&cfg, "fakegdb").unwrap(), super::adapters::Availability { available: true, path: None, version: Some("fake gdb 99".into()), problem: None });
+    env
+}
+
+/// Variables read from the running target through the debug server's Tcl port: found in the ELF by
+/// a batch gdb, read over and over, shown with their kind; what a read would disturb, what cannot
+/// be found and what is too big is refused with the reason; the Tcl port is sent nothing but
+/// `read_memory`; the expressions come back with the next session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_watch_reads_the_running_target_through_the_tcl_port() {
+    if !have_python() {
+        eprintln!("skipped: Python 3 is not installed");
+        return;
+    }
+    let env = live_env().await;
     // A `live_port` the server's arguments do not use is a mistake of the configuration.
     let configs = env.get("configs").await;
     let problems = configs["configs"].as_array().unwrap().iter().find(|c| c["name"] == "oops").unwrap()["problems"].to_string();
     assert!(problems.contains("live_port"), "{problems}");
 
-    // A session whose server has no Tcl port has no live view.
+    // A session whose server has no Tcl port can read only by pausing the program, which the user has to allow: until then
+    // it reads nothing. (The Tcl-port session below never stops the program, and has nothing to allow.)
     let plain = env.start("plain").await;
     let info = env.wait_session(&plain, "the halt", |v| v["state"] == "stopped").await;
-    assert!(info["live"].is_null() || info["live"] == false, "{info}");
-    let (s, v) = env.send(reqwest::Method::GET, &format!("sessions/{plain}/live"), json!({})).await;
-    assert_eq!(s, 409, "{v}");
-    assert!(v["error"]["message"].as_str().unwrap().contains("no live view"));
+    assert_eq!((info["live"].clone(), info["liveMode"].clone()), (json!(true), json!("pausing")), "{info}");
+    let snap = env.get(&format!("sessions/{plain}/live")).await;
+    assert_eq!((snap["mode"].clone(), snap["pausing"].clone()), (json!("pausing"), json!(false)), "{snap}");
+    let (s, ticks) = env.send(reqwest::Method::POST, &format!("sessions/{plain}/live"), json!({ "expression": "ticks" })).await;
+    assert_eq!(s, 200, "{ticks}");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(env.get(&format!("sessions/{plain}/live")).await["last"].as_object().unwrap().is_empty(), "nothing is read before the user allows it");
+    // Agents cannot allow it.
+    let ctx = crate::mcp::McpCtx::default();
+    let path = format!("/api/projects/{}/debug/sessions/{plain}/live/pausing", env.pid());
+    assert_eq!(crate::mcp::call_api(&env.state, axum::http::Method::PUT, &path, Some(json!({ "enabled": true })), &ctx).await.unwrap_err().status, 403);
+    // Allowed: the program is stopped here anyway (the halt at the reset vector), so the word is read at no cost.
+    let (s, v) = env.send(reqwest::Method::PUT, &format!("sessions/{plain}/live/pausing"), json!({ "enabled": true })).await;
+    assert_eq!((s, v["pausing"].clone()), (200, json!(true)), "{v}");
+    let mut word = json!(null);
+    for _ in 0..100 {
+        word = env.get(&format!("sessions/{plain}/live")).await["last"][ticks["id"].to_string()]["v"].clone();
+        if word.is_number() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(word, json!(0x1811_0a03u64), "the bytes the fake serves at 0x20000000, little-endian");
+    assert!(env.requests("pause").is_empty(), "a stopped program is read without being paused");
+    // The Tcl-port session has nothing to allow.
     env.post(&format!("sessions/{plain}/stop"), json!({})).await;
 
     let sid = env.start("board").await;
@@ -2931,8 +2960,12 @@ server = "oops"
     }
     assert!(later > first + 2, "the value moves while the program 'runs': {first} -> {later}");
     assert_eq!(first & !0xfff, 0xE000_0000 & !0xfff, "the word at 0x20000000 is 0xE0000000 + the number of reads: {first:#x}");
-    // The same expression again is the same item.
+    // The same expression again is the same item, also when two asks cross while it is being resolved (the watches brought back
+    // at the start of a session against a user typing the same one).
     assert_eq!(add("ticks").await.1["id"], ticks["id"]);
+    let ((_, first), (_, second)) = tokio::join!(add("v99"), add("v99"));
+    assert_eq!(first["id"], second["id"], "one item for two asks: {first} {second}");
+    assert_eq!(live().await["items"].as_array().unwrap().iter().filter(|i| i["expression"] == "v99").count(), 1);
 
     // Kinds: a float, a signed halfword (read as 16 bits), bytes, a peripheral register.
     let (_, temperature) = add("temperature").await;
@@ -3034,4 +3067,394 @@ server = "oops"
     // All 15 kept expressions are found again (`faulty` resolves too: it fails only when read).
     assert_eq!(resolved, 15, "all the kept expressions are found again in the new session");
     env.post(&format!("sessions/{again}/stop"), json!({})).await;
+}
+
+// ---------------------------------------------------------------- plots
+
+/// A project keeps its plots (the browser's definitions of what is drawn together) and the readings behind them are
+/// kept too: both are read back over REST and by agents. Writes are the user's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plots_are_kept_by_the_server_and_read_back_with_the_live_history() {
+    if !have_python() {
+        eprintln!("skipped: Python 3 is not installed");
+        return;
+    }
+    let env = live_env().await;
+    let pid = env.pid();
+    let motor = json!({ "id": "motor", "name": "  Motor ", "series": [{ "expression": "ticks", "slot": 1 }, { "expression": "temperature", "slot": 4, "hidden": true }], "windowMs": 10000, "scale": "normalized" });
+
+    // None yet; one is added trimmed, and another PUT of the same id replaces it.
+    assert_eq!(env.get("plots").await["plots"], json!([]));
+    let (s, saved) = env.send(reqwest::Method::PUT, "plots/motor", motor.clone()).await;
+    assert_eq!(s, 200, "{saved}");
+    assert_eq!((saved["name"].clone(), saved["series"][1]["hidden"].clone()), (json!("Motor"), json!(true)));
+    let renamed = json!({ "name": "Motor 2", "series": [], "windowMs": 60000, "scale": "shared" }); // no id: the path's
+    let (s, saved) = env.send(reqwest::Method::PUT, "plots/motor", renamed).await;
+    assert_eq!((s, saved["id"].clone()), (200, json!("motor")), "{saved}");
+    let (s, _) = env.send(reqwest::Method::PUT, "plots/motor", motor.clone()).await;
+    assert_eq!(s, 200);
+    let list = env.get("plots").await;
+    assert_eq!(list["plots"].as_array().unwrap().len(), 1, "{list}");
+    assert_eq!(env.state.debug.store.get(&env.state.paths.data_dir, &pid).plots[0].name, "Motor");
+
+    // What a browser may send is checked.
+    for (path, body, needle) in [
+        ("plots/motor", json!({ "id": "other", "name": "x", "series": [], "windowMs": 5000, "scale": "shared" }), "id is the one in the path"),
+        ("plots/bad id", json!({ "name": "x", "series": [], "windowMs": 5000, "scale": "shared" }), "plot id"),
+        ("plots/p", json!({ "name": "  ", "series": [], "windowMs": 5000, "scale": "shared" }), "plot name"),
+        ("plots/p", json!({ "name": "x", "series": [{ "expression": "a", "slot": 1 }, { "expression": "b", "slot": 1 }], "windowMs": 5000, "scale": "shared" }), "colour"),
+        ("plots/p", json!({ "name": "x", "series": [{ "expression": "a", "slot": 1 }, { "expression": "a", "slot": 2 }], "windowMs": 5000, "scale": "shared" }), "twice"),
+        ("plots/p", json!({ "name": "x", "series": [], "windowMs": 1234, "scale": "shared" }), "time span"),
+        ("plots/p", json!({ "name": "x", "series": [], "windowMs": 5000, "scale": "log" }), "scale"),
+    ] {
+        let (s, v) = env.send(reqwest::Method::PUT, path, body).await;
+        assert_eq!(s, 400, "{path}: {v}");
+        assert!(v["error"]["message"].as_str().unwrap().contains(needle), "{path}: {v}");
+    }
+    assert_eq!(env.get("plots").await["plots"].as_array().unwrap().len(), 1, "nothing refused was kept");
+
+    // A project keeps up to 40.
+    for i in 0..39 {
+        let (s, v) = env.send(reqwest::Method::PUT, &format!("plots/p{i}"), json!({ "name": format!("P{i}"), "series": [], "windowMs": 5000, "scale": "shared" })).await;
+        assert_eq!(s, 200, "{v}");
+    }
+    let (s, v) = env.send(reqwest::Method::PUT, "plots/one-too-many", json!({ "name": "x", "series": [], "windowMs": 5000, "scale": "shared" })).await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("up to 40"), "{v}");
+    for i in 0..39 {
+        assert_eq!(env.send(reqwest::Method::DELETE, &format!("plots/p{i}"), json!({})).await.0, 200);
+    }
+    assert_eq!(env.send(reqwest::Method::DELETE, "plots/p0", json!({})).await.0, 404);
+
+    // Agents read plots; the user makes them.
+    let ctx = crate::mcp::McpCtx::default();
+    let base = format!("/api/projects/{pid}/debug/plots");
+    assert!(crate::mcp::call_api(&env.state, axum::http::Method::GET, &base, None, &ctx).await.is_ok());
+    assert_eq!(crate::mcp::call_api(&env.state, axum::http::Method::PUT, &format!("{base}/x"), Some(motor.clone()), &ctx).await.unwrap_err().status, 403);
+    assert_eq!(crate::mcp::call_api(&env.state, axum::http::Method::DELETE, &format!("{base}/motor"), None, &ctx).await.unwrap_err().status, 403);
+    let listed = env.agent("debug_plots", json!({})).await.unwrap();
+    assert_eq!((listed["plots"][0]["id"].clone(), listed["plots"][0]["series"].clone()), (json!("motor"), json!(["ticks", "temperature"])), "{listed}");
+
+    // With no session there is nothing to read, and the data says so.
+    let none = env.get("plots/motor/data").await;
+    assert!(none["sessionId"].is_null() && none["series"][0]["watched"] == false, "{none}");
+    assert!(none["note"].as_str().unwrap().contains("no debug session"), "{none}");
+
+    // A session that watches the values keeps their readings.
+    let sid = env.start("board").await;
+    env.wait_session(&sid, "the halt", |v| v["state"] == "stopped").await;
+    let (_, ticks) = env.send(reqwest::Method::POST, &format!("sessions/{sid}/live"), json!({ "expression": "ticks" })).await;
+    let id = ticks["id"].as_u64().unwrap();
+    assert_eq!(env.send(reqwest::Method::PUT, &format!("sessions/{sid}/live"), json!({ "intervalMs": 50 })).await.0, 200);
+    let history = |query: String| {
+        let (env, path) = (&env, format!("sessions/{sid}/live/history{query}"));
+        async move { env.get(&path).await }
+    };
+    let mut full = json!(null);
+    for _ in 0..200 {
+        full = history(String::new()).await;
+        if full["series"][id.to_string()]["t"].as_array().is_some_and(|t| t.len() >= 12) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let series = &full["series"][id.to_string()];
+    let (t, v): (Vec<i64>, Vec<f64>) = (series["t"].as_array().unwrap().iter().map(|x| x.as_i64().unwrap()).collect(), series["v"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect());
+    assert!(t.len() >= 12 && t.len() == v.len(), "the readings kept: {}", t.len());
+    assert!(t.windows(2).all(|w| w[0] < w[1]), "times go forward: {t:?}");
+    assert!(v.windows(2).all(|w| w[1] > w[0]), "the fake word counts up with every read: {v:?}");
+    assert_eq!(full["intervalMs"], 50);
+    assert_eq!(full["items"][0]["expression"], "ticks");
+    // The newest few, after a time, thinned, and for chosen items.
+    let few = history("?limit=3".into()).await;
+    assert_eq!(few["series"][id.to_string()]["t"].as_array().unwrap().len(), 3);
+    let after = history(format!("?since={}", t[t.len() - 3])).await;
+    let after_t = after["series"][id.to_string()]["t"].as_array().unwrap().iter().map(|x| x.as_i64().unwrap()).collect::<Vec<_>>();
+    assert!(!after_t.is_empty() && after_t.iter().all(|x| *x > t[t.len() - 3]), "{after_t:?}");
+    let thin = history("?maxPoints=4".into()).await;
+    assert!(thin["series"][id.to_string()]["t"].as_array().unwrap().len() <= 4, "{thin}");
+    assert_eq!(history(format!("?ids={id}")).await["series"].as_object().unwrap().len(), 1);
+    assert_eq!(history("?ids=999".into()).await["series"].as_object().unwrap().len(), 0);
+    assert_eq!(env.send(reqwest::Method::GET, &format!("sessions/{sid}/live/history?ids=x"), json!({})).await.0, 400);
+
+    // The plot's data: ticks is watched, temperature is not (yet).
+    let data = env.get("plots/motor/data?seconds=60&maxPoints=50").await;
+    assert_eq!(data["sessionId"], sid.as_str(), "{data}");
+    let (a, b) = (&data["series"][0], &data["series"][1]);
+    assert_eq!((a["watched"].clone(), a["slot"].clone(), b["watched"].clone(), b["hidden"].clone()), (json!(true), json!(1), json!(false), json!(true)), "{data}");
+    assert!(a["stats"]["readings"].as_u64().unwrap() >= 12 && a["stats"]["min"].as_f64() <= a["stats"]["max"].as_f64(), "{a}");
+    assert!(a["t"].as_array().unwrap().len() <= 50 && a["t"].as_array().unwrap().len() == a["v"].as_array().unwrap().len());
+    assert!(data["note"].as_str().unwrap().contains("watched: false"), "{data}");
+    let (_, temperature) = env.send(reqwest::Method::POST, &format!("sessions/{sid}/live"), json!({ "expression": "temperature" })).await;
+    for _ in 0..200 {
+        let d = env.get("plots/motor/data").await;
+        if d["series"][1]["stats"]["readings"].as_u64().unwrap_or(0) >= 3 {
+            assert!(d["series"][1]["stats"]["last"]["v"].as_f64().unwrap() >= 2.0, "1.5 + 0.5 per read: {d}");
+            assert!(d.get("note").is_none() || d["note"].is_null(), "everything is watched now: {d}");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(env.send(reqwest::Method::GET, "plots/nosuch/data", json!({})).await.0, 404);
+
+    // Agents get the same, by id or by name, and are told when there is no such plot.
+    let by_id = env.agent("debug_plots", json!({ "plot": "motor", "seconds": 30, "maxPoints": 8 })).await.unwrap();
+    let by_name = env.agent("debug_plots", json!({ "plot": "MOTOR" })).await.unwrap();
+    assert_eq!((by_id["plot"]["id"].clone(), by_name["plot"]["name"].clone()), (json!("motor"), json!("Motor")), "{by_id}");
+    assert!(by_id["series"][0]["t"].as_array().unwrap().len() <= 8, "{by_id}");
+    assert_eq!(env.agent("debug_plots", json!({ "plot": "nosuch" })).await.unwrap_err().status, 404);
+
+    // The readings outlive the session; a watch taken off the list loses its own.
+    env.post(&format!("sessions/{sid}/stop"), json!({})).await;
+    assert!(history(String::new()).await["series"][id.to_string()]["t"].as_array().unwrap().len() >= 12, "still there after Stop");
+    assert_eq!(env.send(reqwest::Method::DELETE, &format!("sessions/{sid}/live/{}", temperature["id"]), json!({})).await.0, 200);
+    let left = history(String::new()).await;
+    assert!(left["series"].get(temperature["id"].to_string().as_str()).is_none() && left["series"].get(id.to_string().as_str()).is_some(), "{left}");
+
+    // A plot can be deleted.
+    assert_eq!(env.send(reqwest::Method::DELETE, "plots/motor", json!({})).await.0, 200);
+    assert_eq!(env.get("plots").await["plots"], json!([]));
+}
+
+// ---------------------------------------------------------------- reading by pausing the program
+
+/// A gdb adapter whose program keeps running when continued and can be paused (`fake_dap.py`), with `extra` settings of its own
+/// (a halt that takes time, a step that takes time).
+fn pausing_adapter(extra: &str) -> String {
+    format!(
+        r#"
+[adapters.fakerun]
+kind = "gdb"
+command = {{python}}
+args = [{{pyargs}}{{fake}}]
+languages = ["embedded"]
+env = {{ FAKE_LOG = {{log}}, FAKE_RUNS = "1", FAKE_MEM_COUNTS = "1"{extra} }}
+"#
+    )
+}
+
+/// An environment with one remote configuration, `free`, on a server with no Tcl port and the adapter above.
+async fn pausing_env(extra: &str) -> Env {
+    let env = setup_with(
+        r#"
+[[debug]]
+name = "free"
+adapter = "fakerun"
+program = "prog.bin"
+[debug.remote]
+server = "fakesrv"
+download = false
+stop_at = "reset"
+"#,
+        Opts { debug_toml: &format!("{REMOTE_DEBUG}\n{}", pausing_adapter(extra)), ..Default::default() },
+    )
+    .await;
+    let cfg = env.state.config.read().debug.clone();
+    super::adapters::seed_probe(&env.state, &super::adapters::find(&cfg, "fakerun").unwrap(), super::adapters::Availability { available: true, path: None, version: Some("fake gdb 99".into()), problem: None });
+    env
+}
+
+/// A debug server with no side channel (J-Link, pyOCD, st-util): values are read by stopping the program for a moment,
+/// which the user allows. The stop must stay invisible (the session keeps running, its stop counter does not move), the
+/// program must always be resumed, a real stop (the user's pause) must be left alone, and agents cannot allow any of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn values_are_read_by_pausing_the_program_when_the_server_has_no_side_channel() {
+    if !have_python() {
+        eprintln!("skipped: Python 3 is not installed");
+        return;
+    }
+    let env = pausing_env("").await;
+
+    let sid = env.start("free").await;
+    env.wait_session(&sid, "the halt", |v| v["state"] == "stopped").await;
+    let live = format!("sessions/{sid}/live");
+    // Two words far apart, one peripheral register.
+    let mut ids = vec![];
+    for e in ["ticks", "v1", "cr1"] {
+        let (s, v) = env.send(reqwest::Method::POST, &live, json!({ "expression": e })).await;
+        assert_eq!(s, 200, "{e}: {v}");
+        ids.push(v["id"].as_u64().unwrap());
+    }
+    assert_eq!(env.send(reqwest::Method::PUT, &live, json!({ "intervalMs": 100 })).await.0, 200);
+    assert_eq!(env.send(reqwest::Method::PUT, &live, json!({ "intervalMs": 50 })).await.0, 400, "not faster than every 100 ms when the program is stopped for it");
+    assert_eq!(env.send(reqwest::Method::PUT, &format!("{live}/pausing"), json!({ "enabled": true })).await.0, 200);
+    let history = |n: usize| {
+        let (env, path) = (&env, format!("{live}/history?ids={}", ids[0]));
+        let key = ids[0].to_string();
+        async move {
+            for _ in 0..300 {
+                let h = env.get(&path).await;
+                if h["series"][&key]["t"].as_array().is_some_and(|t| t.len() >= n) {
+                    return h;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!("fewer than {n} readings");
+        }
+    };
+    let count = |h: &Value| h["series"][ids[0].to_string()]["t"].as_array().unwrap().len();
+
+    // Running: every round pauses the program, reads, and resumes it, and none of that shows.
+    let (s, _) = env.send(reqwest::Method::POST, &format!("sessions/{sid}/control"), json!({ "action": "continue" })).await;
+    assert_eq!(s, 200);
+    let info = env.wait_session(&sid, "running", |v| v["state"] == "running").await;
+    let epoch = info["stopEpoch"].clone();
+    let before = count(&history(1).await);
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_millis(2500) {
+        let now = env.get(&format!("sessions/{sid}")).await;
+        assert_eq!((now["state"].clone(), now["stopEpoch"].clone()), (json!("running"), epoch.clone()), "the pauses of the reads are not shown: {now}");
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    let h = history(before + 8).await;
+    assert!(count(&h) >= before + 8, "{} readings", count(&h));
+    let v: Vec<f64> = h["series"][ids[0].to_string()]["v"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+    assert!(v.windows(2).all(|w| w[1] > w[0]), "the word counts up with every read: {v:?}");
+    let pauses = env.requests("pause").len();
+    assert!(pauses >= 8 && env.requests("continue").len() >= pauses, "a round pauses and resumes: {pauses} pauses");
+    // The user is told what it costs: how long a round keeps the program stopped.
+    let cost = env.get(&live).await["pauseMs"].as_u64();
+    assert!(cost.is_some_and(|ms| (1..5000).contains(&ms)), "{cost:?}");
+    // Three values, but the two RAM words are far apart and the register is read alone: three reads a round at most.
+    let reads = env.requests("readMemory");
+    assert!(reads.iter().all(|r| r["arguments"]["count"] == 4), "each value at its own size");
+
+    // The user pauses: that is a real stop, left alone (it is not resumed), and the values go on being read, free of charge.
+    let (s, _) = env.send(reqwest::Method::POST, &format!("sessions/{sid}/control"), json!({ "action": "pause" })).await;
+    assert_eq!(s, 200);
+    let stopped = env.wait_session(&sid, "the user's pause", |v| v["state"] == "stopped").await;
+    assert_eq!(stopped["stopped"]["reason"], "pause");
+    let (paused, resumed) = (env.requests("pause").len(), env.requests("continue").len());
+    let readings = count(&history(1).await);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let still = env.get(&format!("sessions/{sid}")).await;
+    assert_eq!((still["state"].clone(), still["stopEpoch"].clone()), (json!("stopped"), stopped["stopEpoch"].clone()), "{still}");
+    assert_eq!((env.requests("pause").len(), env.requests("continue").len()), (paused, resumed), "a stopped program is neither paused nor resumed by a read");
+    assert!(count(&history(readings + 3).await) >= readings + 3, "still read while stopped");
+
+    // Resumed by the user, reading by pausing starts again; taken away, it stops.
+    env.send(reqwest::Method::POST, &format!("sessions/{sid}/control"), json!({ "action": "continue" })).await;
+    env.wait_session(&sid, "running again", |v| v["state"] == "running").await;
+    let again = env.requests("pause").len();
+    for _ in 0..100 {
+        if env.requests("pause").len() > again + 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(env.requests("pause").len() > again + 2, "pausing reads resumed with the program");
+    assert_eq!(env.send(reqwest::Method::PUT, &format!("{live}/pausing"), json!({ "enabled": false })).await.0, 200);
+    tokio::time::sleep(Duration::from_millis(400)).await; // a round in flight finishes
+    let quiet = (env.requests("pause").len(), env.requests("continue").len());
+    // The user pressed continue twice (to start, and after their pause) and pause once: the reads' pauses and continues cancel out.
+    assert_eq!(quiet.0 + 1, quiet.1, "every pause a read made was followed by its continue: the program was left running");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!((env.requests("pause").len(), env.requests("continue").len()), quiet, "no more pauses once it is taken away");
+    assert_eq!(env.get(&format!("sessions/{sid}")).await["state"], "running");
+
+    // Stopping the session while it reads never leaves the program stopped by a read.
+    assert_eq!(env.send(reqwest::Method::PUT, &format!("{live}/pausing"), json!({ "enabled": true })).await.0, 200);
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    env.post(&format!("sessions/{sid}/stop"), json!({})).await;
+    env.wait_session(&sid, "the end", |v| v["state"] == "terminated").await;
+    assert_eq!(env.requests("pause").len() + 1, env.requests("continue").len(), "stopping the session never leaves a read's pause without its continue");
+}
+
+/// The user's own motion is theirs. A step is a running program too, and a read that paused it would end the step and then
+/// resume the program: the user would see it run away instead of reaching the next line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_never_ends_the_users_step() {
+    if !have_python() {
+        eprintln!("skipped: Python 3 is not installed");
+        return;
+    }
+    let env = pausing_env(r#", FAKE_STEP_DELAY = "0.8""#).await;
+    let sid = env.start("free").await;
+    env.wait_session(&sid, "the halt", |v| v["state"] == "stopped").await;
+    let live = format!("sessions/{sid}/live");
+    assert_eq!(env.send(reqwest::Method::POST, &live, json!({ "expression": "ticks" })).await.0, 200);
+    assert_eq!(env.send(reqwest::Method::PUT, &live, json!({ "intervalMs": 100 })).await.0, 200);
+    assert_eq!(env.send(reqwest::Method::PUT, &format!("{live}/pausing"), json!({ "enabled": true })).await.0, 200);
+    // Stopped, the values are read for nothing; the step then takes 0.8 s with the program "running".
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let (pauses, resumes) = (env.requests("pause").len(), env.requests("continue").len());
+    assert_eq!((pauses, resumes), (0, 0), "a stopped program is read without being paused");
+    let (s, _) = env.send(reqwest::Method::POST, &format!("sessions/{sid}/control"), json!({ "action": "next" })).await;
+    assert_eq!(s, 200);
+    assert_eq!(env.get(&format!("sessions/{sid}")).await["state"], "running", "the step is under way");
+    let done = env.wait_session(&sid, "the step's own stop", |v| v["state"] == "stopped").await;
+    assert_eq!(done["stopped"]["reason"], "step", "the step ended at the next line: {done}");
+    assert_eq!((env.requests("pause").len(), env.requests("continue").len()), (0, 0), "no read touched the step");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(env.get(&format!("sessions/{sid}")).await["state"], "stopped", "and nothing ran the program away afterwards");
+    env.post(&format!("sessions/{sid}/stop"), json!({})).await;
+}
+
+/// A probe can take a while to halt the core. The user's Pause must still be theirs: the stop that comes some time after it is
+/// not a read's (a read never starts in between), so it is shown and the program stays stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_users_pause_is_not_mistaken_for_a_reads_when_the_halt_is_slow() {
+    if !have_python() {
+        eprintln!("skipped: Python 3 is not installed");
+        return;
+    }
+    let env = pausing_env(r#", FAKE_PAUSE_DELAY = "0.4""#).await;
+    let sid = env.start("free").await;
+    env.wait_session(&sid, "the halt", |v| v["state"] == "stopped").await;
+    let live = format!("sessions/{sid}/live");
+    assert_eq!(env.send(reqwest::Method::POST, &live, json!({ "expression": "ticks" })).await.0, 200);
+    assert_eq!(env.send(reqwest::Method::PUT, &live, json!({ "intervalMs": 100 })).await.0, 200);
+    assert_eq!(env.send(reqwest::Method::PUT, &format!("{live}/pausing"), json!({ "enabled": true })).await.0, 200);
+    env.send(reqwest::Method::POST, &format!("sessions/{sid}/control"), json!({ "action": "continue" })).await;
+    env.wait_session(&sid, "running", |v| v["state"] == "running").await;
+    // Rounds go on (each waits 0.4 s for the halt), none of them visible.
+    for _ in 0..100 {
+        if env.requests("pause").len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(env.requests("pause").len() >= 2);
+    assert_eq!(env.get(&format!("sessions/{sid}")).await["state"], "running");
+    // The user presses Pause, at whatever moment of a round.
+    let (s, _) = env.send(reqwest::Method::POST, &format!("sessions/{sid}/control"), json!({ "action": "pause" })).await;
+    assert_eq!(s, 200);
+    let stopped = env.wait_session(&sid, "the user's pause", |v| v["state"] == "stopped").await;
+    assert_eq!(stopped["stopped"]["reason"], "pause", "{stopped}");
+    let resumes = env.requests("continue").len();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let still = env.get(&format!("sessions/{sid}")).await;
+    assert_eq!((still["state"].clone(), still["stopEpoch"].clone()), (json!("stopped"), stopped["stopEpoch"].clone()), "{still}");
+    assert_eq!(env.requests("continue").len(), resumes, "nothing resumed the program the user stopped");
+    env.post(&format!("sessions/{sid}/stop"), json!({})).await;
+}
+
+/// A round in which nothing can be read stops the program for nothing: it is a failure, and the rounds after it wait longer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rounds_that_read_nothing_back_off_and_the_program_is_still_resumed() {
+    if !have_python() {
+        eprintln!("skipped: Python 3 is not installed");
+        return;
+    }
+    let env = pausing_env("").await;
+    let sid = env.start("free").await;
+    env.wait_session(&sid, "the halt", |v| v["state"] == "stopped").await;
+    let live = format!("sessions/{sid}/live");
+    let (s, faulty) = env.send(reqwest::Method::POST, &live, json!({ "expression": "faulty" })).await; // 0xDEAD0000 cannot be read
+    assert_eq!(s, 200, "{faulty}");
+    assert_eq!(env.send(reqwest::Method::PUT, &live, json!({ "intervalMs": 100 })).await.0, 200);
+    assert_eq!(env.send(reqwest::Method::PUT, &format!("{live}/pausing"), json!({ "enabled": true })).await.0, 200);
+    env.send(reqwest::Method::POST, &format!("sessions/{sid}/control"), json!({ "action": "continue" })).await;
+    env.wait_session(&sid, "running", |v| v["state"] == "running").await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let pauses = env.requests("pause").len();
+    // At every 100 ms that would be about 25; failing rounds wait 200, 400, 800, 1600 ms.
+    assert!((2..=8).contains(&pauses), "{pauses} rounds in 2.5 s");
+    let last = env.get(&live).await["last"][faulty["id"].to_string()].clone();
+    assert!(last["e"].as_str().is_some_and(|e| e.contains("Out of memory")), "the reason is shown on the value: {last}");
+    assert_eq!(env.get(&format!("sessions/{sid}")).await["state"], "running");
+    env.send(reqwest::Method::PUT, &format!("{live}/pausing"), json!({ "enabled": false })).await;
+    tokio::time::sleep(Duration::from_millis(2000)).await; // a round in flight (or about to start) ends
+    assert_eq!(env.requests("pause").len() + 1, env.requests("continue").len(), "every pause was followed by its continue (the user's one continue aside)");
+    env.post(&format!("sessions/{sid}/stop"), json!({})).await;
 }

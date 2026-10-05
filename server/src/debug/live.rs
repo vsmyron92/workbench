@@ -3,6 +3,11 @@
 //! `readMemory` while the program runs), so the values come from OpenOCD's Tcl port
 //! (`tcl.rs`), which reads memory on a running core, and each is shown with its history.
 //!
+//! * **Servers without such a port** (J-Link, pyOCD, st-util, QEMU…) have no side channel to read
+//!   memory through while the core runs. A gdb session on an embedded target can still read by
+//!   stopping the program for a few milliseconds each time and resuming it (`pausing.rs`): that
+//!   disturbs the program, so it is off until the user allows it for the session.
+//!
 //! * **Finding the address.** An expression is resolved *statically*, by a separate batch gdb
 //!   that only reads the program's ELF (no target, so it works while the program runs and does
 //!   not touch the session's own gdb): its address, size and kind (`uint`, `float`, `bytes`…).
@@ -18,7 +23,7 @@
 //!   gdb runs outside the project's directory with `-nx` and no auto-loading, because the
 //!   project's files are untrusted.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::time::Duration;
@@ -39,7 +44,11 @@ pub const MAX_BYTES: u32 = 64;
 const DEFAULT_INTERVAL_MS: u64 = 250;
 const MIN_INTERVAL_MS: u64 = 50;
 const MAX_INTERVAL_MS: u64 = 5000;
+/// Reading by stopping the program: not faster than this, however fast the user asks.
+pub const MIN_PAUSING_INTERVAL_MS: u64 = 100;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Readings kept per item (the plot viewer's own buffer holds as many): ten minutes at the fastest rate.
+pub const HISTORY_MAX: usize = 12_000;
 
 // ---------------------------------------------------------------- items
 
@@ -98,37 +107,136 @@ pub struct Sample {
     pub e: Option<String>,
 }
 
+/// One reading as kept for plots: the time, the number (NaN for a failed reading and for what is no number: bytes), and
+/// for a whole number a double cannot hold exactly (64-bit values) its digits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Point {
+    pub t: i64,
+    pub v: f64,
+    pub exact: Option<Box<str>>,
+}
+
+impl Point {
+    pub fn of(s: &Sample) -> Point {
+        let (v, exact) = match (&s.e, &s.v) {
+            (None, Some(Value::Number(n))) => (n.as_f64().unwrap_or(f64::NAN), None),
+            (None, Some(Value::Bool(b))) => (if *b { 1.0 } else { 0.0 }, None),
+            (None, Some(Value::String(text))) => match text.parse::<i128>() {
+                Ok(n) => (n as f64, Some(text.as_str().into())),
+                Err(_) => (f64::NAN, None),
+            },
+            _ => (f64::NAN, None),
+        };
+        Point { t: s.t, v, exact }
+    }
+}
+
 #[derive(Debug)]
 struct LiveState {
     items: Vec<Item>,
     interval_ms: u64,
     last: HashMap<u32, Sample>,
+    /// The newest `HISTORY_MAX` readings of each item, oldest first.
+    history: HashMap<u32, VecDeque<Point>>,
 }
 
 impl Default for LiveState {
     fn default() -> Self {
-        LiveState { items: vec![], interval_ms: DEFAULT_INTERVAL_MS, last: HashMap::new() }
+        LiveState { items: vec![], interval_ms: DEFAULT_INTERVAL_MS, last: HashMap::new(), history: HashMap::new() }
     }
 }
 
-/// A session's live watch: the Tcl port of its debug server and what is watched.
-#[derive(Debug, Default)]
+impl LiveState {
+    /// Keep a reading of a watched item (one removed meanwhile stays removed).
+    fn record(&mut self, sample: &Sample) {
+        if !self.items.iter().any(|i| i.id == sample.id) {
+            return;
+        }
+        self.last.insert(sample.id, sample.clone());
+        let h = self.history.entry(sample.id).or_default();
+        if h.len() >= HISTORY_MAX {
+            h.pop_front();
+        }
+        h.push_back(Point::of(sample));
+    }
+}
+
+/// How a session reads memory while the program runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// It cannot (a host program, a debugger without readMemory).
+    None,
+    /// Through the debug server's Tcl port: the program is never stopped.
+    Tcl,
+    /// By stopping the program for a moment and resuming it, when the user allows it.
+    Pausing,
+}
+
+impl Mode {
+    pub fn name(self) -> Option<&'static str> {
+        match self {
+            Mode::None => None,
+            Mode::Tcl => Some("tcl"),
+            Mode::Pausing => Some("pausing"),
+        }
+    }
+}
+
+/// A session's live watch: the Tcl port of its debug server (or the means to read by pausing) and what is watched.
+#[derive(Debug)]
 pub struct LiveWatch {
-    /// OpenOCD's Tcl port; 0 while the server has none (no live view).
+    /// OpenOCD's Tcl port; 0 while the server has none.
     port: AtomicU16,
+    /// The session is a gdb session on an embedded target, so it could read by pausing the program.
+    pausing_possible: bool,
+    /// The user allowed that for this session.
+    pausing: AtomicBool,
+    /// How long a round keeps the program stopped, milliseconds, smoothed over the last rounds (0: not measured yet).
+    pause_ms: AtomicU32,
     next_id: AtomicU32,
     polling: AtomicBool,
     state: Mutex<LiveState>,
 }
 
 impl LiveWatch {
+    pub fn new(pausing_possible: bool) -> Self {
+        LiveWatch { port: AtomicU16::new(0), pausing_possible, pausing: AtomicBool::new(false), pause_ms: AtomicU32::new(0), next_id: AtomicU32::new(0), polling: AtomicBool::new(false), state: Mutex::new(LiveState::default()) }
+    }
+
     pub fn set_port(&self, port: u16) {
         self.port.store(port, Ordering::SeqCst);
     }
 
-    /// Whether this session can read memory while it runs.
+    pub fn mode(&self) -> Mode {
+        if self.port.load(Ordering::SeqCst) != 0 {
+            Mode::Tcl
+        } else if self.pausing_possible {
+            Mode::Pausing
+        } else {
+            Mode::None
+        }
+    }
+
+    /// Whether this session has a live view: it can read memory while the program runs (or, with the user's say-so, by pausing it).
     pub fn enabled(&self) -> bool {
-        self.port.load(Ordering::SeqCst) != 0
+        self.mode() != Mode::None
+    }
+
+    /// The user allowed reading by pausing the program.
+    pub fn pausing_on(&self) -> bool {
+        self.pausing.load(Ordering::SeqCst)
+    }
+
+    /// A round kept the program stopped for `ms`: fold it into the running average the user is shown.
+    pub fn note_pause(&self, ms: u32) {
+        let old = self.pause_ms.load(Ordering::SeqCst);
+        let next = if old == 0 { ms.max(1) } else { ((u64::from(old) * 7 + u64::from(ms) * 3) / 10).max(1) as u32 };
+        self.pause_ms.store(next, Ordering::SeqCst);
+    }
+
+    /// The average time a round keeps the program stopped, if any round has run.
+    pub fn pause_ms(&self) -> Option<u32> {
+        Some(self.pause_ms.load(Ordering::SeqCst)).filter(|m| *m != 0)
     }
 
     fn port(&self) -> Option<u16> {
@@ -149,8 +257,104 @@ impl LiveWatch {
 
     pub fn snapshot(&self) -> Value {
         let st = self.state.lock();
-        json!({ "items": st.items, "intervalMs": st.interval_ms, "last": st.last })
+        json!({ "items": st.items, "intervalMs": st.interval_ms, "last": st.last, "mode": self.mode().name(), "pausing": self.pausing_on(), "pauseMs": self.pause_ms() })
     }
+
+    /// The watched item with this expression.
+    pub fn find(&self, expression: &str) -> Option<Item> {
+        self.state.lock().items.iter().find(|i| i.expression == expression).cloned()
+    }
+
+    /// The readings kept of an item, oldest first: only those after `since` (ms), and at most the newest `limit`.
+    pub fn readings(&self, id: u32, since: Option<i64>, limit: usize) -> Vec<Point> {
+        let st = self.state.lock();
+        let Some(h) = st.history.get(&id) else { return vec![] };
+        let after: Vec<&Point> = h.iter().filter(|p| since.is_none_or(|s| p.t > s)).collect();
+        after[after.len().saturating_sub(limit)..].iter().map(|p| (*p).clone()).collect()
+    }
+}
+
+// ---------------------------------------------------------------- history
+
+/// At most about `max` points: the readings are cut into `max / 2` equal slices and each keeps its lowest and highest
+/// number, in time order, so a spike or a dip survives. A slice with no number (every reading failed) keeps its first.
+pub fn decimate(points: &[Point], max: usize) -> Vec<Point> {
+    let max = max.max(4);
+    if points.len() <= max {
+        return points.to_vec();
+    }
+    let size = points.len().div_ceil(max / 2);
+    let mut out = Vec::with_capacity(max + 2);
+    for chunk in points.chunks(size) {
+        let (mut lo, mut hi): (Option<usize>, Option<usize>) = (None, None);
+        for (i, p) in chunk.iter().enumerate() {
+            if !p.v.is_finite() {
+                continue;
+            }
+            if lo.is_none_or(|l| p.v < chunk[l].v) {
+                lo = Some(i);
+            }
+            if hi.is_none_or(|h| p.v > chunk[h].v) {
+                hi = Some(i);
+            }
+        }
+        match (lo, hi) {
+            (Some(l), Some(h)) => {
+                let (a, b) = if l <= h { (l, h) } else { (h, l) };
+                out.push(chunk[a].clone());
+                if b != a {
+                    out.push(chunk[b].clone());
+                }
+            }
+            _ => out.push(chunk[0].clone()),
+        }
+    }
+    out
+}
+
+/// `{t: [ms…], v: [number | null…], exact?: {index: "digits"}}`: null is a reading that failed or is no number; `exact`
+/// has the digits of the whole numbers a double cannot hold.
+pub fn points_json(points: &[Point]) -> Value {
+    let t: Vec<i64> = points.iter().map(|p| p.t).collect();
+    let v: Vec<Value> = points.iter().map(|p| if p.v.is_finite() { json!(p.v) } else { Value::Null }).collect();
+    let exact: serde_json::Map<String, Value> = points.iter().enumerate().filter_map(|(i, p)| p.exact.as_ref().map(|x| (i.to_string(), json!(x)))).collect();
+    let mut out = json!({ "t": t, "v": v });
+    if !exact.is_empty() {
+        out["exact"] = Value::Object(exact);
+    }
+    out
+}
+
+/// Count, lowest, highest and mean of the numbers among `points`, the newest number with its time, and how many readings failed.
+pub fn stats(points: &[Point]) -> Value {
+    let nums: Vec<&Point> = points.iter().filter(|p| p.v.is_finite()).collect();
+    let mut out = json!({ "readings": points.len(), "failed": points.len() - nums.len() });
+    if let (Some(lo), Some(hi), Some(last)) = (nums.iter().map(|p| p.v).reduce(f64::min), nums.iter().map(|p| p.v).reduce(f64::max), nums.last()) {
+        out["min"] = json!(lo);
+        out["max"] = json!(hi);
+        out["mean"] = json!(nums.iter().map(|p| p.v).sum::<f64>() / nums.len() as f64);
+        out["last"] = json!({ "t": last.t, "v": last.exact.as_ref().map(|x| json!(x)).unwrap_or_else(|| json!(last.v)) });
+    }
+    out
+}
+
+/// What `GET …/live/history` answers: the readings kept of the watched items (all, or `ids`), each as `points_json`, keyed by item id.
+pub fn history(s: &Session, ids: Option<&[u32]>, since: Option<i64>, limit: usize, max_points: Option<usize>) -> Result<Value, ApiError> {
+    require_live(s)?;
+    let (items, interval_ms) = {
+        let st = s.live.state.lock();
+        (st.items.iter().filter(|i| ids.is_none_or(|ids| ids.contains(&i.id))).cloned().collect::<Vec<_>>(), st.interval_ms)
+    };
+    let limit = limit.clamp(1, HISTORY_MAX);
+    let mut series = serde_json::Map::new();
+    for item in &items {
+        let mut points = s.live.readings(item.id, since, limit);
+        if let Some(max) = max_points {
+            points = decimate(&points, max);
+        }
+        series.insert(item.id.to_string(), points_json(&points));
+    }
+    Ok(json!({ "intervalMs": interval_ms, "items": items, "series": series, "now": crate::util::now_ms() }))
 }
 
 // ---------------------------------------------------------------- what can be watched
@@ -377,8 +581,21 @@ fn require_live(s: &Session) -> Result<(), ApiError> {
     if s.live.enabled() {
         Ok(())
     } else {
-        Err(ApiError::conflict("this session has no live view: it needs a debug server with OpenOCD's Tcl port (the OpenOCD preset has it)"))
+        Err(ApiError::conflict("this session has no live view: it needs a gdb session on an embedded target, and a debug server with OpenOCD's Tcl port (the OpenOCD preset has it) to read without stopping the program"))
     }
+}
+
+/// Allow (or stop) reading by pausing the program, for this session. The user's call: it disturbs the program.
+pub fn set_pausing(state: &AppState, s: &Arc<Session>, on: bool) -> Result<(), ApiError> {
+    if s.live.mode() != Mode::Pausing {
+        return Err(ApiError::conflict("this session reads through the debug server's Tcl port: the program is never stopped"));
+    }
+    s.live.pausing.store(on, Ordering::SeqCst);
+    emit(state, s, json!({ "pausing": on }));
+    if on {
+        ensure_poller(state, s);
+    }
+    Ok(())
 }
 
 async fn persist(state: &AppState, s: &Session) {
@@ -406,6 +623,11 @@ pub async fn add(state: &AppState, s: &Arc<Session>, expression: &str) -> Result
     let item = Item { id: s.live.next_id.fetch_add(1, Ordering::SeqCst) + 1, expression, address: Some(r.address), size: r.size, kind: r.kind, type_name: r.type_name, peripheral, error: None };
     {
         let mut st = s.live.state.lock();
+        // The same expression may have been added while this one was being resolved (the watches brought back at the
+        // start of a session, another tab): it is one item.
+        if let Some(i) = st.items.iter().find(|i| i.expression == item.expression) {
+            return Ok(i.clone());
+        }
         if st.items.len() >= MAX_ITEMS {
             return Err(ApiError::bad_request(format!("at most {MAX_ITEMS} expressions are watched at once")));
         }
@@ -424,6 +646,7 @@ pub async fn remove(state: &AppState, s: &Arc<Session>, id: u32) -> Result<(), A
         let before = st.items.len();
         st.items.retain(|i| i.id != id);
         st.last.remove(&id);
+        st.history.remove(&id);
         if st.items.len() == before {
             return Err(ApiError::not_found(format!("no watched expression {id}")));
         }
@@ -435,8 +658,9 @@ pub async fn remove(state: &AppState, s: &Arc<Session>, id: u32) -> Result<(), A
 
 pub fn set_interval(state: &AppState, s: &Arc<Session>, ms: u64) -> Result<(), ApiError> {
     require_live(s)?;
-    if !(MIN_INTERVAL_MS..=MAX_INTERVAL_MS).contains(&ms) {
-        return Err(ApiError::bad_request(format!("an interval of {MIN_INTERVAL_MS} to {MAX_INTERVAL_MS} ms")));
+    let min = if s.live.mode() == Mode::Pausing { MIN_PAUSING_INTERVAL_MS } else { MIN_INTERVAL_MS };
+    if !(min..=MAX_INTERVAL_MS).contains(&ms) {
+        return Err(ApiError::bad_request(format!("an interval of {min} to {MAX_INTERVAL_MS} ms")));
     }
     s.live.state.lock().interval_ms = ms;
     emit(state, s, json!({ "intervalMs": ms }));
@@ -487,10 +711,51 @@ async fn read_item(client: &mut TclClient, item: &Item) -> Result<Value, TclErro
     Ok(decode(item.kind, item.size, &tcl::words_to_bytes(&words, width)))
 }
 
+/// One round of readings through the Tcl port.
+async fn read_tcl(client: &mut Option<TclClient>, port: u16, items: &[Item]) -> Vec<Sample> {
+    let now = crate::util::now_ms();
+    let mut samples: Vec<Sample> = vec![];
+    if client.is_none() {
+        match TclClient::connect(port).await {
+            Ok(c) => *client = Some(c),
+            Err(e) => samples.extend(items.iter().map(|i| Sample { id: i.id, t: now, v: None, e: Some(e.to_string()) })),
+        }
+    }
+    if let Some(c) = client.as_mut() {
+        let mut broken = false;
+        for item in items {
+            if broken {
+                samples.push(Sample { id: item.id, t: now, v: None, e: Some("the connection to the debug server was lost".into()) });
+                continue;
+            }
+            match read_item(c, item).await {
+                Ok(v) => samples.push(Sample { id: item.id, t: now, v: Some(v), e: None }),
+                Err(TclError::Command(m)) => samples.push(Sample { id: item.id, t: now, v: None, e: Some(m) }),
+                Err(TclError::Transport(m)) => {
+                    broken = true;
+                    samples.push(Sample { id: item.id, t: now, v: None, e: Some(m) });
+                }
+            }
+        }
+        if broken {
+            *client = None;
+        }
+    }
+    samples
+}
+
 async fn poll(state: AppState, s: Arc<Session>) {
     let mut client: Option<TclClient> = None;
+    // Rounds in a row that could not read by pausing the program: each one waits longer than the last.
+    let mut failed: u32 = 0;
+    // How long a round keeps the program stopped (average), told along with the readings.
+    let mut pause_ms: Option<u32> = None;
     loop {
-        let interval = s.live.state.lock().interval_ms;
+        let mode = s.live.mode();
+        let mut interval = s.live.state.lock().interval_ms;
+        if mode == Mode::Pausing {
+            interval = (interval.max(MIN_PAUSING_INTERVAL_MS) << failed.min(4)).min(MAX_INTERVAL_MS);
+        }
         tokio::select! {
             _ = s.cancel.cancelled() => return,
             _ = tokio::time::sleep(Duration::from_millis(interval)) => {}
@@ -503,51 +768,142 @@ async fn poll(state: AppState, s: Arc<Session>) {
         if items.is_empty() || s.state() == SessionState::Starting {
             continue;
         }
-        let Some(port) = s.live.port() else { continue };
-        let now = crate::util::now_ms();
-        let mut samples: Vec<Sample> = vec![];
-        if client.is_none() {
-            match TclClient::connect(port).await {
-                Ok(c) => client = Some(c),
-                Err(e) => samples.extend(items.iter().map(|i| Sample { id: i.id, t: now, v: None, e: Some(e.to_string()) })),
+        let samples = match mode {
+            Mode::None => continue,
+            Mode::Tcl => {
+                let Some(port) = s.live.port() else { continue };
+                read_tcl(&mut client, port, &items).await
             }
-        }
-        if let Some(c) = client.as_mut() {
-            let mut broken = false;
-            for item in &items {
-                if broken {
-                    samples.push(Sample { id: item.id, t: now, v: None, e: Some("the connection to the debug server was lost".into()) });
-                    continue;
-                }
-                match read_item(c, item).await {
-                    Ok(v) => samples.push(Sample { id: item.id, t: now, v: Some(v), e: None }),
-                    Err(TclError::Command(m)) => samples.push(Sample { id: item.id, t: now, v: None, e: Some(m) }),
-                    Err(TclError::Transport(m)) => {
-                        broken = true;
-                        samples.push(Sample { id: item.id, t: now, v: None, e: Some(m) });
+            // Only once the user allowed it: reading stops the program for a moment.
+            Mode::Pausing if !s.live.pausing_on() => continue,
+            Mode::Pausing => match super::pausing::read(&state, &s, &items).await {
+                super::pausing::Outcome::Skip => continue,
+                super::pausing::Outcome::Done(samples, stopped) => {
+                    failed = 0;
+                    if let Some(ms) = stopped {
+                        s.live.note_pause(ms);
+                        pause_ms = s.live.pause_ms();
                     }
+                    samples
                 }
-            }
-            if broken {
-                client = None;
-            }
-        }
+                super::pausing::Outcome::Failed(samples) => {
+                    failed = failed.saturating_add(1);
+                    samples
+                }
+            },
+        };
         {
             let mut st = s.live.state.lock();
             for sample in &samples {
                 // A watch removed while this was reading stays removed.
-                if st.items.iter().any(|i| i.id == sample.id) {
-                    st.last.insert(sample.id, sample.clone());
-                }
+                st.record(sample);
             }
         }
-        emit(&state, &s, json!({ "samples": samples }));
+        let mut payload = json!({ "samples": samples });
+        if let (Mode::Pausing, Some(ms)) = (mode, pause_ms) {
+            payload["pauseMs"] = json!(ms);
+        }
+        emit(&state, &s, payload);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample(id: u32, t: i64, v: Option<Value>, e: Option<&str>) -> Sample {
+        Sample { id, t, v, e: e.map(String::from) }
+    }
+
+    #[test]
+    fn the_time_a_round_keeps_the_program_stopped_is_averaged() {
+        let live = LiveWatch::new(true);
+        assert_eq!(live.pause_ms(), None);
+        live.note_pause(40);
+        assert_eq!(live.pause_ms(), Some(40), "the first round is the average");
+        live.note_pause(50);
+        assert_eq!(live.pause_ms(), Some(43), "70% of the old, 30% of the new");
+        for _ in 0..40 {
+            live.note_pause(10);
+        }
+        assert!(live.pause_ms().unwrap() <= 11, "it follows the recent rounds");
+        live.note_pause(0);
+        assert!(live.pause_ms().unwrap() >= 1, "never back to 'not measured'");
+        assert_eq!(live.snapshot()["pauseMs"], json!(live.pause_ms()));
+    }
+
+    #[test]
+    fn a_reading_is_kept_as_a_number_with_a_gap_for_what_is_none() {
+        assert_eq!(Point::of(&sample(1, 5, Some(json!(42)), None)), Point { t: 5, v: 42.0, exact: None });
+        assert_eq!(Point::of(&sample(1, 5, Some(json!(true)), None)).v, 1.0);
+        assert_eq!(Point::of(&sample(1, 5, Some(json!(false)), None)).v, 0.0);
+        assert_eq!(Point::of(&sample(1, 5, Some(json!(-2.5)), None)).v, -2.5);
+        // A 64-bit value keeps its digits beside the nearest double.
+        let big = Point::of(&sample(1, 5, Some(json!("18446744073709551615")), None));
+        assert_eq!((big.v, big.exact.as_deref()), (18446744073709551615u64 as f64, Some("18446744073709551615")));
+        assert_eq!(Point::of(&sample(1, 5, Some(json!("-9223372036854775808")), None)).exact.as_deref(), Some("-9223372036854775808"));
+        // Bytes, text, a failure and nothing are gaps.
+        for s in [sample(1, 5, Some(json!("01 ab ff")), None), sample(1, 5, Some(json!("NaN")), None), sample(1, 5, None, Some("read failed")), sample(1, 5, Some(json!(7)), Some("but failed")), sample(1, 5, None, None), sample(1, 5, Some(json!([1])), None)] {
+            let p = Point::of(&s);
+            assert!(p.v.is_nan() && p.exact.is_none() && p.t == 5, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn the_history_is_capped_and_forgets_what_is_no_longer_watched() {
+        let item = |id| Item { id, expression: format!("v{id}"), address: Some(0x2000_0000), size: 4, kind: Kind::Uint, type_name: "uint32_t".into(), peripheral: None, error: None };
+        let mut st = LiveState::default();
+        st.items = vec![item(1)];
+        for i in 0..(HISTORY_MAX as i64 + 5) {
+            st.record(&sample(1, i, Some(json!(i)), None));
+        }
+        assert_eq!(st.history[&1].len(), HISTORY_MAX);
+        assert_eq!((st.history[&1].front().unwrap().t, st.history[&1].back().unwrap().t), (5, HISTORY_MAX as i64 + 4), "the oldest went");
+        assert_eq!(st.last[&1].t, HISTORY_MAX as i64 + 4);
+        // A reading of something not watched (removed while the poller was reading) is not kept.
+        st.record(&sample(2, 1, Some(json!(1)), None));
+        assert!(!st.history.contains_key(&2) && !st.last.contains_key(&2));
+    }
+
+    #[test]
+    fn thinning_keeps_the_lowest_and_the_highest_of_every_slice_in_time_order() {
+        let pts: Vec<Point> = (0..1000).map(|i| Point { t: i, v: if i == 500 { 1000.0 } else if i == 250 { -1000.0 } else { (i % 7) as f64 }, exact: None }).collect();
+        let few = decimate(&pts, 20);
+        assert!(few.len() <= 20, "{}", few.len());
+        assert!(few.iter().any(|p| p.v == 1000.0) && few.iter().any(|p| p.v == -1000.0), "a spike and a dip survive");
+        assert!(few.windows(2).all(|w| w[0].t < w[1].t), "times go forward");
+        // Short enough: untouched. A tiny maximum still gives something sensible.
+        assert_eq!(decimate(&pts[..10], 20), pts[..10].to_vec());
+        assert!(decimate(&pts, 1).len() <= 4);
+        // A slice with no number (every reading failed) keeps its first reading, as a gap.
+        let mut gappy: Vec<Point> = (0..40).map(|i| Point { t: i, v: f64::NAN, exact: None }).collect();
+        gappy[39].v = 5.0;
+        let thin = decimate(&gappy, 8);
+        assert!(thin.iter().any(|p| p.v == 5.0) && thin.iter().any(|p| p.v.is_nan()), "{thin:?}");
+        assert!(decimate(&[], 10).is_empty());
+    }
+
+    #[test]
+    fn points_and_statistics_read_back_as_json() {
+        let pts = vec![
+            Point { t: 10, v: 1.0, exact: None },
+            Point { t: 20, v: f64::NAN, exact: None },
+            Point { t: 30, v: 4.0, exact: None },
+            Point { t: 40, v: 18446744073709551615u64 as f64, exact: Some("18446744073709551615".into()) },
+        ];
+        let j = points_json(&pts);
+        assert_eq!((j["t"].clone(), j["v"][1].clone(), j["exact"].clone()), (json!([10, 20, 30, 40]), Value::Null, json!({ "3": "18446744073709551615" })));
+        assert!(points_json(&pts[..3]).get("exact").is_none());
+        let s = stats(&pts[..3]);
+        assert_eq!((s["readings"].clone(), s["failed"].clone(), s["min"].clone(), s["max"].clone(), s["mean"].clone()), (json!(3), json!(1), json!(1.0), json!(4.0), json!(2.5)));
+        assert_eq!(s["last"], json!({ "t": 30, "v": 4.0 }));
+        // The newest number is told by its digits when it has them.
+        assert_eq!(stats(&pts)["last"]["v"], json!("18446744073709551615"));
+        let none = stats(&[Point { t: 1, v: f64::NAN, exact: None }]);
+        assert_eq!((none["readings"].clone(), none["failed"].clone()), (json!(1), json!(1)));
+        assert!(none.get("min").is_none() && none.get("last").is_none());
+        assert_eq!(stats(&[])["readings"], json!(0));
+    }
 
     #[test]
     fn only_things_at_a_fixed_address_can_be_watched() {

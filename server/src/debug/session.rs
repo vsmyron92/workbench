@@ -198,9 +198,12 @@ pub struct SessionInfo {
     /// The configuration names an SVD file: the Peripherals view has a register map.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub peripherals: bool,
-    /// The Live tab can read variables of the running program (the debug server has a Tcl port).
+    /// The Live tab can read variables of the running program: through the debug server's Tcl port, or (`live_mode`
+    /// `pausing`) by stopping the program for a moment, which the user allows per session.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub live: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_mode: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -346,6 +349,9 @@ pub struct Session {
     svd: tokio::sync::OnceCell<Result<Arc<super::svd::Svd>, String>>,
     /// Variables read from the running target (Live tab).
     pub(super) live: super::live::LiveWatch,
+    /// A live read that stopped the program on purpose (see `pausing.rs`).
+    pub(super) quiet: Mutex<Quiet>,
+    pub(super) quiet_changed: tokio::sync::Notify,
     initialized: watch::Sender<bool>,
     terminated: AtomicBool,
     finished: AtomicBool,
@@ -403,7 +409,78 @@ fn truncate(mut s: String, max: usize) -> String {
     s
 }
 
+/// How long a user's pause may be on its way before live reads take the program for themselves again.
+const USER_PAUSE_GRACE: Duration = Duration::from_secs(10);
+
+/// Who may stop the program: a live read (`pausing.rs`) that stops it on purpose and resumes it, or the user. One lock
+/// decides, so the two never mix: while a read is in flight the `pause` stop it causes belongs to it and nothing shows it,
+/// and while the user is stepping or has pressed Pause no read starts and no stop is swallowed. Any other stop (a
+/// breakpoint) is a stop whatever else is going on.
+#[derive(Debug, Default)]
+pub(super) struct Quiet {
+    /// A read is in flight.
+    pub active: bool,
+    /// The stop it asked for has arrived.
+    pub stopped: bool,
+    /// The thread that stopped.
+    pub thread: Option<i64>,
+    /// The user pressed Pause and its stop has not arrived yet (when they pressed it).
+    pub user_pause: Option<std::time::Instant>,
+    /// The user's step is in flight: a pause now would end it, and a resume after that would run the program away.
+    pub stepping: bool,
+}
+
 impl Session {
+    /// A live read starts, if nobody else is moving the program. False: not now.
+    pub(super) fn begin_round(&self) -> bool {
+        let mut q = self.quiet.lock();
+        if q.active || q.stepping || q.user_pause.is_some_and(|t| t.elapsed() < USER_PAUSE_GRACE) {
+            return false;
+        }
+        q.user_pause = None;
+        q.active = true;
+        q.stopped = false;
+        q.thread = None;
+        true
+    }
+
+    /// The round is over, however it ended.
+    pub(super) fn end_round(&self) {
+        let mut q = self.quiet.lock();
+        q.active = false;
+        q.stopped = false;
+        q.thread = None;
+        drop(q);
+        self.quiet_changed.notify_waiters();
+    }
+
+    /// The user is about to pause the program: wait for a live read in flight to finish (it resumes the program, and its
+    /// stop is not the user's), then claim the program so that none starts before the user's stop arrives.
+    pub(super) async fn claim_for_user_pause(&self) {
+        for _ in 0..250 {
+            {
+                let mut q = self.quiet.lock();
+                if !q.active {
+                    q.user_pause = Some(std::time::Instant::now());
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // A round that never ends cannot hold the user's Pause back.
+        self.quiet.lock().user_pause = Some(std::time::Instant::now());
+    }
+
+    /// Wait (briefly) for a live read in flight to finish: ending the session must not land in the middle of one.
+    pub(super) async fn quiet_idle(&self) {
+        for _ in 0..250 {
+            if !self.quiet.lock().active {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     fn new(project: &Project, plan: &Plan, parent: Option<String>) -> Self {
         let (tx, _) = watch::channel(false);
         Self {
@@ -422,7 +499,11 @@ impl Session {
             proc_: tokio::sync::Mutex::new(None),
             server: Mutex::new(None),
             svd: tokio::sync::OnceCell::new(),
-            live: super::live::LiveWatch::default(),
+            // A gdb session on an embedded target can read values by stopping the program for a moment, when its debug
+            // server has no side channel for it (`pausing.rs`).
+            live: super::live::LiveWatch::new(plan.remote.is_some() && plan.raw_arguments.is_none() && plan.adapter.kind == AdapterKind::Gdb),
+            quiet: Mutex::new(Quiet::default()),
+            quiet_changed: tokio::sync::Notify::new(),
             initialized: tx,
             terminated: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -435,6 +516,16 @@ impl Session {
 
     pub fn state(&self) -> SessionState {
         self.data.lock().state.unwrap_or(SessionState::Starting)
+    }
+
+    /// Stop (or Rerun) was asked for, or the session is being cancelled: no new work.
+    pub(super) fn stopping(&self) -> bool {
+        self.stop_requested.load(Ordering::SeqCst) || self.cancel.is_cancelled()
+    }
+
+    /// The thread a pause or continue is addressed to (gdb has one per core).
+    pub(super) fn first_thread(&self) -> i64 {
+        self.data.lock().threads.first().map(|t| t.id).unwrap_or(1)
     }
 
     /// The program's ELF on this computer (the Live tab's batch gdb reads its symbols).
@@ -496,6 +587,7 @@ impl Session {
             }),
             peripherals: self.plan.remote.as_ref().is_some_and(|r| r.svd.is_some()) && self.plan.raw_arguments.is_none(),
             live: self.live.enabled(),
+            live_mode: self.live.mode().name(),
         }
     }
 
@@ -1165,6 +1257,9 @@ async fn start_server(state: &AppState, s: &Arc<Session>, plan: &Plan, r: &launc
     if let Some(p) = server.live_port.as_deref().and_then(servers::port_index).and_then(|i| ports.get(i).copied()) {
         s.live.set_port(p);
         s.update(|_| {});
+        super::live::start(state, s);
+    } else if s.live.mode() == super::live::Mode::Pausing {
+        // No side channel: the saved watches come back, and are read by pausing the program once the user allows it.
         super::live::start(state, s);
     }
     spawn_channels(state, s, r, &ports);
@@ -1899,7 +1994,7 @@ async fn handle(state: &AppState, s: &Arc<Session>, m: Incoming) -> bool {
     false
 }
 
-fn on_event(state: &AppState, s: &Arc<Session>, e: Value) {
+pub(super) fn on_event(state: &AppState, s: &Arc<Session>, e: Value) {
     let body = e.get("body").cloned().unwrap_or(Value::Null);
     let str_of = |k: &str| body.get(k).and_then(Value::as_str).map(str::to_string);
     match e.get("event").and_then(Value::as_str).unwrap_or("") {
@@ -1907,6 +2002,21 @@ fn on_event(state: &AppState, s: &Arc<Session>, e: Value) {
             s.initialized.send_replace(true);
         }
         "stopped" => {
+            // The program was stopped for a moment by a live read, which resumes it: not a stop worth showing. (A second report
+            // of the same halt is swallowed with it. The user's own pause cannot be taken for this one: a read never starts
+            // while it is on its way, `begin_round`.)
+            if str_of("reason").as_deref() == Some("pause") {
+                let mut q = s.quiet.lock();
+                if q.active {
+                    if !q.stopped {
+                        q.stopped = true;
+                        q.thread = body.get("threadId").and_then(Value::as_i64);
+                    }
+                    drop(q);
+                    s.quiet_changed.notify_waiters();
+                    return;
+                }
+            }
             // Connecting to a remote target halts it: not a stop worth showing while it
             // is still being reset and flashed.
             {
@@ -1918,6 +2028,12 @@ fn on_event(state: &AppState, s: &Arc<Session>, e: Value) {
             }
             let reason = str_of("reason").unwrap_or_else(|| "pause".into());
             let thread_id = body.get("threadId").and_then(Value::as_i64);
+            {
+                // The user's pause or step has arrived: live reads may use the program again once it runs.
+                let mut q = s.quiet.lock();
+                q.user_pause = None;
+                q.stepping = false;
+            }
             let mut temp = None;
             let epoch;
             {
@@ -2229,6 +2345,18 @@ pub async fn control(state: &AppState, s: &Arc<Session>, action: &str, thread_id
         _ => return Err(ApiError::conflict("the program is not suspended")),
     }
     let tid = tid.unwrap_or(0);
+    let is_step = matches!(command, "next" | "stepIn" | "stepOut");
+    if command == "pause" {
+        // A live read stops the program for a moment and resumes it: let it finish, and keep the next from starting before
+        // this pause's own stop has arrived (that stop is the user's, and must not be taken for a read's).
+        s.claim_for_user_pause().await;
+        if s.state() != SessionState::Running {
+            s.quiet.lock().user_pause = None;
+            return Err(ApiError::conflict("the program is not running"));
+        }
+    } else if is_step {
+        s.quiet.lock().stepping = true; // a read must not pause the step, and then resume the program
+    }
     if command != "pause" {
         s.update(|d| {
             d.state = Some(SessionState::Running);
@@ -2239,6 +2367,13 @@ pub async fn control(state: &AppState, s: &Arc<Session>, action: &str, thread_id
     }
     let r = client.request(command, json!({ "threadId": tid }), REQUEST_TIMEOUT).await;
     if let Err(e) = r {
+        {
+            let mut q = s.quiet.lock();
+            q.stepping = false;
+            if command == "pause" {
+                q.user_pause = None;
+            }
+        }
         if command != "pause" {
             s.update(|d| {
                 if d.state == Some(SessionState::Running) {
@@ -2280,6 +2415,8 @@ async fn stop_as(state: &AppState, s: &Arc<Session>, terminate_debuggee: bool) {
         s.stop_requested.store(true, Ordering::SeqCst);
         s.update(|_| {});
     }
+    // A live read in flight resumes the program first: detaching from a stopped one can leave it stopped.
+    s.quiet_idle().await;
     // Child sessions first: they talk to this session's adapter.
     stop_children(state.clone(), s.id.clone(), terminate_debuggee).await;
     if let Ok(c) = s.client() {

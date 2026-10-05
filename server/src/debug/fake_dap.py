@@ -15,6 +15,16 @@ The console commands of a remote target work: `load` takes $FAKE_SLOW_LOAD secon
 `thbreak X` makes the next `continue` stop there (`thbreak nope` fails), `monitor fail`
 fails, anything else `monitor ...` is answered with `ran: <command>`.
 
+With $FAKE_PAUSE_DELAY (seconds) the `stopped` event of a `pause` comes that long after the answer, like a probe that
+needs time to halt the core; with $FAKE_STEP_DELAY a `next`, `stepIn` or `stepOut` takes that long to stop (the program
+"runs" meanwhile, and a `pause` in the middle ends the step with a stop of its own, reason `pause`, as gdb's does).
+
+With $FAKE_RUNS set, `continue` with nothing to stop at leaves the "program" running instead of
+ending it, like a firmware: `pause` stops it (a `stopped` event, reason `pause`; an error when it is
+not running), and `readMemory` while it runs fails with `notStopped`, as gdb's does. With
+$FAKE_MEM_COUNTS the word at an address is `address * 7 + the number of reads so far`, so values move
+(up to 8 bytes; little-endian).
+
 `target extended-remote X` (a console command, sent before the launch or attach) is answered
 with "Remote debugging using X" (a host with "refuse" in it with "Connection refused."); an
 attach after it behaves like gdb's attach to a remote target.
@@ -64,13 +74,17 @@ log = open(os.environ["FAKE_LOG"], "a") if os.environ.get("FAKE_LOG") else None
 seq = 0
 
 
+send_lock = threading.Lock()  # a delayed stop is sent from a timer thread
+
+
 def send(obj):
     global seq
-    seq += 1
-    obj["seq"] = seq
-    b = json.dumps(obj).encode()
-    out.write(b"Content-Length: %d\r\n\r\n" % len(b) + b)
-    out.flush()
+    with send_lock:
+        seq += 1
+        obj["seq"] = seq
+        b = json.dumps(obj).encode()
+        out.write(b"Content-Length: %d\r\n\r\n" % len(b) + b)
+        out.flush()
 
 
 def event(name, body=None):
@@ -78,6 +92,9 @@ def event(name, body=None):
     if body is not None:
         m["body"] = body
     send(m)
+
+
+timers = {}  # "step" / "pause": the timer of a stop that is on its way
 
 
 def respond(req, body=None, success=True, message=None):
@@ -179,6 +196,8 @@ def main_c():
     return os.path.join(os.path.dirname(program), "src", "main.c")
 
 
+running = False  # $FAKE_RUNS: the "program" is running (after a `continue`), so memory cannot be read
+reads = 0  # $FAKE_MEM_COUNTS: memory reads so far
 memory = {}  # written bytes; the rest reads as ((address * 7) + 3) & 0xFF, and 0xDEAD0000 and up faults
 tb = None  # a temporary breakpoint (thbreak): the line the next `continue` stops at
 
@@ -343,12 +362,39 @@ while True:
             respond(m, success=False, message="The program being debugged stopped while in a function called from GDB.")
         else:
             respond(m, {"result": "eval:" + e, "variablesReference": 0})
+    elif cmd == "pause":
+        if running:
+            respond(m)
+            if "step" in timers:  # the pause ends a step that is under way
+                timers.pop("step").cancel()
+            delay = float(os.environ.get("FAKE_PAUSE_DELAY", "0"))
+            if "pause" in timers:
+                pass  # a halt is already on its way: asking again changes nothing
+            elif delay > 0:
+                def halted():
+                    global running
+                    timers.pop("pause", None)
+                    running = False
+                    event("stopped", {"reason": "pause", "threadId": 1, "allThreadsStopped": True})
+                timers["pause"] = threading.Timer(delay, halted)
+                timers["pause"].start()
+            else:
+                running = False
+                event("stopped", {"reason": "pause", "threadId": 1, "allThreadsStopped": True})
+        else:
+            respond(m, success=False, message="the program is not running")
     elif cmd == "readMemory":
         addr = int(a["memoryReference"], 0) + a.get("offset", 0)
-        if addr >= 0xDEAD0000:
+        if running:
+            respond(m, success=False, message="notStopped")
+        elif addr >= 0xDEAD0000:
             respond(m, success=False, message="Out of memory")
         else:
-            data = bytes(memory.get(addr + i, ((addr + i) * 7 + 3) & 0xFF) for i in range(a["count"]))
+            if os.environ.get("FAKE_MEM_COUNTS") and a["count"] <= 8:
+                reads += 1
+                data = ((addr * 7 + reads) & ((1 << (8 * a["count"])) - 1)).to_bytes(a["count"], "little")
+            else:
+                data = bytes(memory.get(addr + i, ((addr + i) * 7 + 3) & 0xFF) for i in range(a["count"]))
             respond(m, {"address": hex(addr), "data": base64.b64encode(data).decode()})
     elif cmd == "writeMemory":
         addr = int(a["memoryReference"], 0) + a.get("offset", 0)
@@ -363,7 +409,19 @@ while True:
     elif cmd == "next":
         respond(m)
         cur = (cur[0], cur[1] + 1, None)
-        event("stopped", {"reason": "step", "threadId": 1, "allThreadsStopped": True})
+        step_delay = float(os.environ.get("FAKE_STEP_DELAY", "0"))
+        if step_delay > 0:
+            running = True  # a step under way is a running program
+
+            def stepped():
+                global running
+                timers.pop("step", None)
+                running = False
+                event("stopped", {"reason": "step", "threadId": 1, "allThreadsStopped": True})
+            timers["step"] = threading.Timer(step_delay, stepped)
+            timers["step"].start()
+        else:
+            event("stopped", {"reason": "step", "threadId": 1, "allThreadsStopped": True})
     elif cmd == "continue":
         respond(m, {"allThreadsContinued": True})
         later = [(line, bid) for line, bid in bps.get(cur[0], []) if line > cur[1]]
@@ -375,6 +433,8 @@ while True:
             line, bid = min(later)
             cur = (cur[0], line, bid)
             event("stopped", {"reason": "breakpoint", "threadId": 1, "allThreadsStopped": True, "hitBreakpointIds": [bid]})
+        elif os.environ.get("FAKE_RUNS"):
+            running = True
         else:
             event("output", {"category": "stdout", "output": "bye\n"})
             event("exited", {"exitCode": 3})

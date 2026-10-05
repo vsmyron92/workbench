@@ -14,6 +14,8 @@ import { BreakpointDialogHost } from './BreakpointDialog'
 import { installEditorIntegration } from './editor'
 import { isLive, revealFrame } from './logic'
 import { useLive } from './liveStore'
+import { forgetReadings, ingest } from './plotBuffer'
+import { usePlots } from './plotStore'
 import { PickerHost } from './Pickers'
 import { useDebug } from './store'
 import type { BreakpointsView, DebugSession, LiveEvent, OutputLine } from './types'
@@ -139,6 +141,7 @@ export function DebugProvider({ children }: { children?: ReactNode }) {
     if ('removed' in d) {
       useDebug.getState().remove(d.id)
       useLive.getState().forget(d.id)
+      forgetReadings(d.id)
       return
     }
     const st = useDebug.getState()
@@ -179,7 +182,13 @@ export function DebugProvider({ children }: { children?: ReactNode }) {
     useDebug.getState().appendOutput(sessionId, lines)
   })
 
-  useEvent<LiveEvent>('debug.live', (ev) => useLive.getState().apply(ev.data))
+  // The project's plots changed (another tab, another device, an edit of ours that the server confirms).
+  useEvent<{ projectId: string; plots: unknown }>('debug.plots', (ev) => usePlots.getState().apply(ev.data.projectId, ev.data.plots))
+
+  useEvent<LiveEvent>('debug.live', (ev) => {
+    useLive.getState().apply(ev.data)
+    ingest(ev.data)
+  })
 
   useEvent<BreakpointsView>('debug.breakpoints', (ev) => {
     if (ev.projectId) applyBreakpoints(ev.projectId, ev.data)
@@ -188,6 +197,7 @@ export function DebugProvider({ children }: { children?: ReactNode }) {
   useEffect(
     () =>
       subscribe('resync', () => {
+        usePlots.getState().reloadAll()
         const p = useUi.getState().projectId
         if (p) {
           void loadSessions(p)

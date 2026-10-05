@@ -57,7 +57,12 @@ pub fn router() -> Router<AppState> {
         .route(&format!("{b}/sessions/{{sid}}/set-variable"), post(set_variable))
         .route(&format!("{b}/sessions/{{sid}}/completions"), post(completions))
         .route(&format!("{b}/sessions/{{sid}}/live"), get(live_list).post(live_add).put(live_interval))
+        .route(&format!("{b}/sessions/{{sid}}/live/history"), get(live_history))
+        .route(&format!("{b}/sessions/{{sid}}/live/pausing"), put(live_pausing))
         .route(&format!("{b}/sessions/{{sid}}/live/{{id}}"), delete(live_remove))
+        .route(&format!("{b}/plots"), get(plots_list))
+        .route(&format!("{b}/plots/{{id}}"), put(plots_put).delete(plots_delete))
+        .route(&format!("{b}/plots/{{id}}/data"), get(plots_data))
         .route(&format!("{b}/sessions/{{sid}}/svd"), get(super::peripherals::list))
         .route(&format!("{b}/sessions/{{sid}}/svd/{{peripheral}}"), get(super::peripherals::detail))
         .route(&format!("{b}/sessions/{{sid}}/svd/{{peripheral}}/{{register}}"), put(super::peripherals::write))
@@ -706,6 +711,104 @@ async fn live_interval(State(state): State<AppState>, caller: C, Path((pid, sid)
     let s = session_of(&state, &pid, &sid)?;
     super::live::set_interval(&state, &s, b.interval_ms)?;
     Ok(Json(json!({ "intervalMs": b.interval_ms })))
+}
+
+#[derive(Deserialize)]
+struct LivePausingBody {
+    enabled: bool,
+}
+
+/// Allow reading values by stopping the program for a moment (debug servers without a Tcl port). The user's call.
+async fn live_pausing(State(state): State<AppState>, caller: C, Path((pid, sid)): Path<(String, String)>, Json(b): Json<LivePausingBody>) -> ApiResult<Json<Value>> {
+    user_only(&caller)?;
+    let s = session_of(&state, &pid, &sid)?;
+    super::live::set_pausing(&state, &s, b.enabled)?;
+    Ok(Json(json!({ "pausing": b.enabled })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryQuery {
+    /// Only readings after this time (ms since the epoch).
+    since: Option<i64>,
+    /// The newest this many readings of each value (default 2000).
+    limit: Option<usize>,
+    /// Thin each value to about this many readings (each slice keeps its lowest and highest).
+    max_points: Option<usize>,
+    /// Item numbers separated by commas (default: all).
+    ids: Option<String>,
+}
+
+async fn live_history(State(state): State<AppState>, Path((pid, sid)): Path<(String, String)>, Query(q): Query<HistoryQuery>) -> ApiResult<Json<Value>> {
+    let s = session_of(&state, &pid, &sid)?;
+    let ids: Option<Vec<u32>> = match q.ids.as_deref() {
+        None => None,
+        Some(text) => Some(
+            text.split(',')
+                .filter(|x| !x.trim().is_empty())
+                .map(|x| x.trim().parse().map_err(|_| ApiError::bad_request("ids are item numbers separated by commas")))
+                .collect::<Result<_, _>>()?,
+        ),
+    };
+    Ok(Json(super::live::history(&s, ids.as_deref(), q.since, q.limit.unwrap_or(2000), q.max_points)?))
+}
+
+// ---------------------------------------------------------------- plots
+
+async fn plots_list(State(state): State<AppState>, Path(pid): Path<String>) -> ApiResult<Json<Value>> {
+    state.projects.require(&pid)?;
+    Ok(Json(json!({ "plots": state.debug.store.get(&state.paths.data_dir, &pid).plots })))
+}
+
+/// Add the plot or replace the one with this id. Browsers keep their plots here, so they all see the same ones.
+async fn plots_put(State(state): State<AppState>, caller: C, Path((pid, id)): Path<(String, String)>, Json(mut plot): Json<super::plots::PlotConfig>) -> ApiResult<Json<Value>> {
+    user_only(&caller)?;
+    state.projects.require(&pid)?;
+    if !plot.id.is_empty() && plot.id != id {
+        return Err(ApiError::bad_request("the plot's id is the one in the path"));
+    }
+    plot.id = id.clone();
+    let mut saved = None;
+    state
+        .debug
+        .store
+        .update(&state.paths.data_dir, &pid, |p| {
+            p.upsert_plot(plot)?;
+            saved = p.plots.iter().find(|x| x.id == id).cloned();
+            Ok(())
+        })
+        .await?;
+    super::plots::emit_plots(&state, &pid);
+    Ok(Json(json!(saved)))
+}
+
+async fn plots_delete(State(state): State<AppState>, caller: C, Path((pid, id)): Path<(String, String)>) -> ApiResult<Json<Value>> {
+    user_only(&caller)?;
+    state.projects.require(&pid)?;
+    state
+        .debug
+        .store
+        .update(&state.paths.data_dir, &pid, |p| if p.remove_plot(&id) { Ok(()) } else { Err(ApiError::not_found(format!("no plot {id}"))) })
+        .await?;
+    super::plots::emit_plots(&state, &pid);
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlotDataQuery {
+    /// The last this many seconds (default: the plot's own span).
+    seconds: Option<u64>,
+    /// About this many readings per series (default 500).
+    max_points: Option<usize>,
+}
+
+/// The data behind a plot: statistics and readings of each series, from the project's newest session that reads values.
+async fn plots_data(State(state): State<AppState>, Path((pid, id)): Path<(String, String)>, Query(q): Query<PlotDataQuery>) -> ApiResult<Json<Value>> {
+    state.projects.require(&pid)?;
+    let plot = state.debug.store.get(&state.paths.data_dir, &pid).plots.into_iter().find(|p| p.id == id).ok_or_else(|| ApiError::not_found(format!("no plot {id}")))?;
+    let seconds = q.seconds.unwrap_or(plot.window_ms / 1000).clamp(1, 3600);
+    Ok(Json(super::plots::plot_data(&state, &pid, &plot, seconds, q.max_points.unwrap_or(500).clamp(4, 5000))))
 }
 
 #[derive(Deserialize)]

@@ -3,7 +3,8 @@
 
 import { useQuery, type QueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
-import type { AdapterView, BreakpointsView, CompletionItem, DebugSession, Frame, FunctionBreakpoint, LaunchConfig, LineBreakpoint, LiveItem, LiveSnapshot, OutputLine, ProcessList, Scope, ServerView, SvdList, SvdPeripheral, SvdRegister, Variable } from './types'
+import type { PlotConfig } from './plotStore'
+import type { AdapterView, BreakpointsView, CompletionItem, DebugSession, Frame, FunctionBreakpoint, LaunchConfig, LineBreakpoint, LiveHistory, LiveItem, LiveSnapshot, OutputLine, ProcessList, Scope, ServerView, SvdList, SvdPeripheral, SvdRegister, Variable } from './types'
 
 const enc = encodeURIComponent
 export const base = (pid: string) => `/api/projects/${enc(pid)}/debug`
@@ -105,6 +106,14 @@ export const debugApi = {
   liveAdd: (pid: string, sid: string, expression: string) => api.post<LiveItem>(`${sbase(pid, sid)}/live`, { expression }),
   liveRemove: (pid: string, sid: string, id: number) => api.del<{ ok: true }>(`${sbase(pid, sid)}/live/${id}`),
   liveInterval: (pid: string, sid: string, intervalMs: number) => api.put<{ intervalMs: number }>(`${sbase(pid, sid)}/live`, { intervalMs }),
+  /** Allow (or take away) reading by stopping the program for a moment: for debug servers with no Tcl port. */
+  livePausing: (pid: string, sid: string, enabled: boolean) => api.put<{ pausing: boolean }>(`${sbase(pid, sid)}/live/pausing`, { enabled }),
+  /** The readings the server kept of the watched values (the newest `limit` of each, after `since`), for a page that was reloaded. */
+  liveHistory: (pid: string, sid: string, query: { limit?: number; since?: number; maxPoints?: number }, signal?: AbortSignal) => api.get<LiveHistory>(`${sbase(pid, sid)}/live/history`, query, signal),
+  /** The project's plots (what is drawn together); the server keeps them for every browser. */
+  plotsList: (pid: string) => api.get<{ plots: PlotConfig[] }>(`${base(pid)}/plots`),
+  plotPut: (pid: string, plot: PlotConfig) => api.put<PlotConfig>(`${base(pid)}/plots/${enc(plot.id)}`, plot),
+  plotDelete: (pid: string, id: string) => api.del<{ ok: true }>(`${base(pid)}/plots/${enc(id)}`),
   /** The chip's register map (the configuration's `svd`). */
   svd: (pid: string, sid: string, signal?: AbortSignal) => api.get<SvdList>(`${sbase(pid, sid)}/svd`, undefined, signal),
   /** A peripheral's registers; `read` reads them (the program must be suspended), `force` names

@@ -12,9 +12,13 @@ export interface LiveSession {
   samples: Record<number, LiveSample[]>
   /** The snapshot arrived (before it, events may have come in for items not known yet). */
   loaded: boolean
+  /** Reading by pausing the program is allowed (only meaningful for a session whose `liveMode` is `pausing`). */
+  pausing: boolean
+  /** How long a round of reading keeps the program stopped (average, ms); null until one has run. */
+  pauseMs: number | null
 }
 
-export const emptyLive = (): LiveSession => ({ items: [], intervalMs: 250, samples: {}, loaded: false })
+export const emptyLive = (): LiveSession => ({ items: [], intervalMs: 250, samples: {}, loaded: false, pausing: false, pauseMs: null })
 
 /** Readings for the items that are still watched. */
 function keep(samples: LiveSession['samples'], items: LiveSession['items']): LiveSession['samples'] {
@@ -31,13 +35,15 @@ export function loadSnapshot(cur: LiveSession | undefined, snap: LiveSnapshot): 
     const last = snap.last[String(item.id)]
     if (last && !samples[item.id]?.length) samples[item.id] = [last]
   }
-  return { items: snap.items, intervalMs: snap.intervalMs, samples, loaded: true }
+  return { items: snap.items, intervalMs: snap.intervalMs, samples, loaded: true, pausing: !!snap.pausing, pauseMs: snap.pauseMs ?? null }
 }
 
 export function applyLive(cur: LiveSession | undefined, ev: LiveEvent): LiveSession {
   let next = cur ?? emptyLive()
   if (ev.items) next = { ...next, items: ev.items, samples: keep(next.samples, ev.items) }
   if (ev.intervalMs !== undefined) next = { ...next, intervalMs: ev.intervalMs }
+  if (ev.pausing !== undefined) next = { ...next, pausing: ev.pausing }
+  if (ev.pauseMs !== undefined) next = { ...next, pauseMs: ev.pauseMs }
   if (ev.samples?.length) {
     const samples = { ...next.samples }
     for (const s of ev.samples) {

@@ -356,9 +356,19 @@ and drawn as a line of its recent readings. A counter climbs, a flag draws a squ
 sensor value wanders.
 
 - **How.** gdb cannot read a running target, so the values come from OpenOCD's Tcl port, which
-  reads memory over SWD while the core runs. The OpenOCD preset has it; another OpenOCD (a
-  vendor's build) takes `live_port = "{port3}"` in `[debug.servers.<id>]`. J-Link, pyOCD and
-  st-util have no such port, so no Live tab. Workbench sends that port nothing but `read_memory`.
+  reads memory over SWD while the core runs, without stopping it. The OpenOCD preset has it; another
+  OpenOCD (a vendor's build) takes `live_port = "{port3}"` in `[debug.servers.<id>]`. Workbench sends that
+  port nothing but `read_memory`.
+- **Servers without such a port** (J-Link, pyOCD, st-util, QEMU, an OpenOCD without `live_port`) have no way
+  to read memory while the core runs. The Live tab is there for them too, but its values stay blank until
+  you allow **reading by pausing the program**: Workbench then stops the program for a few milliseconds,
+  reads, and resumes it, every 100 ms or slower. That disturbs the program: code that depends on timing
+  (motor control, communication, watchdogs) can notice, and the Live tab tells you how long each read stops
+  it and what share of the time that is (on a NUCLEO-C092RC through OpenOCD about 50 ms, 17% of the time at
+  the default 250 ms; a slower rate costs less). It is off for every new session and you can take it away
+  at any time. The stop is not shown as a pause (the session stays "running"); a breakpoint that hits during
+  a read, or your own Pause, is a real stop and is left alone, a step of yours is never cut short by a read,
+  and while the program is stopped anyway the values are read without pausing anything and follow every step.
 - **What can be watched.** Things at a fixed address: a global (`ticks`), a member (`cfg.limit`),
   an element (`buf[3]`) and a fixed address (`*(uint32_t*)0x50000014`), up to 64 bytes, 16 at
   once. Integers, floats, booleans, pointers and enums are shown by their type (right-click:
@@ -377,6 +387,43 @@ sensor value wanders.
 - **Remembered.** The expressions belong to the project: the next session watches them again (one
   that no longer resolves after a rebuild stays in the list with the reason). Agents see the
   latest values in `debug_state`.
+
+## Plots: several values on one chart
+
+The **Plots** button in the Live tab's header draws watched values *together*, as lines on one chart in
+a panel of their own. Pick **New Plot from Watched Values**, or right-click a value and choose **Plot in
+New Plot** or **Add to <plot>**. A plot takes up to eight series, each in its own colour that it keeps for
+good; type another variable in the box above the chart to add it (it is watched first when the session does
+not watch it yet).
+
+- **Several plots.** Each plot is a configuration of its own (a name, its series, the time span, the scale)
+  that Workbench keeps for the project, so every browser and device sees the same ones and a change in one
+  shows in the others at once. Make one per question ("motor", "ADC", "state machine"), dock them side by
+  side, and bring them back from the Plots menu or the palette (**Open Plot …**). A plot follows the
+  project's current debug session; a new session starts the chart over, and a series the session does not
+  watch says so with a **Watch** button.
+- **Values of different sizes.** The scale **Same axis** draws the values in their own unit, so a counter in
+  the thousands flattens a temperature next to it. **Each as % of range** draws every series as a percentage
+  of its own range in view, still on one axis; the tooltip, the legend and the table show the real values.
+- **Scrolling.** The chart scrolls through everything Workbench has kept. Turn the mouse wheel (or drag the
+  chart) to move back and forth in time, drag the scroll bar under it or click on it to jump, hold Ctrl and
+  turn the wheel to zoom (5 seconds to 30 minutes, around the pointer), or use the keys on the focused chart:
+  Page Up and Page Down page, Home goes to the oldest reading, End back to the newest, `+` and `-` zoom.
+  **Follow** (or End) returns to the newest readings and keeps following them; a chart you scrolled away
+  from stays where it is while new readings arrive. In a panel too short for the chart, the panel scrolls.
+- **Reading it.** Move over the chart (or focus it and use Left and Right; Esc clears) for a crosshair and a
+  tooltip with every series at that moment; stepping past the edge scrolls. Click a name in the legend to
+  hide or show its line. **Pause** freezes the view while the readings keep being collected; the table button
+  shows the same readings as a table, and **Copy Readings as CSV** (the ⋯ menu) takes them out.
+- **How much it keeps.** Up to 12,000 readings per value (ten minutes at 50 ms, fifty minutes at the default
+  250 ms), kept by Workbench for the session as well as by the page, so reloading the page keeps the last
+  minutes. Booleans draw as 0 and 1; 64-bit values show every digit in the tooltip, the table and the CSV
+  (the line itself cannot be finer than a pixel); bytes, arrays and structs cannot be drawn; a value that
+  cannot be read leaves a gap.
+- **Scripts and agents.** `GET /api/projects/<id>/debug/plots` lists the plots and
+  `…/plots/<plot>/data?seconds=60&maxPoints=200` returns, for each series, its statistics (lowest, highest,
+  mean, newest, failed readings) and the readings, thinned so that spikes survive; `…/sessions/<id>/live/history`
+  returns the raw readings. Agents have the same through the `debug_plots` tool. Only you make and change plots.
 
 ## While it runs
 
@@ -453,8 +500,10 @@ container, a firmware built with container paths), and `source_map`.
 
 **Not verified** (written from the tools' documentation and tested against stand-ins):
 
-- OpenOCD, J-Link, pyOCD and `st-util` driving a chip, J-Link's RTT and SWO ports, and the
-  ITM decoder against a real SWO stream.
+- J-Link, pyOCD and `st-util` driving a chip, J-Link's RTT and SWO ports, and the
+  ITM decoder against a real SWO stream. (OpenOCD was tried on a NUCLEO-C092RC, including reading by
+  pausing through it. `st-util` 1.8.0 does not know that chip: it wedged the probe and crashed, so use
+  OpenOCD for the STM32C0.)
 - `attach` on an extended-remote stub (Black Magic Probe): with GDB 17.1 the DAP server
   aborted when asked to attach to an `extended-remote` target in my test, so only the
   launch form (`gdbserver --multi`) is known to work.

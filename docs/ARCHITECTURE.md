@@ -268,7 +268,7 @@ release archive adds `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY 
 - The theme preference is applied to `<html data-theme>` synchronously by the store (`state/store.ts`), before React re-renders, so xterm and Monaco effects read the new CSS variables. Highlighted code outside Monaco uses the `--syn-*` tokens.
 - **Editor models** (files contract, `features/files/modelAccess.ts`): a project file's Monaco model is `file:///<projectId>/<path>` (`~abs` for absolute paths: `file:///~abs/etc/hosts`, and on a Windows server `file:///~abs/C%3A%5Cx` for `C:\x`, which `parseModelUri` gives back as `C:\x`), created only by the files slice's buffers. Other features use `modelUriString` / `parseModelUri` / `modelFile(uri, projectOnly?)` (the file an editor shows; lsp, debug and git all parse model URIs with it), `peekModel`, `readText`, `ensureModel` (+ `release`), `saveModel`, `isDirty`, `onBuffersChange`, `onBufferRevision`, and for the paths models carry `isAbsolutePath` (`/…`, and `C:\…` or `C:/…` on a Windows server, from `api/health.ts`), `basename` (also at `\` on Windows) and `samePath` (on Windows without regard to `/` versus `\` or ASCII case). Project-relative paths use `/` on every OS; Copy Path and drag and drop join them to the root with its own separator (`joinAbsolute`). Other schemes: `lsp-src://<pid>/<abs>` (lsp's read-only library files), `inmemory://debug-source/<sid>/…` (debug), `inmemory://git-diff/…` (git's diff sides). Features hooking every editor (lsp, debug, git) guard against hooking one twice and add their actions a microtask after `onDidCreateEditor`.
 - **The editor gutter is shared.** The glyph margin (on in the files slice's editor) carries debug breakpoints and execution point, and Monaco's code-action lightbulb when a line leaves it no room (lsp quick fixes): debug ignores clicks on the lightbulb. VCS change bars are line decorations (files), blame is in the line numbers, diagnostics are markers (lsp), git's line checkboxes live in the glyph margins of its own diff editors (`inmemory:` models, which debug does not decorate). Context menu groups: `navigation` (Ask Agent), `1_lsp`, Monaco's `1_modification`, `9_cutcopypaste`, `9_git`, `y_debug`, `z_workbench`.
-- **UI:** use `@/ui` components and the design tokens. Features must not introduce new colour literals. Monaco comes through `MonacoEditor` / `MonacoDiffEditor`, logs through `AnsiLog`, markdown through `Markdown`.
+- **UI:** use `@/ui` components and the design tokens. Features must not introduce new colour literals. Chart series take `--plot-1` … `--plot-8` (`theme/tokens.css`, both themes): eight hues in a fixed order, checked for colour-blind readers against `--bg-inset`; a series keeps its slot, nothing is cycled or generated past eight. Monaco comes through `MonacoEditor` / `MonacoDiffEditor`, logs through `AnsiLog`, markdown through `Markdown`.
 
 ### Keyboard shortcuts
 
@@ -351,6 +351,7 @@ Panel ids must be stable so reopening focuses the existing panel. Params must be
 | `localHistory` | `{projectId, path, dir?, id?}` (a file's, a folder's or, with `path: ''`, the project's Recent Changes) | files | `localHistory:<projectId>:<path>` (folders end in `/`) |
 | `lsp.source` | `{projectId, uri, line?, column?, endColumn?, t?}`: a read-only library file a language server pointed to (`lsp-src:` URI) | lsp | `lsp.source:<projectId>:<path>` |
 | `debug.source` | `{projectId, sessionId, path \| sourceReference, name?, line?, column?, t?}`: a frame's source outside the project, or source only the debugger has | debug | `debug.source:<projectId>:<path>` or `debug.source:<projectId>:<sessionId>:ref<n>` |
+| `debug.plot` | `{projectId, plotId}`: Live Watch values drawn together on one chart; the plot is a saved configuration of the project (see "Plot viewer" under Debugger) | debug | `debug.plot:<projectId>:<plotId>` |
 
 ### Tool windows
 
@@ -397,6 +398,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `debug.session` | `SessionInfo`; `{id, projectId, removed: true}` when an ended session is forgotten | debug |
 | `debug.output` | `{sessionId, lines}` (a flood sends 500 lines; the UI fetches the rest) | debug |
 | `debug.breakpoints` | the whole breakpoints view (lines, functions, exception filters, muted, watches) | debug |
+| `debug.plots` | `{projectId, plots}`: the project's plots after a change (see "Plots" under Debugger) | debug |
 | `run.state` | `{name, state, port?, url?, terminalId?, startedAt?, readyAt?, exit?, result?, error?, terminated?, phase?, inContainer?, reach?}` | apps |
 | `devcontainer.state` | `{projectId, state, containerId?, inContainer}` (`none`, `stopped`, `running`, `building`, `error`) | devcontainer |
 | `docker.changed` | `{kinds: ('container' \| 'image')[]}` (a container or image changed; `docker events`, 300 ms debounce, `exec_*` ignored; also after each Services action) | devcontainer |
@@ -512,6 +514,7 @@ Added in the third phase (all confined with `McpCtx::project_for`):
 |---|---|---|
 | `code_diagnostics {path?}`, `code_symbols {query}`, `code_definition {path, line, column}`, `code_references {path, line, column}` | lsp | read-only; only servers that already run (a tool never enables or starts one) |
 | `debug_state {sessionId?, frame?, registers?}` | debug | read-only: sessions, the stop, the stack, a frame's locals (secret values masked), the CPU registers on request, the console's newest tail |
+| `debug_plots {plot?, seconds?, maxPoints?}` | debug | read-only: the project's plots, or the data behind one (statistics and thinned readings of each series) |
 | `debug_start {config, stopOnEntry?, pid?, waitSeconds?, frame?, registers?}`, `debug_attach {pid, adapter?, language?, program?, …}`, `debug_restart {sessionId?, …}` | debug | `mutating`: start a configuration (its build step and debug server run), attach to a process, rerun a session (a new sessionId); wait (default 60 s, ≤300) for a stop and answer like `debug_state` |
 | `debug_evaluate {expression, context?, frame?, threadId?, sessionId?}` | debug | `mutating`: `watch` (default) or `repl` (debugger commands, echoed into the console as `(agent)`) in a stopped session |
 | `debug_control {action, sessionId?, threadId?, path?, line?, waitSeconds?, frame?, registers?}` | debug | `mutating`: continue, pause, next, stepIn, stepOut, runTo, stop on a live session; waits (≤300 s) for the program to stop and answers like `debug_state` |
@@ -1818,17 +1821,99 @@ items of at most 64 bytes; `peripheral_note` refuses an address inside an SVD re
 and flags the peripheral regions. *Reading:* one poller task per session (`poll`: every `interval_ms`,
 default 250, 50-5000; idle while the session is `Starting`) reads each resolved item with the widest
 aligned access (`tcl::plan_read`), decodes it (`live::decode`: numbers, 64-bit values and bytes as
-text), keeps the last sample, and emits `debug.live {sessionId, samples|items|intervalMs}`; a transport
+text), keeps the last sample and the history, and emits `debug.live {sessionId, samples|items|intervalMs|pausing|pauseMs}`; a transport
 failure drops the connection and reconnects next cycle, a command failure is that item's error.
 *Persistence:* the expressions are `ProjectDebug.live_watches`; a new session re-adds them in the
 background after its server is up, an unresolvable one stays with its reason. REST: `GET|POST|PUT
 sessions/{sid}/live` (snapshot, `{expression}`, `{intervalMs}`), `DELETE sessions/{sid}/live/{id}`; `409`
-when the session has no Tcl port. `debug_state` carries `live` (expression, type, value) for agents.
+when the session cannot read while the program runs. `debug_state` carries `live` (expression, type, value) for agents.
 `SessionInfo.live` turns the web tab on. **Verified:** a fake Tcl server and a fake batch gdb through the
 real session code (values move, kinds, refusals, only `read_memory` on the wire, restore, agents);
 `tcl`/`live` unit tests; on a NUCLEO-C092RC with the real OpenOCD preset and gdb-multiarch: variables of the
 running blinky (`ticks` 500 ms apart, the LED's `ODR` toggling), the Live tab in headless Chrome in both
 themes. **Not verified:** a vendor OpenOCD with `live_port`, a 64-bit target, big-endian parts.
+
+*Reading by pausing* (`pausing.rs`; `Mode::Pausing`). A debug server with no Tcl port (J-Link, pyOCD, st-util, QEMU, a plain
+OpenOCD) has no side channel to read memory while the core runs. A gdb session on an embedded target (`plan.remote`, adapter
+kind gdb) can still read, by stopping the program for a moment: `SessionInfo.live` is then true with `liveMode: "pausing"`,
+and nothing is read until the user allows it for the session (`PUT sessions/{sid}/live/pausing {enabled}`, user-only; the Live
+tab asks first and says what it costs). Each round is `pause`, one `readMemory` per value, `continue`: values in ordinary
+memory within 16 bytes of each other are one read (`plan_reads`, at most 256 bytes), peripheral registers are always read alone
+at their exact size. The stop must not look like debugging, and the user's own motion must stay the user's. One lock decides
+(`Session.quiet`): a round marks itself in flight (`begin_round`) and `session::on_event` swallows the `pause` stop it causes
+(the state stays `running`, `stopEpoch` does not move, nothing is announced, a second report of the same halt goes with it);
+but no round begins while the user's step is in flight (`stepping`, set by `control`, cleared by the next stop) or while their
+Pause is on its way (`user_pause`, claimed by `claim_for_user_pause` after any round in flight has finished, and held until the
+stop is shown), so a step is never ended by a read and a slow probe's stop is never taken for a read's. Every stop that is
+shown is real, and a real stop is never resumed from here: the state is checked before the wait is trusted and again just before
+`continue`. A stopped program is read without any pause, so the values follow stepping. A pause request that failed or was
+slow still waits briefly for its stop, so a swallowed stop is always resumed; a `continue` that fails turns the stop into a real
+one (the user hears of it, unless the session is already ending); a round that fails, or that read nothing, shows the reason on
+every value and the next rounds wait longer. Not faster than every 100 ms. The poller times
+each round and tells the user (`pauseMs`, a running average, in the snapshot and with the readings): on the NUCLEO through
+OpenOCD about 45–50 ms per round, 17% of the time at 250 ms, which `SysTick` shows as 827 ticks a second instead of 1,000.
+Hazard learned on the way: st-util 1.8.0 does not know the STM32C092 (`unknown chip id 0x44d`), wedges the probe on its first
+memory read and crashes, leaving the core halted; recover with a USB reset of the probe and OpenOCD's `resume`.
+
+*History* (`live::Point`, `LiveState.history`). The poller keeps the newest 12,000 readings of every item (a number, NaN for a
+failed one or what is no number, and the digits of a whole number a double cannot hold), dropped with the item. `GET
+sessions/{sid}/live/history?since=&limit=&maxPoints=&ids=` returns them as `{t, v, exact?}` per item (null for a gap; `maxPoints`
+thins each series, every slice keeping its lowest and highest). The browser seeds its own buffer from it the first time it looks at
+a session, so a reloaded page has the last minutes; agents and scripts read the same.
+
+*Plots* (`plots.rs`; stored in `ProjectDebug.plots`, `data_dir/debug/<project>.json`). A plot is `{id, name, series: [{expression,
+slot, hidden?}], windowMs, scale}`, validated on every write (id of letters, digits, `-` `_` up to 40; a name of up to 60
+characters; up to 8 series, one colour slot 1–8 each, no expression twice; a span from `WINDOWS_MS`; scale `shared` or
+`normalized`; at most 40 plots a project). REST: `GET plots`, `PUT plots/{id}` (add or replace one, user-only), `DELETE
+plots/{id}` (user-only), `GET plots/{id}/data?seconds=&maxPoints=` (statistics and thinned readings of every series from the
+project's newest session that reads values; a series that session does not watch says `watched: false`); each change is
+announced as `debug.plots {projectId, plots}` so every browser and device shows the same. MCP: `debug_plots {plot?, seconds?,
+maxPoints?}` (read-only: with no `plot` the list, with one the data; agents never change plots).
+
+*Plot viewer* (`PlotPanel.tsx`, `plotStore.ts`, `plotBuffer.ts`, `plotMath.ts`, `plotDraw.ts`, `plotActions.ts`,
+`liveSnapshot.ts`, `livePausing.ts`). The `debug.plot {projectId, plotId}` panel draws Live Watch's readings of the project's
+active session; each plot is a configuration of its own, so a project keeps one per question and several can be docked side by
+side. *Readings:* `plotBuffer` keeps up to 12,000 per item and session in plain arrays outside React state (`ingest` from
+`debug.live` in `DebugProvider`, `seed` from the Live snapshot, `seedHistory` from the server's history, freed with the
+session; a removed item's late readings are dropped; a failed reading or a non-number is a gap; a 64-bit value keeps its digits
+in `Track.raw` for the tooltip, table and CSV while the line uses the nearest double), and `usePlotClock` re-renders a view at
+most once per frame. The Live tab's sparkline reads the same buffer over at least the last 30 s (`sparklinePoints`).
+*Configurations:* `plotStore` shows edits at once and writes each plot back (`PUT`/`DELETE`), listens to `debug.plots` (not
+while its own writes are in flight, then it fetches the list once), and fetches the lists again after a reconnect; plots an
+earlier version kept in the browser (`wb.debug.plots.v1`) move to the server the first time a project has none there. A series
+is an expression with a colour slot given when it is added and never changed, matched by expression to the session's watch
+list. One the session does not watch reads "not read" with a Watch button; adding a series during a live session watches it
+first (`POST …/live`, the user-only route of the Live tab; bytes and unresolvable expressions are refused and the watch just
+made is removed, using the server's list to know it is new). A new session brings the project's watches back, and the plot
+follows the project's active session. *Drawing* (`plotDraw.ts`, canvas, colours read from the tokens when the theme changes):
+one y axis only. Scale `shared` is the values' own unit; `normalized` draws every series as a percentage of its own range in
+view on that one axis (never two scales), the tooltip, legend and table keep the real values. Lines are 2 px and break at a
+failed reading or a hole longer than `plotGapMs`; `decimateRuns` keeps each pixel column's first, last and extremes, so spikes
+survive. The crosshair snaps to readings (pointer, or Left/Right/Home/End/Esc on the focused chart) and a tooltip lists every
+series; the legend lists names and values (and toggles, removes), names sit at line ends only for up to four lines that end
+apart, and a table view with "Copy Readings as CSV" is the chart's twin. *Scrolling:* the view's right edge is `pausedAt` (null:
+following the newest reading). The wheel scrolls through time, a drag pans, Ctrl/Cmd+wheel and `+`/`-` zoom through the spans
+(5 s … 30 min, around the pointer; a following chart keeps following), PageUp/PageDown page, Home goes to the oldest reading and End
+back to the newest, and an arrow key that steps past the edge scrolls with the crosshair; a scroll bar under the chart
+(`PlotScrollbar`, lined up with the time axis, `role="scrollbar"`) shows the readings kept and the span in view, with Follow. A
+panel squeezed shorter than its parts scrolls vertically. *Reach:* the Live tab's Plots button (New Plot, New Plot from Watched
+Values, the saved plots) and each row's menu (Plot in New Plot, Add to …), and the palette (New Plot, Open Plot …). Desktop only.
+**Verified:** Rust unit tests (validation, history, thinning, statistics, read planning) and an integration test of the plot
+routes, history, data and `debug_plots` through the fake Tcl server; integration tests of reading by pausing through a fake
+adapter that keeps running (the pauses stay invisible, a real pause is left alone, every pause is followed by its continue even
+when the session is stopped; the user's step is not ended by a read; the user's pause is not taken for a read's when the halt is
+slow; rounds that read nothing back off), the last two proven to fail without their fix; web unit tests (maths, buffer, store against a fake server including the migration, drawing against a recording
+canvas); headless Chrome against a scratch instance with a fake board: both scales, hover, keyboard, scrolling by every input,
+zoom, a second browser seeing and editing the same plot at once, history after a reload, migration of browser-only plots,
+session end and restart, delete, 50 ms polling over 5 minutes (about 60 fps, no long tasks), in both themes. **On hardware**
+(NUCLEO-C092RC, a blinky): through the OpenOCD preset, `ticks` advanced 1,004 a second, the LED toggle drew as a 500 ms square
+wave, 50 ms polling held about 60 fps, and the firmware was running after Stop; through OpenOCD without a live port, reading by
+pausing: the session showed only `running` with a constant stop counter, nothing was read before it was allowed, a user pause
+stayed a real stop, a run to a line stopped for real in the middle of the rounds and stayed stopped, eight steps in a row (one of
+them 0.7 s over a delay loop) each ended at its own stop, taking pausing away ended the reads, and the measured cost agreed with
+the `ticks` rate. **Not verified:**
+J-Link and pyOCD themselves (they take the same path as the plain OpenOCD), a program that is sensitive to being stopped, and
+scrolling on the board (checked on the fake board only).
 
 *Server output* (`servers::ServerWatch`, fed by `start_server` for every line of the debug server). An
 `unknown chip id` line (st-util on a chip newer than its tables: it connects, then hangs on the first
