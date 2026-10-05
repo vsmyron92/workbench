@@ -3,13 +3,15 @@
 // Shift+F8 and Ctrl+F2 itself); in the editor, Ctrl+F8, Alt+F9 and Ctrl+Shift+F8 are
 // editor actions (they need the caret).
 
-import { ArrowDownToDot, ArrowUpFromDot, Bug, BugPlay, CircleDot, CircleSlash, Pause, Play, Plug, RedoDot, RotateCw, Sparkles, Square, TextCursorInput } from 'lucide-react'
+import { ArrowDownToDot, ArrowUpFromDot, Bug, BugPlay, ChartLine, CircleDot, CircleSlash, Pause, Play, Plug, RedoDot, RotateCw, Sparkles, Square, TextCursorInput } from 'lucide-react'
 import { showToolWindow, toast } from '@/shell/actions'
 import type { Command, CommandContext } from '@/shell/types'
 import { askAgentAboutStop, control, currentSession, rerun, runToCursor, setMuted, startDebug, stopSession, toggleBreakpoint, viewBreakpoints } from './actions'
 import { cachedBreakpoints, cachedConfigs } from './api'
 import { lastFocusedEditor } from './editor'
 import { isLive } from './logic'
+import { newPlot, openPlot } from './plotActions'
+import { plotsOf, usePlots } from './plotStore'
 import { openAttachPicker, openDebugPicker } from './store'
 
 export function debugCommands(ctx: CommandContext): Command[] {
@@ -92,6 +94,12 @@ export function debugCommands(ctx: CommandContext): Command[] {
   // One command per launch configuration ("Debug server").
   for (const c of configs.slice(0, 60)) {
     out.push({ id: `debug.config:${c.name}`, title: `Debug ${c.name}`, group: 'Debug configurations', keywords: [c.adapterLabel ?? '', c.program ?? '', c.origin], icon: BugPlay, run: () => void startDebug(pid, c.name) })
+  }
+  // Plots of watched values: a new one, and one command per saved plot (the project's plots are fetched the first time).
+  void usePlots.getState().load(pid)
+  out.push({ id: 'debug.plot.new', title: 'New Plot', group, icon: ChartLine, keywords: ['graph', 'chart', 'live watch', 'multi plot', 'variables'], run: () => void newPlot(pid) })
+  for (const p of plotsOf(pid).slice(0, 40)) {
+    out.push({ id: `debug.plot:${p.id}`, title: `Open Plot ${p.name}`, group: 'Plots', icon: ChartLine, keywords: ['graph', 'chart', ...p.series.map((x) => x.expression)], run: () => openPlot(pid, p) })
   }
   const live = s()
   if (live && !isLive(live)) return out.filter((c) => !['debug.pause', 'debug.stop'].includes(c.id))

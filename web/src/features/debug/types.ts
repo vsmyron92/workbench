@@ -69,8 +69,11 @@ export interface DebugSession {
   remote?: { server?: string; target?: string }
   /** The configuration names an SVD file: the Peripherals tab has a register map. */
   peripherals?: boolean
-  /** The Live tab can read variables of the running program (the debug server has a Tcl port). */
+  /** The Live tab can read variables of the running program: through the debug server's Tcl port (`tcl`: the program is never
+   *  stopped), or (`pausing`) by stopping it for a moment, which the user allows per session. */
   live?: boolean
+  liveMode?: 'tcl' | 'pausing'
+
 }
 
 // ---------------------------------------------------------------- live watch
@@ -105,6 +108,20 @@ export interface LiveSnapshot {
   items: LiveItem[]
   intervalMs: number
   last: Record<string, LiveSample>
+  mode?: 'tcl' | 'pausing'
+  /** Reading by pausing the program is allowed for this session. */
+  pausing?: boolean
+  /** How long a round keeps the program stopped, milliseconds (average), once any round has run. */
+  pauseMs?: number | null
+}
+
+/** `GET …/live/history`: the readings the server kept, per item id, thinned if asked. `v` is null for a reading that failed
+ *  or is no number; `exact` has the digits of the whole numbers a double cannot hold, by index. */
+export interface LiveHistory {
+  intervalMs: number
+  items: LiveItem[]
+  series: Record<string, { t: number[]; v: (number | null)[]; exact?: Record<string, string> }>
+  now: number
 }
 
 /** `debug.live`: the list changed (`items`), the interval changed, or one round of readings. */
@@ -112,6 +129,8 @@ export interface LiveEvent {
   sessionId: string
   items?: LiveItem[]
   intervalMs?: number
+  pausing?: boolean
+  pauseMs?: number
   samples?: LiveSample[]
 }
 

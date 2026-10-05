@@ -65,6 +65,9 @@ pub struct ProjectDebug {
     pub watches: Vec<String>,
     /// Expressions of the Live Watch (read from a running target), brought back by every session.
     pub live_watches: Vec<String>,
+    /// Plots of Live Watch values (see `plots.rs`).
+    #[serde(deserialize_with = "super::plots::lenient")]
+    pub plots: Vec<super::plots::PlotConfig>,
     /// "Mute breakpoints": sessions get none while set.
     pub muted: bool,
     /// The launch configuration last started, for the Debug button.
@@ -180,6 +183,24 @@ impl ProjectDebug {
         }
         self.live_watches = list;
         Ok(())
+    }
+
+    /// Add the plot, or replace the one with its id.
+    pub fn upsert_plot(&mut self, plot: super::plots::PlotConfig) -> Result<(), ApiError> {
+        let plot = plot.validated()?;
+        match self.plots.iter().position(|p| p.id == plot.id) {
+            Some(i) => self.plots[i] = plot,
+            None if self.plots.len() >= super::plots::MAX_PLOTS => return Err(ApiError::bad_request(format!("a project keeps up to {} plots", super::plots::MAX_PLOTS))),
+            None => self.plots.push(plot),
+        }
+        Ok(())
+    }
+
+    /// Whether there was such a plot.
+    pub fn remove_plot(&mut self, id: &str) -> bool {
+        let before = self.plots.len();
+        self.plots.retain(|p| p.id != id);
+        self.plots.len() != before
     }
 
     pub fn set_watches(&mut self, list: Vec<String>) -> Result<(), ApiError> {

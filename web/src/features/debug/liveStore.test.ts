@@ -7,6 +7,30 @@ const item = (id: number, expression = `v${id}`): LiveItem => ({ id, expression,
 const sample = (id: number, v: number, t = v): LiveSample => ({ id, t, v })
 const snap = (items: LiveItem[], last: Record<string, LiveSample> = {}): LiveSnapshot => ({ items, intervalMs: 250, last })
 
+describe('reading by pausing the program', () => {
+  it('follows the snapshot and the events, and starts off', () => {
+    expect(emptyLive().pausing).toBe(false)
+    expect(loadSnapshot(undefined, snap([item(1)])).pausing).toBe(false)
+    let s = loadSnapshot(undefined, { ...snap([item(1)]), mode: 'pausing', pausing: true })
+    expect(s.pausing).toBe(true)
+    s = applyLive(s, { sessionId: 'd', pausing: false })
+    expect(s.pausing).toBe(false)
+    s = applyLive(s, { sessionId: 'd', samples: [sample(1, 5)] }) // an ordinary round of readings leaves it alone
+    expect(s.pausing).toBe(false)
+    expect(applyLive(s, { sessionId: 'd', pausing: true }).pausing).toBe(true)
+  })
+
+  it('knows how long a round keeps the program stopped once one has run', () => {
+    expect(emptyLive().pauseMs).toBeNull()
+    expect(loadSnapshot(undefined, { ...snap([item(1)]), mode: 'pausing', pauseMs: null }).pauseMs).toBeNull()
+    let s = loadSnapshot(undefined, { ...snap([item(1)]), mode: 'pausing', pausing: true, pauseMs: 40 })
+    expect(s.pauseMs).toBe(40)
+    s = applyLive(s, { sessionId: 'd', samples: [sample(1, 5)], pauseMs: 43 })
+    expect(s.pauseMs).toBe(43)
+    expect(applyLive(s, { sessionId: 'd', samples: [sample(1, 6)] }).pauseMs).toBe(43) // a round that did not stop it says nothing
+  })
+})
+
 describe('the Live tab\'s data', () => {
   it('starts an item from its last reading and keeps the history of the ones that stay', () => {
     let s = loadSnapshot(undefined, snap([item(1), item(2)], { '1': sample(1, 10), '2': sample(2, 20) }))

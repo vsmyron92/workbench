@@ -6,6 +6,7 @@
 
 use serde_json::{Value, json};
 
+use super::plots;
 use super::routes::{frames_view, variable_view};
 use super::session::{REQUEST_TIMEOUT, SessionState};
 use crate::mcp::{McpTool, ToolOutput, tool};
@@ -35,7 +36,7 @@ fn tail(v: &str, max: usize) -> String {
 }
 
 pub fn tools() -> Vec<McpTool> {
-    vec![tool(
+    let mut v = vec![tool(
         "debug_state",
         "The state of the user's debug sessions in Workbench (gdb, lldb, debugpy, delve… over DAP): for each \
          session its launch configuration, state (starting|running|stopped|terminated|failed), and when stopped: \
@@ -70,7 +71,46 @@ pub fn tools() -> Vec<McpTool> {
             }
             Ok(ToolOutput::Json(json!({ "projectId": pid, "sessions": out })))
         },
-    )]
+    )];
+    v.push(plots_tool());
+    v
+}
+
+/// `debug_plots`: the plots the user keeps for Live Watch values, and the data behind one.
+fn plots_tool() -> McpTool {
+    tool(
+        "debug_plots",
+        "The plots the user keeps in Workbench for the values it reads from a running target (Live Watch: variables \
+         of the program, read without stopping it). With no `plot`: the list (id, name, the expressions it draws, the \
+         time span, the scale). With `plot` (an id or a name): the data behind it, for each series its statistics over \
+         the last `seconds` (lowest, highest, mean, the newest value, how many readings failed) and the readings \
+         themselves as `t` (ms since the epoch) and `v` (null: a failed reading), thinned to about `maxPoints` (each \
+         slice keeps its lowest and highest, so a spike survives). Use it to see how a value behaved over the last \
+         minutes: a counter that stalled, a sensor that drifted, a flag that stopped toggling. Read-only; the user \
+         makes and changes plots.",
+        json!({ "type": "object", "properties": {
+            "projectId": { "type": "string", "description": "Workbench project id; defaults to the calling session's project." },
+            "plot": { "type": "string", "description": "A plot's id or name; omit it to list the plots." },
+            "seconds": { "type": "integer", "description": "How far back to look (default: the plot's own span; at most 3600)." },
+            "maxPoints": { "type": "integer", "description": "Readings per series (default 120, at most 1000)." }
+        } }),
+        false,
+        |state, ctx, args| async move {
+            let pid = ctx.project_for(args.get("projectId").and_then(Value::as_str))?;
+            state.projects.require(&pid)?;
+            let list = state.debug.store.get(&state.paths.data_dir, &pid).plots;
+            let Some(want) = args.get("plot").and_then(Value::as_str) else {
+                if list.is_empty() {
+                    return Ok(ToolOutput::Text(format!("Project {pid} has no plots. The user makes them from the Debug window's Live tab (the Plots button).")));
+                }
+                return Ok(ToolOutput::Json(json!({ "projectId": pid, "plots": list.iter().map(plots::PlotConfig::summary).collect::<Vec<_>>() })));
+            };
+            let plot = list.iter().find(|p| p.id == want).or_else(|| list.iter().find(|p| p.name.eq_ignore_ascii_case(want))).ok_or_else(|| crate::error::ApiError::not_found(format!("no plot {want} in project {pid}")))?;
+            let seconds = args.get("seconds").and_then(Value::as_u64).unwrap_or(plot.window_ms / 1000).clamp(1, 3600);
+            let max = args.get("maxPoints").and_then(Value::as_u64).unwrap_or(120).clamp(4, 1000) as usize;
+            Ok(ToolOutput::Json(plots::plot_data(&state, &pid, plot, seconds, max)))
+        },
+    )
 }
 
 /// The CPU registers of a frame (the `registers` scope), `name: value`, redacted like
