@@ -203,6 +203,10 @@ pub struct ProviderConfig {
     /// usage limit: a second subscription, then perhaps a local model.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fallback: Vec<String>,
+    /// Claude Code: keep this account's auto-memory in its own folder. Default `false`: the
+    /// account reads and writes the memory of the default account (`~/.claude`), per project.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub own_memory: bool,
     /// A default permission preset of the provider. Dangerous presets (Codex `bypass`,
     /// Kimi `yolo`/`auto`, Gemini `yolo`, Aider `yes-always`) are never defaults: the user
     /// picks them per session.

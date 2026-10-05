@@ -54,6 +54,13 @@ pub fn project_dir(claude_dir: &Path, cwd: &Path) -> PathBuf {
         .unwrap_or(exact)
 }
 
+/// Where Claude keeps the auto-memory of `cwd` under the config folder `claude_dir`
+/// (`None`: the slug is so long that Claude adds a hash to it, which we do not reproduce).
+pub fn memory_dir(claude_dir: &Path, cwd: &Path) -> Option<PathBuf> {
+    let s = slug(cwd);
+    (s.len() <= 200).then(|| claude_dir.join("projects").join(s).join("memory"))
+}
+
 pub fn transcript_path(claude_dir: &Path, cwd: &Path, session_id: &str) -> PathBuf {
     project_dir(claude_dir, cwd).join(format!("{session_id}.jsonl"))
 }

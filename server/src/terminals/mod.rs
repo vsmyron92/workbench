@@ -47,6 +47,7 @@ mod hooks;
 mod input;
 mod kimi;
 mod local;
+mod memory;
 mod permission;
 mod providers;
 mod pty;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.0 - 2026-10-05
+
+- **Agent accounts share the default memory.** A second Claude Code, Codex or Gemini CLI account no longer
+  starts with an empty memory: it reads and writes the default account's (Claude Code per project). Memory an
+  account already has is kept. Set `own_memory = true` on an account to keep a memory of its own.
+
 ## 0.11.0 - 2026-10-05
 
 - **Plots: several watched values on one chart.** The Live tab's new **Plots** button opens a plot in its
