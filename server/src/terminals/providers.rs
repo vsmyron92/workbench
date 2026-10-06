@@ -311,6 +311,9 @@ pub struct Provider {
     pub install_hint: String,
     /// Accounts to use when this one is at its usage limit, in order.
     pub fallback: Vec<String>,
+    /// Claude Code: the account keeps its auto-memory in its own folder instead of sharing
+    /// the default account's.
+    pub own_memory: bool,
     /// A model server of your own instead of the vendor's.
     pub local: Option<LocalModelConfig>,
     /// A hosted model API reached with an API key.
@@ -392,6 +395,7 @@ fn build(id: &str, kind: ProviderKind, c: Option<&ProviderConfig>, agents: &Agen
         env: c.env.clone(),
         install_hint: non_empty(&c.install_hint).unwrap_or_else(|| kind.default_install_hint().to_string()),
         fallback: c.fallback.iter().map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect(),
+        own_memory: c.own_memory,
         local: c.local.clone(),
         api: c.api.clone(),
     }

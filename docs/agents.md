@@ -109,6 +109,25 @@ session's account. Workbench never reads or copies a login or a key. An Aider ac
 must exist before a session starts (Aider would otherwise run on the default keys without
 saying so); Aider keeps its chat history in each repository, shared by all its accounts.
 
+**Memory is shared.** Each CLI keeps its memory inside the account's folder, so a second account
+would start with none. Workbench makes every account of a CLI use the default account's:
+
+- **Claude Code**: sessions are pointed at `~/.claude/projects/<project>/memory` (the default
+  account's memory for the same working directory) through `autoMemoryDirectory` in the session's
+  `--settings`.
+- **Codex**: the account's `memories` folder becomes a link to `~/.codex/memories`.
+- **Gemini CLI**: the account's `.gemini/GEMINI.md`, where `save_memory` writes, becomes a link to
+  `~/.gemini/GEMINI.md`. Gemini's private per-project notes stay with each account.
+- **Kimi Code** (`AGENTS.md` is written by hand) and **Aider** (no memory) are left alone.
+
+Set `own_memory = true` in `[agents.providers.<name>]` to give an account a memory of its own.
+Memory the account already has is never replaced: a link is made only where its folder or file is
+missing or empty. For Claude Code an `autoMemoryDirectory` in the account's own `settings.json` (or the
+project's `.claude/settings.local.json`) wins, and so does `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` in
+the account's `env`. Two sessions writing memory at once can overwrite each other. Sessions inside a
+dev container keep the container's memory, and on Windows, where links need a privilege, Codex and
+Gemini accounts keep their own.
+
 ### Signing an account in
 
 Each account of Claude Code, Codex, Kimi Code or Gemini CLI shows whether it is signed in, and a

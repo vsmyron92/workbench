@@ -17,6 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use super::activity::Activity;
 use super::hooks::{self, AgentRt};
+use super::memory;
 use super::permission;
 use super::providers::{self, Continue, LaunchArgs, Provider, ProviderKind};
 use super::store::AgentLaunch;
@@ -242,6 +243,51 @@ pub fn user_defines_statusline(claude_dir: &Path, dirs: &[&Path]) -> bool {
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
             .is_some_and(|v| v.get("statusLine").is_some_and(|s| !s.is_null()))
     })
+}
+
+/// Where an account's session keeps its auto-memory when it shares the default account's
+/// (`~/.claude/projects/<project>/memory`, so one memory serves every account), or `None`
+/// to leave the CLI to its own folder: the default account itself, `own_memory`, a
+/// memory location the user set (`autoMemoryDirectory` in the account's `settings.json` or
+/// the project's `settings.local.json`, the only files Claude honours it in; or
+/// `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` in the environment), or a path Claude hashes.
+pub fn shared_memory_dir(provider: &providers::Provider, claude_dir: &Path, cwd: &Path, env: &[(String, Option<String>)]) -> Option<PathBuf> {
+    let default = transcript::claude_dir(None);
+    if provider.own_memory || claude_dir == default || env_value(env, "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE").is_some() {
+        return None;
+    }
+    let sets_dir = [claude_dir.join("settings.json"), cwd.join(".claude/settings.local.json")].iter().any(|f| {
+        std::fs::read(f)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .is_some_and(|v| v.get("autoMemoryDirectory").is_some_and(|d| !d.is_null()))
+    });
+    if sets_dir {
+        return None;
+    }
+    transcript::memory_dir(&default, cwd)
+}
+
+/// Before a Codex or Gemini CLI session of an account: its memory becomes the default
+/// account's (see `memory`), unless the account has `own_memory`. Never fails the launch.
+async fn share_memory(provider: &providers::Provider, env: &[(String, Option<String>)]) {
+    // The default account is the real one in the owner's home: tests must not touch it
+    // (`memory::tests` covers the links on scratch folders).
+    if cfg!(test) {
+        return;
+    }
+    let (kind, own) = (provider.kind, provider.own_memory);
+    let (account, default) = match kind {
+        ProviderKind::Codex => (codex::codex_home(env_value(env, "CODEX_HOME").as_deref()), codex::codex_home(None)),
+        ProviderKind::Gemini => (gemini::gemini_dir(env_value(env, "GEMINI_CLI_HOME").as_deref()), gemini::gemini_dir(None)),
+        _ => return,
+    };
+    if own {
+        return;
+    }
+    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || memory::link_shared(kind, &account, &default)).await {
+        tracing::warn!("sharing the default account's memory: {e}");
+    }
 }
 
 /// The Workbench executable for the `statusline` helper, also after the binary was
@@ -894,7 +940,10 @@ impl Terminals {
             !user_defines_statusline(&claude_dir, &dirs)
         };
         let base = state.local_base_url();
-        let settings = session_settings(&format!("{base}/api/hooks/claude/{}", entry.id), &token, helper.as_deref(), statusline, permission_wait(&cfg));
+        let mut settings = session_settings(&format!("{base}/api/hooks/claude/{}", entry.id), &token, helper.as_deref(), statusline, permission_wait(&cfg));
+        if let Some(m) = shared_memory_dir(&provider, &claude_dir, &cwd, &env) {
+            settings["autoMemoryDirectory"] = Value::String(m.to_string_lossy().into_owned());
+        }
         let mcp = mcp_config(&format!("{base}/mcp"), &token, &entry.id);
         {
             let (sp, mp, e) = (settings_path.clone(), mcp_path.clone(), entry.clone());
@@ -1056,6 +1105,7 @@ impl Terminals {
     ) -> Result<(), ApiError> {
         let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, local, api, .. } = prep;
         let home = codex::codex_home(env_value(&env, "CODEX_HOME").as_deref());
+        share_memory(&provider, &env).await;
         let features = self.codex_features(&command).await;
         // Resuming needs the rollout; a session that never had a turn has none: start fresh.
         let (cont, rollout) = match cont {
@@ -1176,6 +1226,9 @@ impl Terminals {
     ) -> Result<(), ApiError> {
         let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, container, local, api, .. } = prep;
         let kind = provider.kind;
+        if container.is_none() {
+            share_memory(&provider, &env).await;
+        }
         // Not used by these CLIs themselves; there for a user's own MCP setup to reference.
         env.push(("WORKBENCH_AGENT_TOKEN".into(), Some(token)));
         let current = entry.rec.lock().info.agent.as_ref().map(|a| a.session_id.clone()).unwrap_or_default();
@@ -2880,6 +2933,25 @@ mod tests {
             remote_control: true,
             add_dirs: vec!["/tmp/x".into()],
         }
+    }
+
+    #[test]
+    fn accounts_share_the_default_memory_unless_told_otherwise() {
+        let c = cfg("[agents.providers.work]\nkind = \"claude\"\n[agents.providers.solo]\nkind = \"claude\"\nown_memory = true\n");
+        let (work, solo) = (providers::find(&c, Some("work")).unwrap(), providers::find(&c, Some("solo")).unwrap());
+        let acct = tempfile::tempdir().unwrap();
+        let proj = tempfile::tempdir().unwrap();
+        let default = transcript::claude_dir(None);
+        let want = default.join("projects").join(transcript::slug(proj.path())).join("memory");
+        assert_eq!(shared_memory_dir(&work, acct.path(), proj.path(), &[]), Some(want));
+        // The default account, `own_memory`, an environment override, an `autoMemoryDirectory`
+        // of the user's: left alone.
+        assert_eq!(shared_memory_dir(&work, &default, proj.path(), &[]), None);
+        assert_eq!(shared_memory_dir(&solo, acct.path(), proj.path(), &[]), None);
+        let env = vec![("CLAUDE_COWORK_MEMORY_PATH_OVERRIDE".to_string(), Some("/m".to_string()))];
+        assert_eq!(shared_memory_dir(&work, acct.path(), proj.path(), &env), None);
+        std::fs::write(acct.path().join("settings.json"), r#"{"autoMemoryDirectory":"~/mem"}"#).unwrap();
+        assert_eq!(shared_memory_dir(&work, acct.path(), proj.path(), &[]), None);
     }
 
     #[test]
