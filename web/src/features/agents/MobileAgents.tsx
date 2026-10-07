@@ -173,6 +173,15 @@ export function MobileAgents({ projectId }: { projectId: string | null }) {
   const [composing, setComposing] = useState(false)
   const current = data?.find((t) => t.id === selected)
 
+  // Switching project in the phone header leaves the previous project's session open
+  // otherwise: go back to the list when the project changes under a session of another one.
+  const lastProject = useRef(projectId)
+  useEffect(() => {
+    if (lastProject.current === projectId) return
+    lastProject.current = projectId
+    if (current && current.projectId !== projectId) setSelected(null)
+  }, [projectId, current, setSelected])
+
   if (current) return <MobileTerminal t={current} onBack={() => setSelected(null)} onReplaced={(next) => setSelected(next.id)} />
   if (error) return <ErrorBox error={error} />
   if (isLoading) return <Loading />

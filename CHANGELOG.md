@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.1 - 2026-10-07
+
+- **Phone: switching project leaves the old session.** Changing the project in the phone header while a
+  session of the previous project was open in the Agents tab kept showing that session. The tab now goes
+  back to the session list of the new project.
+
 ## 0.12.0 - 2026-10-05
 
 - **Agent accounts share the default memory.** A second Claude Code, Codex or Gemini CLI account no longer
