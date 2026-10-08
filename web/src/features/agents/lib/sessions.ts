@@ -212,6 +212,11 @@ export function counts(list: TerminalInfo[] | undefined): Counts {
   return c
 }
 
+/** Running agent sessions that are working right now, in the order the Agents list shows them. */
+export function workingSessions(list: TerminalInfo[] | undefined): TerminalInfo[] {
+  return sortSessions((list ?? []).filter((t) => t.kind === 'agent' && isRunning(t) && t.agent?.state === 'working'))
+}
+
 /** The next session needing attention after `currentId` (wraps around). */
 export function nextAttention(list: TerminalInfo[] | undefined, currentId: string | null): TerminalInfo | null {
   const waiting = sortSessions((list ?? []).filter(needsAttention))

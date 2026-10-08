@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.2 - 2026-10-08
+
+- **The "N working" pill opens a list of sessions.** Clicking it in the top bar used to go to the Agents
+  tab. It now drops down the working sessions; picking one opens it, and "All agent sessions" at the
+  bottom goes to the overview.
+- **Workspace card tabs scroll with the mouse wheel.** A long strip of steps moves sideways when the wheel
+  turns over it.
+
 ## 0.12.1 - 2026-10-07
 
 - **Phone: switching project leaves the old session.** Changing the project in the phone header while a
