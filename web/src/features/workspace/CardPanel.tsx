@@ -192,6 +192,20 @@ export function CardPanel({ params, setParams, setTitle, close, active }: PanelP
     else if (right > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = right - strip.clientWidth + 8
   }, [shownStep, preview, card?.steps.length])
 
+  // A mouse wheel moves the strip sideways (it only has a horizontal scrollbar).
+  const hasCard = !!card
+  useEffect(() => {
+    const strip = stepsRef.current
+    if (!strip) return
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || Math.abs(e.deltaX) >= Math.abs(e.deltaY) || strip.scrollWidth <= strip.clientWidth) return
+      e.preventDefault()
+      strip.scrollLeft += e.deltaMode === 1 ? e.deltaY * 32 : e.deltaY
+    }
+    strip.addEventListener('wheel', onWheel, { passive: false })
+    return () => strip.removeEventListener('wheel', onWheel)
+  }, [hasCard])
+
   useEffect(() => {
     if (card) setTitle(card.title)
   }, [card?.title, setTitle]) // eslint-disable-line react-hooks/exhaustive-deps

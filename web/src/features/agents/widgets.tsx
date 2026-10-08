@@ -1,11 +1,11 @@
 // Top bar attention pill, status bar counts and the phone tab's badge.
 
 import { useRef } from 'react'
-import { Bot, BellRing } from 'lucide-react'
+import { Bot, BellRing, ListTree } from 'lucide-react'
 import { useTerminals } from '@/api/queries'
-import { Spinner } from '@/ui'
+import { Spinner, showMenuAt } from '@/ui'
 import { openAgentsHome, openTerminal } from './api'
-import { counts, nextAttention } from './lib/sessions'
+import { counts, nextAttention, workingSessions } from './lib/sessions'
 
 /** "2 need you" — each click jumps to the next session waiting on the user. */
 export function AttentionPill() {
@@ -15,7 +15,18 @@ export function AttentionPill() {
   if (!c.attention && !c.working) return null
   if (!c.attention) {
     return (
-      <button className="wb-topbar-widget wb-ag-pill working" onClick={() => openAgentsHome()} title="Agent sessions at work">
+      <button
+        className="wb-topbar-widget wb-ag-pill working"
+        aria-haspopup="menu"
+        title="Agent sessions at work — pick one to open"
+        onClick={(e) =>
+          showMenuAt(e.currentTarget, [
+            ...workingSessions(data).map((t) => ({ label: t.title, icon: Bot, run: () => openTerminal(t) })),
+            'separator' as const,
+            { label: 'All agent sessions', icon: ListTree, run: () => openAgentsHome() },
+          ])
+        }
+      >
         <Spinner size={11} />
         {c.working} working
       </button>

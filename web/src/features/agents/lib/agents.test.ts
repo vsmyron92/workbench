@@ -21,6 +21,7 @@ import {
   tabAfterClose,
   tone,
   upsertTerminal,
+  workingSessions,
 } from './sessions'
 
 function agent(over: Partial<AgentInfo> = {}): AgentInfo {
@@ -97,6 +98,8 @@ describe('session state', () => {
     expect(nextAttention(list, 'perm')?.id).toBe('done')
     expect(nextAttention(list, 'done')?.id).toBe('perm')
     expect(nextAttention([list[0]], null)).toBeNull()
+    expect(workingSessions(list).map((t) => t.id)).toEqual(['work'])
+    expect(workingSessions(undefined)).toEqual([])
   })
 
   it('updates the cache immutably', () => {
