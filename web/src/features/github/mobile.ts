@@ -3,6 +3,7 @@
 // without loading the tab's code.
 
 import { create } from 'zustand'
+import { activeScope, scopeProject, scopeRepo, setActiveRepo } from '@/api/repos'
 import { useUi } from '@/state/store'
 
 export type GhMobileView =
@@ -19,7 +20,8 @@ export const useGhMobile = create<{ view: GhMobileView; setView: (v: GhMobileVie
 
 /** The view for a GitHub panel (`gh.run`, `gh.job`, `pr`, `gh.issue`), if it is one. */
 export function mobileViewFor(kind: string, params: Record<string, unknown>, currentProject: string | null): GhMobileView | null {
-  const pid = typeof params.projectId === 'string' && params.projectId ? params.projectId : currentProject
+  // The panel's `projectId` is a repository scope id; without one, the current project's active repository.
+  const pid = typeof params.projectId === 'string' && params.projectId ? params.projectId : currentProject ? activeScope(currentProject) : null
   if (!pid) return null
   const num = (k: string) => (typeof params[k] === 'number' ? (params[k] as number) : null)
   const runId = num('runId')
@@ -37,7 +39,10 @@ export function openOnPhone(panel: { kind: string; params: Record<string, unknow
   const ui = useUi.getState()
   const view = mobileViewFor(panel.kind, panel.params, ui.projectId)
   if (!view || view.kind === 'list') return false
-  if (view.pid !== ui.projectId) ui.setProject(view.pid)
+  // Switch to the panel's project and repository, which the tab then shows.
+  const project = scopeProject(view.pid)
+  if (project !== ui.projectId) ui.setProject(project)
+  setActiveRepo(project, scopeRepo(view.pid))
   useGhMobile.getState().setView(view)
   return true
 }

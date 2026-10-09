@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.13.0 - 2026-10-09
+
+- **One project, several git repositories.** A project folder can hold more than one repository: services
+  cloned side by side, a monorepo with a submodule, or a plain folder of repositories. Workbench finds them
+  (up to three folders below the project root; or list them with `[[repository]]` in `.workbench.toml`, each
+  with its own GitLab or GitHub project and token), and a **repository switcher** in the top bar (and the
+  status bar and the phone's Git and CI tabs) picks the one that git and CI show: the Commit window, the Git
+  Log, branches, stash and shelf, fetch, pull and push, merge or pull requests, pipelines, jobs, issues and
+  Actions runs. Repositories can be on different hosts, and their pipelines are watched separately. Each
+  repository keeps its own changelists and shelves. With a single repository nothing changes.
+- **A folder of repositories is a project too.** A folder with a `.workbench.toml` and no `.git` of its own
+  is listed under a projects root, and its first repository is the default.
+- **The file tree, Go to File, Find in Files and the watcher follow nested repositories**, also when the root's
+  `.gitignore` lists them: files changed in any repository are coloured, searchable and refreshed live, and a
+  commit made in a terminal inside a nested repository updates the views.
+- **Agents can pick the repository.** `workbench_projects` lists a project's repositories, and the git,
+  GitLab and GitHub tools take an optional `repo`.
+- **Git credentials follow the repository.** Fetch, pull and push in a repository on another GitLab host use
+  that repository's token.
+
 ## 0.12.3 - 2026-10-08
 
 - **3D comparisons with many models show every model whole.** A test with more models than fit in one

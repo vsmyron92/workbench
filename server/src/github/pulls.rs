@@ -18,6 +18,7 @@ use super::client::{Fresh, GhCtx, ctx};
 use super::model::{Commit, IssueComment, ListPage, PrFile, Pull, PullDetail, RawCommit, Review, ReviewComment, Thread, group_threads, review_states};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::forge::RepoParam;
 
 /// Largest file version we send to the diff viewer.
 const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
@@ -124,7 +125,7 @@ async fn local_blob(root: &std::path::Path, sha: &str, path: &str, cap: usize) -
 /// content, not counted against the quota when anonymous on github.com).
 pub async fn file_at(ctx: &GhCtx, path: &str, git_ref: &str, cap: usize) -> ApiResult<FileText> {
     let path = valid_repo_file(path)?;
-    if let Some(f) = local_blob(&ctx.project.root, git_ref, path, cap).await {
+    if let Some(f) = local_blob(ctx.project.repo_dir(), git_ref, path, cap).await {
         return Ok(f);
     }
     let got = if ctx.is_anonymous() && ctx.is_github_com() {
@@ -261,7 +262,7 @@ pub async fn merge_base(ctx: &GhCtx, base: &str, head: &str) -> ApiResult<String
     let mut found = None;
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(["merge-base", base, head])
-        .current_dir(&ctx.project.root)
+        .current_dir(ctx.project.repo_dir())
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0");
     if let Ok(out) = crate::util::proc::run_cmd(cmd, Duration::from_secs(10)).await {
@@ -698,7 +699,7 @@ pub struct CreatePr {
 pub async fn create_pr(ctx: &GhCtx, b: &CreatePr) -> ApiResult<Pull> {
     let head = match b.head.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(h) => h.to_string(),
-        None => crate::util::git::current_branch(&ctx.project.root)
+        None => crate::util::git::current_branch(ctx.project.repo_dir())
             .await
             .ok_or_else(|| ApiError::bad_request("the project is not on a branch; pass head"))?,
     };
@@ -779,29 +780,29 @@ pub async fn update_pr(ctx: &GhCtx, n: u64, b: &UpdatePr) -> ApiResult<PullDetai
 
 type N = Path<(String, u64)>;
 
-async fn h_list(State(s): State<AppState>, Path(pid): Path<String>, Query(q): Query<PullsQuery>) -> ApiResult<Json<ListPage<Pull>>> {
-    Ok(Json(list_pulls(&ctx(&s, &pid).await?, &q).await?))
+async fn h_list(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>, Query(q): Query<PullsQuery>) -> ApiResult<Json<ListPage<Pull>>> {
+    Ok(Json(list_pulls(&ctx(&s, &pid, &repo).await?, &q).await?))
 }
-async fn h_create(State(s): State<AppState>, Path(pid): Path<String>, Json(b): Json<CreatePr>) -> ApiResult<Json<Pull>> {
-    Ok(Json(create_pr(&ctx(&s, &pid).await?, &b).await?))
+async fn h_create(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>, Json(b): Json<CreatePr>) -> ApiResult<Json<Pull>> {
+    Ok(Json(create_pr(&ctx(&s, &pid, &repo).await?, &b).await?))
 }
-async fn h_get(State(s): State<AppState>, Path((pid, n)): N) -> ApiResult<Json<PullDetail>> {
-    Ok(Json(get_pull(&ctx(&s, &pid).await?, n).await?))
+async fn h_get(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): N) -> ApiResult<Json<PullDetail>> {
+    Ok(Json(get_pull(&ctx(&s, &pid, &repo).await?, n).await?))
 }
-async fn h_update(State(s): State<AppState>, Path((pid, n)): N, Json(b): Json<UpdatePr>) -> ApiResult<Json<PullDetail>> {
-    Ok(Json(update_pr(&ctx(&s, &pid).await?, n, &b).await?))
+async fn h_update(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): N, Json(b): Json<UpdatePr>) -> ApiResult<Json<PullDetail>> {
+    Ok(Json(update_pr(&ctx(&s, &pid, &repo).await?, n, &b).await?))
 }
-async fn h_files(State(s): State<AppState>, Path((pid, n)): N) -> ApiResult<Json<PrFiles>> {
-    Ok(Json(pr_files(&ctx(&s, &pid).await?, n).await?))
+async fn h_files(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): N) -> ApiResult<Json<PrFiles>> {
+    Ok(Json(pr_files(&ctx(&s, &pid, &repo).await?, n).await?))
 }
-async fn h_file(State(s): State<AppState>, Path((pid, n)): N, Query(q): Query<FileQuery>) -> ApiResult<Json<FileVersions>> {
-    Ok(Json(pr_file(&ctx(&s, &pid).await?, n, &q).await?))
+async fn h_file(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): N, Query(q): Query<FileQuery>) -> ApiResult<Json<FileVersions>> {
+    Ok(Json(pr_file(&ctx(&s, &pid, &repo).await?, n, &q).await?))
 }
-async fn h_threads(State(s): State<AppState>, Path((pid, n)): N) -> ApiResult<Json<Vec<Thread>>> {
-    Ok(Json(threads(&ctx(&s, &pid).await?, n).await?))
+async fn h_threads(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): N) -> ApiResult<Json<Vec<Thread>>> {
+    Ok(Json(threads(&ctx(&s, &pid, &repo).await?, n).await?))
 }
-async fn h_review_comment(State(s): State<AppState>, Path((pid, n)): N, Json(b): Json<NewReviewComment>) -> ApiResult<Json<ReviewComment>> {
-    Ok(Json(add_review_comment(&ctx(&s, &pid).await?, n, &b).await?))
+async fn h_review_comment(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): N, Json(b): Json<NewReviewComment>) -> ApiResult<Json<ReviewComment>> {
+    Ok(Json(add_review_comment(&ctx(&s, &pid, &repo).await?, n, &b).await?))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -810,8 +811,8 @@ struct BodyOnly {
     body: String,
 }
 
-async fn h_reply(State(s): State<AppState>, Path((pid, n, cid)): Path<(String, u64, u64)>, Json(b): Json<BodyOnly>) -> ApiResult<Json<ReviewComment>> {
-    Ok(Json(reply(&ctx(&s, &pid).await?, n, cid, &b.body).await?))
+async fn h_reply(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n, cid)): Path<(String, u64, u64)>, Json(b): Json<BodyOnly>) -> ApiResult<Json<ReviewComment>> {
+    Ok(Json(reply(&ctx(&s, &pid, &repo).await?, n, cid, &b.body).await?))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -822,28 +823,29 @@ struct ResolveBody {
 
 async fn h_resolve(
     State(s): State<AppState>,
+    Query(repo): Query<RepoParam>,
     Path((pid, n, tid)): Path<(String, u64, String)>,
     Json(b): Json<ResolveBody>,
 ) -> ApiResult<Json<Value>> {
-    Ok(Json(resolve(&ctx(&s, &pid).await?, n, &tid, b.resolved).await?))
+    Ok(Json(resolve(&ctx(&s, &pid, &repo).await?, n, &tid, b.resolved).await?))
 }
-async fn h_reviews(State(s): State<AppState>, Path((pid, n)): N) -> ApiResult<Json<Vec<Review>>> {
-    Ok(Json(reviews(&ctx(&s, &pid).await?, n).await?))
+async fn h_reviews(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): N) -> ApiResult<Json<Vec<Review>>> {
+    Ok(Json(reviews(&ctx(&s, &pid, &repo).await?, n).await?))
 }
-async fn h_review(State(s): State<AppState>, Path((pid, n)): N, Json(b): Json<ReviewBody>) -> ApiResult<Json<Review>> {
-    Ok(Json(review(&ctx(&s, &pid).await?, n, &b).await?))
+async fn h_review(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): N, Json(b): Json<ReviewBody>) -> ApiResult<Json<Review>> {
+    Ok(Json(review(&ctx(&s, &pid, &repo).await?, n, &b).await?))
 }
-async fn h_comments(State(s): State<AppState>, Path((pid, n)): N) -> ApiResult<Json<Vec<IssueComment>>> {
-    Ok(Json(issue_comments(&ctx(&s, &pid).await?, n).await?))
+async fn h_comments(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): N) -> ApiResult<Json<Vec<IssueComment>>> {
+    Ok(Json(issue_comments(&ctx(&s, &pid, &repo).await?, n).await?))
 }
-async fn h_comment(State(s): State<AppState>, Path((pid, n)): N, Json(b): Json<BodyOnly>) -> ApiResult<Json<IssueComment>> {
-    Ok(Json(add_comment(&ctx(&s, &pid).await?, n, &b.body).await?))
+async fn h_comment(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): N, Json(b): Json<BodyOnly>) -> ApiResult<Json<IssueComment>> {
+    Ok(Json(add_comment(&ctx(&s, &pid, &repo).await?, n, &b.body).await?))
 }
-async fn h_commits(State(s): State<AppState>, Path((pid, n)): N) -> ApiResult<Json<Vec<Commit>>> {
-    Ok(Json(commits(&ctx(&s, &pid).await?, n).await?))
+async fn h_commits(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): N) -> ApiResult<Json<Vec<Commit>>> {
+    Ok(Json(commits(&ctx(&s, &pid, &repo).await?, n).await?))
 }
-async fn h_merge(State(s): State<AppState>, Path((pid, n)): N, Json(b): Json<MergeBody>) -> ApiResult<Json<PullDetail>> {
-    Ok(Json(merge(&ctx(&s, &pid).await?, n, &b).await?))
+async fn h_merge(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): N, Json(b): Json<MergeBody>) -> ApiResult<Json<PullDetail>> {
+    Ok(Json(merge(&ctx(&s, &pid, &repo).await?, n, &b).await?))
 }
 
 pub fn routes() -> Router<AppState> {

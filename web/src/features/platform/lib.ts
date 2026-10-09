@@ -1,5 +1,7 @@
 // Pure helpers for the platform feature (tested in lib.test.ts).
 
+import { scopeOfRepo } from '@/api/repos'
+import type { RepoSummary } from '@/api/types'
 import type { AccountSignIn, ActivityEvent, McpCall, SecretRef, UpdateStatus } from './types'
 
 type Params = Record<string, unknown>
@@ -63,6 +65,22 @@ export function panelIdFor(kind: string, params: Params): string {
       return keys.length ? `${kind}:${JSON.stringify(params, keys)}` : kind
     }
   }
+}
+
+/** Panels that belong to one repository: their `projectId` param is a repository scope id (`api/repos.ts`). */
+const REPO_PANELS = new Set(['diff', 'commit', 'gitlog', 'conflict', 'mr', 'pipeline', 'job', 'gitlab.issue', 'pr', 'gh.issue', 'gh.run', 'gh.job'])
+
+/**
+ * The params of a `ui.open` for a repository panel: the server names the real project and
+ * its repository (`repo`); the panel keeps both in its scope id. `scoped` is whether the
+ * panel's id has to be worked out again (the server's names the project alone).
+ */
+export function scopeUiOpen(kind: string, params: Params, repos: readonly RepoSummary[]): { params: Params; scoped: boolean } {
+  if (!REPO_PANELS.has(kind) || !('repo' in params)) return { params, scoped: false }
+  const { repo, ...rest } = params
+  if (typeof rest.projectId !== 'string' || typeof repo !== 'string' || !repo) return { params: rest, scoped: false }
+  const projectId = scopeOfRepo(rest.projectId, repos, repo)
+  return { params: { ...rest, projectId }, scoped: projectId !== rest.projectId }
 }
 
 /** `m:ss` for a countdown; `0:00` once expired. */

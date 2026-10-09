@@ -28,6 +28,7 @@ use super::model::Pipeline;
 use super::poller::PollState;
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::forge::RepoParam;
 use crate::projects::Project;
 use crate::secrets::Secret;
 
@@ -52,7 +53,7 @@ pub struct GitlabState {
     rate: Mutex<HashMap<String, RateInfo>>,
     /// Pipeline details keyed by `api|id`, valid while `updated_at` is unchanged.
     pipelines: Mutex<HashMap<String, (String, Pipeline)>>,
-    /// Short-lived summaries keyed by project id (dedupes several open tabs).
+    /// Short-lived summaries keyed by `Project::scope_key` (dedupes several open tabs).
     pub(super) summaries: Mutex<HashMap<String, (Instant, Value)>>,
     pub(super) poll: PollState,
 }
@@ -124,9 +125,10 @@ impl GitlabState {
         map.insert(key, (updated, p.clone()));
     }
 
-    /// Forget the cached summary of a project (after a mutation).
-    pub(super) fn invalidate_summary(&self, project_id: &str) {
-        self.summaries.lock().remove(project_id);
+    /// Forget the cached summary of a repository (after a mutation); `scope` is its
+    /// `Project::scope_key`.
+    pub(super) fn invalidate_summary(&self, scope: &str) {
+        self.summaries.lock().remove(scope);
     }
 }
 
@@ -300,9 +302,10 @@ pub struct Page<T> {
     pub next_url: Option<String>,
 }
 
-/// Connection + project for a Workbench project id.
-pub async fn ctx(state: &AppState, pid: &str) -> ApiResult<GlCtx> {
-    let project = state.projects.require(pid)?;
+/// Connection + project for a Workbench project id, seen through the repository `repo`
+/// names (`?repo=`; none: the default one, `404 unknown_repo` for an id it does not have).
+pub async fn ctx(state: &AppState, pid: &str, repo: &RepoParam) -> ApiResult<GlCtx> {
+    let project = state.projects.require_repo(pid, repo.id())?;
     ctx_for(state, project).await
 }
 

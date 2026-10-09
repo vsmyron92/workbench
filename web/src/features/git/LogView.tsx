@@ -13,6 +13,7 @@ import { BisectBanner } from './Bisect'
 import { CommitDetailsView, RefBadge, commitMenu } from './CommitDetails'
 import { layoutGraph, segmentPath, type GraphRow } from './graph'
 import { bisectMark, shortSha, splitPath, type BisectMark } from './logic'
+import { RepoChip } from './RepoSwitcher'
 import type { LogCommit, LogFilters, RefLabel } from './types'
 
 const ROW = 24
@@ -65,6 +66,7 @@ export function GitLogPanel({ params }: PanelProps<{ projectId: string; path?: s
       gitRef={params.ref}
       lines={params.lines}
       worktreeLines={!!params.worktreeLines}
+      panel
     />
   )
 }
@@ -91,12 +93,15 @@ function LogView({
   gitRef,
   lines: initialLines,
   worktreeLines,
+  panel,
 }: {
   pid: string
   path?: string
   gitRef?: string
   lines?: string
   worktreeLines?: boolean
+  /** A panel of its own repository, not the tool window that follows the active one. */
+  panel?: boolean
 }) {
   const qc = useQueryClient()
   const branches = useBranches(pid)
@@ -241,6 +246,7 @@ function LogView({
   return (
     <div className="git-log">
       <div className="git-log-filters">
+        <RepoChip scope={pid} readOnly={panel} />
         <Select value={scope} onChange={(e) => setScope(e.target.value)} style={{ maxWidth: 200 }} aria-label="Branch filter">
           <option value="">All branches</option>
           <option value="HEAD">HEAD{branches.data?.current ? ` (${branches.data.current})` : ''}</option>

@@ -109,6 +109,47 @@ An environment with a `host` runs its logs, commands and deploys over ssh on tha
 deploys always ask first (`confirm = "click"` or `"typed"`) and can require a green
 pipeline.
 
+## Several repositories in one project
+
+A project is a folder, and the folder may hold more than one git repository: services
+cloned side by side, a monorepo with a submodule, a workspace folder that is no
+repository itself. Workbench lists them all. Git, the Commit window, the Git Log,
+merge requests, pipelines and Actions work on one repository at a time, and the
+**repository switcher** in the top bar (it appears when the project has two or more)
+picks which. The file tree and the editor show the changes of every repository, and
+agents, terminals, runs and search keep working on the whole project.
+
+Workbench finds repositories up to three folders below the project root (not inside
+dependency or build folders, and not linked worktrees). Name them yourself, or give one
+its own GitLab or GitHub project, in `.workbench.toml`:
+
+```toml
+[project]
+nested_repos = false             # optional: do not search, list only the entries below
+
+[[repository]]
+path = "services/api"            # relative to the project root, inside it
+name = "API"                     # shown in the switcher (default: the folder's name)
+[repository.gitlab]
+host = "gitlab.example.com"
+path = "acme/api"
+token = "api_token"              # the name of a [secrets] entry of the machine overlay
+
+[[repository]]
+path = "web"
+[repository.github]
+path = "acme/web"
+```
+
+A repository takes the same keys as `[repo]` (`remote`, `default_branch`, `gitlab`,
+`github`, `ci`); what you leave out comes from its own remote. As with `[repo]`, the
+token names resolve only against the `[secrets]` of your machine overlay.
+
+A folder with a `.workbench.toml` and no `.git` of its own is listed as a project too,
+which is how a folder of repositories becomes one project: its first repository is the
+default. Agents can pass `repo` to the git, GitLab and GitHub tools to work on another
+repository than the default one.
+
 ## Databases
 
 The Database window (right stripe) connects to PostgreSQL. **Add Data Source** asks for

@@ -8,6 +8,7 @@ import type { DiffOnMount } from '@monaco-editor/react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Columns2, FileCode, FoldVertical, Folder, MessageSquare, Rows2, SkipBack, SkipForward } from 'lucide-react'
 import { openPanel, promptDialog, toast, toastError } from '@/shell/actions'
+import { fileInProject, scopeProject } from '@/api/repos'
 import { useUi } from '@/state/store'
 import { monacoThemeName } from '@/theme/palette'
 import { EmptyState, ErrorBox, IconButton, Loading, MonacoDiffEditor, Spacer, Toolbar } from '@/ui'
@@ -341,7 +342,12 @@ export function PrFilesView({
                   size="small"
                   label="Open the local file"
                   onClick={() =>
-                    openPanel({ kind: 'editor', id: `editor:${projectId}:${file.filename}`, title: file.filename.split('/').pop(), params: { projectId, path: file.filename } })
+                    openPanel({
+                      kind: 'editor',
+                      id: `editor:${scopeProject(projectId)}:${fileInProject(projectId, file.filename)}`,
+                      title: file.filename.split('/').pop(),
+                      params: { projectId: scopeProject(projectId), path: fileInProject(projectId, file.filename) },
+                    })
                   }
                 />
               )}

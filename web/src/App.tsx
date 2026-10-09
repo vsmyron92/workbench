@@ -1,9 +1,10 @@
 import { lazy, Suspense, useEffect, useState, useSyncExternalStore } from 'react'
-import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
+import { QueryCache, QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import { api, setUnauthorizedHandler, settleDeviceKey } from '@/api/client'
 import { installResync, startEvents } from '@/api/events'
 import { loadHealth } from '@/api/health'
-import { installProjectsSync } from '@/api/queries'
+import { installProjectsSync, qk } from '@/api/queries'
+import { resetUnknownRepo } from '@/api/repos'
 import { Login } from '@/shell/Login'
 import { desktopHeld, subscribeDesktopHold } from '@/shell/windowFit'
 import { providers } from '@/shell/registry'
@@ -15,6 +16,12 @@ const DesktopShell = lazy(() => import('@/shell/DesktopShell').then((m) => ({ de
 const MobileShell = lazy(() => import('@/shell/MobileShell').then((m) => ({ default: m.MobileShell })))
 
 const queryClient = new QueryClient({
+  // A repository that vanished from a project: its views go back to the default one.
+  queryCache: new QueryCache({
+    onError: (error, query) => {
+      if (resetUnknownRepo(error, query.queryKey)) void queryClient.invalidateQueries({ queryKey: qk.projects })
+    },
+  }),
   defaultOptions: {
     queries: { staleTime: 30_000, refetchOnWindowFocus: false, retry: 1 },
   },

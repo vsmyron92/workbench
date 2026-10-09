@@ -57,6 +57,7 @@ import { BisectBanner } from './Bisect'
 import { ChangelistView, useCommitSelection } from './Changelists'
 import { refsOf } from './lineSelection'
 import { groupStatus, sectionCode, shortSha, splitPath, stateLabel, statusClass, statusLabel, type SectionId, type StatusSections } from './logic'
+import { RepoChip } from './RepoSwitcher'
 import { ShelfView, StashView } from './ShelfView'
 import { useDraft, useDrafts, useGitPrefs, useGitUi, useInclusion, type CommitTab } from './store'
 import type { GitStatus, GitStatusFile } from './types'
@@ -164,6 +165,7 @@ function Tools({ pid, children }: { pid: string; children?: ReactNode }) {
   const setGroupBy = useGitPrefs((s) => s.setGroupBy)
   return (
     <div className="wb-toolbar">
+      <RepoChip scope={pid} />
       <IconButton icon={RefreshCw} size="small" label="Refresh" onClick={() => void qc.invalidateQueries({ queryKey: gk.all(pid) })} />
       <span className="git-tb-sep" />
       <IconButton icon={ArrowDownToLine} size="small" label="Update Project (Ctrl+T)" onClick={() => void updateProject(pid)} />

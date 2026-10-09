@@ -31,6 +31,10 @@ pub struct StatusFile {
     /// A submodule entry.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub submodule: bool,
+    /// The repository of the project the file is in (its id). Only the whole-project status
+    /// (`?repo=all`, `repos::project_status`) says; a single repository's status leaves it out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     /// Submodule whose checked-out commit differs from the index (`SC..`): that
     /// part can be staged like a file.
     #[serde(skip)]
@@ -58,6 +62,7 @@ impl StatusFile {
             conflict: false,
             score: None,
             submodule: false,
+            repo: None,
             sub_commit: false,
             sub_modified: false,
             sub_untracked: false,
@@ -226,6 +231,7 @@ fn entry(xy: &str, sub: &str, path: &str, orig: Option<String>, score: Option<u8
         conflict,
         score,
         submodule,
+        repo: None,
         sub_commit: submodule && sb.get(1) == Some(&b'C'),
         sub_modified: submodule && sb.get(2) == Some(&b'M'),
         sub_untracked: submodule && sb.get(3) == Some(&b'U'),
@@ -347,7 +353,10 @@ pub async fn entries_for(repo: &Repo, repo_paths: &[String]) -> Result<Vec<Statu
     Ok(files)
 }
 
-/// Run status for a repository and map paths to the project.
+/// Run status for a repository and map paths to the project. The root directories of
+/// the project's other repositories inside this one (git lists a nested repository as an
+/// untracked or ignored directory), and the untracked or ignored directories above them,
+/// are left out: they are not changes of this repository.
 pub async fn status(repo: &Repo, include_ignored: bool) -> Result<GitStatus, ApiError> {
     let mut g = repo.git().args([
         "status",
@@ -367,13 +376,21 @@ pub async fn status(repo: &Repo, include_ignored: bool) -> Result<GitStatus, Api
     let (state, detail) = detect_state(&repo.git_dir);
     st.state = state;
     st.state_detail = detail;
-    if !repo.prefix.is_empty() {
+    if !repo.prefix.is_empty() || !repo.base.is_empty() {
         for f in &mut st.files {
             f.path = repo.to_project(&f.path);
             if let Some(o) = &f.orig_path {
                 f.orig_path = Some(repo.to_project(o));
             }
         }
+    }
+    if !repo.inner.is_empty() {
+        // An untracked or ignored directory that is, or holds, another repository says
+        // nothing about that repository's files (`.gitignore` often lists the clones).
+        st.files.retain(|f| {
+            let p = f.path.trim_end_matches('/');
+            !(matches!(f.index, '?' | '!') && repo.inner.iter().any(|d| p == d || d.strip_prefix(p).is_some_and(|rest| rest.starts_with('/'))))
+        });
     }
     Ok(st)
 }

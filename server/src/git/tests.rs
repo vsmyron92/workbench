@@ -22,7 +22,12 @@ pub(super) fn git(dir: &Path, args: &[&str]) -> String {
 /// A fresh repository with local config that overrides anything global.
 pub(super) fn init_repo() -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
-    let p = d.path();
+    init_repo_at(d.path());
+    d
+}
+
+/// [`init_repo`] in an existing folder (a repository inside another one's folder).
+pub(super) fn init_repo_at(p: &Path) {
     git(p, &["init", "-q", "-b", "main"]);
     for (k, v) in [
         ("user.name", "Test User"),
@@ -36,7 +41,6 @@ pub(super) fn init_repo() -> tempfile::TempDir {
         git(p, &["config", k, v]);
     }
     no_hooks(p);
-    d
 }
 
 /// Run no hooks in `repo` (global ones included): `core.hooksPath` names a folder that does
@@ -59,7 +63,7 @@ pub(super) fn commit_all(dir: &Path, msg: &str) {
 }
 
 pub(super) async fn repo(dir: &Path) -> Repo {
-    Repo::discover("test", dir).await.unwrap()
+    Repo::discover_root("test", dir).await.unwrap()
 }
 
 pub(super) fn lines(n: usize) -> String {
@@ -424,7 +428,7 @@ async fn subdirectory_projects_see_project_relative_paths() {
     commit_all(p, "init");
     write(p, "app/web/src/x.ts", "y\n");
     write(p, "README.md", "changed\n");
-    let r = Repo::discover("sub", &p.join("app/web")).await.unwrap();
+    let r = Repo::discover_root("sub", &p.join("app/web")).await.unwrap();
     assert_eq!(r.prefix, "app/web/");
     let st = status::status(&r, false).await.unwrap();
     assert_eq!(st.files.len(), 1);
@@ -442,7 +446,7 @@ async fn linked_worktrees_have_their_own_state() {
     let wt = tempfile::tempdir().unwrap();
     let wt_path = wt.path().join("wt");
     git(p, &["worktree", "add", "-q", "-b", "side", wt_path.to_str().unwrap()]);
-    let r = Repo::discover("wt", &wt_path).await.unwrap();
+    let r = Repo::discover_root("wt", &wt_path).await.unwrap();
     // A linked worktree has a `.git` file; its git dir is under the common dir.
     assert!(wt_path.join(".git").is_file());
     assert!(r.git_dir.starts_with(&r.common_dir) && r.git_dir != r.common_dir);
@@ -760,10 +764,10 @@ async fn local_operations_do_not_wait_forever_for_the_repository_lock() {
     let project = state.projects.require(&pid).unwrap();
     let r = state.git.repo(&project).await.unwrap();
     let held = state.git.lock(&r.top).lock_owned().await;
-    let err = super::routes::mutate_waiting(&state, &pid, std::time::Duration::from_millis(200), |_| async { Ok(()) }).await.unwrap_err();
+    let err = super::routes::mutate_waiting(&state, &pid, &super::routes::RepoSel::default(), std::time::Duration::from_millis(200), |_| async { Ok(()) }).await.unwrap_err();
     assert_eq!((err.status.as_u16(), err.code), (409, "busy"));
     drop(held);
-    super::routes::mutate_waiting(&state, &pid, std::time::Duration::from_millis(200), |_| async { Ok(()) }).await.unwrap();
+    super::routes::mutate_waiting(&state, &pid, &super::routes::RepoSel::default(), std::time::Duration::from_millis(200), |_| async { Ok(()) }).await.unwrap();
 }
 
 #[tokio::test]
@@ -883,5 +887,5 @@ async fn a_repository_git_refuses_for_its_owner_is_reported_in_gits_words() {
     }
     // A folder that is no repository still says so.
     let plain = tempfile::tempdir().unwrap();
-    assert_eq!(Repo::discover("plain", plain.path()).await.unwrap_err().code, "not_a_repo");
+    assert_eq!(Repo::discover_root("plain", plain.path()).await.unwrap_err().code, "not_a_repo");
 }

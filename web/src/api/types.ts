@@ -25,6 +25,21 @@ export interface ProjectSummary {
     /** Running, and new shells and runs go into it. */
     inContainer: boolean
   } | null
+  /** The git repositories, the default one first (docs/ARCHITECTURE.md "Repositories of a project"); `[]` for a folder in none. */
+  repos?: RepoSummary[]
+}
+
+/** projects.rs RepoSummary: one git repository of a project. */
+export interface RepoSummary {
+  /** `.` for the repository holding the project root, else its project-relative directory (`services/api`). */
+  id: string
+  name: string
+  /** The working tree relative to the project root; empty for `.`. */
+  path: string
+  default: boolean
+  remote: string | null
+  gitlab: { host: string; path: string } | null
+  github: { host: string; path: string } | null
 }
 
 /** GET /api/projects/{pid} */

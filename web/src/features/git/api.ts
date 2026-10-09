@@ -1,9 +1,12 @@
-// REST calls and react-query hooks of the git slice. Every key starts with
-// ['git', projectId] so one `git.changed` event refreshes a project's views;
-// commit details are immutable and live under ['git-commit', …].
+// REST calls and react-query hooks of the git slice. The "pid" every function takes is a
+// repository scope id (`api/repos.ts`): the project id for the default repository, else
+// `<project>::<repo>`. Every key starts with ['git', scope], so one `git.changed` event
+// refreshes the views of a project's repositories (`inProject`); commit details are
+// immutable and live under ['git-commit', …].
 
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { api, ApiError } from '@/api/client'
+import { scopeProject, withRepo } from '@/api/repos'
 import type {
   BisectState,
   Branches,
@@ -13,6 +16,7 @@ import type {
   ConflictVersions,
   DiffPanelParams,
   GitFileDiff,
+  GitRepoInfo,
   GitStatus,
   LogFilters,
   LogPage,
@@ -26,13 +30,16 @@ import type {
 
 export const LOG_PAGE = 300
 
-export function gitUrl(pid: string, p: string) {
-  return `/api/projects/${encodeURIComponent(pid)}/git/${p}`
+export function gitUrl(scope: string, p: string) {
+  return withRepo(`/api/projects/${encodeURIComponent(scopeProject(scope))}/git/${p}`, scope)
 }
 
 export const gk = {
   all: (pid: string) => ['git', pid] as const,
   status: (pid: string) => ['git', pid, 'status'] as const,
+  /** Every repository's changed files, project-relative (the files tree's colours): keyed by the real project id. */
+  statusAll: (projectId: string) => ['git', projectId, 'status', 'all'] as const,
+  repos: (projectId: string) => ['git', projectId, 'repos'] as const,
   diffs: (pid: string) => ['git', pid, 'diff'] as const,
   diff: (p: DiffPanelParams) => ['git', p.projectId, 'diff', p.mode, p.path, p.sha ?? '', p.base ?? '', p.head ?? '', p.oldPath ?? ''] as const,
   log: (pid: string, f: LogFilters) => ['git', pid, 'log', f] as const,
@@ -83,6 +90,18 @@ export function useGitStatus(pid: string | null) {
     staleTime: 5_000,
     refetchOnWindowFocus: true,
     retry: (n, e) => !isNotRepo(e) && !isUnsafeRepo(e) && n < 1,
+  })
+}
+
+/** The project's repositories with their branch and state (the repository switcher). */
+export function useRepoInfos(projectId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: gk.repos(projectId ?? ''),
+    queryFn: ({ signal }) => api.get<GitRepoInfo[]>(gitUrl(projectId!, 'repos'), undefined, signal),
+    enabled: !!projectId && enabled,
+    staleTime: 10_000,
+    refetchOnWindowFocus: true,
+    retry: false,
   })
 }
 

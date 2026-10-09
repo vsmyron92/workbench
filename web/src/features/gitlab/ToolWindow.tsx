@@ -3,8 +3,9 @@
 
 import type { ReactNode } from 'react'
 import { GitPullRequestCreate } from 'lucide-react'
+import { NotOnForge } from '@/shell/RepoUi'
 import { Badge, EmptyState, ErrorBox, GitLabIcon, Loading, Tabs } from '@/ui'
-import { useGitlabSummary } from './api'
+import { useGitlabSummary, useHasGitlab } from './api'
 import { Duration, ExtLink, openMr, openPipeline, RefLabel, StatusIcon, useGlUi, type GlTab } from './components'
 import { EnvironmentsList, IssuesList, MrList, PipelinesList, RegistryView } from './Lists'
 import { statusLabel } from './logic'
@@ -58,10 +59,13 @@ function Header({ projectId, s }: { projectId: string; s: GitlabSummary }) {
 }
 
 export function GitlabToolWindow({ projectId }: { projectId: string | null }) {
-  const summary = useGitlabSummary(projectId)
+  const has = useHasGitlab(projectId)
+  const summary = useGitlabSummary(projectId, has)
   const tab = useGlUi((s) => s.tab)
   const setTab = useGlUi((s) => s.setTab)
   if (!projectId) return <EmptyState title="No project selected" />
+  // The project has a repository on GitLab, but not the active one.
+  if (!has) return <NotOnForge scope={projectId} forge="gitlab" icon={GitLabIcon} />
   const s = summary.data
   if (summary.error && !s) return <ErrorBox error={summary.error} onRetry={() => summary.refetch()} />
   if (!s) return <Loading />

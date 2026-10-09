@@ -8,6 +8,7 @@ import type { DiffOnMount } from '@monaco-editor/react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Columns2, FileCode, FoldVertical, Folder, MessageSquare, Rows2, SkipBack, SkipForward } from 'lucide-react'
 import { openPanel, promptDialog, toast, toastError } from '@/shell/actions'
+import { fileInProject, scopeProject } from '@/api/repos'
 import { useUi } from '@/state/store'
 import { monacoThemeName } from '@/theme/palette'
 import { EmptyState, ErrorBox, IconButton, Loading, MonacoDiffEditor, Spacer, Toolbar } from '@/ui'
@@ -356,11 +357,12 @@ export function MrChanges({
                   size="small"
                   label="Open the local file"
                   onClick={() =>
+                    // The editor belongs to the real project, and GitLab's path is relative to the repository.
                     openPanel({
                       kind: 'editor',
-                      id: `editor:${projectId}:${file.newPath}`,
+                      id: `editor:${scopeProject(projectId)}:${fileInProject(projectId, file.newPath)}`,
                       title: file.newPath.split('/').pop(),
-                      params: { projectId, path: file.newPath },
+                      params: { projectId: scopeProject(projectId), path: fileInProject(projectId, file.newPath) },
                     })
                   }
                 />

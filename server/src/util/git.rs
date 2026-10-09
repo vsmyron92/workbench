@@ -94,6 +94,11 @@ pub async fn try_commit_sha(root: &Path, rev: &str) -> Result<Option<String>, Fa
     query(command(root, &["rev-parse", "--verify", "--quiet", &spec])).await
 }
 
+/// Is `root` inside a git working tree (a repository itself, or in a folder of one)?
+pub async fn in_work_tree(root: &Path) -> bool {
+    matches!(query(command(root, &["rev-parse", "--is-inside-work-tree"])).await, Ok(Some(t)) if t == "true")
+}
+
 /// URL of a remote (`origin` by default).
 pub async fn remote_url(root: &Path, remote: &str) -> Option<String> {
     query(command(root, &["remote", "get-url", remote])).await.ok().flatten()

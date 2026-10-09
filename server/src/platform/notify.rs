@@ -303,6 +303,21 @@ fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
+/// The git repository a forge event is about (`data.repo`) when it is not the one the
+/// project root belongs to (`.`): a project with several repositories names which one.
+fn repo_of(d: &Value) -> Option<&str> {
+    s(d, "repo").filter(|r| *r != ".")
+}
+
+/// The id web views and notification keys use for a repository of a project: the project
+/// id for the root repository, `<project>::<repository>` for another.
+fn scope_of(pid: Option<&str>, repo: Option<&str>) -> String {
+    match (pid, repo) {
+        (Some(p), Some(r)) => format!("{p}::{r}"),
+        (p, _) => p.unwrap_or("").to_string(),
+    }
+}
+
 /// Rate-limit key, repeat window and priority of an `agent.attention` notification.
 ///
 /// The terminals slice emits one event per transition into an attention state,
@@ -527,7 +542,9 @@ fn handle_event(state: &AppState, ls: &mut ListenerState, ev: &Arc<Event>) {
         "gitlab.pipeline" => {
             let Some(status) = s(d, "status") else { return };
             let id = d.get("pipelineId").map(|v| v.to_string()).unwrap_or_default();
-            let key = format!("{}:{id}", pid.unwrap_or(""));
+            let repo = repo_of(d);
+            let scope = scope_of(pid, repo);
+            let key = format!("{scope}:{id}");
             if ls.pipelines.get(&key).is_some_and(|prev| prev == status) {
                 return;
             }
@@ -540,7 +557,8 @@ fn handle_event(state: &AppState, ls: &mut ListenerState, ev: &Arc<Event>) {
             }
             let pname = project_name(state, pid).unwrap_or_else(|| "Workbench".into());
             let reference = s(d, "ref").unwrap_or("?");
-            let title = format!("{pname} · pipeline #{id} on {reference}");
+            let named = repo.map(|r| format!("{pname} · {r}")).unwrap_or(pname);
+            let title = format!("{named} · pipeline #{id} on {reference}");
             let level = match status {
                 "failed" => "error",
                 "success" => "success",
@@ -548,16 +566,18 @@ fn handle_event(state: &AppState, ls: &mut ListenerState, ev: &Arc<Event>) {
             };
             record_event(state, "pipeline", level, pid, None, &title, format!("Pipeline {status}"));
             if status == "failed" {
-                let open = pid.zip(d.get("pipelineId").filter(|v| v.is_u64())).map(|(p, id)| OpenTarget {
-                    kind: "pipeline".into(),
-                    id: format!("pipeline:{p}:{id}"),
-                    params: json!({ "projectId": p, "pipelineId": id }),
+                let open = pid.zip(d.get("pipelineId").filter(|v| v.is_u64())).map(|(p, id)| {
+                    let mut params = json!({ "projectId": p, "pipelineId": id });
+                    if let Some(r) = repo {
+                        params["repo"] = json!(r);
+                    }
+                    OpenTarget { kind: "pipeline".into(), id: format!("pipeline:{scope}:{id}"), params }
                 });
                 let push = pipeline_push(pid, reference, &title, "Pipeline failed", open);
                 state.platform.notifier.send(
                     state,
                     DesktopNote {
-                        key: format!("pipeline:{}:{reference}", pid.unwrap_or("")),
+                        key: format!("pipeline:{scope}:{reference}"),
                         repeat_after: PER_KEY_INTERVAL,
                         priority: Priority::Normal,
                         title: format!("Workbench · {title}"),
@@ -573,7 +593,9 @@ fn handle_event(state: &AppState, ls: &mut ListenerState, ev: &Arc<Event>) {
             // A workflow dispatch has no run yet (`runId: null`, no state).
             let Some(run_state) = s(d, "state") else { return };
             let Some(run_id) = d.get("runId").filter(|v| v.is_u64()).map(Value::to_string) else { return };
-            let key = format!("{}:gh:{run_id}", pid.unwrap_or(""));
+            let repo = repo_of(d);
+            let scope = scope_of(pid, repo);
+            let key = format!("{scope}:gh:{run_id}");
             if ls.pipelines.get(&key).is_some_and(|prev| prev == run_state) {
                 return;
             }
@@ -588,7 +610,8 @@ fn handle_event(state: &AppState, ls: &mut ListenerState, ev: &Arc<Event>) {
             let workflow = s(d, "name").unwrap_or("workflow");
             let number = d.get("runNumber").and_then(Value::as_u64).map(|n| format!(" #{n}")).unwrap_or_default();
             let branch = s(d, "branch").unwrap_or("?");
-            let title = format!("{pname} · {workflow}{number} on {branch}");
+            let named = repo.map(|r| format!("{pname} · {r}")).unwrap_or(pname);
+            let title = format!("{named} · {workflow}{number} on {branch}");
             let level = match run_state {
                 "failed" => "error",
                 "success" => "success",
@@ -596,16 +619,18 @@ fn handle_event(state: &AppState, ls: &mut ListenerState, ev: &Arc<Event>) {
             };
             record_event(state, "pipeline", level, pid, None, &title, format!("Workflow run {run_state}"));
             if run_state == "failed" {
-                let open = pid.map(|p| OpenTarget {
-                    kind: "gh.run".into(),
-                    id: format!("gh.run:{p}:{run_id}"),
-                    params: json!({ "projectId": p, "runId": d["runId"] }),
+                let open = pid.map(|p| {
+                    let mut params = json!({ "projectId": p, "runId": d["runId"] });
+                    if let Some(r) = repo {
+                        params["repo"] = json!(r);
+                    }
+                    OpenTarget { kind: "gh.run".into(), id: format!("gh.run:{scope}:{run_id}"), params }
                 });
                 let push = pipeline_push(pid, branch, &title, "Workflow run failed", open);
                 state.platform.notifier.send(
                     state,
                     DesktopNote {
-                        key: format!("pipeline:{}:{branch}", pid.unwrap_or("")),
+                        key: format!("pipeline:{scope}:{branch}"),
                         repeat_after: PER_KEY_INTERVAL,
                         priority: Priority::Normal,
                         title: format!("Workbench · {title}"),
@@ -820,5 +845,34 @@ mod tests {
         assert_eq!(events[1].message, "Workflow run failed");
         assert_eq!(events[0].level, "success");
         assert_eq!(state.platform.notifier.sent_keys(), vec!["pipeline:p:main".to_string()]);
+    }
+
+    /// A run or pipeline of a repository other than the project's root one says which,
+    /// and is kept apart from the root repository's in the dedupe keys.
+    #[tokio::test]
+    async fn listener_names_the_repository_of_a_pipeline_or_run() {
+        let app = crate::platform::testutil::app().await;
+        let state = &app.state;
+        let mut ls = ListenerState::default();
+        let ev = |kind: &str, data: Value| Arc::new(Event { kind: kind.into(), project_id: Some("p".into()), data, ts: 0 });
+        let pipeline = |repo: &str| json!({ "pipelineId": 12, "status": "failed", "ref": "main", "repo": repo });
+        handle_event(state, &mut ls, &ev("gitlab.pipeline", pipeline(".")));
+        handle_event(state, &mut ls, &ev("gitlab.pipeline", pipeline("api")));
+        handle_event(
+            state,
+            &mut ls,
+            &ev("github.run", json!({ "runId": 7, "state": "failed", "name": "CI", "branch": "dev", "repo": "services/web" })),
+        );
+        let events = state.platform.activity.events(10);
+        assert_eq!(events.len(), 3, "{events:?}");
+        // Newest first.
+        assert!(events[2].title.ends_with("· pipeline #12 on main") && !events[2].title.contains("api"), "{}", events[2].title);
+        assert!(events[1].title.ends_with("· api · pipeline #12 on main"), "{}", events[1].title);
+        assert!(events[0].title.ends_with("· services/web · CI on dev"), "{}", events[0].title);
+        assert_eq!(events[1].message, "Pipeline failed");
+        assert_eq!(
+            state.platform.notifier.sent_keys(),
+            vec!["pipeline:p:main".to_string(), "pipeline:p::api:main".to_string(), "pipeline:p::services/web:dev".to_string()]
+        );
     }
 }

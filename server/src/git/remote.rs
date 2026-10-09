@@ -36,6 +36,11 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(200);
 pub struct OpInfo {
     pub op_id: String,
     pub project_id: String,
+    /// The repository of the project it runs in (`.` or its directory).
+    pub repo: String,
+    /// The repository's state key (`Repo::scope`), what `OpRegistry::list` filters by.
+    #[serde(skip)]
+    pub scope: String,
     pub op: String,
     pub title: String,
     pub started_at: i64,
@@ -131,15 +136,15 @@ impl OpRegistry {
         self.ops.lock().get(id).map(|r| OpInfo { lines: r.lines.iter().cloned().collect(), ..r.info.clone() })
     }
 
-    /// Running and recent ops of a project (without their logs).
-    pub fn list(&self, project_id: &str) -> Vec<OpInfo> {
+    /// Running and recent ops of a repository (`Repo::scope`; without their logs).
+    pub fn list(&self, scope: &str) -> Vec<OpInfo> {
         let ops = self.ops.lock();
         let order = self.order.lock();
         order
             .iter()
             .rev()
             .filter_map(|id| ops.get(id))
-            .filter(|r| r.info.project_id == project_id)
+            .filter(|r| r.info.scope == scope)
             .map(|r| r.info.clone())
             .collect()
     }
@@ -216,7 +221,8 @@ fn truncate_line(s: &str) -> String {
 
 /// Known secret values that could appear in git output (defence in depth).
 fn secrets_for(state: &AppState, repo: &Repo) -> Vec<Secret> {
-    let project = state.projects.get(&repo.project_id);
+    // The project seen through this repository: its `[repo.gitlab]` (or `[[repository]]`) token.
+    let project = state.projects.require_repo(&repo.project_id, Some(&repo.id)).ok();
     let mut names = vec![];
     if let Some(g) = project.as_ref().and_then(|p| p.config.repo.as_ref()).and_then(|r| r.gitlab.as_ref()) {
         if !g.token.is_empty() {
@@ -236,6 +242,8 @@ pub fn start(state: &AppState, repo: Arc<Repo>, spec: RemoteOpSpec, requested_id
     let info = OpInfo {
         op_id: id.clone(),
         project_id: repo.project_id.clone(),
+        repo: repo.id.clone(),
+        scope: repo.scope.clone(),
         op: spec.op.to_string(),
         title: spec.title.clone(),
         started_at: crate::util::now_ms(),
@@ -256,7 +264,7 @@ pub fn start(state: &AppState, repo: Arc<Repo>, spec: RemoteOpSpec, requested_id
             let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
         }
         state.git.ops.finish(&op_id, &res);
-        let mut ev = json!({ "opId": op_id, "op": spec.op, "title": spec.title, "done": true, "ok": res.ok, "message": res.message });
+        let mut ev = json!({ "opId": op_id, "op": spec.op, "repo": repo.id, "title": spec.title, "done": true, "ok": res.ok, "message": res.message });
         if res.conflicts {
             ev["conflicts"] = json!(true);
         }
@@ -264,7 +272,7 @@ pub fn start(state: &AppState, repo: Arc<Repo>, spec: RemoteOpSpec, requested_id
             ev["stopped"] = json!(true);
         }
         state.events.emit("git.op", Some(&repo.project_id), ev);
-        state.events.emit("git.changed", Some(&repo.project_id), json!({}));
+        state.events.emit("git.changed", Some(&repo.project_id), json!({ "repo": repo.id }));
     });
     Ok(id)
 }
@@ -299,7 +307,7 @@ async fn run(state: &AppState, repo: &Repo, spec: &RemoteOpSpec, op_id: &str, ca
     let secrets = secrets_for(state, repo);
     let emit_line = |line: &str| {
         let line = truncate_line(&crate::secrets::redact(line, &secrets));
-        state.events.emit("git.op", Some(&repo.project_id), json!({ "opId": op_id, "op": spec.op, "line": line }));
+        state.events.emit("git.op", Some(&repo.project_id), json!({ "opId": op_id, "op": spec.op, "repo": repo.id, "line": line }));
         line
     };
     emit_line(&format!("$ git {}", spec.args.join(" ")));
@@ -318,12 +326,13 @@ async fn run(state: &AppState, repo: &Repo, spec: &RemoteOpSpec, op_id: &str, ca
         // Git's credential helpers are neither asked for the host askpass answers for nor
         // handed its token to store (Git Credential Manager, `~/.git-credentials`…).
         let cfg = state.config.read().clone();
-        if let Some(key) = super::askpass::reset_helpers_key(&state.paths, &cfg, Some((&root, &repo.project_id))) {
+        for key in super::askpass::reset_helpers_keys(&state.paths, &cfg, Some((&root, &repo.project_id))) {
             g = g.config(&key, "");
         }
     }
     g = g
         .env("WORKBENCH_PROJECT_ID", repo.project_id.clone())
+        .env("WORKBENCH_REPO_ID", repo.id.clone())
         .env("WORKBENCH_PROJECT_ROOT", root.to_string_lossy().to_string())
         // Abort transfers that stall for a minute.
         .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
@@ -602,6 +611,8 @@ mod tests {
         let info = |id: &str| OpInfo {
             op_id: id.into(),
             project_id: "p".into(),
+            repo: ".".into(),
+            scope: "p".into(),
             op: "fetch".into(),
             title: "Fetch".into(),
             started_at: 0,

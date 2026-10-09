@@ -4,9 +4,11 @@
 // the panels notifications open. Pure decisions live in pushLib.ts.
 
 import { api, getDeviceKey } from '@/api/client'
+import { knownRepos } from '@/api/repos'
 import { getDockApi, isMobileShell, openPanel } from '@/shell/actions'
 import { panelDefs } from '@/shell/registry'
 import { useUi } from '@/state/store'
+import { scopeUiOpen } from './lib'
 import { b64urlBytes, bytesB64url, launchParams, parseTarget, pushSupport, syncAction, type OpenTarget, type PushSupport, type SyncAction } from './pushLib'
 import type { PushInfo, PushSubscriptionInfo, PushTopics } from './types'
 
@@ -305,7 +307,12 @@ function whenReady(projects: ProjectIds, fn: () => void, tries = 100) {
 export function openTarget(t: OpenTarget, projects: ProjectIds) {
   whenReady(projects, () => {
     if (t.projectId && projects()?.includes(t.projectId)) useUi.getState().setProject(t.projectId)
-    if (t.kind && panelDefs[t.kind]) openPanel({ kind: t.kind, id: t.id, params: t.params ?? {}, title: t.title })
+    if (t.kind && panelDefs[t.kind]) {
+      // A repository of the project (`params.repo`) becomes the scope its views are addressed by.
+      const params = t.params ?? {}
+      const pid = typeof params.projectId === 'string' ? params.projectId : t.projectId
+      openPanel({ kind: t.kind, id: t.id, params: pid ? scopeUiOpen(t.kind, params, knownRepos(pid)).params : params, title: t.title })
+    }
   })
 }
 

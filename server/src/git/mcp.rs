@@ -7,7 +7,7 @@
 use axum::http::Method;
 use serde_json::{Value, json};
 
-use super::routes::repo_for;
+use super::routes::{RepoSel, repo_for};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::mcp::{McpCtx, McpTool, ToolOutput, tool};
@@ -22,6 +22,28 @@ fn project_of(ctx: &McpCtx, args: &Value) -> Result<String, ApiError> {
 
 fn project_prop() -> Value {
     json!({ "type": "string", "description": "Workbench project id (default: this session's project)" })
+}
+
+fn repo_prop() -> Value {
+    json!({
+        "type": "string",
+        "description": "Repository of the project: its id as the project lists it (`.` for the repository the project root is in, \
+                        else its folder such as `services/api`). Default: the project's default repository"
+    })
+}
+
+/// The repository the tool is about (`repo`; absent: the default one).
+fn repo_of(args: &Value) -> RepoSel {
+    RepoSel(str_arg(args, "repo").map(str::to_string))
+}
+
+/// The id a panel of that repository has in the UI (`<project>` for the default repository,
+/// `<project>::<repository>` for another): what the web's scope id is.
+fn scope_id(project: &crate::projects::Project) -> String {
+    match project.repos.first() {
+        Some(d) if d.id != project.repo_id() => format!("{}::{}", project.id, project.repo_id()),
+        _ => project.id.clone(),
+    }
 }
 
 fn str_arg<'a>(args: &'a Value, k: &str) -> Option<&'a str> {
@@ -40,7 +62,11 @@ fn open(state: &AppState, panel: &str, id: String, params: Value, title: String)
 
 async fn show_diff(state: AppState, ctx: McpCtx, args: Value) -> Result<ToolOutput, ApiError> {
     let pid = project_of(&ctx, &args)?;
-    let repo = repo_for(&state, &pid).await?;
+    let rs = repo_of(&args);
+    let project = super::routes::project_for(&state, &pid, &rs)?;
+    let repo = repo_for(&state, &pid, &rs).await?;
+    // Panels address the repository by its scope id; their params name the project and repository.
+    let (scope, repo_id) = (scope_id(&project), repo.id.clone());
     let path = str_arg(&args, "path");
     let sha = match str_arg(&args, "sha") {
         Some(s) => Some(super::diff::resolve_commit(&repo, s).await?),
@@ -49,14 +75,14 @@ async fn show_diff(state: AppState, ctx: McpCtx, args: Value) -> Result<ToolOutp
     match (path, sha) {
         (Some(path), Some(sha)) => {
             repo.to_repo(path)?;
-            let id = format!("diff:{pid}:commit:{sha}:{path}");
-            let params = json!({ "projectId": pid, "path": path, "mode": "commit", "sha": sha });
+            let id = format!("diff:{scope}:commit:{sha}:{path}");
+            let params = json!({ "projectId": pid, "repo": repo_id, "path": path, "mode": "commit", "sha": sha });
             open(&state, "diff", id, params, format!("{} @ {}", file_name(path), &sha[..8.min(sha.len())]));
             Ok(ToolOutput::Text(format!("Opened the diff of {path} in commit {} in Workbench.", &sha[..10.min(sha.len())])))
         }
         (None, Some(sha)) => {
-            let id = format!("commit:{pid}:{sha}");
-            open(&state, "commit", id, json!({ "projectId": pid, "sha": sha }), format!("Commit {}", &sha[..8.min(sha.len())]));
+            let id = format!("commit:{scope}:{sha}");
+            open(&state, "commit", id, json!({ "projectId": pid, "repo": repo_id, "sha": sha }), format!("Commit {}", &sha[..8.min(sha.len())]));
             Ok(ToolOutput::Text(format!("Opened commit {} in Workbench.", &sha[..10.min(sha.len())])))
         }
         (Some(path), None) => {
@@ -70,12 +96,12 @@ async fn show_diff(state: AppState, ctx: McpCtx, args: Value) -> Result<ToolOutp
                 None => return Err(ApiError::bad_request(format!("{path} has no uncommitted changes; pass sha to show a commit's diff"))),
             };
             if entry.is_some_and(|f| f.conflict) {
-                let id = format!("conflict:{pid}:{path}");
-                open(&state, "conflict", id, json!({ "projectId": pid, "path": path }), format!("Conflict: {}", file_name(path)));
+                let id = format!("conflict:{scope}:{path}");
+                open(&state, "conflict", id, json!({ "projectId": pid, "repo": repo_id, "path": path }), format!("Conflict: {}", file_name(path)));
                 return Ok(ToolOutput::Text(format!("{path} has merge conflicts; opened the conflict resolver in Workbench.")));
             }
-            let id = format!("diff:{pid}:{mode}::{path}");
-            open(&state, "diff", id, json!({ "projectId": pid, "path": path, "mode": mode }), format!("{} ({mode})", file_name(path)));
+            let id = format!("diff:{scope}:{mode}::{path}");
+            open(&state, "diff", id, json!({ "projectId": pid, "repo": repo_id, "path": path, "mode": mode }), format!("{} ({mode})", file_name(path)));
             Ok(ToolOutput::Text(format!("Opened the {mode} diff of {path} in Workbench.")))
         }
         (None, None) => Err(ApiError::bad_request("pass path (uncommitted changes of a file) and/or sha (a commit)")),
@@ -84,7 +110,7 @@ async fn show_diff(state: AppState, ctx: McpCtx, args: Value) -> Result<ToolOutp
 
 async fn set_commit_message(state: AppState, ctx: McpCtx, args: Value) -> Result<ToolOutput, ApiError> {
     let pid = project_of(&ctx, &args)?;
-    state.projects.require(&pid)?;
+    let project = super::routes::project_for(&state, &pid, &repo_of(&args))?;
     let message = args
         .get("message")
         .and_then(Value::as_str)
@@ -97,7 +123,7 @@ async fn set_commit_message(state: AppState, ctx: McpCtx, args: Value) -> Result
     state.events.emit(
         "git.commitMessage",
         Some(&pid),
-        json!({ "projectId": pid, "message": message, "terminalId": ctx.terminal_id }),
+        json!({ "projectId": pid, "repo": project.repo_id(), "message": message, "terminalId": ctx.terminal_id }),
     );
     Ok(ToolOutput::Text(
         "The message is now in the Workbench commit window. The user reviews it and commits; do not run git commit yourself.".into(),
@@ -107,10 +133,11 @@ async fn set_commit_message(state: AppState, ctx: McpCtx, args: Value) -> Result
 /// The user's changelists (with their files) and shelved changes, read-only.
 async fn changelists(state: AppState, ctx: McpCtx, args: Value) -> Result<ToolOutput, ApiError> {
     let pid = project_of(&ctx, &args)?;
-    state.projects.require(&pid)?;
+    let project = super::routes::project_for(&state, &pid, &repo_of(&args))?;
     let base = format!("/api/projects/{}/git", urlencoding::encode(&pid));
-    let lists = crate::mcp::call_api(&state, Method::GET, &format!("{base}/changelists"), None, &ctx).await?;
-    let shelves = crate::mcp::call_api(&state, Method::GET, &format!("{base}/shelf"), None, &ctx).await?;
+    let repo = format!("?repo={}", urlencoding::encode(project.repo_id()));
+    let lists = crate::mcp::call_api(&state, Method::GET, &format!("{base}/changelists{repo}"), None, &ctx).await?;
+    let shelves = crate::mcp::call_api(&state, Method::GET, &format!("{base}/shelf{repo}"), None, &ctx).await?;
     let shelves: Vec<Value> = shelves
         .as_array()
         .map(|a| {
@@ -141,7 +168,8 @@ pub fn tools() -> Vec<McpTool> {
                 "properties": {
                     "path": { "type": "string", "description": "File path relative to the project root" },
                     "sha": { "type": "string", "description": "Commit (sha, branch, tag or revision expression)" },
-                    "projectId": project_prop()
+                    "projectId": project_prop(),
+                    "repo": repo_prop()
                 }
             }),
             false,
@@ -156,7 +184,8 @@ pub fn tools() -> Vec<McpTool> {
                 "type": "object",
                 "properties": {
                     "message": { "type": "string", "description": "The full commit message" },
-                    "projectId": project_prop()
+                    "projectId": project_prop(),
+                    "repo": repo_prop()
                 },
                 "required": ["message"]
             }),
@@ -171,7 +200,7 @@ pub fn tools() -> Vec<McpTool> {
              changelist; committing, shelving and unshelving stay with the user.",
             json!({
                 "type": "object",
-                "properties": { "projectId": project_prop() }
+                "properties": { "projectId": project_prop(), "repo": repo_prop() }
             }),
             false,
             changelists,

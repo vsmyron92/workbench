@@ -298,7 +298,9 @@ and the first answer wins. See [working with agents](agents.md).
   bottom. Settings is the last button of the left stripe.
 - **The command palette** (Ctrl+K) lists every action; **Search Everywhere** (double
   Shift) finds files, symbols, text and actions.
-- **The workspace window's top bar** switches branches and starts run configurations.
+- **The workspace window's top bar** switches branches and starts run configurations. In a
+  project with several git repositories it also switches the repository that git and CI
+  show (see "Several repositories in one project" in *Make Workbench yours*).
 - **The status bar** shows the language server, the branch, CI status and the dev
   container.
 - **The Workspace** is what a project opens on: its cards, as the first tab and the first

@@ -12,6 +12,7 @@ use super::model::{self, Job, Pipeline};
 use super::{mrs, pipelines};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::forge::RepoParam;
 use crate::mcp::{McpCtx, McpTool, ToolOutput, tool};
 
 /// Diff text an agent gets at most from `gitlab_mr_diff`.
@@ -42,7 +43,11 @@ fn need(args: &Value, k: &str) -> ApiResult<u64> {
 /// or change another project's merge requests or CI, whatever `projectId` says.
 async fn tool_ctx(state: &AppState, mctx: &McpCtx, args: &Value) -> ApiResult<GlCtx> {
     let pid = mctx.project_for(s(args, "projectId").as_deref())?;
-    client::ctx(state, &pid).await
+    client::ctx(state, &pid, &RepoParam::named(s(args, "repo").as_deref())).await
+}
+
+fn repo_prop() -> Value {
+    json!({ "type": "string", "description": "Repository id from the project's repositories (default repository when omitted). Repositories of one project can be on different GitLab/GitHub projects." })
 }
 
 fn project_prop() -> Value {
@@ -110,6 +115,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "List recent GitLab CI pipelines of the project (newest first) with status, ref, commit, duration.",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "ref": { "type": "string", "description": "Branch or tag to filter by." },
                 "status": { "type": "string", "description": "running | pending | success | failed | canceled | skipped | manual" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 15 }
@@ -144,6 +150,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "Jobs of one pipeline grouped by stage, with status, duration, failure reason and the test report summary.",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "pipelineId": { "type": "integer", "description": "Pipeline id (not the #iid)." }
             }, "required": ["pipelineId"] }),
             false,
@@ -186,6 +193,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "The failed and errored tests of a pipeline from its JUnit test report: suite, test, file, and the failure output (message and stack trace).",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "pipelineId": { "type": "integer", "description": "Pipeline id (not the #iid)." }
             }, "required": ["pipelineId"] }),
             false,
@@ -230,6 +238,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "The end of a CI job's log as plain text (ANSI colours and runner timestamps removed).",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "jobId": { "type": "integer" },
                 "tailLines": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 200 }
             }, "required": ["jobId"] }),
@@ -261,6 +270,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "List the project's merge requests (newest activity first).",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "state": { "type": "string", "enum": ["opened", "merged", "closed", "all"], "default": "opened" },
                 "search": { "type": "string" }
             }}),
@@ -303,6 +313,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "One merge request: status, branches, pipeline, approvals, description and a summary of its discussion threads.",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "iid": { "type": "integer", "description": "The MR number (!iid)." }
             }, "required": ["iid"] }),
             false,
@@ -385,6 +396,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "The unified diff of a merge request (all files, or one file with `path`). Large diffs are cut at 200 KB.",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "iid": { "type": "integer" },
                 "path": { "type": "string", "description": "Only this file (old or new path)." }
             }, "required": ["iid"] }),
@@ -437,6 +449,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "Create a merge request (source defaults to the project's current branch, target to the default branch). The branch must already be pushed. Opens the MR in Workbench.",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "title": { "type": "string" },
                 "description": { "type": "string", "description": "Markdown." },
                 "sourceBranch": { "type": "string" },
@@ -459,9 +472,13 @@ pub fn mcp_tools() -> Vec<McpTool> {
                     ..Default::default()
                 };
                 let mr = mrs::create_mr(&ctx, &body).await?;
+                let mut params = json!({ "projectId": ctx.project.id, "iid": mr.iid });
+                if let Some(repo) = crate::forge::panel_repo(&state, &ctx.project) {
+                    params["repo"] = json!(repo);
+                }
                 state.events.ui_open(
                     "mr",
-                    json!({ "projectId": ctx.project.id, "iid": mr.iid }),
+                    params,
                     Some(&format!("!{} {}", mr.iid, mr.title)),
                 );
                 Ok(ToolOutput::Text(format!(
@@ -475,6 +492,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "Comment on a merge request: a general note, a reply to a discussion (`discussionId`), or a diff-line comment (`path` plus `line` for the new side or `oldLine` for a removed line).",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "iid": { "type": "integer" },
                 "body": { "type": "string", "description": "Markdown." },
                 "discussionId": { "type": "string" },
@@ -510,6 +528,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "Retry a CI job (creates a new job in the same pipeline).",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "jobId": { "type": "integer" }
             }, "required": ["jobId"] }),
             true,

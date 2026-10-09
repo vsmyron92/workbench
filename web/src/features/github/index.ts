@@ -11,9 +11,11 @@
 import { lazy } from 'react'
 import { CircleDot, FileText, GitPullRequest, GitPullRequestCreate, Play, Workflow } from 'lucide-react'
 import { api } from '@/api/client'
+import { anyRepoOn, forgeScope } from '@/api/repos'
+import { withGitScope } from '@/api/useRepos'
 import { showToolWindow, toast, toastError } from '@/shell/actions'
 import type { FeatureModule } from '@/shell/types'
-import { gh } from './api'
+import { ghUrl } from './api'
 import { GithubBadge } from './Badge'
 import { GitHubIcon, openPr, openRun, runTitle, useGhUi, type GhTab } from './components'
 import { openOnPhone } from './mobile'
@@ -30,7 +32,7 @@ const MobileGithub = lazy(() => import('./MobileGithub'))
 
 async function summaryOf(pid: string): Promise<GithubSummary | null> {
   try {
-    return await api.get<GithubSummary>(`${gh(pid)}/summary`)
+    return await api.get<GithubSummary>(ghUrl(pid, 'summary'))
   } catch (e) {
     toastError(e, 'GitHub')
     return null
@@ -52,20 +54,23 @@ const feature: FeatureModule = {
       icon: GitHubIcon,
       side: 'right',
       order: 12,
-      component: GithubToolWindow,
-      badge: GithubBadge,
-      when: (p) => !!p?.github,
+      component: withGitScope(GithubToolWindow),
+      badge: withGitScope(GithubBadge),
+      // Any repository of the project on GitHub; the window follows the active one.
+      when: (p) => anyRepoOn(p, 'github'),
     },
   ],
   commands: (ctx) => {
     const pid = ctx.projectId
-    if (!pid || !ctx.project?.github) return []
+    if (!pid || !anyRepoOn(ctx.project, 'github')) return []
+    // The active repository, or the first one on GitHub when that is not.
+    const scope = () => forgeScope(pid, 'github')
     const show = (tab: GhTab) => {
       useGhUi.getState().setTab(tab)
       showToolWindow('github')
     }
     const withToken = async (what: string, run: () => void) => {
-      const s = await summaryOf(pid)
+      const s = await summaryOf(scope())
       if (!s) return
       if (!s.auth.authenticated) toast('info', `${what} needs a GitHub token (this project is read in public, read-only mode)`)
       else run()
@@ -86,10 +91,10 @@ const feature: FeatureModule = {
         icon: Workflow,
         keywords: ['ci', 'build', 'status', 'actions'],
         run: async () => {
-          const s = await summaryOf(pid)
+          const s = await summaryOf(scope())
           if (!s) return
           const r = s.branchRun ?? s.defaultRun
-          if (r) openRun(pid, r.id, runTitle(r, r.id))
+          if (r) openRun(scope(), r.id, runTitle(r, r.id))
           else toast('info', `No workflow runs for ${s.branch ?? 'this branch'} yet`)
         },
       },
@@ -99,7 +104,7 @@ const feature: FeatureModule = {
         group: 'GitHub',
         icon: Play,
         keywords: ['ci', 'dispatch', 'trigger', 'actions'],
-        run: () => withToken('Running a workflow', () => useGhUi.getState().openRunWorkflow(pid)),
+        run: () => withToken('Running a workflow', () => useGhUi.getState().openRunWorkflow(scope())),
       },
       {
         id: 'github.createPr',
@@ -107,7 +112,7 @@ const feature: FeatureModule = {
         group: 'GitHub',
         icon: GitPullRequestCreate,
         keywords: ['pr', 'pull request', 'merge request', 'mr'],
-        run: () => withToken('Creating a pull request', () => useGhUi.getState().openCreatePr(pid)),
+        run: () => withToken('Creating a pull request', () => useGhUi.getState().openCreatePr(scope())),
       },
       {
         id: 'github.openCurrentPr',
@@ -116,12 +121,12 @@ const feature: FeatureModule = {
         icon: GitPullRequest,
         keywords: ['pr', 'pull request', 'review'],
         run: async () => {
-          const s = await summaryOf(pid)
+          const s = await summaryOf(scope())
           if (!s) return
-          if (s.currentPr) openPr(pid, s.currentPr.number, s.currentPr.title)
+          if (s.currentPr) openPr(scope(), s.currentPr.number, s.currentPr.title)
           else
             toast('info', `No pull request for ${s.branch ?? 'this branch'}`, {
-              action: s.auth.authenticated ? { label: 'Create one', run: () => useGhUi.getState().openCreatePr(pid) } : undefined,
+              action: s.auth.authenticated ? { label: 'Create one', run: () => useGhUi.getState().openCreatePr(scope()) } : undefined,
             })
         },
       },
@@ -142,8 +147,8 @@ const feature: FeatureModule = {
       },
     ]
   },
-  topbar: [CiTopbarWidget],
-  statusbar: [RunStatusItem],
+  topbar: [withGitScope(CiTopbarWidget)],
+  statusbar: [withGitScope(RunStatusItem)],
   mobileTabs: [
     {
       id: 'github',
@@ -151,8 +156,8 @@ const feature: FeatureModule = {
       icon: GitHubIcon,
       order: 42,
       component: MobileGithub,
-      badge: GithubBadge,
-      when: (p) => !!p?.github,
+      badge: withGitScope(GithubBadge),
+      when: (p) => anyRepoOn(p, 'github'),
       // Runs, jobs, pull requests and issues open inside the tab on a phone.
       openPanel: openOnPhone,
     },

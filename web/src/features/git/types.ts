@@ -11,6 +11,29 @@ export interface GitStatusFile {
   conflict: boolean
   score?: number
   submodule?: boolean
+  /** The repository the file is in: set by `status?repo=all`, optional in a single repository's status. */
+  repo?: string
+}
+
+/** `GET …/git/repos`: one repository of the project with its branch and state. */
+export interface GitRepoInfo {
+  id: string
+  name: string
+  path: string
+  default: boolean
+  branch: string | null
+  head: string | null
+  upstream: string | null
+  ahead: number
+  behind: number
+  /** Tracked files with changes. */
+  changed: number
+  conflicts: number
+  state: RepoState
+  gitlab: { host: string; path: string } | null
+  github: { host: string; path: string } | null
+  /** Git refused this repository (not a repository, another user's folder…). */
+  error?: { code: string; message: string }
 }
 
 export type RepoState = 'clean' | 'merging' | 'rebasing' | 'cherry-picking' | 'reverting' | 'bisecting'

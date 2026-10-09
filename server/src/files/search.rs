@@ -212,14 +212,15 @@ impl Sink for HitSink<'_> {
     }
 }
 
-fn walker(root: &Path, overrides: ignore::overrides::Override) -> WalkBuilder {
-    let mut b = super::gitignore::walk(root);
+fn walker(root: &Path, nested: &[PathBuf], overrides: ignore::overrides::Override) -> WalkBuilder {
+    let mut b = super::gitignore::walk(root, nested);
     b.parents(true).max_filesize(Some(MAX_FILESIZE)).overrides(overrides);
     b
 }
 
-/// Search `root`. Blocking; `cancel` stops the walk early (the client went away).
-pub fn run_search(root: &Path, p: &SearchParams, sensitive: &Sensitive, cancel: &AtomicBool) -> ApiResult<SearchResult> {
+/// Search `root`, and the repositories `nested` below it. Blocking; `cancel` stops the walk
+/// early (the client went away).
+pub fn run_search(root: &Path, nested: &[PathBuf], p: &SearchParams, sensitive: &Sensitive, cancel: &AtomicBool) -> ApiResult<SearchResult> {
     let started = Instant::now();
     let matcher = build_matcher(p)?;
     let overrides = build_overrides(root, &p.glob)?;
@@ -235,7 +236,7 @@ pub fn run_search(root: &Path, p: &SearchParams, sensitive: &Sensitive, cancel: 
     };
     let timed_out = AtomicBool::new(false);
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
-    walker(root, overrides).threads(threads).build_parallel().run(|| {
+    walker(root, nested, overrides).threads(threads).build_parallel().run(|| {
         let matcher = &matcher;
         let out = &out;
         let timed_out = &timed_out;
@@ -305,7 +306,8 @@ pub async fn search(
     let cancel = Arc::new(AtomicBool::new(false));
     let _guard = CancelOnDrop(cancel.clone());
     let root = project.root.clone();
-    let result = blocking(move || run_search(&root, &p, &sensitive, &cancel)).await?;
+    let nested = project.nested_repo_dirs();
+    let result = blocking(move || run_search(&root, &nested, &p, &sensitive, &cancel)).await?;
     Ok(Json(result))
 }
 
@@ -541,9 +543,27 @@ mod tests {
     }
 
     #[test]
+    fn searches_repositories_below_the_root_that_the_root_ignores() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        for d in ["src", "web/.git"] {
+            std::fs::create_dir_all(r.join(d)).unwrap();
+        }
+        std::fs::write(r.join(".gitignore"), "web/\n").unwrap();
+        std::fs::write(r.join("src/main.rs"), "needle\n").unwrap();
+        std::fs::write(r.join("web/app.js"), "needle\n").unwrap();
+        let (s, no) = (Sensitive::defaults(), AtomicBool::new(false));
+        let paths = |nested: &[PathBuf]| -> Vec<String> {
+            run_search(r, nested, &params("needle"), &s, &no).unwrap().matches.into_iter().map(|h| h.path).collect()
+        };
+        assert_eq!(paths(&[]), ["src/main.rs"]);
+        assert_eq!(paths(&[r.join("web")]), ["src/main.rs", "web/app.js"]);
+    }
+
+    #[test]
     fn searches_with_ignores_dotfiles_and_sorting() {
         let dir = fixture();
-        let res = run_search(dir.path(), &params("foo"), &Sensitive::defaults(), &AtomicBool::new(false)).unwrap();
+        let res = run_search(dir.path(), &[], &params("foo"), &Sensitive::defaults(), &AtomicBool::new(false)).unwrap();
         let files: Vec<_> = res.matches.iter().map(|h| h.path.as_str()).collect();
         assert_eq!(files, vec![".gitlab-ci.yml", "src/lib.rs", "src/main.rs", "src/main.rs", "src/main.rs"]);
         assert_eq!(res.sensitive_skipped, 1);
@@ -560,16 +580,16 @@ mod tests {
         let dir = fixture();
         let s = Sensitive::defaults();
         let no = AtomicBool::new(false);
-        let r = run_search(dir.path(), &SearchParams { case: true, ..params("Foo") }, &s, &no).unwrap();
+        let r = run_search(dir.path(), &[], &SearchParams { case: true, ..params("Foo") }, &s, &no).unwrap();
         assert_eq!(r.matches.len(), 1);
-        let r = run_search(dir.path(), &SearchParams { word: true, glob: "*.rs".into(), ..params("foo") }, &s, &no).unwrap();
+        let r = run_search(dir.path(), &[], &SearchParams { word: true, glob: "*.rs".into(), ..params("foo") }, &s, &no).unwrap();
         // `foo_bar` is not the word `foo`.
         assert_eq!(r.matches.iter().filter(|h| h.path == "src/main.rs").count(), 2);
         assert!(r.matches.iter().all(|h| h.path.ends_with(".rs")));
-        let r = run_search(dir.path(), &SearchParams { regex: true, glob: "!src/lib.rs".into(), ..params(r"foo_\w+") }, &s, &no).unwrap();
+        let r = run_search(dir.path(), &[], &SearchParams { regex: true, glob: "!src/lib.rs".into(), ..params(r"foo_\w+") }, &s, &no).unwrap();
         assert_eq!(r.matches.len(), 1);
         assert_eq!(r.matches[0].end_column - r.matches[0].column, 7);
-        assert!(run_search(dir.path(), &SearchParams { regex: true, ..params("(") }, &s, &no).is_err());
+        assert!(run_search(dir.path(), &[], &SearchParams { regex: true, ..params("(") }, &s, &no).is_err());
     }
 
     #[test]
@@ -582,7 +602,7 @@ mod tests {
         let no = AtomicBool::new(false);
         let find = |q: &str| -> Vec<(String, u64, u32, u32)> {
             let p = SearchParams { regex: true, case: true, ..params(q) };
-            run_search(r, &p, &s, &no).unwrap().matches.into_iter().map(|h| (h.path, h.line, h.column, h.end_column)).collect()
+            run_search(r, &[], &p, &s, &no).unwrap().matches.into_iter().map(|h| (h.path, h.line, h.column, h.end_column)).collect()
         };
         let hit = |p: &str, line: u64, col: u32, end: u32| (p.to_string(), line, col, end);
         // `$` at the end of a line, including the last one without a terminator.
@@ -606,10 +626,10 @@ mod tests {
         for i in 0..50 {
             std::fs::write(dir.path().join(format!("f{i}.txt")), "x x x x\n".repeat(10)).unwrap();
         }
-        let r = run_search(dir.path(), &SearchParams { max: Some(25), ..params("x") }, &Sensitive::defaults(), &AtomicBool::new(false)).unwrap();
+        let r = run_search(dir.path(), &[], &SearchParams { max: Some(25), ..params("x") }, &Sensitive::defaults(), &AtomicBool::new(false)).unwrap();
         assert_eq!(r.matches.len(), 25);
         assert!(r.truncated);
-        let r = run_search(dir.path(), &params("x"), &Sensitive::defaults(), &AtomicBool::new(true)).unwrap();
+        let r = run_search(dir.path(), &[], &params("x"), &Sensitive::defaults(), &AtomicBool::new(true)).unwrap();
         assert!(r.matches.is_empty());
     }
 

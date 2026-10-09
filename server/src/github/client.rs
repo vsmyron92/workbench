@@ -41,6 +41,7 @@ use sha2::Digest;
 use super::poller::PollState;
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::forge::RepoParam;
 use crate::projects::Project;
 use crate::secrets::Secret;
 
@@ -144,12 +145,12 @@ pub struct GithubState {
     meta: Mutex<HashMap<String, (Instant, Arc<RepoMeta>)>>,
     /// Repositories GitHub answered 404 for, keyed like `meta`.
     missing: Mutex<HashMap<String, Instant>>,
-    /// When the UI or an agent last asked for a project's GitHub data.
+    /// When the UI or an agent last asked for a repository's GitHub data (by scope key).
     viewed: Mutex<HashMap<String, Instant>>,
     rate: Mutex<HashMap<String, RateInfo>>,
     cache: Mutex<RespCache>,
     viewers: Mutex<HashMap<String, (Instant, Option<String>)>>,
-    /// Short-lived summaries keyed by project id (dedupes several open tabs).
+    /// Short-lived summaries keyed by `Project::scope_key` (dedupes several open tabs).
     pub(super) summaries: Mutex<HashMap<String, (Instant, Value)>>,
     pub(super) poll: PollState,
     /// Downloaded logs of finished jobs (they never change), newest last.
@@ -210,19 +211,20 @@ impl GithubState {
         self.rate.lock().get(&format!("{prefix}|{resource}")).copied()
     }
 
-    /// Forget the cached summary of a project (after a mutation).
-    pub(super) fn invalidate_summary(&self, project_id: &str) {
-        self.summaries.lock().remove(project_id);
+    /// Forget the cached summary of a repository (after a mutation); `scope` is its
+    /// `Project::scope_key`.
+    pub(super) fn invalidate_summary(&self, scope: &str) {
+        self.summaries.lock().remove(scope);
     }
 
-    /// Someone (a browser tab, an agent) asked for this project's GitHub data.
-    pub(super) fn note_viewed(&self, project_id: &str) {
-        self.viewed.lock().insert(project_id.to_string(), Instant::now());
+    /// Someone (a browser tab, an agent) asked for this repository's GitHub data.
+    pub(super) fn note_viewed(&self, scope: &str) {
+        self.viewed.lock().insert(scope.to_string(), Instant::now());
     }
 
-    /// Whether the project's GitHub data was asked for within `within`.
-    pub(super) fn viewed_within(&self, project_id: &str, within: Duration) -> bool {
-        self.viewed.lock().get(project_id).is_some_and(|t| t.elapsed() < within)
+    /// Whether the repository's GitHub data was asked for within `within`.
+    pub(super) fn viewed_within(&self, scope: &str, within: Duration) -> bool {
+        self.viewed.lock().get(scope).is_some_and(|t| t.elapsed() < within)
     }
 }
 
@@ -410,11 +412,13 @@ pub fn conn_for(state: &AppState, project: &Project, host: &str) -> ApiResult<Co
     Ok(Conn { state: state.clone(), host: display_host(&web), api, web, graphql_url, auth, ident, http: state.github.http() })
 }
 
-/// Connection + repository for a Workbench project id (REST handlers and MCP
-/// tools: it also marks the project as looked at, for the poller).
-pub async fn ctx(state: &AppState, pid: &str) -> ApiResult<GhCtx> {
-    let project = state.projects.require(pid)?;
-    state.github.note_viewed(&project.id);
+/// Connection + GitHub repository for a Workbench project id, seen through the git
+/// repository `repo` names (`?repo=`; none: the default one, `404 unknown_repo` for an id
+/// it does not have). REST handlers and MCP tools; it also marks the repository as
+/// looked at, for the poller.
+pub async fn ctx(state: &AppState, pid: &str, repo: &RepoParam) -> ApiResult<GhCtx> {
+    let project = state.projects.require_repo(pid, repo.id())?;
+    state.github.note_viewed(&project.scope_key());
     ctx_for(state, project).await
 }
 
@@ -462,7 +466,7 @@ impl GhCtx {
         };
         self.state.github.cache.lock().retain(keep);
         self.state.github.meta.lock().remove(&self.meta_key(&self.owner, &self.repo));
-        self.state.github.invalidate_summary(&self.project.id);
+        self.state.github.invalidate_summary(&self.project.scope_key());
     }
 
     /// Drop cached answers about one workflow run (its detail, its jobs, job

@@ -23,6 +23,7 @@ use super::model::{
 };
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::forge::RepoParam;
 
 /// Bytes of log kept per job (the tail wins when a log is larger).
 const LOG_KEEP: usize = 16 * 1024 * 1024;
@@ -68,7 +69,7 @@ pub async fn full_sha(ctx: &GhCtx, sha: &str) -> ApiResult<Option<String>> {
     }
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(["rev-parse", "--verify", "--quiet", &format!("{sha}^{{commit}}")])
-        .current_dir(&ctx.project.root)
+        .current_dir(ctx.project.repo_dir())
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0");
     if let Ok(out) = crate::util::proc::run_cmd(cmd, Duration::from_secs(5)).await {
@@ -350,7 +351,7 @@ pub async fn rerun_job(ctx: &GhCtx, id: u64) -> ApiResult<Job> {
     ctx.state.events.emit(
         "github.job",
         Some(&ctx.project.id),
-        json!({ "jobId": id, "runId": job.run_id, "action": "rerun" }),
+        json!({ "jobId": id, "runId": job.run_id, "action": "rerun", "repo": ctx.project.repo_id() }),
     );
     if let Ok(mut run) = get_run(ctx, job.run_id).await {
         if run.status == "completed" {
@@ -494,11 +495,12 @@ pub fn dispatch_payload(b: &DispatchBody) -> ApiResult<Value> {
 pub async fn dispatch(ctx: &GhCtx, id: u64, b: &DispatchBody) -> ApiResult<Value> {
     let payload = dispatch_payload(b)?;
     let _: Value = ctx.write(Method::POST, &ctx.rurl(&format!("/actions/workflows/{id}/dispatches")), Some(&payload)).await?;
-    ctx.state.github.poll.mark_hot(&ctx.project.id);
+    ctx.state.github.poll.mark_hot(&ctx.project.scope_key());
     ctx.state.events.emit(
         "github.run",
         Some(&ctx.project.id),
-        json!({ "runId": null, "workflowId": id, "action": "dispatch", "branch": payload["ref"] }),
+        json!({ "runId": null, "workflowId": id, "action": "dispatch", "branch": payload["ref"],
+                "repo": ctx.project.repo_id() }),
     );
     Ok(json!({ "ok": true }))
 }
@@ -616,29 +618,29 @@ pub async fn annotations(ctx: &GhCtx, id: u64) -> ApiResult<Vec<Annotation>> {
 
 type Id = Path<(String, u64)>;
 
-async fn h_runs(State(s): State<AppState>, Path(pid): Path<String>, Query(q): Query<RunsQuery>) -> ApiResult<Json<ListPage<Run>>> {
-    Ok(Json(list_runs(&ctx(&s, &pid).await?, &q).await?))
+async fn h_runs(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>, Query(q): Query<RunsQuery>) -> ApiResult<Json<ListPage<Run>>> {
+    Ok(Json(list_runs(&ctx(&s, &pid, &repo).await?, &q).await?))
 }
-async fn h_run(State(s): State<AppState>, Path((pid, id)): Id) -> ApiResult<Json<RunDetail>> {
-    Ok(Json(run_detail(&ctx(&s, &pid).await?, id).await?))
+async fn h_run(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id) -> ApiResult<Json<RunDetail>> {
+    Ok(Json(run_detail(&ctx(&s, &pid, &repo).await?, id).await?))
 }
-async fn h_rerun(State(s): State<AppState>, Path((pid, id)): Id) -> ApiResult<Json<Run>> {
-    Ok(Json(run_action(&ctx(&s, &pid).await?, id, "rerun").await?))
+async fn h_rerun(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id) -> ApiResult<Json<Run>> {
+    Ok(Json(run_action(&ctx(&s, &pid, &repo).await?, id, "rerun").await?))
 }
-async fn h_rerun_failed(State(s): State<AppState>, Path((pid, id)): Id) -> ApiResult<Json<Run>> {
-    Ok(Json(run_action(&ctx(&s, &pid).await?, id, "rerun-failed-jobs").await?))
+async fn h_rerun_failed(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id) -> ApiResult<Json<Run>> {
+    Ok(Json(run_action(&ctx(&s, &pid, &repo).await?, id, "rerun-failed-jobs").await?))
 }
-async fn h_cancel(State(s): State<AppState>, Path((pid, id)): Id) -> ApiResult<Json<Run>> {
-    Ok(Json(run_action(&ctx(&s, &pid).await?, id, "cancel").await?))
+async fn h_cancel(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id) -> ApiResult<Json<Run>> {
+    Ok(Json(run_action(&ctx(&s, &pid, &repo).await?, id, "cancel").await?))
 }
-async fn h_job(State(s): State<AppState>, Path((pid, id)): Id) -> ApiResult<Json<Job>> {
-    Ok(Json(get_job(&ctx(&s, &pid).await?, id).await?))
+async fn h_job(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id) -> ApiResult<Json<Job>> {
+    Ok(Json(get_job(&ctx(&s, &pid, &repo).await?, id).await?))
 }
-async fn h_job_rerun(State(s): State<AppState>, Path((pid, id)): Id) -> ApiResult<Json<Job>> {
-    Ok(Json(rerun_job(&ctx(&s, &pid).await?, id).await?))
+async fn h_job_rerun(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id) -> ApiResult<Json<Job>> {
+    Ok(Json(rerun_job(&ctx(&s, &pid, &repo).await?, id).await?))
 }
-async fn h_annotations(State(s): State<AppState>, Path((pid, id)): Id) -> ApiResult<Json<Vec<Annotation>>> {
-    Ok(Json(annotations(&ctx(&s, &pid).await?, id).await?))
+async fn h_annotations(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id) -> ApiResult<Json<Vec<Annotation>>> {
+    Ok(Json(annotations(&ctx(&s, &pid, &repo).await?, id).await?))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -650,8 +652,8 @@ struct LogQuery {
     plain: Option<bool>,
 }
 
-async fn h_logs(State(s): State<AppState>, Path((pid, id)): Id, Query(q): Query<LogQuery>) -> ApiResult<Json<Value>> {
-    let ctx = ctx(&s, &pid).await?;
+async fn h_logs(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id, Query(q): Query<LogQuery>) -> ApiResult<Json<Value>> {
+    let ctx = ctx(&s, &pid, &repo).await?;
     if let Some(n) = q.tail {
         let (job, tail, message) = log_tail(&ctx, id, n.clamp(1, 5000), q.plain.unwrap_or(false)).await?;
         let (text, total, truncated) = tail.unwrap_or_default();
@@ -669,15 +671,15 @@ pub async fn run_artifacts(ctx: &GhCtx, id: u64) -> ApiResult<Vec<Artifact>> {
     Ok(ctx.get_all::<Artifact>(&url, &[], 500, Some("artifacts"), Fresh::Live).await?.0)
 }
 
-async fn h_artifacts(State(s): State<AppState>, Path((pid, id)): Id) -> ApiResult<Json<Vec<Artifact>>> {
-    Ok(Json(run_artifacts(&ctx(&s, &pid).await?, id).await?))
+async fn h_artifacts(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id) -> ApiResult<Json<Vec<Artifact>>> {
+    Ok(Json(run_artifacts(&ctx(&s, &pid, &repo).await?, id).await?))
 }
 
 /// Stream an artifact's zip through (never buffered whole). GitHub answers with a
 /// redirect to its blob storage, followed without the token (`send_raw`); downloads
 /// need a token even on public repositories.
-async fn h_artifact_zip(State(s): State<AppState>, Path((pid, id)): Id) -> ApiResult<Response> {
-    let ctx = ctx(&s, &pid).await?;
+async fn h_artifact_zip(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id) -> ApiResult<Response> {
+    let ctx = ctx(&s, &pid, &repo).await?;
     ctx.require_token("downloading artifacts")?;
     let a: Artifact = ctx.get(&ctx.rurl(&format!("/actions/artifacts/{id}")), &[], Fresh::Live).await?;
     if a.expired {
@@ -706,8 +708,8 @@ fn zip_filename(name: &str) -> String {
 }
 
 /// Download the job log as a text file.
-async fn h_log_download(State(s): State<AppState>, Path((pid, id)): Id) -> ApiResult<Response> {
-    let ctx = ctx(&s, &pid).await?;
+async fn h_log_download(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id) -> ApiResult<Response> {
+    let ctx = ctx(&s, &pid, &repo).await?;
     let log = job_log(&ctx, id).await?;
     let Some(SharedLog(data)) = log.data else {
         return Err(ApiError::not_found(log.message.unwrap_or_else(|| "no log for this job".into())));
@@ -721,8 +723,8 @@ async fn h_log_download(State(s): State<AppState>, Path((pid, id)): Id) -> ApiRe
     Ok(resp)
 }
 
-async fn h_workflows(State(s): State<AppState>, Path(pid): Path<String>) -> ApiResult<Json<Vec<Workflow>>> {
-    Ok(Json(workflows(&ctx(&s, &pid).await?).await?))
+async fn h_workflows(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>) -> ApiResult<Json<Vec<Workflow>>> {
+    Ok(Json(workflows(&ctx(&s, &pid, &repo).await?).await?))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -732,15 +734,15 @@ struct InputsQuery {
     git_ref: Option<String>,
 }
 
-async fn h_workflow_inputs(State(s): State<AppState>, Path((pid, id)): Id, Query(q): Query<InputsQuery>) -> ApiResult<Json<DispatchInfo>> {
-    Ok(Json(workflow_inputs(&ctx(&s, &pid).await?, id, q.git_ref.as_deref()).await?))
+async fn h_workflow_inputs(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id, Query(q): Query<InputsQuery>) -> ApiResult<Json<DispatchInfo>> {
+    Ok(Json(workflow_inputs(&ctx(&s, &pid, &repo).await?, id, q.git_ref.as_deref()).await?))
 }
-async fn h_dispatch(State(s): State<AppState>, Path((pid, id)): Id, Json(b): Json<DispatchBody>) -> ApiResult<Json<Value>> {
-    Ok(Json(dispatch(&ctx(&s, &pid).await?, id, &b).await?))
+async fn h_dispatch(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Id, Json(b): Json<DispatchBody>) -> ApiResult<Json<Value>> {
+    Ok(Json(dispatch(&ctx(&s, &pid, &repo).await?, id, &b).await?))
 }
 
-async fn h_commit_checks(State(s): State<AppState>, Path((pid, sha)): Path<(String, String)>) -> ApiResult<Json<Option<CommitChecks>>> {
-    let ctx = ctx(&s, &pid).await?;
+async fn h_commit_checks(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, sha)): Path<(String, String)>) -> ApiResult<Json<Option<CommitChecks>>> {
+    let ctx = ctx(&s, &pid, &repo).await?;
     let Some(full) = full_sha(&ctx, &sha).await? else { return Ok(Json(None)) };
     Ok(Json(known_commit_checks(&ctx, &full).await?))
 }

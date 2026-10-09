@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   accountHomeError,
+  scopeUiOpen,
   accountIdError,
   accountKind,
   accountName,
@@ -423,5 +424,26 @@ describe('hosted APIs', () => {
     expect(suggestApiId('claude', 'deepseek', '')).toBe('claude-deepseek')
     expect(suggestApiId('claude', 'deepseek', 'Cheap')).toBe('claude-cheap')
     expect(suggestApiId('aider', 'openrouter', '')).toBe('aider-openrouter')
+  })
+})
+
+describe('scopeUiOpen', () => {
+  const repos = [
+    { id: '.', name: 'shop', path: '', default: true, remote: null, gitlab: null, github: null },
+    { id: 'web', name: 'web', path: 'web', default: false, remote: null, gitlab: null, github: null },
+  ]
+
+  it('puts the repository an agent names into the panel’s scope, and the id follows', () => {
+    const r = scopeUiOpen('diff', { projectId: 'shop', repo: 'web', path: 'web/a.ts', mode: 'working' }, repos)
+    expect(r).toEqual({ params: { projectId: 'shop::web', path: 'web/a.ts', mode: 'working' }, scoped: true })
+    expect(panelIdFor('diff', r.params)).toBe('diff:shop::web:working::web/a.ts')
+    expect(scopeUiOpen('gitlab.issue', { projectId: 'shop', repo: 'web', iid: 3 }, repos).params.projectId).toBe('shop::web')
+  })
+
+  it('leaves the default repository, other panels and a missing repo alone', () => {
+    expect(scopeUiOpen('diff', { projectId: 'shop', repo: '.', path: 'a' }, repos)).toEqual({ params: { projectId: 'shop', path: 'a' }, scoped: false })
+    expect(scopeUiOpen('diff', { projectId: 'shop', path: 'a' }, repos)).toEqual({ params: { projectId: 'shop', path: 'a' }, scoped: false })
+    expect(scopeUiOpen('editor', { projectId: 'shop', repo: 'web', path: 'a' }, repos).params).toEqual({ projectId: 'shop', repo: 'web', path: 'a' })
+    expect(scopeUiOpen('diff', { repo: 'web', path: 'a' }, repos).scoped).toBe(false)
   })
 })

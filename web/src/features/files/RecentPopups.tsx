@@ -4,12 +4,11 @@
 
 import { useMemo, useState } from 'react'
 import { Command as Cmdk } from 'cmdk'
-import { useQuery } from '@tanstack/react-query'
 import { create } from 'zustand'
-import { api } from '@/api/client'
 import { useUi } from '@/state/store'
 import { Kbd } from '@/ui'
 import { bufferKey, getModel } from './buffers'
+import { useGitStatus } from './hooks'
 import { FileIcon } from './icons'
 import { navHistory, type NavEntry } from './navHistory'
 import { openFile } from './openers'
@@ -49,10 +48,6 @@ export function RecentPopupHost() {
   return which === 'files' ? <RecentFiles projectId={projectId} /> : <RecentLocations projectId={projectId} />
 }
 
-interface GitStatusLite {
-  files: { path: string }[]
-}
-
 /** Recent Files values of scratch files (the others are project paths). */
 const SCRATCH_PREFIX = 'scratch:'
 
@@ -61,12 +56,7 @@ function RecentFiles({ projectId }: { projectId: string }) {
   const [q, setQ] = useState('')
   const active = useActiveEditor((s) => s.current)
   // The git slice's shared status query (docs/ARCHITECTURE.md, cross-slice contracts).
-  const status = useQuery({
-    queryKey: ['git', projectId, 'status'],
-    queryFn: ({ signal }) => api.get<GitStatusLite>(`/api/projects/${encodeURIComponent(projectId)}/git/status`, undefined, signal),
-    enabled: changedOnly,
-    retry: false,
-  })
+  const status = useGitStatus(projectId, changedOnly)
   const paths = useMemo(() => {
     const recent = recentFiles(projectId)
     if (!changedOnly) return recent

@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Bot, Download, ExternalLink, Package, Play, RotateCw, Square } from 'lucide-react'
+import { repoNote, scopeProject } from '@/api/repos'
 import { askAgent } from '@/shell/agentBridge'
 import { toast, toastError } from '@/shell/actions'
 import type { PanelProps } from '@/shell/types'
@@ -23,15 +24,16 @@ export async function askAgentToFix(projectId: string, projectPath: string, job:
   try {
     const tail = await fetchTraceTail(projectId, job.id, 150)
     await askAgent({
-      projectId,
-      prompt: jobFixPrompt({
-        projectPath,
-        job,
-        pipeline: job.pipeline,
-        log: tail.text,
-        shownLines: Math.min(150, tail.totalLines),
-        totalLines: tail.totalLines,
-      }),
+      projectId: scopeProject(projectId),
+      prompt:
+        jobFixPrompt({
+          projectPath,
+          job,
+          pipeline: job.pipeline,
+          log: tail.text,
+          shownLines: Math.min(150, tail.totalLines),
+          totalLines: tail.totalLines,
+        }) + repoNote(projectId),
     })
   } catch (e) {
     toastError(e, 'Could not read the job log')

@@ -267,6 +267,8 @@ mod tests {
             warnings: vec![],
             repo_secret_names: Default::default(),
             overlay_error: None,
+            repos: Default::default(),
+            repo: 0,
         }
     }
 

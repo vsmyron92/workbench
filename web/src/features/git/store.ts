@@ -224,19 +224,27 @@ export type GitDialog =
   | { kind: 'changelist'; projectId: string; list?: Changelist; paths?: string[] }
 
 interface UiStore {
+  /** The branches popover; `projectId` is a repository scope id. */
   popover: { projectId: string; anchor: DOMRect | null; from: 'topbar' | 'statusbar' } | null
+  /** The repository switcher's list; `projectId` is the real project's. */
+  repoPopover: { projectId: string; anchor: DOMRect | null; from: 'topbar' | 'statusbar' } | null
   dialog: GitDialog | null
   openPopover: (projectId: string, anchor: DOMRect | null, from: 'topbar' | 'statusbar') => void
   closePopover: () => void
+  openRepoPopover: (projectId: string, anchor: DOMRect | null, from: 'topbar' | 'statusbar') => void
+  closeRepoPopover: () => void
   openDialog: (d: GitDialog) => void
   closeDialog: () => void
 }
 
 export const useGitUi = create<UiStore>()((set) => ({
   popover: null,
+  repoPopover: null,
   dialog: null,
-  openPopover: (projectId, anchor, from) => set({ popover: { projectId, anchor, from } }),
+  openPopover: (projectId, anchor, from) => set({ popover: { projectId, anchor, from }, repoPopover: null }),
   closePopover: () => set({ popover: null }),
-  openDialog: (d) => set({ dialog: d, popover: null }),
+  openRepoPopover: (projectId, anchor, from) => set({ repoPopover: { projectId, anchor, from }, popover: null }),
+  closeRepoPopover: () => set({ repoPopover: null }),
+  openDialog: (d) => set({ dialog: d, popover: null, repoPopover: null }),
   closeDialog: () => set({ dialog: null }),
 }))

@@ -18,6 +18,7 @@ import {
   Undo2,
 } from 'lucide-react'
 import { openPanel, confirmDialog, toast, toastError } from '@/shell/actions'
+import { repoNote, scopeProject } from '@/api/repos'
 import { askAgent } from '@/shell/agentBridge'
 import type { PanelProps } from '@/shell/types'
 import {
@@ -381,15 +382,16 @@ export function MrPanel({ params, setTitle, visible }: PanelProps<MrParams>) {
   const unresolved = threads.filter((d) => d.notes.some((n) => n.resolvable && !n.resolved)).length
   const review = () =>
     askAgent({
-      projectId,
-      prompt: mrReviewPrompt({
-        projectPath: summary.data?.path ?? projectId,
-        iid: mr.iid,
-        title: mr.title,
-        sourceBranch: mr.sourceBranch,
-        targetBranch: mr.targetBranch,
-        sha: mr.sha,
-      }),
+      projectId: scopeProject(projectId),
+      prompt:
+        mrReviewPrompt({
+          projectPath: summary.data?.path ?? projectId,
+          iid: mr.iid,
+          title: mr.title,
+          sourceBranch: mr.sourceBranch,
+          targetBranch: mr.targetBranch,
+          sha: mr.sha,
+        }) + repoNote(projectId),
     })
 
   return (

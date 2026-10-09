@@ -10,12 +10,13 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useEvent } from '@/api/events'
 import { FEATURES, unsupportedReason } from '@/api/health'
 import { qk } from '@/api/queries'
+import { knownRepos } from '@/api/repos'
 import type { ProjectSummary } from '@/api/types'
 import { getDockApi, openPanel, showToolWindow, toast, type ToastLevel } from '@/shell/actions'
 import { panelDefs } from '@/shell/registry'
 import { useUi } from '@/state/store'
 import { pk, usePushInfo } from './api'
-import { desktopNotifiesHere, panelIdFor } from './lib'
+import { desktopNotifiesHere, panelIdFor, scopeUiOpen } from './lib'
 import { PairDialogHost } from './PairDialog'
 import { listenToWorker, openTarget, registerWorker, startPresence, syncPush, takeLaunch, type ProjectIds } from './push'
 import { watchServerVersion } from './update'
@@ -34,7 +35,9 @@ export function handleUiOpen(d: UiOpen) {
   if (document.visibilityState !== 'visible') return
   const kind = d.panel
   if (!kind || !panelDefs[kind]) return
-  const params = d.params && typeof d.params === 'object' && !Array.isArray(d.params) ? d.params : {}
+  const raw = d.params && typeof d.params === 'object' && !Array.isArray(d.params) ? d.params : {}
+  // A git or CI panel of another repository of the project carries that repository in its scope.
+  const { params, scoped } = scopeUiOpen(kind, raw, typeof raw.projectId === 'string' ? knownRepos(raw.projectId) : [])
   const title = d.title ?? undefined
   if (!getDockApi()) {
     // Phone layout: no panels. Offer web pages in a new browser tab instead.
@@ -42,7 +45,7 @@ export function handleUiOpen(d: UiOpen) {
     if (url) toast('info', `An agent opened ${title ?? url}`, { action: { label: 'Open', run: () => window.open(url, '_blank', 'noopener') } })
     return
   }
-  openPanel({ kind, id: d.id ?? panelIdFor(kind, params), title, params })
+  openPanel({ kind, id: (!scoped && d.id) || panelIdFor(kind, params), title, params })
 }
 
 /** This device receives Web Push: the service worker notifies, not the page. */

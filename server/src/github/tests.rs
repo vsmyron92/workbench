@@ -20,9 +20,13 @@ use serde_json::{Value, json};
 use super::{ci, client, misc, pulls};
 use crate::app::AppState;
 use crate::config::{GlobalConfig, Paths};
+use crate::forge::RepoParam;
 use crate::mcp::{McpCtx, ToolOutput};
 
 const TOKEN: &str = "ghp_mock-token-value-0123456789";
+/// The token of the second GitHub repository (`other/api`, the `api` repository in the
+/// multi-repository tests): the first repository's token must never reach it.
+const TOKEN_B: &str = "ghp_mock-token-for-the-api-repo-9876";
 const PID: &str = "repo";
 const RUN_SHA: &str = "5babfd548d64a14eabeba53b847fdec5fa5f0ca9";
 /// A full sha GitHub has never seen (an unpushed commit).
@@ -50,6 +54,8 @@ struct Mock {
     /// `base.sha` GitHub recorded for the merged pull requests #9 and #10.
     merged_base: Mutex<String>,
     run_status: Mutex<(String, Option<String>)>,
+    /// Status and conclusion of run 888, the newest of branch `dev` of `other/api`.
+    api_run: Mutex<(String, Option<String>)>,
     secondary_hits: AtomicUsize,
     not_modified: AtomicUsize,
     /// Answer every request as anonymous GitHub would (no permissions).
@@ -117,7 +123,9 @@ async fn mock_handler(State(m): State<Arc<Mock>>, method: Method, uri: Uri, head
         accept: h(header::ACCEPT),
         if_none_match: h(header::IF_NONE_MATCH),
     });
-    let authed = auth.as_deref() == Some(&format!("Bearer {TOKEN}"));
+    // Repository `other/api` (77) has a token of its own.
+    let second = path.contains("/repos/other/api") || path.contains("/repositories/77");
+    let authed = auth.as_deref() == Some(&format!("Bearer {}", if second { TOKEN_B } else { TOKEN }));
     if auth.is_some() && !authed {
         return json_resp(StatusCode::UNAUTHORIZED, json!({ "message": "Bad credentials" }));
     }
@@ -169,6 +177,31 @@ async fn mock_handler(State(m): State<Arc<Mock>>, method: Method, uri: Uri, head
                 v["allow_rebase_merge"] = json!(false);
             }
             json_resp(StatusCode::OK, v)
+        }
+        ("GET", ["repos", "other", "api"]) => json_resp(
+            StatusCode::OK,
+            json!({ "id": 77, "node_id": "R_77", "name": "api", "full_name": "other/api", "private": false,
+                    "html_url": format!("{base}/other/api"), "default_branch": "main", "open_issues_count": 0, "has_issues": true,
+                    "permissions": { "admin": false, "push": true, "pull": true } }),
+        ),
+        ("GET", ["repos", "other", "api", "actions", "runs"]) => {
+            let (status, conclusion) = m.api_run.lock().clone();
+            let items = if q.get("branch").is_none_or(|b| b == "dev") {
+                vec![run_json(&base, 888, "dev", &"2".repeat(40), &status, conclusion.as_deref())]
+            } else {
+                vec![]
+            };
+            // A new ETag with every state: the client never answers from a stale copy.
+            let etag = format!("W/\"api-runs-{status}\"");
+            let mut resp = json_resp(StatusCode::OK, json!({ "total_count": items.len(), "workflow_runs": items }));
+            resp.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
+            resp
+        }
+        ("POST", ["repos", "other", "api", "pulls"]) => {
+            let b: Value = serde_json::from_slice(&body).unwrap_or_default();
+            let mut p = pr_json(&base, 4, b["title"].as_str().unwrap_or(""), &"2".repeat(40), &"3".repeat(40));
+            p["head"]["ref"] = b["head"].clone();
+            json_resp(StatusCode::CREATED, p)
         }
         ("GET", ["repos", "mock", "proj", "actions", "runs"]) => {
             let (status, conclusion) = m.run_status.lock().clone();
@@ -474,6 +507,7 @@ async fn serve(app: Router) -> String {
 async fn start_mock() -> (String, Arc<Mock>) {
     let m = Arc::new(Mock::default());
     *m.run_status.lock() = ("in_progress".into(), None);
+    *m.api_run.lock() = ("in_progress".into(), None);
     m.remaining.store(5000, Ordering::SeqCst);
     let base = serve(Router::new().fallback(mock_handler).with_state(m.clone())).await;
     let storage = serve(Router::new().fallback(storage_handler).with_state(m.clone())).await;
@@ -504,6 +538,13 @@ struct Setup {
 /// A Workbench state whose only project (`repo`, on branch `feature`) points at
 /// the mock. `token`: whether the project names a token secret.
 async fn setup_with(token: bool) -> Setup {
+    setup_custom(token, |_| String::new(), &[], &[]).await
+}
+
+/// `setup_with`, plus more `.workbench.toml` (built from the mock's origin), git
+/// repositories below the project's root (`nested`: directory and branch) and more
+/// secrets in the machine overlay (`secrets`: name and token value).
+async fn setup_custom(token: bool, more_toml: impl FnOnce(&str) -> String, nested: &[(&str, &str)], secrets: &[(&str, &str)]) -> Setup {
     let (base, mock) = start_mock().await;
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
@@ -518,10 +559,15 @@ async fn setup_with(token: bool) -> Setup {
     git(&repo, &["commit", "-q", "-am", "Add two"]);
     let feature_sha = git(&repo, &["rev-parse", "HEAD"]);
     *mock.shas.lock() = (main_sha, feature_sha);
+    for (sub, branch) in nested {
+        std::fs::create_dir_all(repo.join(sub)).unwrap();
+        git(&repo.join(sub), &["init", "-q", "-b", branch]);
+    }
     let token_file = dir.path().join("token");
     crate::util::fs::write_atomic(&token_file, TOKEN.as_bytes(), 0o600).unwrap();
     let token_line = if token { "token = \"mock\"\n" } else { "" };
-    std::fs::write(repo.join(".workbench.toml"), format!("[repo.github]\nhost = \"{base}\"\npath = \"mock/proj\"\n{token_line}")).unwrap();
+    let more = more_toml(&base);
+    std::fs::write(repo.join(".workbench.toml"), format!("[repo.github]\nhost = \"{base}\"\npath = \"mock/proj\"\n{token_line}{more}")).unwrap();
     let paths = Paths { config_dir: dir.path().join("config"), data_dir: dir.path().join("data") };
     std::fs::create_dir_all(paths.config_dir.join("projects")).unwrap();
     std::fs::create_dir_all(&paths.data_dir).unwrap();
@@ -530,7 +576,13 @@ async fn setup_with(token: bool) -> Setup {
     // escapes (`\U` wants eight hex digits), and an overlay that does not parse
     // vouches for nothing.
     let token_ref = toml::Value::String(token_file.display().to_string());
-    std::fs::write(paths.project_overlay(PID), format!("[secrets]\nmock = {{ file = {token_ref} }}\n")).unwrap();
+    let mut overlay = format!("[secrets]\nmock = {{ file = {token_ref} }}\n");
+    for (name, value) in secrets {
+        let file = dir.path().join(format!("secret-{name}"));
+        crate::util::fs::write_atomic(&file, value.as_bytes(), 0o600).unwrap();
+        overlay.push_str(&format!("{name} = {{ file = {} }}\n", toml::Value::String(file.display().to_string())));
+    }
+    std::fs::write(paths.project_overlay(PID), overlay).unwrap();
     let mut cfg = GlobalConfig::default();
     cfg.projects.roots = vec![];
     cfg.projects.include = vec![repo.display().to_string()];
@@ -548,11 +600,11 @@ async fn setup() -> Setup {
 #[tokio::test]
 async fn resolves_repo_and_sends_token_only_in_header() {
     let t = setup().await;
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     assert!(!ctx.is_anonymous());
     assert_eq!(ctx.default_branch(), Some("main"));
     assert_eq!(ctx.rurl("/pulls"), format!("{}/api/v3/repos/mock/proj/pulls", t.mock.base.lock()));
-    let _ = client::ctx(&t.state, PID).await.unwrap();
+    let _ = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     assert_eq!(t.mock.requests("GET", "/repos/mock/proj").len(), 1, "metadata is cached");
     for r in t.mock.log.lock().iter() {
         assert_eq!(r.auth.as_deref(), Some(format!("Bearer {TOKEN}").as_str()));
@@ -563,7 +615,7 @@ async fn resolves_repo_and_sends_token_only_in_header() {
 #[tokio::test]
 async fn pagination_follows_link_next_across_url_forms() {
     let t = setup().await;
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     let page = ci::list_runs(&ctx, &ci::RunsQuery { per_page: Some(2), ..Default::default() }).await.unwrap();
     assert_eq!(page.items.len(), 2);
     assert_eq!(page.total, Some(3));
@@ -585,7 +637,7 @@ async fn pagination_follows_link_next_across_url_forms() {
 #[tokio::test]
 async fn etags_revalidate_cached_responses() {
     let t = setup().await;
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     let q = ci::RunsQuery { branch: Some("main".into()), ..Default::default() };
     let a = ci::list_runs(&ctx, &q).await.unwrap();
     let _ = ci::list_runs(&ctx, &q).await.unwrap();
@@ -607,7 +659,7 @@ async fn etags_revalidate_cached_responses() {
 #[tokio::test]
 async fn secondary_rate_limits_are_waited_out() {
     let t = setup().await;
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     let started = std::time::Instant::now();
     let page = misc::releases(&ctx, &misc::PageQuery::default()).await.unwrap();
     assert_eq!(page.items[0].tag_name, "v1.0.0");
@@ -621,7 +673,7 @@ async fn secondary_rate_limits_are_waited_out() {
 #[tokio::test]
 async fn an_exhausted_quota_fails_fast_and_serves_stale_data() {
     let t = setup().await;
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     let q = ci::RunsQuery { branch: Some("main".into()), ..Default::default() };
     let before = ci::list_runs(&ctx, &q).await.unwrap();
     t.mock.exhausted.store(true, Ordering::SeqCst);
@@ -641,7 +693,7 @@ async fn an_exhausted_quota_fails_fast_and_serves_stale_data() {
 #[tokio::test]
 async fn job_logs_follow_the_redirect_without_the_token() {
     let t = setup().await;
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     let log = ci::job_log(&ctx, 9001).await.unwrap();
     assert!(log.available);
     let data = log.data.clone().unwrap().0;
@@ -706,7 +758,7 @@ async fn run_artifacts_list_and_download_without_leaking_the_token() {
 #[tokio::test]
 async fn anonymous_mode_is_read_only() {
     let t = setup_with(false).await;
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     assert!(ctx.is_anonymous());
     assert!(ctx.anonymous_reason().unwrap().contains("no GitHub token"));
     let _ = pulls::list_pulls(&ctx, &pulls::PullsQuery::default()).await.unwrap();
@@ -752,7 +804,7 @@ async fn repository_config_cannot_borrow_global_secrets() {
     assert_eq!(err.code, "not_configured");
     // The global [github] token is used only for its own host (scheme included).
     t.state.config.write().github = Some(crate::config::global::GithubConfig { host: "github.com".into(), token: "globalgh".into() });
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     assert!(ctx.is_anonymous());
     assert!(ctx.anonymous_reason().unwrap().contains("is for github.com"));
     assert!(t.mock.log.lock().iter().all(|r| r.auth.is_none()));
@@ -768,7 +820,7 @@ async fn commit_ci_status_combines_checks_runs_and_statuses() {
     assert_eq!(st.sha.as_deref(), Some(RUN_SHA));
     assert_eq!(st.git_ref.as_deref(), Some("main"));
     assert!(st.pipeline_id.is_some());
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     let checks = ci::commit_checks(&ctx, RUN_SHA).await.unwrap();
     let kinds: Vec<(&str, &str)> = checks.items.iter().map(|i| (i.name.as_str(), i.state.as_str())).collect();
     assert!(kinds.contains(&("test", "failed")));
@@ -792,7 +844,7 @@ async fn commit_ci_status_combines_checks_runs_and_statuses() {
 #[tokio::test]
 async fn pull_request_detail_and_file_versions() {
     let t = setup().await;
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     let (main_sha, feature_sha) = t.mock.shas.lock().clone();
     let d = pulls::get_pull(&ctx, 7).await.unwrap();
     assert_eq!(d.merge_base_sha.as_deref(), Some(main_sha.as_str()), "merge base from the local clone");
@@ -829,7 +881,7 @@ async fn pull_request_detail_and_file_versions() {
 #[tokio::test]
 async fn writes_go_where_they_should() {
     let t = setup().await;
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     let (_, feature_sha) = t.mock.shas.lock().clone();
     let mut events = t.state.events.subscribe();
     // Create: head is the current branch, base the default branch.
@@ -895,7 +947,7 @@ async fn writes_go_where_they_should() {
 #[tokio::test]
 async fn upstream_bodies_are_never_echoed() {
     let t = setup().await;
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     let err = misc::issue_detail(&ctx, 500).await.unwrap_err();
     assert_eq!(err.code, "upstream");
     assert!(!err.message.contains(TOKEN));
@@ -1018,7 +1070,7 @@ async fn merged_pull_requests_diff_from_the_branch_point() {
     let later = git(&repo, &["rev-parse", "HEAD"]);
     git(&repo, &["checkout", "-q", "feature"]);
     *t.mock.merged_base.lock() = later.clone();
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     let d = pulls::get_pull(&ctx, 9).await.unwrap();
     assert!(d.pull.merged);
     assert_eq!(d.merge_base_sha.as_deref(), Some(main_sha.as_str()), "where the branches met, not main's tip at the merge");
@@ -1093,12 +1145,12 @@ async fn private_repositories_without_a_token_are_setup_help_asked_once() {
 #[tokio::test]
 async fn writes_refresh_the_repository_metadata() {
     let t = setup().await;
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
-    let _ = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
+    let _ = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     assert_eq!(t.mock.requests("GET", "/repos/mock/proj").len(), 1);
     // The open issue count comes from the metadata: a new issue must show in it.
     misc::create_issue(&ctx, &misc::CreateIssue { title: "Broken".into(), ..Default::default() }).await.unwrap();
-    let _ = client::ctx(&t.state, PID).await.unwrap();
+    let _ = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     assert_eq!(t.mock.requests("GET", "/repos/mock/proj").len(), 2, "metadata refetched after the write");
 }
 
@@ -1119,7 +1171,7 @@ async fn the_anonymous_poller_watches_only_projects_someone_looks_at() {
     let t = setup_with(false).await;
     let project = t.state.projects.get(PID).unwrap();
     assert!(!super::poller::wants_poll(&t.state, &project), "nobody looked at it yet");
-    let _ = client::ctx(&t.state, PID).await.unwrap();
+    let _ = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     assert!(super::poller::wants_poll(&t.state, &project), "the UI asked for it");
     // Background lookups (the poller, deploy gates) do not count as looking.
     let t = setup_with(false).await;
@@ -1135,7 +1187,7 @@ async fn the_anonymous_poller_watches_only_projects_someone_looks_at() {
 #[tokio::test]
 async fn a_changed_run_drops_its_cached_detail_and_checks() {
     let t = setup().await;
-    let ctx = client::ctx(&t.state, PID).await.unwrap();
+    let ctx = client::ctx(&t.state, PID, &RepoParam::default()).await.unwrap();
     let count = |suffix: &str| t.mock.requests("GET", suffix).len();
     let branch_lists = || t.mock.log.lock().iter().filter(|r| r.path.ends_with("/actions/runs") && r.query.contains("branch=main")).count();
     let by_sha = || t.mock.log.lock().iter().filter(|r| r.path.ends_with("/actions/runs") && r.query.contains("head_sha=")).count();
@@ -1156,4 +1208,156 @@ async fn a_changed_run_drops_its_cached_detail_and_checks() {
     assert_eq!(count("/check-runs"), before.2 + 1, "its commit's checks are asked again");
     assert_eq!(by_sha(), before.3 + 1, "and the commit's runs");
     assert_eq!(branch_lists(), before.4, "the branch list the poller just fetched stays");
+}
+
+// ---------------------------------------------------------------- several repositories
+
+/// The root repository on `mock/proj` and `api/` on `other/api`, each with its own token.
+fn api_repo(base: &str) -> String {
+    format!("\n[[repository]]\npath = \"api\"\n[repository.github]\nhost = \"{base}\"\npath = \"other/api\"\ntoken = \"api\"\n")
+}
+
+/// The root repository (branch `feature`), `api` (branch `dev`) and a repository on no
+/// forge (`web`, found below the root).
+async fn setup_repos() -> Setup {
+    setup_custom(true, api_repo, &[("api", "dev"), ("web", "main")], &[("api", TOKEN_B)]).await
+}
+
+async fn get(state: &AppState, path: &str) -> Result<Value, crate::error::ApiError> {
+    crate::mcp::call_api(state, Method::GET, path, None, &McpCtx::default()).await
+}
+
+#[tokio::test]
+async fn each_repository_uses_its_own_github_repository_and_token() {
+    let t = setup_repos().await;
+    let project = t.state.projects.get(PID).unwrap();
+    let ids: Vec<&str> = project.repos.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, [".", "api", "web"], "{:?}", project.warnings);
+
+    for path in ["/api/projects/repo/github/actions/runs", "/api/projects/repo/github/actions/runs?repo=.", "/api/projects/repo/github/actions/runs?repo="] {
+        let v = get(&t.state, path).await.unwrap();
+        assert!(v.to_string().contains("\"id\":303"), "{path}: {v}");
+    }
+    let v = get(&t.state, "/api/projects/repo/github/actions/runs?repo=api").await.unwrap();
+    assert!(v.to_string().contains("\"id\":888") && !v.to_string().contains("\"id\":303"), "{v}");
+    for r in t.mock.log.lock().iter().filter(|r| r.path != "/api/graphql") {
+        let second = r.path.contains("/repos/other/api") || r.path.contains("/repositories/77");
+        let want = format!("Bearer {}", if second { TOKEN_B } else { TOKEN });
+        assert_eq!(r.auth.as_deref(), Some(want.as_str()), "{} {}", r.method, r.path);
+    }
+    assert!(!t.mock.requests("GET", "/repos/other/api/actions/runs").is_empty());
+
+    // Summaries are cached per repository, and read the repository's own checkout.
+    let a = get(&t.state, "/api/projects/repo/github/summary").await.unwrap();
+    let b = get(&t.state, "/api/projects/repo/github/summary?repo=api").await.unwrap();
+    assert_eq!((a["path"].as_str(), a["branch"].as_str()), (Some("mock/proj"), Some("feature")));
+    assert_eq!((b["path"].as_str(), b["branch"].as_str()), (Some("other/api"), Some("dev")));
+    assert_eq!(get(&t.state, "/api/projects/repo/github/summary").await.unwrap()["path"], "mock/proj");
+
+    let e = get(&t.state, "/api/projects/repo/github/summary?repo=web").await.unwrap_err();
+    assert_eq!(e.code, "not_configured", "{}", e.message);
+    let e = get(&t.state, "/api/projects/repo/github/actions/runs?repo=nope").await.unwrap_err();
+    assert_eq!((e.status, e.code), (StatusCode::NOT_FOUND, "unknown_repo"));
+}
+
+#[tokio::test]
+async fn actions_name_their_repository_in_events_and_use_its_checkout() {
+    let t = setup_repos().await;
+    let mut events = t.state.events.subscribe();
+    let ctx = McpCtx::default();
+    let body = json!({ "title": "API change" });
+    crate::mcp::call_api(&t.state, Method::POST, "/api/projects/repo/github/pulls?repo=api", Some(body), &ctx).await.unwrap();
+    let sent = t.mock.requests("POST", "/repos/other/api/pulls");
+    assert_eq!(sent[0].body.as_ref().unwrap()["head"], "dev", "the head is the current branch of that repository");
+    let ev = events.try_recv().unwrap();
+    assert_eq!((ev.kind.as_str(), ev.project_id.as_deref()), ("github.pr", Some(PID)));
+    assert_eq!((ev.data["number"].clone(), ev.data["repo"].clone()), (json!(4), json!("api")));
+}
+
+#[tokio::test]
+async fn the_poller_watches_every_repository_on_github() {
+    let t = setup_repos().await;
+    let views: Vec<_> = crate::forge::repo_views(&t.state).into_iter().filter(|p| p.github().is_some()).collect();
+    let keys: Vec<String> = views.iter().map(|p| p.scope_key()).collect();
+    assert_eq!(keys, ["repo", "repo@api"], "`web` is on no forge and is not polled");
+    let mut events = t.state.events.subscribe();
+    for p in &views {
+        assert!(super::poller::wants_poll(&t.state, p));
+        let (active, _) = super::poller::poll_project(&t.state, p.clone()).await.unwrap();
+        assert!(active);
+    }
+    *t.mock.run_status.lock() = ("completed".into(), Some("failure".into()));
+    *t.mock.api_run.lock() = ("completed".into(), Some("failure".into()));
+    tokio::time::sleep(Duration::from_millis(3200)).await;
+    for p in &views {
+        super::poller::poll_project(&t.state, p.clone()).await.unwrap();
+    }
+    let mut changes = vec![];
+    while let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_millis(200), events.recv()).await {
+        if ev.kind == "github.run" {
+            assert_eq!(ev.project_id.as_deref(), Some(PID));
+            changes.push((ev.data["repo"].as_str().unwrap().to_string(), ev.data["runId"].as_u64().unwrap(), ev.data["state"].as_str().unwrap().to_string()));
+        }
+    }
+    changes.sort();
+    assert_eq!(changes, [(".".to_string(), 303, "failed".to_string()), ("api".to_string(), 888, "failed".to_string())]);
+    // What each repository saw is remembered under its own key.
+    assert!(t.state.github.poll.observe("repo@api", "dev", &[(888, "failed".into())]).is_empty());
+}
+
+#[tokio::test]
+async fn tools_and_the_deploy_gate_take_a_repository() {
+    let t = setup_repos().await;
+    let tools = super::mcp_tools();
+    let find = |n: &str| tools.iter().find(|t| t.name == n).unwrap().clone();
+    for tool in &tools {
+        assert!(tool.input_schema["properties"].get("repo").is_some(), "{} takes a repo", tool.name);
+    }
+    let mctx = McpCtx { terminal_id: None, project_id: Some(PID.into()) };
+    let ToolOutput::Text(text) = (find("github_runs").handler)(t.state.clone(), mctx.clone(), json!({ "repo": "api" })).await.unwrap() else {
+        panic!("text output")
+    };
+    assert!(text.contains("other/api") && text.contains("888"), "{text}");
+    let e = (find("github_runs").handler)(t.state.clone(), mctx.clone(), json!({ "repo": "nope" })).await.unwrap_err();
+    assert_eq!(e.code, "unknown_repo");
+
+    // A panel opened for a repository other than the default one carries it, in its id too.
+    let mut events = t.state.events.subscribe();
+    for (repo, want, id) in [(json!({ "repo": "api" }), Some("api"), "pr:repo::api:4"), (json!({}), None, "pr:repo:8")] {
+        let mut args = json!({ "title": "x" });
+        args.as_object_mut().unwrap().extend(repo.as_object().unwrap().clone());
+        (find("github_create_pr").handler)(t.state.clone(), mctx.clone(), args).await.unwrap();
+        let ev = loop {
+            let ev = events.recv().await.unwrap();
+            if ev.kind == "ui.open" {
+                break ev;
+            }
+        };
+        assert_eq!(ev.data["params"]["projectId"], PID);
+        assert_eq!(ev.data["params"]["repo"].as_str(), want, "{:?}", ev.data);
+        assert_eq!(ev.data["id"], id, "{:?}", ev.data);
+    }
+
+    // A deploy's CI gate asks about the project it is given: a view through `api` is `other/api`.
+    let project = t.state.projects.get(PID).unwrap();
+    let api = project.scoped("api").unwrap();
+    assert_eq!(crate::forge::forge_of(&api), Some(crate::forge::Forge::Github));
+    assert_eq!(api.github().unwrap().1, "other/api");
+    assert_eq!(project.github().unwrap().1, "mock/proj");
+}
+
+/// `[[repository]]` comes from repository content: its token name resolves against the
+/// machine overlay only, never against config.toml's secrets.
+#[tokio::test]
+async fn a_repositorys_token_name_resolves_only_against_the_overlay() {
+    let more = |base: &str| format!("\n[[repository]]\npath = \"api\"\n[repository.github]\nhost = \"{base}\"\npath = \"other/api\"\ntoken = \"globaltok\"\n");
+    let t = setup_custom(true, more, &[("api", "dev")], &[]).await;
+    let global = t._dir.path().join("global-token");
+    crate::util::fs::write_atomic(&global, TOKEN_B.as_bytes(), 0o600).unwrap();
+    t.state.config.write().secrets.insert("globaltok".into(), crate::config::SecretRef::File(global.display().to_string()));
+    t.mock.log.lock().clear();
+    let e = get(&t.state, "/api/projects/repo/github/actions/runs?repo=api").await.unwrap_err();
+    assert_eq!(e.code, "not_configured", "{}", e.message);
+    assert!(e.message.contains("machine overlay"), "{}", e.message);
+    assert!(t.mock.log.lock().is_empty(), "nothing reached GitHub: {:?}", t.mock.log.lock());
 }

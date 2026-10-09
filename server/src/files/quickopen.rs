@@ -56,18 +56,20 @@ impl QuickOpenCache {
             }
         }
         let root = project.root.clone();
-        let (files, truncated) = blocking(move || Ok(build_index(&root))).await?;
+        let nested = project.nested_repo_dirs();
+        let (files, truncated) = blocking(move || Ok(build_index(&root, &nested))).await?;
         let idx = Arc::new(Index { root: project.root.clone(), generation, built: Instant::now(), files, truncated });
         self.indexes.lock().insert(project.id.clone(), idx.clone());
         Ok(idx)
     }
 }
 
-/// Every non-ignored file under `root`, relative and sorted.
-pub fn build_index(root: &Path) -> (Vec<String>, bool) {
+/// Every non-ignored file under `root` (and in the repositories `nested` below it, whatever
+/// the root's ignore files say of them), relative and sorted.
+pub fn build_index(root: &Path, nested: &[PathBuf]) -> (Vec<String>, bool) {
     let mut files = vec![];
     let mut truncated = false;
-    let walk = super::gitignore::walk(root).build();
+    let walk = super::gitignore::walk(root, nested).build();
     for ent in walk.flatten() {
         if !ent.file_type().is_some_and(|t| t.is_file() || t.is_symlink()) {
             continue;
@@ -167,9 +169,24 @@ mod tests {
         for f in ["src/main.rs", ".gitlab-ci.yml", ".git/HEAD", "node_modules/x/i.js", "dist/app.js"] {
             std::fs::write(r.join(f), "").unwrap();
         }
-        let (files, truncated) = build_index(r);
+        let (files, truncated) = build_index(r, &[]);
         assert_eq!(files, vec![".gitignore", ".gitlab-ci.yml", "src/main.rs"]);
         assert!(!truncated);
+    }
+
+    #[test]
+    fn index_includes_repositories_below_the_root_that_the_root_ignores() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        for d in ["src", "web/src", "web/.git"] {
+            std::fs::create_dir_all(r.join(d)).unwrap();
+        }
+        std::fs::write(r.join(".gitignore"), "web/\n").unwrap();
+        for f in ["src/main.rs", "web/src/app.js"] {
+            std::fs::write(r.join(f), "").unwrap();
+        }
+        assert_eq!(build_index(r, &[]).0, vec![".gitignore", "src/main.rs"]);
+        assert_eq!(build_index(r, &[r.join("web")]).0, vec![".gitignore", "src/main.rs", "web/src/app.js"]);
     }
 
     #[test]

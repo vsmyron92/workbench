@@ -2,6 +2,7 @@
 // cross-slice git shapes it consumes (docs/ARCHITECTURE.md#cross-slice-data-contracts).
 
 import { api } from '@/api/client'
+import { knownRepos, repoParam } from '@/api/repos'
 
 /** files/listing.rs Entry */
 export interface FileEntry {
@@ -214,7 +215,9 @@ export const filesApi = {
     s: SearchParams & { replacement: string; paths: string[]; expected?: Record<string, string>; dryRun?: boolean },
   ) => api.post<ReplaceResult>(`${p(pid)}/search/replace`, s),
 
-  gitStatus: (pid: string, signal?: AbortSignal) => api.get<GitStatus>(`${p(pid)}/git/status`, undefined, signal),
-  gitDiff: (pid: string, path: string) => api.get<GitFileDiff>(`${p(pid)}/git/diff`, { path, mode: 'working' }),
-  gitBlame: (pid: string, path: string) => api.get<GitBlame>(`${p(pid)}/git/blame`, { path }),
+  /** `all`: every repository of the project (project-relative paths), for the tree colours. */
+  gitStatus: (pid: string, signal?: AbortSignal, all = false) =>
+    api.get<GitStatus>(`${p(pid)}/git/status`, all ? { repo: 'all' } : undefined, signal),
+  gitDiff: (pid: string, path: string) => api.get<GitFileDiff>(`${p(pid)}/git/diff`, { path, mode: 'working', repo: repoParam(knownRepos(pid), path) }),
+  gitBlame: (pid: string, path: string) => api.get<GitBlame>(`${p(pid)}/git/blame`, { path, repo: repoParam(knownRepos(pid), path) }),
 }

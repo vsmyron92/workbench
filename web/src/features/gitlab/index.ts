@@ -6,10 +6,12 @@
 
 import { CircleDot, FileText, GitPullRequest, GitPullRequestCreate, Play, Workflow } from 'lucide-react'
 import { api } from '@/api/client'
+import { anyRepoOn, forgeScope } from '@/api/repos'
+import { withGitScope } from '@/api/useRepos'
 import { showToolWindow, toast, toastError } from '@/shell/actions'
 import type { FeatureModule } from '@/shell/types'
 import { GitLabIcon } from '@/ui'
-import { gl } from './api'
+import { glUrl } from './api'
 import { GitlabBadge } from './Badge'
 import { openMr, openPipeline, useGlUi } from './components'
 import { IssuePanel } from './IssuePanel'
@@ -24,7 +26,7 @@ import { CiTopbarWidget, PipelineStatusItem } from './widgets'
 
 async function summaryOf(pid: string): Promise<GitlabSummary | null> {
   try {
-    return await api.get<GitlabSummary>(`${gl(pid)}/summary`)
+    return await api.get<GitlabSummary>(glUrl(pid, 'summary'))
   } catch (e) {
     toastError(e, 'GitLab')
     return null
@@ -46,14 +48,17 @@ const feature: FeatureModule = {
       icon: GitLabIcon,
       side: 'right',
       order: 10,
-      component: GitlabToolWindow,
-      badge: GitlabBadge,
-      when: (p) => !!p?.gitlab,
+      component: withGitScope(GitlabToolWindow),
+      badge: withGitScope(GitlabBadge),
+      // Any repository of the project on GitLab; the window follows the active one.
+      when: (p) => anyRepoOn(p, 'gitlab'),
     },
   ],
   commands: (ctx) => {
     const pid = ctx.projectId
-    if (!pid || !ctx.project?.gitlab) return []
+    if (!pid || !anyRepoOn(ctx.project, 'gitlab')) return []
+    // The active repository, or the first one on GitLab when that is not.
+    const scope = () => forgeScope(pid, 'gitlab')
     const show = (tab: 'pipelines' | 'mrs' | 'issues') => {
       useGlUi.getState().setTab(tab)
       showToolWindow('gitlab')
@@ -74,10 +79,10 @@ const feature: FeatureModule = {
         icon: Workflow,
         keywords: ['ci', 'build', 'status'],
         run: async () => {
-          const s = await summaryOf(pid)
+          const s = await summaryOf(scope())
           if (!s) return
           const p = s.branchPipeline ?? s.defaultPipeline
-          if (p) openPipeline(pid, p.id, p.iid)
+          if (p) openPipeline(scope(), p.id, p.iid)
           else toast('info', `No pipelines for ${s.branch ?? 'this branch'} yet`)
         },
       },
@@ -87,7 +92,7 @@ const feature: FeatureModule = {
         group: 'GitLab',
         icon: Play,
         keywords: ['ci', 'trigger'],
-        run: () => useGlUi.getState().openRunPipeline(pid),
+        run: () => useGlUi.getState().openRunPipeline(scope()),
       },
       {
         id: 'gitlab.createMr',
@@ -95,7 +100,7 @@ const feature: FeatureModule = {
         group: 'GitLab',
         icon: GitPullRequestCreate,
         keywords: ['mr', 'pull request', 'pr'],
-        run: () => useGlUi.getState().openCreateMr(pid),
+        run: () => useGlUi.getState().openCreateMr(scope()),
       },
       {
         id: 'gitlab.openCurrentMr',
@@ -104,12 +109,12 @@ const feature: FeatureModule = {
         icon: GitPullRequest,
         keywords: ['mr', 'pull request', 'pr', 'review'],
         run: async () => {
-          const s = await summaryOf(pid)
+          const s = await summaryOf(scope())
           if (!s) return
-          if (s.currentMr) openMr(pid, s.currentMr.iid, s.currentMr.title)
+          if (s.currentMr) openMr(scope(), s.currentMr.iid, s.currentMr.title)
           else
             toast('info', `No merge request for ${s.branch ?? 'this branch'}`, {
-              action: { label: 'Create one', run: () => useGlUi.getState().openCreateMr(pid) },
+              action: { label: 'Create one', run: () => useGlUi.getState().openCreateMr(scope()) },
             })
         },
       },
@@ -130,9 +135,9 @@ const feature: FeatureModule = {
       },
     ]
   },
-  topbar: [CiTopbarWidget],
-  statusbar: [PipelineStatusItem],
-  mobileTabs: [{ id: 'ci', title: 'CI', icon: Workflow, order: 40, component: MobileCi, badge: GitlabBadge, when: (p) => !!p?.gitlab }],
+  topbar: [withGitScope(CiTopbarWidget)],
+  statusbar: [withGitScope(PipelineStatusItem)],
+  mobileTabs: [{ id: 'ci', title: 'CI', icon: Workflow, order: 40, component: MobileCi, badge: withGitScope(GitlabBadge), when: (p) => anyRepoOn(p, 'gitlab') }],
   providers: [GitlabProvider],
 }
 

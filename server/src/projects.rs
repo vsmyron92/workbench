@@ -27,6 +27,10 @@ use crate::config::{GlobalConfig, ProjectFile, contract_tilde, expand_tilde, pro
 use crate::error::{ApiError, ApiResult};
 use crate::util;
 
+mod repos;
+
+pub use repos::{ROOT_REPO, RepoEntry, scope_key};
+
 /// The scratch files' project (see the module doc).
 pub const SCRATCH_ID: &str = "wb-scratches";
 
@@ -62,29 +66,45 @@ pub struct Project {
     /// Why the machine overlay was left out (it does not parse, or cannot be read), when
     /// it was: `AppState::secret` names it for a secret the overlay would have held.
     pub overlay_error: Option<String>,
+    /// The project's git repositories, the one holding the root first (see `repos`).
+    pub repos: Arc<Vec<RepoEntry>>,
+    /// Index into `repos` of the repository this value is about: the default one (0)
+    /// unless it came from `Project::scoped`.
+    pub repo: usize,
+}
+
+/// GitLab `(host, path)` of a repository: its `[repo.gitlab]` section, else a remote on a host
+/// that says so.
+fn gitlab_of(repo: Option<&project::Repo>, remote: Option<&RemoteInfo>) -> Option<(String, String)> {
+    if let Some(g) = repo.and_then(|r| r.gitlab.as_ref()) {
+        if !g.path.is_empty() {
+            return Some((g.host.clone(), g.path.clone()));
+        }
+    }
+    let r = remote?;
+    r.host.contains("gitlab").then(|| (r.host.clone(), r.path.clone()))
+}
+
+/// GitHub `(host, "owner/repo")` of a repository (see [`gitlab_of`]).
+fn github_of(repo: Option<&project::Repo>, remote: Option<&RemoteInfo>) -> Option<(String, String)> {
+    if let Some(g) = repo.and_then(|r| r.github.as_ref()) {
+        if !g.path.is_empty() {
+            return Some((g.host.clone(), g.path.clone()));
+        }
+    }
+    let r = remote?;
+    r.host.contains("github").then(|| (r.host.clone(), r.path.clone()))
 }
 
 impl Project {
     /// GitLab `(host, path)` for this project, from config or the remote.
     pub fn gitlab(&self) -> Option<(String, String)> {
-        if let Some(g) = self.config.repo.as_ref().and_then(|r| r.gitlab.as_ref()) {
-            if !g.path.is_empty() {
-                return Some((g.host.clone(), g.path.clone()));
-            }
-        }
-        let r = self.remote.as_ref()?;
-        r.host.contains("gitlab").then(|| (r.host.clone(), r.path.clone()))
+        gitlab_of(self.config.repo.as_ref(), self.remote.as_ref())
     }
 
     /// GitHub `(host, "owner/repo")` for this project, from config or the remote.
     pub fn github(&self) -> Option<(String, String)> {
-        if let Some(g) = self.config.repo.as_ref().and_then(|r| r.github.as_ref()) {
-            if !g.path.is_empty() {
-                return Some((g.host.clone(), g.path.clone()));
-            }
-        }
-        let r = self.remote.as_ref()?;
-        r.host.contains("github").then(|| (r.host.clone(), r.path.clone()))
+        github_of(self.config.repo.as_ref(), self.remote.as_ref())
     }
 }
 
@@ -108,6 +128,25 @@ pub struct ProjectSummary {
     pub warnings: Vec<String>,
     /// The dev container (devcontainer slice), `null` without a devcontainer.json or container.
     pub devcontainer: Option<crate::devcontainer::Summary>,
+    /// The git repositories (the default one first); `gitlab`, `github` and `branch` above
+    /// are the default repository's. Empty for a folder in no repository.
+    pub repos: Vec<RepoSummary>,
+}
+
+/// One repository of a project, as the repository switcher and the CI views need it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoSummary {
+    /// `.` for the repository that holds the project root, else its project-relative directory.
+    pub id: String,
+    pub name: String,
+    /// The working tree's directory relative to the project root; empty for `.`.
+    pub path: String,
+    pub default: bool,
+    /// Remote URL without credentials.
+    pub remote: Option<String>,
+    pub gitlab: Option<serde_json::Value>,
+    pub github: Option<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -210,6 +249,19 @@ impl ProjectRegistry {
         self.get(id).ok_or_else(|| ApiError::not_found(format!("no project {id:?}")))
     }
 
+    /// The project seen through its repository `repo` (`None`: the default one): what the
+    /// git, GitLab and GitHub routes resolve a request's `?repo=` with.
+    pub fn require_repo(&self, id: &str, repo: Option<&str>) -> Result<Arc<Project>, ApiError> {
+        let project = self.require(id)?;
+        match repo.filter(|r| !r.is_empty()) {
+            None => Ok(project),
+            Some(r) if r == project.repo_id() => Ok(project),
+            Some(r) => project.scoped(r).map(Arc::new).ok_or_else(|| {
+                ApiError::new(axum::http::StatusCode::NOT_FOUND, "unknown_repo", format!("project {id:?} has no repository {r:?}"))
+            }),
+        }
+    }
+
     /// The project whose root contains `abs` (deepest root wins; on Windows without
     /// regard to case).
     pub fn find_by_path(&self, abs: &Path) -> Option<Arc<Project>> {
@@ -253,9 +305,14 @@ impl ProjectRegistry {
             let Ok(rd) = std::fs::read_dir(&root) else { continue };
             // An entry that links to another computer is not looked into (Windows), nor is
             // a `.git` that does (the check reads every link on the way to it).
-            let local = |p: &Path| !util::os::path::leaves_machine_below(&root, &p.join(".git"));
+            let local = |p: &Path| {
+                !util::os::path::leaves_machine_below(&root, &p.join(".git")) && !project::repo_layer_linked_away(p)
+            };
+            // A repository, or a folder that says it is a project (a `.workbench.toml`): the
+            // way to list a folder of several repositories, which is none itself.
+            let is_project = |p: &Path| p.join(".git").exists() || p.join(".workbench.toml").is_file();
             let mut found: Vec<PathBuf> =
-                rd.flatten().map(|e| e.path()).filter(|p| local(p) && p.is_dir() && p.join(".git").exists()).collect();
+                rd.flatten().map(|e| e.path()).filter(|p| local(p) && p.is_dir() && is_project(p)).collect();
             found.sort();
             dirs.extend(found);
         }
@@ -313,6 +370,8 @@ fn scratch_project(state: &AppState) -> anyhow::Result<Project> {
         warnings: vec![],
         repo_secret_names: BTreeSet::new(),
         overlay_error: None,
+        repos: Arc::new(vec![]),
+        repo: 0,
     })
 }
 
@@ -320,7 +379,7 @@ async fn load_project(state: &AppState, id: &str, root: &Path) -> Project {
     let global_site = state.config.read().atlassian.as_ref().map(|a| a.site.clone());
     let detected = crate::apps::detect(root);
     let layered = project::load_layers(detected, root, &state.paths.project_overlay(id), global_site.as_deref());
-    let project::Layered { mut config, warnings, repo_secret_names, overlay_error } = layered;
+    let project::Layered { mut config, mut warnings, repo_secret_names, overlay_error } = layered;
     let name = if config.project.name.is_empty() {
         root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| id.to_string())
     } else {
@@ -331,7 +390,7 @@ async fn load_project(state: &AppState, id: &str, root: &Path) -> Project {
     config.project.root = contract_tilde(root);
 
     let remote_name = config.repo.as_ref().map(|r| r.remote.clone()).filter(|r| !r.is_empty());
-    let remote = match util::git::remote_url(root, remote_name.as_deref().unwrap_or("origin")).await {
+    let mut remote = match util::git::remote_url(root, remote_name.as_deref().unwrap_or("origin")).await {
         Some(url) => util::git::parse_remote(&url).map(|(host, path)| RemoteInfo {
             url: strip_credentials(&url),
             host,
@@ -339,14 +398,33 @@ async fn load_project(state: &AppState, id: &str, root: &Path) -> Project {
         }),
         None => None,
     };
+    let hosts = {
+        let cfg = state.config.read();
+        repos::ForgeHosts { gitlab: cfg.gitlab.as_ref().map(|g| g.host.clone()), github: cfg.github.as_ref().map(|g| g.host.clone()) }
+    };
     if let Some(r) = &remote {
-        let (gitlab_host, github_host) = {
-            let cfg = state.config.read();
-            (cfg.gitlab.as_ref().map(|g| g.host.clone()), cfg.github.as_ref().map(|g| g.host.clone()))
-        };
-        adopt_configured_forge(&mut config, r, gitlab_host.as_deref(), github_host.as_deref());
+        adopt_configured_forge(&mut config, r, hosts.gitlab.as_deref(), hosts.github.as_deref());
     }
-    Project { id: id.to_string(), name, root: root.to_path_buf(), config, remote, warnings, repo_secret_names, overlay_error }
+    let (found, repo_warnings) = repos::load(root, &name, &config, remote.clone(), &hosts).await;
+    warnings.extend(repo_warnings);
+    // A folder that is no repository but holds some: the first of them is the default one,
+    // and answers for `[repo]` (the remote and forge a project-wide question gets).
+    if let Some(first) = found.first().filter(|r| !r.is_root()) {
+        config.repo = Some(first.config.clone());
+        remote = first.remote.clone();
+    }
+    Project {
+        id: id.to_string(),
+        name,
+        root: root.to_path_buf(),
+        config,
+        remote,
+        warnings,
+        repo_secret_names,
+        overlay_error,
+        repos: Arc::new(found),
+        repo: 0,
+    }
 }
 
 /// `git.corp.example` from a configured forge host (`git.corp.example`,
@@ -370,8 +448,13 @@ fn bare_host(host: &str) -> String {
 /// token (the global one, host-checked by the clients). Projects that already have a
 /// forge, from detection or config, are left alone.
 fn adopt_configured_forge(config: &mut ProjectFile, remote: &RemoteInfo, gitlab_host: Option<&str>, github_host: Option<&str>) {
+    adopt_forge(&mut config.repo, remote, gitlab_host, github_host)
+}
+
+/// [`adopt_configured_forge`] for one repository's settings (`[repo]`, `[[repository]]`).
+fn adopt_forge(repo_cfg: &mut Option<project::Repo>, remote: &RemoteInfo, gitlab_host: Option<&str>, github_host: Option<&str>) {
     let host = remote.host.to_ascii_lowercase();
-    let (gitlab, github) = match &config.repo {
+    let (gitlab, github) = match &*repo_cfg {
         Some(r) => (r.gitlab.as_ref(), r.github.as_ref()),
         None => (None, None),
     };
@@ -388,10 +471,10 @@ fn adopt_configured_forge(config: &mut ProjectFile, remote: &RemoteInfo, gitlab_
     let configured = |h: Option<&str>| h.unwrap_or_default().trim().trim_end_matches('/').to_string();
     let repo = || project::Repo { remote: "origin".into(), ..Default::default() };
     if no_gitlab && matches(gitlab_host) {
-        config.repo.get_or_insert_with(repo).gitlab =
+        repo_cfg.get_or_insert_with(repo).gitlab =
             Some(project::GitLab { host: configured(gitlab_host), path: remote.path.clone(), ..Default::default() });
     } else if no_github && matches(github_host) {
-        config.repo.get_or_insert_with(repo).github =
+        repo_cfg.get_or_insert_with(repo).github =
             Some(project::GitHub { host: configured(github_host), path: remote.path.clone(), token: String::new() });
     }
 }
@@ -422,7 +505,7 @@ fn summary_branch(root: &Path, answer: Result<Option<String>, util::git::Failure
 async fn summary(state: &AppState, p: &Project) -> ProjectSummary {
     let has_global_atlassian = state.config.read().atlassian.as_ref().is_some_and(|a| !a.site.is_empty());
     let mut warnings = p.warnings.clone();
-    let branch = summary_branch(&p.root, util::git::try_current_branch(&p.root).await, &mut warnings);
+    let branch = summary_branch(p.repo_dir(), util::git::try_current_branch(p.repo_dir()).await, &mut warnings);
     ProjectSummary {
         id: p.id.clone(),
         name: p.name.clone(),
@@ -439,6 +522,19 @@ async fn summary(state: &AppState, p: &Project) -> ProjectSummary {
         envs: p.config.envs.iter().map(|e| e.name.clone()).collect(),
         warnings,
         devcontainer: crate::devcontainer::summary(state, p),
+        repos: p.repos.iter().map(|r| repo_summary(p, r)).collect(),
+    }
+}
+
+fn repo_summary(p: &Project, r: &RepoEntry) -> RepoSummary {
+    RepoSummary {
+        id: r.id.clone(),
+        name: r.name.clone(),
+        path: if r.is_root() { String::new() } else { r.id.clone() },
+        default: p.repos.first().is_some_and(|d| d.id == r.id),
+        remote: r.remote.as_ref().map(|m| m.url.clone()),
+        gitlab: r.gitlab().map(|(host, path)| json!({ "host": host, "path": path })),
+        github: r.github().map(|(host, path)| json!({ "host": host, "path": path })),
     }
 }
 
@@ -934,6 +1030,96 @@ mod tests {
         assert_eq!(find(&gle).gitlab(), Some(("code.company.example".to_string(), "group/sub/svc".to_string())));
         let o = find(&other);
         assert_eq!((o.github(), o.gitlab()), (None, None));
+    }
+
+    /// A project with several repositories: the root's own, ones found below it, one named by
+    /// `[[repository]]`; and a folder that is no repository but a project (a `.workbench.toml`)
+    /// holding some. A request's `?repo=` is resolved by `require_repo`.
+    #[tokio::test]
+    async fn a_project_lists_its_repositories_and_a_view_answers_for_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |rel: &str, url: &str| {
+            let d = dir.path().join(rel);
+            std::fs::create_dir_all(&d).unwrap();
+            git(&d, &["init", "-q", "-b", "main"]);
+            git(&d, &["remote", "add", "origin", url]);
+            d
+        };
+        mk("shop", "https://gitlab.com/acme/shop.git");
+        mk("shop/services/api", "https://github.com/acme/api.git");
+        mk("shop/web", "git@gitlab.com:acme/web.git");
+        std::fs::create_dir_all(dir.path().join("shop/docs")).unwrap();
+        std::fs::write(
+            dir.path().join("shop/.workbench.toml"),
+            r#"
+            [[repository]]
+            path = "web"
+            name = "Frontend"
+            [repository.gitlab]
+            host = "gitlab.example"
+            path = "acme/fe"
+            [[repository]]
+            path = "../outside"
+            [[repository]]
+            path = "docs"
+            "#,
+        )
+        .unwrap();
+        // Not a repository itself: listed because of its `.workbench.toml`.
+        std::fs::create_dir_all(dir.path().join("multi")).unwrap();
+        std::fs::write(dir.path().join("multi/.workbench.toml"), "[project]\nname = \"Multi\"\n").unwrap();
+        mk("multi/a", "https://gitlab.com/acme/a.git");
+        mk("multi/b", "https://github.com/acme/b.git");
+        // A folder with nothing to say is no project.
+        std::fs::create_dir_all(dir.path().join("plain/inner")).unwrap();
+
+        let mut cfg = GlobalConfig::default();
+        cfg.projects.roots = vec![dir.path().display().to_string()];
+        cfg.notify.desktop = false;
+        let app = testutil::app_with(cfg).await;
+        let reg = &app.state.projects;
+        assert_eq!(reg.list().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["multi", "shop"]);
+
+        let shop = reg.require("shop").unwrap();
+        let ids: Vec<&str> = shop.repos.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, [".", "services/api", "web"]);
+        assert_eq!(shop.repo_id(), ".");
+        assert_eq!(shop.gitlab(), Some(("gitlab.com".to_string(), "acme/shop".to_string())));
+        let names: Vec<&str> = shop.repos.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["shop", "api", "Frontend"]);
+        assert!(shop.warnings.iter().any(|w| w.contains("../outside") && w.contains("inside the project")), "{:?}", shop.warnings);
+        assert!(shop.warnings.iter().any(|w| w.contains("docs") && w.contains("not the top of a git repository")), "{:?}", shop.warnings);
+
+        // The default repository is the project itself; another is a view of it.
+        assert!(std::sync::Arc::ptr_eq(&shop, &reg.require_repo("shop", None).unwrap()));
+        assert!(std::sync::Arc::ptr_eq(&shop, &reg.require_repo("shop", Some("")).unwrap()));
+        assert!(std::sync::Arc::ptr_eq(&shop, &reg.require_repo("shop", Some(".")).unwrap()));
+        let api = reg.require_repo("shop", Some("services/api")).unwrap();
+        assert_eq!((api.id.as_str(), api.repo_id(), api.github()), ("shop", "services/api", Some(("github.com".to_string(), "acme/api".to_string()))));
+        assert_eq!(api.gitlab(), None, "the root's GitLab project is not inherited");
+        assert_eq!(api.repo_dir(), shop.root.join("services/api"));
+        let web = reg.require_repo("shop", Some("web")).unwrap();
+        assert_eq!(web.gitlab(), Some(("gitlab.example".to_string(), "acme/fe".to_string())), "[[repository]] overrides the remote");
+        let e = reg.require_repo("shop", Some("nope")).unwrap_err();
+        assert_eq!((e.status, e.code), (axum::http::StatusCode::NOT_FOUND, "unknown_repo"));
+        assert_eq!(reg.require_repo("nope", None).unwrap_err().status, axum::http::StatusCode::NOT_FOUND);
+
+        // The summary lists them, the default first.
+        let sum = super::summary(&app.state, &shop).await;
+        assert_eq!(sum.repos.iter().map(|r| (r.id.as_str(), r.default)).collect::<Vec<_>>(), [(".", true), ("services/api", false), ("web", false)]);
+        assert_eq!(sum.repos[1].github.as_ref().unwrap()["path"], "acme/api");
+        assert_eq!(sum.repos[0].path, "");
+        assert_eq!(sum.repos[2].path, "web");
+
+        // A folder of repositories: no "." repository; the first one is the default and
+        // answers for the project's remote and forge.
+        let multi = reg.require("multi").unwrap();
+        assert_eq!(multi.name, "Multi");
+        assert_eq!(multi.repos.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!((multi.repo_id(), multi.repo_dir()), ("a", multi.root.join("a").as_path()));
+        assert_eq!(multi.gitlab(), Some(("gitlab.com".to_string(), "acme/a".to_string())));
+        assert_eq!(reg.require_repo("multi", Some("b")).unwrap().github(), Some(("github.com".to_string(), "acme/b".to_string())));
+        assert_eq!(multi.scope_key(), "multi@a");
     }
 
     /// Scratch files: a project reachable by id and path but never listed, rooted in

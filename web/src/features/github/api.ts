@@ -1,6 +1,7 @@
-// REST client, query keys and hooks for /api/projects/{pid}/github/**.
-// Every key starts with ['github', projectId] so an event for a project can
-// invalidate exactly its views (see providers.tsx).
+// REST client, query keys and hooks for /api/projects/{pid}/github/**. The "pid" every
+// function takes is a repository scope id (`api/repos.ts`): the project id for the default
+// repository, else `<project>::<repo>`. Every key starts with ['github', scope] so an event
+// for a project can invalidate its views (see providers.tsx).
 //
 // Without a token GitHub allows 60 requests an hour: the server caches hard,
 // and these hooks do not poll detail views at all when the summary says the
@@ -9,6 +10,7 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { api, ApiError } from '@/api/client'
 import { useProjects } from '@/api/queries'
+import { repoForge, scopeProject, withRepo } from '@/api/repos'
 import { isActive, livePoll, summaryPoll } from './logic'
 import type {
   Annotation,
@@ -39,7 +41,8 @@ import type {
   Workflow,
 } from './types'
 
-export const gh = (pid: string) => `/api/projects/${encodeURIComponent(pid)}/github`
+/** `/api/projects/{pid}/github/{path}` for the repository a scope id names (`?repo=`; `api/repos.ts`). */
+export const ghUrl = (scope: string, path: string) => withRepo(`/api/projects/${encodeURIComponent(scopeProject(scope))}/github/${path}`, scope)
 
 export const ghk = {
   all: (pid: string) => ['github', pid] as const,
@@ -68,23 +71,23 @@ function retry(count: number, e: unknown) {
   return count < 2
 }
 
-/** The current project's summary entry says whether it is on GitHub. */
+/** The project list says whether the repository a scope names is on GitHub. */
 export function useHasGithub(pid: string | null): boolean {
   const { data } = useProjects()
-  return !!pid && !!data?.find((p) => p.id === pid)?.github
+  return !!pid && !!repoForge(data?.find((p) => p.id === scopeProject(pid)), pid, 'github')
 }
 
-/** GitHub is this project's forge for CI (GitLab wins when a project has both). */
+/** GitHub is this repository's forge for CI (GitLab wins when it has both). */
 export function useGithubIsForge(pid: string | null): boolean {
   const { data } = useProjects()
-  const p = pid ? data?.find((x) => x.id === pid) : undefined
-  return !!p?.github && !p.gitlab
+  const p = pid ? data?.find((x) => x.id === scopeProject(pid)) : undefined
+  return !!pid && !!repoForge(p, pid, 'github') && !repoForge(p, pid, 'gitlab')
 }
 
 export function useGithubSummary(pid: string | null, enabled = true) {
   return useQuery({
     queryKey: ghk.summary(pid ?? ''),
-    queryFn: () => api.get<GithubSummary>(`${gh(pid!)}/summary`),
+    queryFn: () => api.get<GithubSummary>(ghUrl(pid!, 'summary')),
     enabled: !!pid && enabled,
     retry,
     staleTime: 15_000,
@@ -104,7 +107,7 @@ export interface RunFilters {
 export function useRuns(pid: string, filters: RunFilters, anonymous = false, perPage = 25) {
   return useInfiniteQuery({
     queryKey: ghk.runs(pid, { ...filters, perPage }),
-    queryFn: ({ pageParam }) => api.get<ListPage<Run>>(`${gh(pid)}/actions/runs`, { ...filters, page: pageParam, perPage }),
+    queryFn: ({ pageParam }) => api.get<ListPage<Run>>(ghUrl(pid, 'actions/runs'), { ...filters, page: pageParam, perPage }),
     initialPageParam: 1,
     getNextPageParam: (last) => last.nextPage ?? undefined,
     retry,
@@ -117,7 +120,7 @@ export function useRuns(pid: string, filters: RunFilters, anonymous = false, per
 export function useRunArtifacts(pid: string, id: number, updatedAt: string | null, enabled = true) {
   return useQuery({
     queryKey: [...ghk.artifacts(pid, id), updatedAt ?? ''],
-    queryFn: ({ signal }) => api.get<Artifact[]>(`${gh(pid)}/actions/runs/${id}/artifacts`, undefined, signal),
+    queryFn: ({ signal }) => api.get<Artifact[]>(ghUrl(pid, `actions/runs/${id}/artifacts`), undefined, signal),
     enabled: enabled && id > 0,
     retry,
     staleTime: 60_000,
@@ -127,7 +130,7 @@ export function useRunArtifacts(pid: string, id: number, updatedAt: string | nul
 export function useRun(pid: string, id: number, anonymous = false, enabled = true) {
   return useQuery({
     queryKey: ghk.run(pid, id),
-    queryFn: () => api.get<RunDetail>(`${gh(pid)}/actions/runs/${id}`),
+    queryFn: () => api.get<RunDetail>(ghUrl(pid, `actions/runs/${id}`)),
     enabled: enabled && id > 0,
     retry,
     refetchInterval: (q) => {
@@ -140,7 +143,7 @@ export function useRun(pid: string, id: number, anonymous = false, enabled = tru
 export function useJob(pid: string, id: number, anonymous = false) {
   return useQuery({
     queryKey: ghk.job(pid, id),
-    queryFn: () => api.get<Job>(`${gh(pid)}/actions/jobs/${id}`),
+    queryFn: () => api.get<Job>(ghUrl(pid, `actions/jobs/${id}`)),
     retry,
     refetchInterval: (q) => livePoll(anonymous, isActive(q.state.data?.state), 5_000),
   })
@@ -150,7 +153,7 @@ export function useJob(pid: string, id: number, anonymous = false) {
 export function useJobLog(pid: string, id: number, enabled = true) {
   return useQuery({
     queryKey: ghk.jobLog(pid, id),
-    queryFn: () => api.get<JobLog>(`${gh(pid)}/actions/jobs/${id}/logs`),
+    queryFn: () => api.get<JobLog>(ghUrl(pid, `actions/jobs/${id}/logs`)),
     enabled,
     retry,
     staleTime: Infinity,
@@ -161,7 +164,7 @@ export function useJobLog(pid: string, id: number, enabled = true) {
 export function useAnnotations(pid: string, id: number, enabled = true) {
   return useQuery({
     queryKey: ghk.annotations(pid, id),
-    queryFn: () => api.get<Annotation[]>(`${gh(pid)}/actions/jobs/${id}/annotations`),
+    queryFn: () => api.get<Annotation[]>(ghUrl(pid, `actions/jobs/${id}/annotations`)),
     enabled,
     retry,
     staleTime: 60_000,
@@ -169,17 +172,17 @@ export function useAnnotations(pid: string, id: number, enabled = true) {
 }
 
 export function fetchLogTail(pid: string, jobId: number, lines: number) {
-  return api.get<LogTail>(`${gh(pid)}/actions/jobs/${jobId}/logs`, { tail: lines, plain: true })
+  return api.get<LogTail>(ghUrl(pid, `actions/jobs/${jobId}/logs`), { tail: lines, plain: true })
 }
 
 export function fetchAnnotations(pid: string, jobId: number) {
-  return api.get<Annotation[]>(`${gh(pid)}/actions/jobs/${jobId}/annotations`)
+  return api.get<Annotation[]>(ghUrl(pid, `actions/jobs/${jobId}/annotations`))
 }
 
 export function useWorkflows(pid: string, enabled = true) {
   return useQuery({
     queryKey: ghk.workflows(pid),
-    queryFn: () => api.get<Workflow[]>(`${gh(pid)}/actions/workflows`),
+    queryFn: () => api.get<Workflow[]>(ghUrl(pid, 'actions/workflows')),
     enabled,
     retry,
     staleTime: 5 * 60_000,
@@ -189,7 +192,7 @@ export function useWorkflows(pid: string, enabled = true) {
 export function useDispatchInfo(pid: string, id: number | null, ref: string) {
   return useQuery({
     queryKey: ghk.inputs(pid, id ?? 0, ref),
-    queryFn: () => api.get<DispatchInfo>(`${gh(pid)}/actions/workflows/${id}/inputs`, { ref: ref || undefined }),
+    queryFn: () => api.get<DispatchInfo>(ghUrl(pid, `actions/workflows/${id}/inputs`), { ref: ref || undefined }),
     enabled: id !== null,
     retry,
     staleTime: 5 * 60_000,
@@ -204,7 +207,7 @@ export interface PullFilters {
 export function usePulls(pid: string, filters: PullFilters) {
   return useInfiniteQuery({
     queryKey: ghk.pulls(pid, filters),
-    queryFn: ({ pageParam }) => api.get<ListPage<Pull>>(`${gh(pid)}/pulls`, { ...filters, page: pageParam, perPage: 25 }),
+    queryFn: ({ pageParam }) => api.get<ListPage<Pull>>(ghUrl(pid, 'pulls'), { ...filters, page: pageParam, perPage: 25 }),
     initialPageParam: 1,
     getNextPageParam: (last) => last.nextPage ?? undefined,
     retry,
@@ -215,7 +218,7 @@ export function usePulls(pid: string, filters: PullFilters) {
 export function usePull(pid: string, n: number, anonymous = false) {
   return useQuery({
     queryKey: ghk.pull(pid, n),
-    queryFn: () => api.get<PullDetail>(`${gh(pid)}/pulls/${n}`),
+    queryFn: () => api.get<PullDetail>(ghUrl(pid, `pulls/${n}`)),
     retry,
     refetchInterval: (q) => {
       const p = q.state.data
@@ -228,7 +231,7 @@ export function usePull(pid: string, n: number, anonymous = false) {
 export function usePrFiles(pid: string, n: number, enabled = true) {
   return useQuery({
     queryKey: ghk.pullPart(pid, n, 'files'),
-    queryFn: () => api.get<PrFiles>(`${gh(pid)}/pulls/${n}/files`),
+    queryFn: () => api.get<PrFiles>(ghUrl(pid, `pulls/${n}/files`)),
     enabled,
     retry,
     staleTime: 60_000,
@@ -239,7 +242,7 @@ export function usePrFile(pid: string, n: number, f: PrFile | null, base: string
   return useQuery({
     queryKey: ghk.prFile(pid, n, f ? `${f.previousFilename ?? ''}\u0000${f.filename}` : '', base, head),
     queryFn: () =>
-      api.get<FileVersions>(`${gh(pid)}/pulls/${n}/file`, {
+      api.get<FileVersions>(ghUrl(pid, `pulls/${n}/file`), {
         path: f!.filename,
         previousPath: f!.previousFilename ?? undefined,
         status: f!.status,
@@ -257,7 +260,7 @@ export function usePrFile(pid: string, n: number, f: PrFile | null, base: string
 export function useThreads(pid: string, n: number, enabled = true) {
   return useQuery({
     queryKey: ghk.pullPart(pid, n, 'threads'),
-    queryFn: () => api.get<Thread[]>(`${gh(pid)}/pulls/${n}/threads`),
+    queryFn: () => api.get<Thread[]>(ghUrl(pid, `pulls/${n}/threads`)),
     enabled,
     retry,
   })
@@ -266,7 +269,7 @@ export function useThreads(pid: string, n: number, enabled = true) {
 export function useReviews(pid: string, n: number, enabled = true) {
   return useQuery({
     queryKey: ghk.pullPart(pid, n, 'reviews'),
-    queryFn: () => api.get<Review[]>(`${gh(pid)}/pulls/${n}/reviews`),
+    queryFn: () => api.get<Review[]>(ghUrl(pid, `pulls/${n}/reviews`)),
     enabled,
     retry,
   })
@@ -275,7 +278,7 @@ export function useReviews(pid: string, n: number, enabled = true) {
 export function usePrComments(pid: string, n: number, enabled = true) {
   return useQuery({
     queryKey: ghk.pullPart(pid, n, 'comments'),
-    queryFn: () => api.get<IssueComment[]>(`${gh(pid)}/pulls/${n}/comments`),
+    queryFn: () => api.get<IssueComment[]>(ghUrl(pid, `pulls/${n}/comments`)),
     enabled,
     retry,
   })
@@ -284,7 +287,7 @@ export function usePrComments(pid: string, n: number, enabled = true) {
 export function usePrCommits(pid: string, n: number, enabled = true) {
   return useQuery({
     queryKey: ghk.pullPart(pid, n, 'commits'),
-    queryFn: () => api.get<Commit[]>(`${gh(pid)}/pulls/${n}/commits`),
+    queryFn: () => api.get<Commit[]>(ghUrl(pid, `pulls/${n}/commits`)),
     enabled,
     retry,
   })
@@ -298,7 +301,7 @@ export interface IssueFilters {
 export function useIssues(pid: string, filters: IssueFilters) {
   return useInfiniteQuery({
     queryKey: ghk.issues(pid, filters),
-    queryFn: ({ pageParam }) => api.get<ListPage<Issue>>(`${gh(pid)}/issues`, { ...filters, page: pageParam, perPage: 25 }),
+    queryFn: ({ pageParam }) => api.get<ListPage<Issue>>(ghUrl(pid, 'issues'), { ...filters, page: pageParam, perPage: 25 }),
     initialPageParam: 1,
     getNextPageParam: (last) => last.nextPage ?? undefined,
     retry,
@@ -309,7 +312,7 @@ export function useIssues(pid: string, filters: IssueFilters) {
 export function useIssue(pid: string, n: number) {
   return useQuery({
     queryKey: ghk.issue(pid, n),
-    queryFn: () => api.get<IssueDetail>(`${gh(pid)}/issues/${n}`),
+    queryFn: () => api.get<IssueDetail>(ghUrl(pid, `issues/${n}`)),
     retry,
   })
 }
@@ -317,7 +320,7 @@ export function useIssue(pid: string, n: number) {
 export function useReleases(pid: string) {
   return useInfiniteQuery({
     queryKey: ghk.releases(pid),
-    queryFn: ({ pageParam }) => api.get<ListPage<Release>>(`${gh(pid)}/releases`, { page: pageParam, perPage: 20 }),
+    queryFn: ({ pageParam }) => api.get<ListPage<Release>>(ghUrl(pid, 'releases'), { page: pageParam, perPage: 20 }),
     initialPageParam: 1,
     getNextPageParam: (last) => last.nextPage ?? undefined,
     retry,
@@ -328,7 +331,7 @@ export function useReleases(pid: string) {
 export function useBranch(pid: string, name: string | null) {
   return useQuery({
     queryKey: ghk.branch(pid, name ?? ''),
-    queryFn: () => api.get<BranchInfo>(`${gh(pid)}/branch`, { name: name! }),
+    queryFn: () => api.get<BranchInfo>(ghUrl(pid, 'branch'), { name: name! }),
     enabled: !!name,
     retry,
     staleTime: 30_000,
@@ -336,37 +339,37 @@ export function useBranch(pid: string, name: string | null) {
 }
 
 export function fetchChecks(pid: string, sha: string) {
-  return api.get<CommitChecks | null>(`${gh(pid)}/commits/${sha}/checks`)
+  return api.get<CommitChecks | null>(ghUrl(pid, `commits/${sha}/checks`))
 }
 
 // ---------------------------------------------------------------- mutations
 
 export const ghApi = {
-  rerun: (pid: string, id: number) => api.post<Run>(`${gh(pid)}/actions/runs/${id}/rerun`),
-  rerunFailed: (pid: string, id: number) => api.post<Run>(`${gh(pid)}/actions/runs/${id}/rerun-failed`),
-  cancel: (pid: string, id: number) => api.post<Run>(`${gh(pid)}/actions/runs/${id}/cancel`),
-  rerunJob: (pid: string, id: number) => api.post<Job>(`${gh(pid)}/actions/jobs/${id}/rerun`),
+  rerun: (pid: string, id: number) => api.post<Run>(ghUrl(pid, `actions/runs/${id}/rerun`)),
+  rerunFailed: (pid: string, id: number) => api.post<Run>(ghUrl(pid, `actions/runs/${id}/rerun-failed`)),
+  cancel: (pid: string, id: number) => api.post<Run>(ghUrl(pid, `actions/runs/${id}/cancel`)),
+  rerunJob: (pid: string, id: number) => api.post<Job>(ghUrl(pid, `actions/jobs/${id}/rerun`)),
   dispatch: (pid: string, workflowId: number, ref: string, inputs: Record<string, string | boolean>) =>
-    api.post<{ ok: boolean }>(`${gh(pid)}/actions/workflows/${workflowId}/dispatch`, { ref, inputs }),
+    api.post<{ ok: boolean }>(ghUrl(pid, `actions/workflows/${workflowId}/dispatch`), { ref, inputs }),
   createPr: (pid: string, body: { title: string; body?: string; head?: string; base?: string; draft?: boolean }) =>
-    api.post<Pull>(`${gh(pid)}/pulls`, body),
+    api.post<Pull>(ghUrl(pid, 'pulls'), body),
   updatePr: (pid: string, n: number, body: { title?: string; body?: string; state?: 'open' | 'closed'; draft?: boolean }) =>
-    api.patch<PullDetail>(`${gh(pid)}/pulls/${n}`, body),
+    api.patch<PullDetail>(ghUrl(pid, `pulls/${n}`), body),
   review: (pid: string, n: number, body: { event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT'; body?: string; sha?: string | null }) =>
-    api.post<Review>(`${gh(pid)}/pulls/${n}/reviews`, { ...body, sha: body.sha ?? undefined }),
+    api.post<Review>(ghUrl(pid, `pulls/${n}/reviews`), { ...body, sha: body.sha ?? undefined }),
   merge: (pid: string, n: number, body: { sha: string; method: 'merge' | 'squash' | 'rebase'; title?: string; message?: string; deleteBranch?: boolean }) =>
-    api.post<PullDetail>(`${gh(pid)}/pulls/${n}/merge`, body),
-  comment: (pid: string, n: number, body: string) => api.post<IssueComment>(`${gh(pid)}/pulls/${n}/comments`, { body }),
+    api.post<PullDetail>(ghUrl(pid, `pulls/${n}/merge`), body),
+  comment: (pid: string, n: number, body: string) => api.post<IssueComment>(ghUrl(pid, `pulls/${n}/comments`), { body }),
   reviewComment: (pid: string, n: number, body: { body: string; path: string; line?: number; side?: 'LEFT' | 'RIGHT'; commitId?: string }) =>
-    api.post<ReviewComment>(`${gh(pid)}/pulls/${n}/review-comments`, body),
+    api.post<ReviewComment>(ghUrl(pid, `pulls/${n}/review-comments`), body),
   reply: (pid: string, n: number, commentId: number, body: string) =>
-    api.post<ReviewComment>(`${gh(pid)}/pulls/${n}/review-comments/${commentId}/replies`, { body }),
+    api.post<ReviewComment>(ghUrl(pid, `pulls/${n}/review-comments/${commentId}/replies`), { body }),
   resolve: (pid: string, n: number, threadId: string, resolved: boolean) =>
-    api.post<{ id: string; resolved: boolean }>(`${gh(pid)}/pulls/${n}/threads/${encodeURIComponent(threadId)}/resolve`, { resolved }),
-  createIssue: (pid: string, body: { title: string; body?: string; labels?: string[] }) => api.post<Issue>(`${gh(pid)}/issues`, body),
+    api.post<{ id: string; resolved: boolean }>(ghUrl(pid, `pulls/${n}/threads/${encodeURIComponent(threadId)}/resolve`), { resolved }),
+  createIssue: (pid: string, body: { title: string; body?: string; labels?: string[] }) => api.post<Issue>(ghUrl(pid, 'issues'), body),
   updateIssue: (pid: string, n: number, body: { state?: 'open' | 'closed'; stateReason?: string; title?: string; body?: string }) =>
-    api.patch<Issue>(`${gh(pid)}/issues/${n}`, body),
-  issueComment: (pid: string, n: number, body: string) => api.post<IssueComment>(`${gh(pid)}/issues/${n}/comments`, { body }),
-  logUrl: (pid: string, jobId: number) => api.url(`${gh(pid)}/actions/jobs/${jobId}/log`),
-  artifactUrl: (pid: string, artifactId: number) => api.url(`${gh(pid)}/actions/artifacts/${artifactId}/zip`),
+    api.patch<Issue>(ghUrl(pid, `issues/${n}`), body),
+  issueComment: (pid: string, n: number, body: string) => api.post<IssueComment>(ghUrl(pid, `issues/${n}/comments`), { body }),
+  logUrl: (pid: string, jobId: number) => api.url(ghUrl(pid, `actions/jobs/${jobId}/log`)),
+  artifactUrl: (pid: string, artifactId: number) => api.url(ghUrl(pid, `actions/artifacts/${artifactId}/zip`)),
 }

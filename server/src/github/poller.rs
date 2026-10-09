@@ -1,11 +1,15 @@
 //! Background Actions watcher. While at least one browser tab is connected, it
-//! checks the newest workflow runs of each GitHub project's current branch and
-//! default branch, and emits `github.run` when one appears or changes state.
+//! checks the newest workflow runs of each GitHub repository's current branch and
+//! default branch, and emits `github.run` when one appears or changes state. A project
+//! with several repositories is watched repository by repository (`forge::repo_views`),
+//! those not on GitHub not at all.
 //!
 //! With a token: every 30 s, or every 10 s while something runs or shortly after
 //! an action here. Without one (60 requests an hour per IP, shared by every
 //! project) it polls every 10 minutes (5 while something runs), only projects
 //! someone looked at in the last `VIEWED_FOR`, and never when the quota is low.
+//! Everything is keyed by `Project::scope_key`: the project id for its default
+//! repository, `<id>@<repository>` for another.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,7 +46,7 @@ const VIEWED_FOR: Duration = Duration::from_secs(900);
 /// own changes so the poller does not announce them twice).
 #[derive(Default)]
 pub struct PollState {
-    /// `(project id, ref)` → run id → state
+    /// `(repository scope key, ref)` → run id → state
     last: Mutex<HashMap<(String, String), HashMap<u64, String>>>,
     hot_until: Mutex<HashMap<String, Instant>>,
 }
@@ -113,16 +117,20 @@ pub fn spawn(state: AppState) {
             if state.events.ui_clients() == 0 {
                 continue;
             }
-            let projects: Vec<Arc<Project>> = state.projects.list().into_iter().filter(|p| p.github().is_some()).collect();
-            due.retain(|id, _| projects.iter().any(|p| &p.id == id));
-            state.github.poll.forget_project(&|id| projects.iter().any(|p| p.id == id));
-            for project in projects {
-                if due.get(&project.id).is_some_and(|t| *t > Instant::now()) || !wants_poll(&state, &project) {
+            let projects: Vec<(String, Arc<Project>)> = crate::forge::repo_views(&state)
+                .into_iter()
+                .filter(|p| p.github().is_some())
+                .map(|p| (p.scope_key(), p))
+                .collect();
+            due.retain(|key, _| projects.iter().any(|(k, _)| k == key));
+            state.github.poll.forget_project(&|key| projects.iter().any(|(k, _)| k == key));
+            for (scope, project) in projects {
+                if due.get(&scope).is_some_and(|t| *t > Instant::now()) || !wants_poll(&state, &project) {
                     continue;
                 }
                 let next = match poll_project(&state, project.clone()).await {
                     Ok((active, anon)) => {
-                        let hot = active || state.github.poll.is_hot(&project.id);
+                        let hot = active || state.github.poll.is_hot(&scope);
                         match (hot, anon) {
                             (true, false) => FAST,
                             (false, false) => SLOW,
@@ -138,30 +146,30 @@ pub fn spawn(state: AppState) {
                         BROKEN
                     }
                     Err(e) => {
-                        tracing::debug!("github poll of {} failed: {e}", project.id);
+                        tracing::debug!("github poll of {scope} failed: {e}");
                         FAILING
                     }
                 };
-                due.insert(project.id.clone(), Instant::now() + next);
+                due.insert(scope, Instant::now() + next);
             }
         }
     });
 }
 
-/// Whether the poller should watch this project now. With a token always (a
+/// Whether the poller should watch this repository now. With a token always (a
 /// 304 is free); anonymous requests all share one small per-IP quota, so only
-/// while someone looks at the project.
+/// while someone looks at it.
 pub(super) fn wants_poll(state: &AppState, project: &Project) -> bool {
     let Some((host, _)) = project.github() else { return false };
     match client::conn_for(state, project, &host) {
-        Ok(c) if c.is_anonymous() => state.github.viewed_within(&project.id, VIEWED_FOR),
+        Ok(c) if c.is_anonymous() => state.github.viewed_within(&project.scope_key(), VIEWED_FOR),
         // A token, or a setup error that polling reports (and backs off from).
         _ => true,
     }
 }
 
-/// Poll one project; returns whether a watched run is still active, and
-/// whether the connection is anonymous.
+/// Poll one repository (a project seen through it); returns whether a watched run is
+/// still active, and whether the connection is anonymous.
 pub(super) async fn poll_project(state: &AppState, project: Arc<Project>) -> ApiResult<(bool, bool)> {
     let ctx = client::ctx_for(state, project.clone()).await?;
     let anon = ctx.is_anonymous();
@@ -169,7 +177,7 @@ pub(super) async fn poll_project(state: &AppState, project: Arc<Project>) -> Api
         return Ok((false, anon));
     }
     let mut refs: Vec<String> = vec![];
-    if let Some(b) = crate::util::git::current_branch_logged(&project.root).await {
+    if let Some(b) = crate::util::git::current_branch_logged(project.repo_dir()).await {
         refs.push(b);
     }
     if let Some(d) = ctx.default_branch() {
@@ -187,9 +195,10 @@ pub(super) async fn poll_project(state: &AppState, project: Arc<Project>) -> Api
 async fn poll_ref(ctx: &GhCtx, git_ref: &str) -> ApiResult<bool> {
     let runs = branch_runs(ctx, git_ref, PER_REF).await?;
     let seen: Vec<(u64, String)> = runs.iter().map(|r| (r.id, r.state.clone())).collect();
-    let changes = ctx.state.github.poll.observe(&ctx.project.id, git_ref, &seen);
+    let scope = ctx.project.scope_key();
+    let changes = ctx.state.github.poll.observe(&scope, git_ref, &seen);
     if !changes.is_empty() {
-        ctx.state.github.invalidate_summary(&ctx.project.id);
+        ctx.state.github.invalidate_summary(&scope);
     }
     for (id, change) in changes {
         let Some(run) = runs.iter().find(|r| r.id == id) else { continue };
@@ -199,7 +208,7 @@ async fn poll_ref(ctx: &GhCtx, git_ref: &str) -> ApiResult<bool> {
             Change::Changed(p) => Some(p),
             Change::New => None,
         };
-        super::emit_run(&ctx.state, &ctx.project.id, run, "poll", previous.as_deref());
+        super::emit_run(&ctx.state, &ctx.project, run, "poll", previous.as_deref());
     }
     Ok(runs.iter().any(|r| is_active(&r.state)))
 }

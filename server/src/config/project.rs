@@ -25,6 +25,10 @@ pub struct ProjectFile {
     pub project: Project,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<Repo>,
+    /// Further git repositories of the project (`[[repository]]`), merged by `path`.
+    /// `[repo]` is the one the project root belongs to.
+    #[serde(default, rename = "repository", skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<Repository>,
     #[serde(default, rename = "component", skip_serializing_if = "Vec::is_empty")]
     pub components: Vec<Component>,
     #[serde(default, rename = "run", skip_serializing_if = "Vec::is_empty")]
@@ -101,6 +105,10 @@ pub struct Project {
     /// Paths Workbench must never offer to open/serve/upload (e.g. committed secrets, outreach PII).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sensitive: Vec<String>,
+    /// List git repositories found below the root as the project's repositories (on unless
+    /// `false`). `[[repository]]` entries are listed either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_repos: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -117,6 +125,28 @@ pub struct Repo {
     pub ci: Option<Ci>,
 }
 fn origin() -> String { "origin".into() }
+
+/// A `[[repository]] path` as a key for comparing entries: `/`-separated, without `.`
+/// parts, empty parts or a trailing `/` (`./services//api/` is `services/api`). Validity
+/// (inside the root, no `..`) is `projects::repos::normalize_path`'s to judge.
+pub fn repository_key(path: &str) -> String {
+    let p = path.trim().replace('\\', "/");
+    p.split('/').filter(|c| !c.is_empty() && *c != ".").collect::<Vec<_>>().join("/")
+}
+
+/// `[[repository]]`: a further git repository of the project, a directory below its
+/// root. Takes the settings of `[repo]` (remote, GitLab, GitHub, CI); what it leaves out
+/// comes from the repository itself (its remote, its CI files).
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Repository {
+    /// The working tree, relative to the project root (`services/api`).
+    pub path: String,
+    /// Label in the repository switcher; the directory's name when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(flatten)]
+    pub repo: Repo,
+}
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GitLab {
@@ -608,6 +638,17 @@ pub enum SecretRef {
     Command(Vec<String>),
 }
 
+impl Repo {
+    /// Overlay `r` on `self`: what it sets wins.
+    pub fn merge(&mut self, r: Repo) {
+        if !r.remote.is_empty() { self.remote = r.remote; }
+        if r.default_branch.is_some() { self.default_branch = r.default_branch; }
+        if r.gitlab.is_some() { self.gitlab = r.gitlab; }
+        if r.github.is_some() { self.github = r.github; }
+        if r.ci.is_some() { self.ci = r.ci; }
+    }
+}
+
 impl ProjectFile {
     /// Overlay `other` on top of `self`: scalars/sections from `other` win when set,
     /// named lists (`run`, `env`, `component`, `agent.starter`) merge by name.
@@ -620,13 +661,18 @@ impl ProjectFile {
         if !p.tags.is_empty() { self.project.tags = p.tags; }
         if !p.docs.is_empty() { self.project.docs = p.docs; }
         for s in p.sensitive { if !self.project.sensitive.contains(&s) { self.project.sensitive.push(s); } }
+        if p.nested_repos.is_some() { self.project.nested_repos = p.nested_repos; }
         if let Some(r) = other.repo {
-            let base = self.repo.get_or_insert_with(Repo::default);
-            if !r.remote.is_empty() { base.remote = r.remote; }
-            if r.default_branch.is_some() { base.default_branch = r.default_branch; }
-            if r.gitlab.is_some() { base.gitlab = r.gitlab; }
-            if r.github.is_some() { base.github = r.github; }
-            if r.ci.is_some() { base.ci = r.ci; }
+            self.repo.get_or_insert_with(Repo::default).merge(r);
+        }
+        for r in other.repositories {
+            match self.repositories.iter_mut().find(|b| repository_key(&b.path) == repository_key(&r.path)) {
+                Some(base) => {
+                    if !r.name.is_empty() { base.name = r.name; }
+                    base.repo.merge(r.repo);
+                }
+                None => self.repositories.push(r),
+            }
         }
         merge_named(&mut self.components, other.components, |c| c.name.clone());
         merge_named(&mut self.runs, other.runs, |r| r.name.clone());
@@ -847,6 +893,17 @@ impl ProjectFile {
         let overlay_github = overlay.repo.as_ref().is_some_and(|r| r.github.is_some());
         if let (false, Some(g)) = (overlay_github, self.repo.as_ref().and_then(|r| r.github.as_ref())) {
             add(&g.token);
+        }
+        // A further repository's tokens are repository secret names too, unless the
+        // overlay sets that forge for the same directory.
+        for r in &self.repositories {
+            let over = overlay.repositories.iter().find(|o| repository_key(&o.path) == repository_key(&r.path));
+            if let (false, Some(g)) = (over.is_some_and(|o| o.repo.gitlab.is_some()), r.repo.gitlab.as_ref()) {
+                add(&g.token);
+            }
+            if let (false, Some(g)) = (over.is_some_and(|o| o.repo.github.is_some()), r.repo.github.as_ref()) {
+                add(&g.token);
+            }
         }
         if let (None, Some(c)) = (&overlay.links.confluence, &self.links.confluence) {
             add(&c.token);
@@ -1108,6 +1165,70 @@ mod tests {
         // The overlay defines "gitlab" for this project: repository entries may use it.
         assert_eq!(l.secret_ref("gitlab", &BTreeMap::new()), Some(SecretRef::File("~/.project_token".into())));
         assert_eq!(c.hosts["evil"].host, "10.0.0.5");
+    }
+
+    #[test]
+    fn further_repositories_parse_merge_by_path_and_confine_their_tokens() {
+        let repo = pf(r#"
+            [project]
+            nested_repos = false
+
+            [repo.gitlab]
+            host = "gitlab.com"
+            path = "acme/shop"
+
+            [[repository]]
+            path = "services/api"
+            name = "API"
+            [repository.gitlab]
+            host = "gitlab.example"
+            path = "acme/api"
+            token = "api_token"
+
+            [[repository]]
+            path = "web"
+            [repository.github]
+            path = "acme/web"
+            token = "web_token"
+        "#);
+        assert_eq!(repo.repositories.len(), 2);
+        assert_eq!(repo.repositories[0].name, "API");
+        assert_eq!(repo.repositories[0].repo.remote, "origin");
+        assert_eq!(repo.repositories[0].repo.gitlab.as_ref().unwrap().path, "acme/api");
+        assert_eq!(repo.project.nested_repos, Some(false));
+
+        // The machine overlay sets the token of one directory and leaves the other alone.
+        let overlay = pf(r#"
+            [secrets]
+            api_pw = { file = "~/.api_token" }
+            [[repository]]
+            path = "services/api"
+            [repository.gitlab]
+            host = "gitlab.example"
+            path = "acme/api"
+            token = "api_pw"
+        "#);
+        let l = merge_layers(ProjectFile::default(), Some(repo), Some(overlay), "o.toml", None);
+        let api = l.config.repositories.iter().find(|r| r.path == "services/api").unwrap();
+        assert_eq!(api.name, "API", "the overlay's entry keeps what it does not set");
+        assert_eq!(api.repo.gitlab.as_ref().unwrap().token, "api_pw");
+        assert_eq!(l.config.repositories.len(), 2);
+        // The same directory spelled differently is the same entry.
+        let spelled = merge_layers(
+            ProjectFile::default(),
+            Some(pf("[[repository]]\npath = \"services/api/\"\nname = \"API\"\n")),
+            Some(pf("[[repository]]\npath = \"./services//api\"\n[repository.gitlab]\npath = \"acme/api\"\n")),
+            "o.toml",
+            None,
+        );
+        assert_eq!(spelled.config.repositories.len(), 1);
+        assert_eq!((spelled.config.repositories[0].name.as_str(), spelled.config.repositories[0].repo.gitlab.is_some()), ("API", true));
+        // The repository's own token names resolve only against the overlay's secrets.
+        assert!(l.repo_secret_names.contains("web_token"));
+        assert!(!l.repo_secret_names.contains("api_token") && !l.repo_secret_names.contains("api_pw"));
+        assert_eq!(l.secret_ref("web_token", &BTreeMap::new()), None);
+        let global = BTreeMap::from([("web_token".to_string(), SecretRef::Env("GLOBAL".into()))]);
+        assert_eq!(l.secret_ref("web_token", &global), None, "config.toml's secrets are not reachable by name");
     }
 
     #[test]

@@ -16,7 +16,7 @@
 //! Events are debounced (200 ms), deduplicated and capped (500 paths, then
 //! `overflow: true`, as when the watcher itself lost events), and emitted as
 //! `fs.changed {paths}` (project-relative). Changes to `.git/HEAD`, the index or refs
-//! emit `git.changed`. Changed files are handed to Local History (`history::changed`):
+//! emit `git.changed {repo}`, also those of a repository below the root (`NestedGit`). Changed files are handed to Local History (`history::changed`):
 //! not those of a batch over the cap (a checkout, which the VCS records), but after the
 //! watcher lost events (Windows) the files it did report and those the disk shows changed
 //! since the batch before (`changed_since`), looked for by a task of their own (`rescan`)
@@ -67,6 +67,8 @@ struct Pending {
     /// The watcher lost events (its buffer overflowed), or a watch stopped on an error.
     lost: bool,
     git: bool,
+    /// Repositories below the root (ids) whose HEAD, index or refs moved.
+    repos: BTreeSet<String>,
     /// Created or renamed-to paths that may be directories needing watches.
     new_dirs: Vec<PathBuf>,
     /// A directory went away or moved: prune our bookkeeping.
@@ -78,6 +80,10 @@ struct Pending {
 struct Inner {
     root: PathBuf,
     git: Option<GitDirs>,
+    /// The repositories below the root, each with git dirs of its own.
+    nested: Vec<NestedGit>,
+    /// Their working trees (`NestedGit::top`).
+    tops: Vec<PathBuf>,
     deb: Mutex<Option<Deb>>,
     /// The folders watched, one watch each; with one recursive watch, those it reports.
     dirs: Mutex<HashSet<PathBuf>>,
@@ -119,6 +125,28 @@ impl Drop for ProjectWatch {
 struct GitDirs {
     gitdir: PathBuf,
     commondir: PathBuf,
+}
+
+/// A repository below the project root (`Project::repos`, not the `.` one): its id and
+/// git dirs. Its `.git` lies inside the root, where the walk skips it, so it is watched
+/// like the root repository's.
+#[derive(Debug, Clone)]
+struct NestedGit {
+    repo: String,
+    /// The working tree.
+    top: PathBuf,
+    dirs: GitDirs,
+}
+
+impl NestedGit {
+    /// What a change of `path` means to this repository: `Some(true)` HEAD, index or refs
+    /// moved, `Some(false)` other git metadata, `None` not in its git dirs.
+    fn signal(&self, path: &Path) -> Option<bool> {
+        [&self.dirs.gitdir, &self.dirs.commondir]
+            .into_iter()
+            .find_map(|dir| os::path::strip_prefix(path, dir))
+            .map(is_git_signal)
+    }
 }
 
 /// The git dirs of the repository containing `root`: like git's own discovery, the
@@ -219,9 +247,10 @@ fn hard_ignored(name: &str) -> bool {
     HARD_IGNORE.contains(&name)
 }
 
-/// Directories to watch under `start` (inclusive), honouring .gitignore.
-fn walk_dirs(start: &Path) -> impl Iterator<Item = PathBuf> {
-    super::gitignore::walk(start)
+/// Directories to watch under `start` (inclusive), honouring .gitignore, and in the
+/// repositories `nested` below it (their own ignore files govern them).
+fn walk_dirs(start: &Path, nested: &[PathBuf]) -> impl Iterator<Item = PathBuf> {
+    super::gitignore::walk(start, nested)
         .parents(true)
         .build()
         .flatten()
@@ -234,17 +263,24 @@ fn walk_dirs(start: &Path) -> impl Iterator<Item = PathBuf> {
 /// lost. `None` when more than `MAX_EVENT_PATHS` were (a checkout or a generator, which
 /// Local History leaves to the VCS as it does a capped batch). The walk stops after
 /// `MAX_RESCAN_ENTRIES` entries, with what it found by then. Blocking.
-fn changed_since(root: &Path, git: Option<&GitDirs>, since: SystemTime) -> Option<Vec<String>> {
-    let walk = ignore::WalkBuilder::new(root)
-        .hidden(false)
+fn changed_since(root: &Path, nested: &[PathBuf], git: Option<&GitDirs>, since: SystemTime) -> Option<Vec<String>> {
+    let mut walk = ignore::WalkBuilder::new(root);
+    walk.hidden(false)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .require_git(false)
         .parents(true)
         .follow_links(false)
-        .filter_entry(|e| !hard_ignored(&e.file_name().to_string_lossy()))
-        .build();
+        .filter_entry({
+            let nested = nested.to_vec();
+            move |e| !hard_ignored(&e.file_name().to_string_lossy()) && !nested.iter().any(|t| t == e.path())
+        });
+    // A repository below the root is walked on its own, whatever the root's ignore files say.
+    for top in nested.iter().filter(|t| t.starts_with(root) && *t != root) {
+        walk.add(top);
+    }
+    let walk = walk.build();
     let mut out = vec![];
     for (n, entry) in walk.flatten().enumerate() {
         if n >= MAX_RESCAN_ENTRIES {
@@ -275,6 +311,8 @@ struct Batch {
     /// The watcher lost events: changes from this time on may be missing from `paths`.
     lost_since: Option<SystemTime>,
     git: bool,
+    /// Repositories below the root whose HEAD, index or refs moved.
+    repos: BTreeSet<String>,
     /// Created or moved-in paths that may be folders (project-relative).
     created: Vec<String>,
 }
@@ -299,6 +337,7 @@ fn history_paths(
     capped: bool,
     lost_since: Option<SystemTime>,
     root: &Path,
+    nested: &[PathBuf],
     git: Option<&GitDirs>,
 ) -> Option<Vec<String>> {
     if capped {
@@ -306,16 +345,23 @@ fn history_paths(
     }
     let mut paths = paths;
     if let Some(since) = lost_since {
-        paths.extend(changed_since(root, git, since)?);
+        paths.extend(changed_since(root, nested, git, since)?);
     }
     Some(paths.into_iter().collect())
 }
 
 impl Inner {
+    #[cfg(test)]
     fn new(root: PathBuf, git: Option<GitDirs>) -> Arc<Inner> {
+        Self::with_nested(root, git, vec![])
+    }
+
+    fn with_nested(root: PathBuf, git: Option<GitDirs>, nested: Vec<NestedGit>) -> Arc<Inner> {
         Arc::new(Inner {
             root,
             git,
+            tops: nested.iter().map(|n| n.top.clone()).collect(),
+            nested,
             deb: Mutex::new(None),
             dirs: Mutex::new(HashSet::new()),
             pending: Mutex::new(Pending::default()),
@@ -375,6 +421,7 @@ impl Inner {
                 // included (a `.git` inside the root has no watch of its own).
                 p.lost = true;
                 p.git |= git.is_some();
+                p.repos.extend(self.nested.iter().map(|n| n.repo.clone()));
                 any = true;
                 continue;
             }
@@ -389,6 +436,13 @@ impl Inner {
                 p.prune = true;
             }
             for path in &ev.paths {
+                if let Some(signal) = self.nested.iter().find_map(|n| n.signal(path).map(|s| (n, s))) {
+                    if signal.1 {
+                        p.repos.insert(signal.0.repo.clone());
+                        any = true;
+                    }
+                    continue;
+                }
                 match classify(&self.root, git, path) {
                     Class::Git => {
                         p.git = true;
@@ -449,6 +503,7 @@ impl Inner {
         p.rewatch = true;
         p.lost = true;
         p.git |= self.git.is_some();
+        p.repos.extend(self.nested.iter().map(|n| n.repo.clone()));
         drop(p);
         self.wake.notify_one();
     }
@@ -462,6 +517,9 @@ impl Inner {
         self.add_tree(&self.root, false);
         if let Some(g) = &self.git {
             self.add_git_watches(g);
+        }
+        for n in &self.nested {
+            self.add_git_watches(&n.dirs);
         }
     }
 
@@ -494,6 +552,9 @@ impl Inner {
                 if let Some(g) = &w.git {
                     w.add_git_watches(g);
                 }
+                for n in &w.nested {
+                    w.add_git_watches(&n.dirs);
+                }
             })
             .await;
         }
@@ -525,7 +586,7 @@ impl Inner {
             })
             .await;
         }
-        Batch { paths: batch.paths, overflow: batch.capped || batch.lost, capped: batch.capped, lost_since, git: batch.git, created }
+        Batch { paths: batch.paths, overflow: batch.capped || batch.lost, capped: batch.capped, lost_since, git: batch.git, repos: batch.repos, created }
     }
 
     /// Watch `dir` and its (non-ignored) subdirectories. Blocking.
@@ -545,7 +606,7 @@ impl Inner {
                 return;
             }
         }
-        for d in walk_dirs(dir) {
+        for d in walk_dirs(dir, &self.tops) {
             let mut dirs = self.dirs.lock();
             if dirs.len() >= MAX_WATCHED_DIRS && !dirs.contains(&d) {
                 if !self.capped.swap(true, Ordering::Relaxed) {
@@ -603,7 +664,13 @@ impl Inner {
 /// Start watching `project`. The initial walk runs on the blocking pool.
 async fn start_watch(state: &AppState, project: &Project) -> anyhow::Result<ProjectWatch> {
     let root = project.root.clone();
-    let inner = Inner::new(root.clone(), git_dirs(&root));
+    let nested = project
+        .repos
+        .iter()
+        .filter(|r| !r.is_root())
+        .filter_map(|r| git_dirs(&r.dir).map(|dirs| NestedGit { repo: r.id.clone(), top: r.dir.clone(), dirs }))
+        .collect();
+    let inner = Inner::with_nested(root.clone(), git_dirs(&root), nested);
     inner.start(Duration::from_millis(200))?;
     let setup = inner.clone();
     tokio::task::spawn_blocking(move || setup.watch_all()).await?;
@@ -626,7 +693,10 @@ async fn run(state: AppState, pid: String, inner: Arc<Inner>) {
                 .emit("fs.changed", Some(&pid), json!({ "paths": batch.paths, "overflow": batch.overflow }));
         }
         if batch.git {
-            state.events.emit("git.changed", Some(&pid), json!({}));
+            state.events.emit("git.changed", Some(&pid), json!({ "repo": crate::projects::ROOT_REPO }));
+        }
+        for repo in &batch.repos {
+            state.events.emit("git.changed", Some(&pid), json!({ "repo": repo }));
         }
         if !changed {
             continue;
@@ -638,7 +708,7 @@ async fn run(state: AppState, pid: String, inner: Arc<Inner>) {
         match lost_since {
             Some(since) if !capped => inner.queue_lost(since, paths, created),
             _ => {
-                if let Some(paths) = history_paths(paths, capped, None, &inner.root, inner.git.as_ref()) {
+                if let Some(paths) = history_paths(paths, capped, None, &inner.root, &inner.tops, inner.git.as_ref()) {
                     super::history::changed(&state, &pid, paths, created);
                 }
             }
@@ -654,7 +724,7 @@ async fn rescan(state: AppState, pid: String, inner: Arc<Inner>) {
         inner.lost_wake.notified().await;
         while let Some(Lost { since, paths, created, capped }) = inner.take_lost() {
             let walk = inner.clone();
-            let found = tokio::task::spawn_blocking(move || history_paths(paths, capped, Some(since), &walk.root, walk.git.as_ref())).await;
+            let found = tokio::task::spawn_blocking(move || history_paths(paths, capped, Some(since), &walk.root, &walk.tops, walk.git.as_ref())).await;
             if let Ok(Some(paths)) = found {
                 super::history::changed(&state, &pid, paths, created);
             }
@@ -751,7 +821,7 @@ mod tests {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         std::fs::write(root.join(".gitignore"), "build/\n").unwrap();
-        let mut got: Vec<String> = walk_dirs(root).map(|p| os::path::to_slash(p.strip_prefix(root).unwrap())).collect();
+        let mut got: Vec<String> = walk_dirs(root, &[]).map(|p| os::path::to_slash(p.strip_prefix(root).unwrap())).collect();
         got.sort();
         assert_eq!(got, vec!["", ".github", ".github/workflows", "src", "src/a"]);
     }
@@ -832,6 +902,87 @@ mod tests {
             }
         };
         assert_eq!(got, Some(Some(pid)));
+    }
+
+    /// A repository below the project root has git dirs of its own: its index and refs moving
+    /// is `git.changed` for that repository (and not for the root one), while its other git
+    /// metadata is noise.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_repository_below_the_root_emits_git_changed_for_itself() {
+        use crate::config::{GlobalConfig, Paths};
+        let (cfg, data, tmp) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let root = crate::util::os::path::canonicalize(tmp.path()).unwrap().join("shop");
+        for repo in [root.clone(), root.join("services/api")] {
+            std::fs::create_dir_all(repo.join(".git/refs/heads")).unwrap();
+            std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        }
+        let mut config = GlobalConfig::default();
+        config.projects.roots = vec![];
+        config.projects.include = vec![root.display().to_string()];
+        config.notify.desktop = false;
+        let paths = Paths { config_dir: cfg.path().to_path_buf(), data_dir: data.path().to_path_buf() };
+        let state = AppState::new(paths, config, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        assert_eq!(state.projects.list()[0].repos.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [".", "services/api"]);
+        let mut rx = state.events.subscribe();
+        sync_all(&state).await;
+
+        let api = root.join("services/api/.git");
+        std::fs::create_dir_all(api.join("objects/ab")).unwrap();
+        std::fs::write(api.join("objects/ab/cdef"), "noise").unwrap();
+        std::fs::write(api.join("index"), "staged").unwrap();
+        std::fs::write(api.join("refs/heads/other"), "0123\n").unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut repos = vec![];
+        while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+            if ev.kind == "git.changed" {
+                repos.push(ev.data["repo"].as_str().unwrap_or_default().to_string());
+                break;
+            }
+        }
+        // Give a late event for the root repository the chance to show up.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        while let Ok(ev) = rx.try_recv() {
+            if ev.kind == "git.changed" {
+                repos.push(ev.data["repo"].as_str().unwrap_or_default().to_string());
+            }
+        }
+        assert!(!repos.is_empty() && repos.iter().all(|r| r == "services/api"), "{repos:?}");
+    }
+
+    /// A repository below the root is watched whatever the root's `.gitignore` says of it
+    /// (it lists its clones): edits in it are `fs.changed`, so its Commit window stays fresh.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn edits_in_a_repository_the_root_ignores_are_reported() {
+        use crate::config::{GlobalConfig, Paths};
+        let (cfg, data, tmp) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let root = crate::util::os::path::canonicalize(tmp.path()).unwrap().join("shop");
+        for repo in [root.clone(), root.join("web")] {
+            std::fs::create_dir_all(repo.join(".git/refs/heads")).unwrap();
+            std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        }
+        std::fs::create_dir_all(root.join("web/src")).unwrap();
+        std::fs::write(root.join(".gitignore"), "web/\n").unwrap();
+        let mut config = GlobalConfig::default();
+        config.projects.roots = vec![];
+        config.projects.include = vec![root.display().to_string()];
+        config.notify.desktop = false;
+        let paths = Paths { config_dir: cfg.path().to_path_buf(), data_dir: data.path().to_path_buf() };
+        let state = AppState::new(paths, config, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut rx = state.events.subscribe();
+        sync_all(&state).await;
+
+        std::fs::write(root.join("web/src/app.js"), "x\n").unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut seen = vec![];
+        while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+            if ev.kind == "fs.changed" {
+                seen.extend(ev.data["paths"].as_array().unwrap().iter().filter_map(|p| p.as_str().map(str::to_string)));
+                if seen.iter().any(|p| p == "web/src/app.js") {
+                    break;
+                }
+            }
+        }
+        assert!(seen.iter().any(|p| p == "web/src/app.js"), "{seen:?}");
     }
 
     /// A watcher on `root` as `start_watch` makes it (with a shorter debounce), stopped when
@@ -977,7 +1128,7 @@ mod tests {
         let b = tokio::time::timeout(Duration::from_millis(500), inner.next_batch()).await.unwrap();
         assert!(b.overflow && b.capped && b.lost_since.is_none(), "{:?}", (b.overflow, b.capped, b.lost_since));
         assert_eq!(b.paths.len(), MAX_EVENT_PATHS);
-        assert_eq!(history_paths(b.paths, b.capped, b.lost_since, &root, None), None);
+        assert_eq!(history_paths(b.paths, b.capped, b.lost_since, &root, &[], None), None);
     }
 
     /// Changes the watcher lost are looked for on disk: files modified since, in the folders a
@@ -1006,10 +1157,10 @@ mod tests {
         write(".git/HEAD", None);
         let git = git_dirs(&root);
         let since = SystemTime::now() - Duration::from_secs(60);
-        assert_eq!(changed_since(&root, git.as_ref(), since), Some(vec!["src/new.rs".to_string()]));
+        assert_eq!(changed_since(&root, &[], git.as_ref(), since), Some(vec!["src/new.rs".to_string()]));
 
         let reported = BTreeSet::from(["src/new.rs".to_string(), "src/reported.rs".to_string()]);
-        let all = |capped, lost_since| history_paths(reported.clone(), capped, lost_since, &root, git.as_ref());
+        let all = |capped, lost_since| history_paths(reported.clone(), capped, lost_since, &root, &[], git.as_ref());
         assert_eq!(all(false, None), Some(vec!["src/new.rs".to_string(), "src/reported.rs".to_string()]));
         assert_eq!(all(false, Some(since)), Some(vec!["src/new.rs".to_string(), "src/reported.rs".to_string()]));
         write("src/lost.rs", None);
@@ -1021,7 +1172,7 @@ mod tests {
         for i in 0..MAX_EVENT_PATHS {
             write(&format!("gen/f{i}.txt"), None);
         }
-        assert_eq!(changed_since(&root, git.as_ref(), since), None);
+        assert_eq!(changed_since(&root, &[], git.as_ref(), since), None);
         assert_eq!(all(false, Some(since)), None);
     }
 

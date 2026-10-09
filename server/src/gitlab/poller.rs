@@ -1,7 +1,9 @@
 //! Background pipeline poller. While at least one browser tab is connected, it
-//! checks the newest pipeline of each GitLab project's current branch and
+//! checks the newest pipeline of each GitLab repository's current branch and
 //! default branch — every 30 s, or every 10 s while one is running or shortly
-//! after a pipeline action — and emits `gitlab.pipeline` when one changes.
+//! after a pipeline action — and emits `gitlab.pipeline` when one changes. A project
+//! with several repositories is watched repository by repository (`forge::repo_views`),
+//! those not on GitLab not at all.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,7 +31,7 @@ const FAILING: Duration = Duration::from_secs(60);
 /// own changes so the poller does not announce them twice).
 #[derive(Default)]
 pub struct PollState {
-    /// `(project id, ref)` → `(pipeline id, status)`
+    /// `(repository scope key, ref)` → `(pipeline id, status)`
     last: Mutex<HashMap<(String, String), (u64, String)>>,
     hot_until: Mutex<HashMap<String, Instant>>,
 }
@@ -86,14 +88,18 @@ pub fn spawn(state: AppState) {
             if state.events.ui_clients() == 0 {
                 continue;
             }
-            let projects: Vec<Arc<Project>> = state.projects.list().into_iter().filter(|p| p.gitlab().is_some()).collect();
-            due.retain(|id, _| projects.iter().any(|p| &p.id == id));
-            for project in projects {
-                if due.get(&project.id).is_some_and(|t| *t > Instant::now()) {
+            let projects: Vec<(String, Arc<Project>)> = crate::forge::repo_views(&state)
+                .into_iter()
+                .filter(|p| p.gitlab().is_some())
+                .map(|p| (p.scope_key(), p))
+                .collect();
+            due.retain(|key, _| projects.iter().any(|(k, _)| k == key));
+            for (scope, project) in projects {
+                if due.get(&scope).is_some_and(|t| *t > Instant::now()) {
                     continue;
                 }
                 let next = match poll_project(&state, project.clone()).await {
-                    Ok(active) if active || state.gitlab.poll.is_hot(&project.id) => FAST,
+                    Ok(active) if active || state.gitlab.poll.is_hot(&scope) => FAST,
                     Ok(_) => SLOW,
                     Err(e)
                         if e.code == "not_configured"
@@ -102,24 +108,25 @@ pub fn spawn(state: AppState) {
                         BROKEN
                     }
                     Err(e) => {
-                        tracing::debug!("gitlab poll of {} failed: {e}", project.id);
+                        tracing::debug!("gitlab poll of {scope} failed: {e}");
                         FAILING
                     }
                 };
-                due.insert(project.id.clone(), Instant::now() + next);
+                due.insert(scope, Instant::now() + next);
             }
         }
     });
 }
 
-/// Poll one project; returns whether any watched pipeline is still active.
+/// Poll one repository (a project seen through it); returns whether any watched
+/// pipeline is still active.
 pub(super) async fn poll_project(state: &AppState, project: Arc<Project>) -> ApiResult<bool> {
     let ctx = client::ctx_for(state, project.clone()).await?;
     if state.gitlab.rate_low(&ctx.host) {
         return Ok(true); // keep the schedule short but skip this round
     }
     let mut refs: Vec<String> = vec![];
-    if let Some(b) = crate::util::git::current_branch_logged(&project.root).await {
+    if let Some(b) = crate::util::git::current_branch_logged(project.repo_dir()).await {
         refs.push(b);
     }
     if let Some(d) = ctx.default_branch() {
@@ -127,13 +134,14 @@ pub(super) async fn poll_project(state: &AppState, project: Arc<Project>) -> Api
             refs.push(d.to_string());
         }
     }
+    let scope = project.scope_key();
     let mut active = false;
     for r in refs {
         let Some(p) = newest(&ctx, &r).await? else { continue };
         active |= is_active_status(&p.status);
-        if let Change::Changed { previous } = state.gitlab.poll.observe(&project.id, &r, p.id, &p.status) {
-            state.gitlab.invalidate_summary(&project.id);
-            super::emit_pipeline(state, &project.id, p.id, p.iid, &p.status, &p.git_ref, &p.sha, &p.web_url, previous.as_deref());
+        if let Change::Changed { previous } = state.gitlab.poll.observe(&scope, &r, p.id, &p.status) {
+            state.gitlab.invalidate_summary(&scope);
+            super::emit_pipeline(state, &project, p.id, p.iid, &p.status, &p.git_ref, &p.sha, &p.web_url, previous.as_deref());
         }
     }
     Ok(active)

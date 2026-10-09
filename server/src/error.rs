@@ -56,6 +56,7 @@ pub const CODES: &[&str] = &[
     "timeout",
     "too_large",
     "unauthorized",
+    "unknown_repo",
     "unsafe_repository",
     "unsupported_platform",
     "untracked_overwritten",

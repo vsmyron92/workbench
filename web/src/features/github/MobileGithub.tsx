@@ -4,6 +4,8 @@
 
 import { useEffect, useRef, type ReactNode } from 'react'
 import { ArrowLeft } from 'lucide-react'
+import { useGitScope } from '@/api/useRepos'
+import { NotOnForge, RepoSelect } from '@/shell/RepoUi'
 import { Badge, EmptyState, ErrorBox, IconButton, Loading, Tabs } from '@/ui'
 import { useGithubSummary, useHasGithub, useJob, useJobLog, useRun } from './api'
 import { GitHubIcon, PublicModeBanner, runTitle, StatusIcon, StatusText, useGhUi, type GhTab } from './components'
@@ -92,7 +94,14 @@ function MobileDetail({ label, onBack, children }: { label: string; onBack: () =
   )
 }
 
+/** The phone's GitHub tab: the runs, pull requests and issues of the project's active repository. */
 function MobileGithub({ projectId }: { projectId: string | null }) {
+  const scope = useGitScope(projectId)
+  if (!projectId || !scope) return <EmptyState title="No project selected" />
+  return <MobileGithubView projectId={scope} real={projectId} />
+}
+
+function MobileGithubView({ projectId, real }: { projectId: string; real: string }) {
   const has = useHasGithub(projectId)
   const summary = useGithubSummary(projectId, has)
   const view = useGhMobile((s) => s.view)
@@ -108,8 +117,18 @@ function MobileGithub({ projectId }: { projectId: string | null }) {
     const v = useGhMobile.getState().view
     if (v.kind !== 'list' && v.pid !== projectId) useGhMobile.getState().setView({ kind: 'list' })
   }, [projectId])
-  if (!projectId) return <EmptyState title="No project selected" />
-  if (!has) return <EmptyState icon={GitHubIcon} title="This project is not on GitHub" />
+  const repoBar = (
+    <div className="wb-repo-bar">
+      <RepoSelect projectId={real} />
+    </div>
+  )
+  if (!has)
+    return (
+      <>
+        {repoBar}
+        <NotOnForge scope={projectId} forge="github" icon={GitHubIcon} />
+      </>
+    )
   const anonymous = summary.data ? !summary.data.auth.authenticated : false
   const toList = () => setView({ kind: 'list' })
   const detail = view.kind !== 'list' && view.pid === projectId ? view : null
@@ -156,6 +175,7 @@ function MobileGithub({ projectId }: { projectId: string | null }) {
   const active = tabs.some((t) => t.id === tab) ? tab : 'runs'
   return (
     <div className="wb-fill gh-mobile">
+      {repoBar}
       {s && <PublicModeBanner s={s} />}
       <Tabs<GhTab> tabs={tabs} value={active} onChange={setTab} />
       {active === 'runs' && <RunsList projectId={projectId} summary={s} compact onOpen={(r) => setView({ kind: 'run', pid: projectId, id: r.id })} />}

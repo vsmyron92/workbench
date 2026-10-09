@@ -8,13 +8,15 @@ import { useQueryClient, type Query } from '@tanstack/react-query'
 import { ArrowDownToLine, CheckCircle2, GitMerge, PauseCircle, Play, ScrollText, TriangleAlert, X, XCircle } from 'lucide-react'
 import { api } from '@/api/client'
 import { subscribe } from '@/api/events'
+import { inProject, scopeOfEvent, scopeOfFile, scopeRepo, setActiveRepo, splitScope } from '@/api/repos'
 import { modelFile } from '@/features/files/modelAccess'
 import { showToolWindow, toast } from '@/shell/actions'
 import { Button, IconButton, Spinner } from '@/ui'
-import { gitUrl, gk } from './api'
+import { gitUrl } from './api'
 import { openGitLog, resolveConflicts, sequencer, updateProject } from './actions'
 import { BranchesPopover } from './BranchesPopover'
 import { GitDialogs } from './Dialogs'
+import { RepoPopover } from './RepoSwitcher'
 import { useDrafts, useOps } from './store'
 import type { GitOpEvent } from './types'
 import './git.css'
@@ -26,9 +28,28 @@ export function GitProvider({ children }: { children?: ReactNode }) {
   const qc = useQueryClient()
   useEffect(() => {
     const fsTimers = new Map<string, number>()
+    // The repository switcher's list runs a status per repository, so it refreshes less eagerly
+    // than the views: soon after git moved, later after file edits (an earlier due time wins).
+    const repoDue = new Map<string, { at: number; timer: number }>()
+    // The views of every repository of a project: their keys start with ['git', <scope>].
+    const invalidate = (projectId: string, keep: (q: Query) => boolean = () => true) =>
+      void qc.invalidateQueries({ predicate: (q) => q.queryKey[0] === 'git' && inProject(q.queryKey[1], projectId) && keep(q) })
+    const refreshRepos = (projectId: string, delay: number) => {
+      const at = Date.now() + delay
+      const cur = repoDue.get(projectId)
+      if (cur && cur.at <= at) return
+      window.clearTimeout(cur?.timer)
+      const timer = window.setTimeout(() => {
+        repoDue.delete(projectId)
+        invalidate(projectId, (q) => q.queryKey[2] === 'repos')
+      }, delay)
+      repoDue.set(projectId, { at, timer })
+    }
     const offs = [
       subscribe('git.changed', (ev) => {
-        if (ev.projectId) void qc.invalidateQueries({ queryKey: gk.all(ev.projectId), predicate: liveDiff })
+        if (!ev.projectId) return
+        invalidate(ev.projectId, (q) => q.queryKey[2] !== 'repos' && liveDiff(q))
+        refreshRepos(ev.projectId, 400)
       }),
       // File edits change status and working diffs; coalesce bursts (formatters, agents).
       subscribe('fs.changed', (ev) => {
@@ -39,24 +60,28 @@ export function GitProvider({ children }: { children?: ReactNode }) {
           pid,
           window.setTimeout(() => {
             fsTimers.delete(pid)
-            void qc.invalidateQueries({ queryKey: gk.status(pid) })
-            void qc.invalidateQueries({ queryKey: gk.changelists(pid) })
-            void qc.invalidateQueries({ queryKey: gk.diffs(pid), predicate: liveDiff })
+            invalidate(pid, (q) => q.queryKey[2] === 'status' || q.queryKey[2] === 'changelists' || (q.queryKey[2] === 'diff' && liveDiff(q)))
           }, 350),
         )
+        refreshRepos(pid, 2000)
       }),
-      subscribe('git.op', (ev) => useOps.getState().event(ev.projectId ?? null, ev.data as GitOpEvent)),
+      subscribe('git.op', (ev) => {
+        if (ev.projectId) useOps.getState().event(scopeOfEvent(ev.projectId, ev.data), ev.data as GitOpEvent)
+      }),
       subscribe('git.changelists', (ev) => {
-        if (ev.projectId) void qc.invalidateQueries({ queryKey: gk.changelists(ev.projectId) })
+        if (ev.projectId) invalidate(ev.projectId, (q) => q.queryKey[2] === 'changelists')
       }),
       subscribe('git.shelf', (ev) => {
-        if (ev.projectId) void qc.invalidateQueries({ queryKey: gk.shelves(ev.projectId) })
+        if (ev.projectId) invalidate(ev.projectId, (q) => q.queryKey[2] === 'shelf')
       }),
       subscribe('git.commitMessage', (ev) => {
-        const d = ev.data as { projectId?: string; message?: string }
+        const d = ev.data as { projectId?: string; repo?: string; message?: string }
         const pid = d.projectId ?? ev.projectId
         if (!pid || !d.message) return
-        useDrafts.getState().update(pid, { message: d.message, amend: false, amendLoaded: undefined })
+        const scope = scopeOfEvent(pid, d)
+        useDrafts.getState().update(scope, { message: d.message, amend: false, amendLoaded: undefined })
+        // The Commit window shows the repository the message is for.
+        setActiveRepo(pid, scopeRepo(scope))
         showToolWindow('commit')
         useDrafts.getState().focus()
         toast('info', 'An agent wrote a commit message — review it in the Commit window', { timeout: 6000 })
@@ -66,6 +91,7 @@ export function GitProvider({ children }: { children?: ReactNode }) {
     return () => {
       offs.forEach((o) => o())
       fsTimers.forEach((t) => window.clearTimeout(t))
+      repoDue.forEach((d) => window.clearTimeout(d.timer))
     }
   }, [qc])
   useHistoryForSelection()
@@ -74,6 +100,7 @@ export function GitProvider({ children }: { children?: ReactNode }) {
       {children}
       <OpsCards />
       <BranchesPopover />
+      <RepoPopover />
       <GitDialogs />
     </>
   )
@@ -102,7 +129,10 @@ function OpsCards() {
             )}
           </span>
           <div className="wb-grow">
-            <div className="title">{op.title}</div>
+            <div className="title">
+              {op.title}
+              {op.projectId && splitScope(op.projectId).repo && <span className="wb-muted"> · {splitScope(op.projectId).repo}</span>}
+            </div>
             {!op.done && <div className="line">{op.lastLine || 'Working…'}</div>}
             {op.done && op.ok && <div className="wb-small wb-muted">{op.message}</div>}
             {op.done && !op.ok && (
@@ -212,7 +242,7 @@ function useHistoryForSelection() {
             if (!f || !s) return
             const end = s.endLineNumber > s.startLineNumber && s.endColumn === 1 ? s.endLineNumber - 1 : s.endLineNumber
             // Editor lines are working-tree lines: the server maps them onto HEAD's version.
-            openGitLog(f.projectId, { path: f.path, lines: [s.startLineNumber, Math.max(s.startLineNumber, end)], worktreeLines: true })
+            openGitLog(scopeOfFile(f.projectId, f.path), { path: f.path, lines: [s.startLineNumber, Math.max(s.startLineNumber, end)], worktreeLines: true })
           },
         })
       }

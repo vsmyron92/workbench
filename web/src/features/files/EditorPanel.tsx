@@ -589,7 +589,7 @@ function TextEditor({
           showMenu({ clientX: ev.event.posx, clientY: ev.event.posy }, items)
         } else if (t.type === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS && live.current.blameInfo) {
           const b = live.current.blameInfo.byLine.get(line)
-          if (b && live.current.projectId && !/^0+$/.test(b.sha)) showCommit(live.current.projectId, b.sha)
+          if (b && live.current.projectId && !/^0+$/.test(b.sha)) showCommit(live.current.projectId, live.current.path, b.sha)
         }
       })
     },
@@ -699,7 +699,7 @@ function TextEditor({
       <div className="wb-editor-footer">
         {vcsKind && <span className={`wb-editor-footer-item wb-vcs-${vcsKind}`}>{VCS_LABEL[vcsKind]}</span>}
         {blameLine && projectId && (
-          <button className="wb-editor-footer-item link wb-ellipsis" title={blameLine.summary} onClick={() => showCommit(projectId, blameLine.sha)}>
+          <button className="wb-editor-footer-item link wb-ellipsis" title={blameLine.summary} onClick={() => showCommit(projectId, path, blameLine.sha)}>
             {blameLine.sha.slice(0, 8)} · {blameLine.author} · {timeAgo(blameTime(blameLine.time))} · {blameLine.summary}
           </button>
         )}
