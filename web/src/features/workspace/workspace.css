@@ -884,6 +884,42 @@
   gap: 8px;
   min-height: 0;
   padding: 8px;
+  /* A row is never shorter than its panes need (the header, however it wraps, plus the stage's
+     minimum) and shares any spare height; rows that do not fit scroll. Squeezed rows used to clip
+     each stage under its pane's overflow: hidden while the viewer still framed the model in the
+     full stage, so a test with more than one row showed only the tops of its models. */
+  grid-auto-rows: minmax(max-content, 1fr);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+/* A single row always fits: rather than scroll a few pixels (and take the wheel from zooming), its
+   stages shrink below their usual minimum. Set by Compare3D from the rendered columns. */
+.c3d-panes[data-one-row] .c3d-stage {
+  min-height: 0;
+}
+/* Several rows keep a minimum that gives way on short screens (a laptop with the terminal open, a
+   phone), so two rows fit more often before anything has to scroll. A shorter stage shows a
+   smaller whole model: the camera is framed in whatever stage there is. */
+.c3d-panes:not([data-one-row]) .c3d-stage {
+  min-height: clamp(160px, 24svh, 220px);
+}
+/* Laid over the bottom of the viewer while the panes scroll (see Compare3D). */
+.c3d-hint {
+  position: absolute;
+  right: 20px;
+  bottom: 14px;
+  z-index: 2;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--fg-muted);
+  pointer-events: none;
+}
+/* While the panes scroll, a vertical swipe scrolls them; a sideways one still turns the model and
+   two fingers still zoom (orbit controls set touch-action: none inline, hence !important). */
+.c3d-panes[data-scrolls] .c3d-canvas canvas {
+  touch-action: pan-y !important;
 }
 .c3d-pane {
   display: flex;

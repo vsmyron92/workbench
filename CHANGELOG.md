@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.3 - 2026-10-08
+
+- **3D comparisons with many models show every model whole.** A test with more models than fit in one
+  row squeezed its rows until each pane clipped its model's stage, which was still framed at full height,
+  so only the tops of the models showed. Rows now keep the height a pane needs (a little less on short
+  screens) and the panes scroll. While they scroll, the wheel scrolls them and Ctrl/⌘ + wheel (or a pinch)
+  zooms the model under the pointer; on a touch screen a vertical swipe scrolls without tilting the models,
+  and a sideways one turns them. A note over the viewer says so. A single row still fits the viewer,
+  however short, and a few pixels out of view do not change what the wheel does.
+- **A 3D test that lists the same model file twice** no longer leaves panes of the previous test behind
+  when you switch tests.
+- **Closing a 3D pane frees its WebGL context at once.** Switching between tests with many models used to
+  leave old contexts alive until the browser dropped the oldest ("Too many active WebGL contexts").
+
 ## 0.12.2 - 2026-10-08
 
 - **The "N working" pill opens a list of sessions.** Clicking it in the top bar used to go to the Agents
