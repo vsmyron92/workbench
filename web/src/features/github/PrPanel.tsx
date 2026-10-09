@@ -16,6 +16,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { confirmDialog, openPanel, toast, toastError } from '@/shell/actions'
+import { repoNote, scopeProject } from '@/api/repos'
 import { askAgent } from '@/shell/agentBridge'
 import type { PanelProps } from '@/shell/types'
 import { Badge, Button, Checkbox, EmptyState, ErrorBox, Field, IconButton, Input, Loading, Markdown, Modal, Spacer, Tabs, TextArea, TimeAgo } from '@/ui'
@@ -467,8 +468,9 @@ export function PrView({ projectId, number, setTitle, compact }: { projectId: st
   const convo = (pr.comments ?? 0) + threadCount
   const review = () =>
     askAgent({
-      projectId,
-      prompt: prReviewPrompt({ repo: summary.data?.path ?? projectId, number: pr.number, title: pr.title, head: pr.head?.ref ?? null, base: pr.base?.ref ?? null, sha: pr.head?.sha ?? null }),
+      projectId: scopeProject(projectId),
+      prompt:
+        prReviewPrompt({ repo: summary.data?.path ?? projectId, number: pr.number, title: pr.title, head: pr.head?.ref ?? null, base: pr.base?.ref ?? null, sha: pr.head?.sha ?? null }) + repoNote(projectId),
     })
   const checksState = aggregateState([pr.checks?.state])
 

@@ -11,9 +11,11 @@ The **Commit** tool window (Alt+0) lists changes with Changes, Stash and Shelf t
 
 **Alt+9** opens the Git Log. **Ctrl+T** updates the project and **Ctrl+Shift+K** pushes.
 
+In a project with several repositories, the **repository switcher** in the top bar chooses the one these windows and the branch widget work on (see [Projects and files](projects#several-repositories-in-one-project)). Changes of every repository show in the file tree.
+
 ## GitLab and GitHub
 
-Both appear as tool windows on the right when a project has that remote:
+Both appear as tool windows on the right when a project has that remote (in a project with several repositories, when any of them has; they show the repository selected in the switcher):
 
 - merge requests or pull requests, with diffs, comments and review;
 - pipelines, jobs and their logs;

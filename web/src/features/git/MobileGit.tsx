@@ -1,9 +1,11 @@
 // Phone view (mobile tab 'git'): changes with tap-to-stage, commit, pull/push.
 // No Monaco here; diffs and conflict resolution are desktop work.
 
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Check, CloudDownload, FileText, GitBranch, Sparkles } from 'lucide-react'
+import { useGitScope } from '@/api/useRepos'
 import { toast, toastError } from '@/shell/actions'
+import { RepoSelect } from '@/shell/RepoUi'
 import { Button, Checkbox, EmptyState, ErrorBox, IconButton, Loading, TextArea } from '@/ui'
 import { gitApi, isNotRepo, useGitStatus } from './api'
 import { BisectBanner } from './Bisect'
@@ -15,11 +17,13 @@ import type { GitStatusFile } from './types'
 const TITLES: Record<SectionId, string> = { conflicts: 'Conflicts', staged: 'Staged', unstaged: 'Changes', untracked: 'Unversioned' }
 
 export function MobileGit({ projectId }: { projectId: string | null }) {
-  if (!projectId) return <EmptyState title="No project selected" />
-  return <MobileGitView key={projectId} pid={projectId} />
+  // The phone shell hands over the project; the view works on its active repository.
+  const scope = useGitScope(projectId)
+  if (!projectId || !scope) return <EmptyState title="No project selected" />
+  return <MobileGitView key={scope} pid={scope} projectId={projectId} />
 }
 
-function MobileGitView({ pid }: { pid: string }) {
+function MobileGitView({ pid, projectId }: { pid: string; projectId: string }) {
   const st = useGitStatus(pid)
   const s = st.data
   const sections = useMemo(() => groupStatus(s?.files ?? []), [s])
@@ -27,8 +31,17 @@ function MobileGitView({ pid }: { pid: string }) {
   const update = useDrafts((x) => x.update)
   const [busy, setBusy] = useState(false)
 
-  if (st.error) return isNotRepo(st.error) ? <EmptyState title="Not a git repository" /> : <ErrorBox error={st.error} onRetry={() => void st.refetch()} />
-  if (!s) return <Loading />
+  // A repository that fails still lets the phone switch to another one.
+  const failed = (body: ReactNode) => (
+    <div className="git-mobile">
+      <div className="top">
+        <RepoSelect projectId={projectId} />
+      </div>
+      <div className="list">{body}</div>
+    </div>
+  )
+  if (st.error) return failed(isNotRepo(st.error) ? <EmptyState title="Not a git repository" /> : <ErrorBox error={st.error} onRetry={() => void st.refetch()} />)
+  if (!s) return failed(<Loading />)
 
   const toggle = (section: SectionId, f: GitStatusFile) => {
     if (section === 'staged') void unstagePaths(pid, [f.path])
@@ -52,6 +65,7 @@ function MobileGitView({ pid }: { pid: string }) {
   return (
     <div className="git-mobile">
       <div className="top">
+        <RepoSelect projectId={projectId} />
         <GitBranch size={16} className="wb-muted" />
         <b className="wb-ellipsis">{s.branch ?? (s.head ? shortSha(s.head) : 'no commits')}</b>
         {(s.ahead > 0 || s.behind > 0) && (

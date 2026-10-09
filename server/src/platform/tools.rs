@@ -20,7 +20,9 @@ pub fn platform_tools() -> Vec<McpTool> {
             "workbench_projects",
             "List the projects open in Workbench: id, name, root directory, current git branch, GitLab path, \
              environments and number of run configurations. `current: true` marks the project of this session. \
-             Other Workbench tools take these project ids.",
+             Other Workbench tools take these project ids. A project with several git repositories also lists \
+             them as `repositories`; the git, GitLab and GitHub tools take one of their ids as `repo` (the default \
+             repository when omitted).",
             json!({ "type": "object", "properties": {}, "additionalProperties": false }),
             false,
             projects,
@@ -86,6 +88,19 @@ async fn projects(state: AppState, ctx: McpCtx, _args: Value) -> Result<ToolOutp
             });
             if p["warnings"].as_array().is_some_and(|w| !w.is_empty()) {
                 o["warnings"] = p["warnings"].clone();
+            }
+            // Only worth saying for a project with several: the ids the git, GitLab and
+            // GitHub tools take as `repo`.
+            if let Some(repos) = p["repos"].as_array().filter(|r| r.len() > 1) {
+                o["repositories"] = repos
+                    .iter()
+                    .map(|r| {
+                        json!({
+                            "id": r["id"], "name": r["name"], "path": r["path"], "default": r["default"],
+                            "gitlab": r["gitlab"]["path"], "github": r["github"]["path"],
+                        })
+                    })
+                    .collect();
             }
             o
         })

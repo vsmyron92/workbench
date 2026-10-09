@@ -66,6 +66,15 @@
 .wb-topbar-widget:hover {
   background: var(--bg-hover);
 }
+/* The repository select above a phone tab (empty, and so hidden, for a single repository). */
+.wb-repo-bar {
+  flex: none;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.wb-repo-bar:empty {
+  display: none;
+}
 .wb-search-button {
   display: inline-flex;
   align-items: center;

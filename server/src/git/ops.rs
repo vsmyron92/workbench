@@ -106,11 +106,32 @@ pub struct PathsRequest {
     pub all: bool,
 }
 
+/// Directories (repository-relative) of the project's other repositories inside this one
+/// that this one does not track as submodules.
+async fn untracked_inner(repo: &Repo) -> Result<Vec<String>, ApiError> {
+    let dirs: Vec<String> = repo.inner.iter().filter_map(|d| repo.to_repo(d).ok()).collect();
+    if dirs.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut args = vec!["ls-files".to_string(), "--stage".into(), "-z".into(), "--".into()];
+    args.extend(dirs.iter().map(|d| literal(d)));
+    let out = repo.git().args(args).run_ok().await?;
+    // `160000 <sha> 0\t<path>`: a gitlink, a submodule the repository tracks.
+    let text = out.text();
+    let submodules: Vec<&str> =
+        text.split('\0').filter_map(|e| e.strip_prefix("160000 ")).filter_map(|e| e.split_once('\t')).map(|(_, p)| p).collect();
+    Ok(dirs.into_iter().filter(|d| !submodules.contains(&d.as_str())).collect())
+}
+
 /// Stage files. Returns the (project-relative) submodules that were skipped because
 /// their only change is content inside them, which `git add` cannot stage.
 pub async fn stage(repo: &Repo, req: &PathsRequest) -> Result<Vec<String>, ApiError> {
     if req.all {
-        repo.git_w().args(["add".to_string(), "-A".into(), "--".into(), literal(&repo.scope())]).run_ok_retry_lock().await?;
+        let mut args = vec!["add".to_string(), "-A".into(), "--".into(), literal(&repo.scope())];
+        // A clone of the project's other repositories inside this one is no change of this
+        // one (`git add -A` would record it as an embedded repository).
+        args.extend(untracked_inner(repo).await?.into_iter().map(|d| format!(":(exclude,literal){d}")));
+        repo.git_w().args(args).run_ok_retry_lock().await?;
         return Ok(vec![]);
     }
     let mut paths = repo_paths(repo, &req.paths)?;

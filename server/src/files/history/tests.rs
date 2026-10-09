@@ -600,6 +600,8 @@ fn new_folders_stay_within_the_batch_budget() {
         warnings: vec![],
         repo_secret_names: Default::default(),
         overlay_error: None,
+            repos: Default::default(),
+            repo: 0,
     };
     let mut paths = vec!["small".to_string(), "small/a.txt".to_string()];
     super::files_in_new_dirs(&project, &["big".into(), "small".into(), "gone".into()], &mut paths);

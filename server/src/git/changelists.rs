@@ -1,7 +1,8 @@
 //! Changelists (JetBrains): named groups of changed files, one of them active. Every
 //! changed tracked file belongs to exactly one list (default "Changes"); a file seen
-//! changed for the first time joins the active list. Stored per project in
-//! `data_dir/git/changelists/<pid>.json`, keyed by project-relative path, and
+//! changed for the first time joins the active list. Stored per repository in
+//! `data_dir/git/changelists/<scope>.json` (`<scope>`: the project id for the root
+//! repository, else `Project::scope_key`), keyed by project-relative path, and
 //! reconciled with `git status` (status and changelist reads).
 //!
 //! A file whose change leaves the working tree for a while (stash, shelve, an
@@ -300,8 +301,8 @@ pub struct Changelists {
     pub lists: Vec<Changelist>,
 }
 
-pub fn store_path(data_dir: &Path, pid: &str) -> PathBuf {
-    data_dir.join("git").join("changelists").join(format!("{pid}.json"))
+pub fn store_path(data_dir: &Path, scope: &str) -> PathBuf {
+    data_dir.join("git").join("changelists").join(format!("{scope}.json"))
 }
 
 /// Read (a missing or unreadable file is the default store), change and write back

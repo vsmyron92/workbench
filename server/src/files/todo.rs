@@ -3,7 +3,7 @@
 //! `.gitignore`, binary and sensitive files are skipped) and keeps the matches that
 //! sit in a comment of the file's language.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -127,11 +127,11 @@ fn todo_of(hit: &Hit) -> Option<TodoItem> {
 }
 
 /// Scan `root`. Blocking; `cancel` stops the walk early.
-pub fn scan(root: &Path, sensitive: &Sensitive, cancel: &AtomicBool) -> ApiResult<TodoResult> {
+pub fn scan(root: &Path, nested: &[PathBuf], sensitive: &Sensitive, cancel: &AtomicBool) -> ApiResult<TodoResult> {
     let started = Instant::now();
     // Case-sensitive at the top level: the pattern opts into insensitivity per keyword.
     let params = SearchParams { q: PATTERN.into(), regex: true, case: true, word: false, glob: String::new(), max: Some(MAX_ITEMS * 2) };
-    let found = run_search(root, &params, sensitive, cancel)?;
+    let found = run_search(root, nested, &params, sensitive, cancel)?;
     let mut items: Vec<TodoItem> = found.matches.iter().filter_map(todo_of).collect();
     // One item per line: `TODO(fixme)` style lines list once, at the first keyword.
     items.dedup_by(|b, a| a.path == b.path && a.line == b.line);
@@ -155,7 +155,8 @@ pub async fn todos(State(state): State<AppState>, UrlPath(pid): UrlPath<String>)
     let cancel = Arc::new(AtomicBool::new(false));
     let _guard = CancelOnDrop(cancel.clone());
     let root = project.root.clone();
-    Ok(Json(blocking(move || scan(&root, &sensitive, &cancel)).await?))
+    let nested = project.nested_repo_dirs();
+    Ok(Json(blocking(move || scan(&root, &nested, &sensitive, &cancel)).await?))
 }
 
 #[cfg(test)]
@@ -212,7 +213,7 @@ mod tests {
         std::fs::write(r.join(".env"), "# TODO rotate SECRET=1\n").unwrap();
         std::fs::write(r.join("run.py"), "print('TODO')  # HACK: quick\n").unwrap();
         let sensitive = Sensitive::new(&[]);
-        let out = scan(r, &sensitive, &AtomicBool::new(false)).unwrap();
+        let out = scan(r, &[], &sensitive, &AtomicBool::new(false)).unwrap();
         let got: Vec<(String, u64, String)> = out.items.iter().map(|i| (i.path.clone(), i.line, i.kind.clone())).collect();
         assert_eq!(
             got,

@@ -1,10 +1,13 @@
 // Top bar branch button, status bar branch/sync/state item, stripe badge.
 
-import { ChevronDown, GitBranch, ShieldAlert } from 'lucide-react'
+import { ChevronDown, FolderGit2, GitBranch, ShieldAlert } from 'lucide-react'
+import { repoOfScope, scopeProject } from '@/api/repos'
+import { useRepos } from '@/api/useRepos'
 import { showToolWindow } from '@/shell/actions'
 import { Spinner, StatusDot } from '@/ui'
 import { isUnsafeRepo, useGitStatus } from './api'
 import { shortSha, stateLabel } from './logic'
+import { toggleRepoPopover } from './RepoSwitcher'
 import { useGitUi, useRunningOp } from './store'
 import type { GitStatus } from './types'
 
@@ -26,6 +29,26 @@ function Sync({ s }: { s: GitStatus }) {
       {s.ahead > 0 && s.behind > 0 && ' '}
       {s.behind > 0 && `↓${s.behind}`}
     </span>
+  )
+}
+
+/** The repository the status bar's git items are about, when the project has several: a click switches it. */
+function RepoStatusItem({ scope }: { scope: string }) {
+  const projectId = scopeProject(scope)
+  const repos = useRepos(projectId)
+  const repo = repoOfScope(repos, scope)
+  if (!repo || repos.length < 2) return null
+  return (
+    <button
+      className="wb-status-item"
+      data-git-repo-anchor=""
+      aria-haspopup="listbox"
+      title={`Repository ${repo.name}${repo.path ? ` (${repo.path})` : ''}. Switch repository`}
+      onClick={(e) => toggleRepoPopover(projectId, e.currentTarget, 'statusbar')}
+    >
+      <FolderGit2 size={13} />
+      <span>{repo.name}</span>
+    </button>
   )
 }
 
@@ -77,6 +100,7 @@ export function GitStatusbarWidget({ projectId }: { projectId: string | null }) 
   if (!projectId || !s) return null
   return (
     <>
+      <RepoStatusItem scope={projectId} />
       <button
         className="wb-status-item"
         data-git-branch-anchor=""

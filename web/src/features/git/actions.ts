@@ -3,6 +3,7 @@
 // report the outcome in toasts.
 
 import { api, ApiError } from '@/api/client'
+import { scopeProject, scopeRepo } from '@/api/repos'
 import { closePanel, confirmDialog, isPanelOpen, openPanel, promptDialog, showToolWindow, toast, toastError } from '@/shell/actions'
 import { askAgent } from '@/shell/agentBridge'
 import { gitApi, gitUrl } from './api'
@@ -50,7 +51,9 @@ export function openConflict(pid: string, path: string) {
   openPanel({ kind: 'conflict', id: conflictPanelId(pid, path), title: `Merge: ${splitPath(path).name}`, params: { projectId: pid, path } })
 }
 
-export function openFile(pid: string, path: string, line?: number) {
+/** Open a project file in the editor: the editor belongs to the real project, whichever repository the file is in. */
+export function openFile(scope: string, path: string, line?: number) {
+  const pid = scopeProject(scope)
   const params: Record<string, unknown> = { projectId: pid, path }
   if (line) params.line = line
   openPanel({ kind: 'editor', id: `editor:${pid}:${path}`, title: splitPath(path).name, params })
@@ -366,28 +369,36 @@ export async function rollback(pid: string, paths: string[], scope: 'all' | 'wor
 
 // ---------------------------------------------------------------- agents
 
+/** The sentence that points an agent (its session runs at the project root) at the repository a scope names. */
+function inRepo(scope: string): string {
+  const repo = scopeRepo(scope)
+  return repo ? ` The repository is the one in the \`${repo}\` directory of the project: run git there (\`git -C ${repo}\`).` : ''
+}
+
 export function askCommitMessage(pid: string) {
   return askAgent({
-    projectId: pid,
+    projectId: scopeProject(pid),
     prompt:
       'Write a commit message for the currently staged changes in this repository (read them with `git diff --cached`; ' +
       'if nothing is staged, describe the unstaged changes from `git diff`). Follow the repository\'s existing commit ' +
       'style (check `git log --oneline -15`). Then call the `workbench_set_commit_message` MCP tool with the full ' +
-      'message. Do not run git commit and do not change any files.',
+      'message. Do not run git commit and do not change any files.' +
+      inRepo(pid) +
+      (scopeRepo(pid) ? ` Pass \`repo: "${scopeRepo(pid)}"\` to \`workbench_set_commit_message\`.` : ''),
   })
 }
 
 export function askReview(pid: string, path: string, staged: boolean) {
   return askAgent({
-    projectId: pid,
-    prompt: `Review my uncommitted changes in ${path} (\`git diff ${staged ? '--cached ' : ''}-- ${path}\`). Point out bugs, risky or unfinished changes and anything that does not match the surrounding code. Do not modify files.`,
+    projectId: scopeProject(pid),
+    prompt: `Review my uncommitted changes in ${path} (\`git diff ${staged ? '--cached ' : ''}-- ${path}\`). Point out bugs, risky or unfinished changes and anything that does not match the surrounding code. Do not modify files.${inRepo(pid)}`,
   })
 }
 
 export function askExplain(pid: string, sha: string, subject: string) {
   return askAgent({
-    projectId: pid,
-    prompt: `Explain commit ${sha} (“${subject}”): what it changes and why, and anything risky. Use \`git show ${sha}\`. Do not modify files.`,
+    projectId: scopeProject(pid),
+    prompt: `Explain commit ${sha} (“${subject}”): what it changes and why, and anything risky. Use \`git show ${sha}\`. Do not modify files.${inRepo(pid)}`,
   })
 }
 

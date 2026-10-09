@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
 import { api } from './client'
 import { subscribe } from './events'
+import { noteProjects } from './repos'
 import type { ProjectDetail, ProjectSummary, TerminalInfo } from './types'
 
 export const qk = {
@@ -36,7 +37,14 @@ export function installProjectsSync(qc: QueryClient): () => void {
 }
 
 export function useProjects() {
-  return useQuery({ queryKey: qk.projects, queryFn: ({ signal }) => api.get<ProjectSummary[]>('/api/projects', undefined, signal) })
+  return useQuery({
+    queryKey: qk.projects,
+    queryFn: async ({ signal }) => {
+      const projects = await api.get<ProjectSummary[]>('/api/projects', undefined, signal)
+      noteProjects(projects) // code outside React (commands, event handlers) reads the repositories from here
+      return projects
+    },
+  })
 }
 
 export function useProject(id: string | null | undefined) {

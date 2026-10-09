@@ -21,6 +21,7 @@ use super::model::{Issue, IssueComment, ListPage, Pull, Release, Run, aggregate}
 use super::pulls::{open_pr_count, pr_for_branch, valid_body};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::forge::RepoParam;
 
 /// Summaries are shared by all open tabs for this long (while the local
 /// branch and HEAD stay the same). Anonymous: as long as `Fresh::Live` lasts.
@@ -109,8 +110,9 @@ fn head_status_from_runs(runs: &[Run], head: &str) -> Option<CiStatus> {
 
 /// The local checkout's current branch and HEAD (both read locally, free).
 async fn checkout(ctx: &GhCtx) -> (Option<String>, Option<String>) {
-    let root = &ctx.project.root;
-    tokio::join!(crate::util::git::current_branch_logged(root), crate::util::git::head_sha_logged(root))
+    // The checkout of this repository, not the project root.
+    let dir = ctx.project.repo_dir();
+    tokio::join!(crate::util::git::current_branch_logged(dir), crate::util::git::head_sha_logged(dir))
 }
 
 /// The summary for the checkout as it is now (the handler reads the checkout
@@ -204,13 +206,14 @@ async fn summary_at(ctx: &GhCtx, branch: Option<String>, head: Option<String>) -
     })
 }
 
-async fn h_summary(State(state): State<AppState>, Path(pid): Path<String>) -> ApiResult<Json<Value>> {
-    let ctx = ctx(&state, &pid).await?;
+async fn h_summary(State(state): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>) -> ApiResult<Json<Value>> {
+    let ctx = ctx(&state, &pid, &repo).await?;
     let ttl = if ctx.is_anonymous() { SUMMARY_TTL_ANON } else { SUMMARY_TTL };
     // The branch and HEAD are local: a checkout or commit shows at once, even
     // while the GitHub side of the summary is still shared.
     let (branch, head) = checkout(&ctx).await;
-    if let Some((at, v)) = state.github.summaries.lock().get(&pid) {
+    let scope = ctx.project.scope_key();
+    if let Some((at, v)) = state.github.summaries.lock().get(&scope) {
         let same_checkout = v["branch"].as_str() == branch.as_deref() && v["head"].as_str() == head.as_deref();
         if at.elapsed() < ttl && same_checkout {
             let mut v = v.clone();
@@ -220,13 +223,13 @@ async fn h_summary(State(state): State<AppState>, Path(pid): Path<String>) -> Ap
         }
     }
     let v = serde_json::to_value(summary_at(&ctx, branch, head).await?)?;
-    state.github.summaries.lock().insert(pid, (Instant::now(), v.clone()));
+    state.github.summaries.lock().insert(scope, (Instant::now(), v.clone()));
     Ok(Json(v))
 }
 
 /// The quota as last seen, without asking GitHub.
-async fn h_rate(State(state): State<AppState>, Path(pid): Path<String>) -> ApiResult<Json<Value>> {
-    let ctx = ctx(&state, &pid).await?;
+async fn h_rate(State(state): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>) -> ApiResult<Json<Value>> {
+    let ctx = ctx(&state, &pid, &repo).await?;
     Ok(Json(json!({ "authenticated": !ctx.is_anonymous(), "core": ctx.rate("core"), "search": ctx.rate("search") })))
 }
 
@@ -264,8 +267,8 @@ pub async fn branch(ctx: &GhCtx, name: &str) -> ApiResult<BranchInfo> {
     })
 }
 
-async fn h_branch(State(s): State<AppState>, Path(pid): Path<String>, Query(q): Query<BranchQuery>) -> ApiResult<Json<BranchInfo>> {
-    Ok(Json(branch(&ctx(&s, &pid).await?, &q.name).await?))
+async fn h_branch(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>, Query(q): Query<BranchQuery>) -> ApiResult<Json<BranchInfo>> {
+    Ok(Json(branch(&ctx(&s, &pid, &repo).await?, &q.name).await?))
 }
 
 // ---------------------------------------------------------------- issues
@@ -419,17 +422,17 @@ pub async fn add_issue_comment(ctx: &GhCtx, n: u64, body: &str) -> ApiResult<Iss
     Ok(c)
 }
 
-async fn h_issues(State(s): State<AppState>, Path(pid): Path<String>, Query(q): Query<IssuesQuery>) -> ApiResult<Json<ListPage<Issue>>> {
-    Ok(Json(list_issues(&ctx(&s, &pid).await?, &q).await?))
+async fn h_issues(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>, Query(q): Query<IssuesQuery>) -> ApiResult<Json<ListPage<Issue>>> {
+    Ok(Json(list_issues(&ctx(&s, &pid, &repo).await?, &q).await?))
 }
-async fn h_issue_create(State(s): State<AppState>, Path(pid): Path<String>, Json(b): Json<CreateIssue>) -> ApiResult<Json<Issue>> {
-    Ok(Json(create_issue(&ctx(&s, &pid).await?, &b).await?))
+async fn h_issue_create(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>, Json(b): Json<CreateIssue>) -> ApiResult<Json<Issue>> {
+    Ok(Json(create_issue(&ctx(&s, &pid, &repo).await?, &b).await?))
 }
-async fn h_issue(State(s): State<AppState>, Path((pid, n)): Path<(String, u64)>) -> ApiResult<Json<IssueDetail>> {
-    Ok(Json(issue_detail(&ctx(&s, &pid).await?, n).await?))
+async fn h_issue(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): Path<(String, u64)>) -> ApiResult<Json<IssueDetail>> {
+    Ok(Json(issue_detail(&ctx(&s, &pid, &repo).await?, n).await?))
 }
-async fn h_issue_update(State(s): State<AppState>, Path((pid, n)): Path<(String, u64)>, Json(b): Json<UpdateIssue>) -> ApiResult<Json<Issue>> {
-    Ok(Json(update_issue(&ctx(&s, &pid).await?, n, &b).await?))
+async fn h_issue_update(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): Path<(String, u64)>, Json(b): Json<UpdateIssue>) -> ApiResult<Json<Issue>> {
+    Ok(Json(update_issue(&ctx(&s, &pid, &repo).await?, n, &b).await?))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -438,8 +441,8 @@ struct BodyOnly {
     body: String,
 }
 
-async fn h_issue_comment(State(s): State<AppState>, Path((pid, n)): Path<(String, u64)>, Json(b): Json<BodyOnly>) -> ApiResult<Json<IssueComment>> {
-    Ok(Json(add_issue_comment(&ctx(&s, &pid).await?, n, &b.body).await?))
+async fn h_issue_comment(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, n)): Path<(String, u64)>, Json(b): Json<BodyOnly>) -> ApiResult<Json<IssueComment>> {
+    Ok(Json(add_issue_comment(&ctx(&s, &pid, &repo).await?, n, &b.body).await?))
 }
 
 // ---------------------------------------------------------------- releases
@@ -459,8 +462,8 @@ pub async fn releases(ctx: &GhCtx, q: &PageQuery) -> ApiResult<ListPage<Release>
     Ok(ListPage { items: res.body, page, next_page: res.next_url.map(|_| page + 1), total: None })
 }
 
-async fn h_releases(State(s): State<AppState>, Path(pid): Path<String>, Query(q): Query<PageQuery>) -> ApiResult<Json<ListPage<Release>>> {
-    Ok(Json(releases(&ctx(&s, &pid).await?, &q).await?))
+async fn h_releases(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>, Query(q): Query<PageQuery>) -> ApiResult<Json<ListPage<Release>>> {
+    Ok(Json(releases(&ctx(&s, &pid, &repo).await?, &q).await?))
 }
 
 // ---------------------------------------------------------------- global

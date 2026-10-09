@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useEvent } from '@/api/events'
 import { useProject, useProjects } from '@/api/queries'
+import { useRepos } from '@/api/useRepos'
 import { filesApi } from './api'
 import { isScratch, SCRATCH_ID } from './scratchStore'
 import { buildVcsIndex, EMPTY_VCS, type VcsIndex } from './vcs'
@@ -13,20 +14,23 @@ import { buildVcsIndex, EMPTY_VCS, type VcsIndex } from './vcs'
  * docs/ARCHITECTURE.md). Sharing it means one request per change for the tree
  * colours, the Commit window and the status bar, and no refresh logic here: the git
  * slice's provider invalidates it on `git.changed`, `fs.changed` (debounced) and
- * `resync`.
+ * `resync`. A project with several repositories asks for all of them at once
+ * (`?repo=all`, project-relative paths) under a key of its own; a project with one
+ * shares the plain status.
  */
-export const gitStatusKey = (pid: string) => ['git', pid, 'status'] as const
+export const gitStatusKey = (pid: string, all = false) => (all ? (['git', pid, 'status', 'all'] as const) : (['git', pid, 'status'] as const))
 
 /**
  * The git status for `projectId`. Any error (the git feature missing, not a
  * repository) just means "no colours".
  */
-export function useGitStatus(projectId: string | null) {
+export function useGitStatus(projectId: string | null, enabled = true) {
+  const all = useRepos(projectId).length > 1
   return useQuery({
-    queryKey: gitStatusKey(projectId ?? ''),
-    queryFn: ({ signal }) => filesApi.gitStatus(projectId!, signal),
+    queryKey: gitStatusKey(projectId ?? '', all),
+    queryFn: ({ signal }) => filesApi.gitStatus(projectId!, signal, all),
     // Scratch files are no repository.
-    enabled: !!projectId && !isScratch(projectId),
+    enabled: !!projectId && !isScratch(projectId) && enabled,
     retry: false,
     staleTime: 15_000,
   })

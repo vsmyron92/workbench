@@ -873,6 +873,57 @@
   text-align: center;
   color: var(--fg-muted);
 }
+/* ---------------------------------------------------------------- repository switcher */
+
+.git-repo-btn .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+.git-repo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 160px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  flex: none;
+}
+.git-repo-chip:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.git-repo-popover .git-pop-head {
+  padding-top: 8px;
+}
+.git-repo-row .git-repo-path {
+  color: var(--fg-subtle);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.git-repo-row.active .git-repo-path {
+  color: inherit;
+}
+.git-repo-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.git-repo-select {
+  max-width: 45%;
+}
+
 .git-branch-btn .name {
   overflow: hidden;
   text-overflow: ellipsis;

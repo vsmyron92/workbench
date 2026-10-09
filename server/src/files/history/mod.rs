@@ -361,6 +361,7 @@ pub(crate) fn changed(state: &AppState, pid: &str, paths: Vec<String>, new_dirs:
 /// files it finds go through the usual checks (sensitive, binary, size). Blocking.
 fn files_in_new_dirs(project: &Project, dirs: &[String], paths: &mut Vec<String>) {
     let mut seen: std::collections::HashSet<String> = paths.iter().cloned().collect();
+    let nested = project.nested_repo_dirs();
     let mut entries = 0usize;
     for dir in dirs {
         let Ok(abs) = util::paths::resolve_in_root(&project.root, dir) else { continue };
@@ -376,7 +377,7 @@ fn files_in_new_dirs(project: &Project, dirs: &[String], paths: &mut Vec<String>
         let budget = MAX_BATCH.saturating_sub(paths.len());
         let mut found = vec![];
         let mut too_many = false;
-        let walk = super::gitignore::walk(&abs).parents(true).build();
+        let walk = super::gitignore::walk(&abs, &nested).parents(true).build();
         for e in walk.flatten() {
             entries += 1;
             if entries > MAX_NEW_DIR_ENTRIES {

@@ -2,6 +2,7 @@
 // Markdown links, MCP `ui.open`), plus the cross-slice actions of the context menus.
 
 import { api } from '@/api/client'
+import { scopeOfFile } from '@/api/repos'
 import type { TerminalInfo } from '@/api/types'
 import { askAgent } from '@/shell/agentBridge'
 import { getDockApi, openPanel, showToolWindow, toast, toastError } from '@/shell/actions'
@@ -148,21 +149,26 @@ export async function openTerminalAt(projectId: string, cwd: string) {
   }
 }
 
+// The git panels belong to a repository: a file's is the one that holds it (`scopeOfFile`).
 export function showHistory(projectId: string, path: string) {
-  openPanel({ kind: 'gitlog', id: `gitlog:${projectId}`, title: 'Git Log', params: { projectId, path } })
+  const scope = scopeOfFile(projectId, path)
+  openPanel({ kind: 'gitlog', id: `gitlog:${scope}`, title: 'Git Log', params: { projectId: scope, path } })
 }
 
 export function compareWithHead(projectId: string, path: string) {
+  const scope = scopeOfFile(projectId, path)
   openPanel({
     kind: 'diff',
-    id: `diff:${projectId}:working::${path}`,
+    id: `diff:${scope}:working::${path}`,
     title: `${basename(path)} (diff)`,
-    params: { projectId, path, mode: 'working' },
+    params: { projectId: scope, path, mode: 'working' },
   })
 }
 
-export function showCommit(projectId: string, sha: string) {
-  openPanel({ kind: 'commit', id: `commit:${projectId}:${sha}`, title: sha.slice(0, 8), params: { projectId, sha } })
+/** A commit of the repository that holds `path` (the blamed file). */
+export function showCommit(projectId: string, path: string, sha: string) {
+  const scope = scopeOfFile(projectId, path)
+  openPanel({ kind: 'commit', id: `commit:${scope}:${sha}`, title: sha.slice(0, 8), params: { projectId: scope, sha } })
 }
 
 export function askAboutFile(projectId: string | null, path: string) {

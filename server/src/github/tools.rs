@@ -12,6 +12,7 @@ use super::model::{Job, Run};
 use super::{ci, pulls};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::forge::RepoParam;
 use crate::mcp::{McpCtx, McpTool, ToolOutput, tool};
 
 /// Diff text an agent gets at most from `github_pr_diff`.
@@ -41,7 +42,11 @@ fn need(args: &Value, k: &str) -> ApiResult<u64> {
 /// confined to its own Workbench project (`McpCtx::project_for`).
 async fn tool_ctx(state: &AppState, mctx: &McpCtx, args: &Value) -> ApiResult<GhCtx> {
     let pid = mctx.project_for(s(args, "projectId").as_deref())?;
-    client::ctx(state, &pid).await
+    client::ctx(state, &pid, &RepoParam::named(s(args, "repo").as_deref())).await
+}
+
+fn repo_prop() -> Value {
+    json!({ "type": "string", "description": "Repository id from the project's repositories (default repository when omitted). Repositories of one project can be on different GitLab/GitHub projects." })
 }
 
 fn project_prop() -> Value {
@@ -107,6 +112,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "List recent GitHub Actions workflow runs of the project (newest first) with state, workflow, branch, commit, event and duration.",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "branch": { "type": "string" },
                 "status": { "type": "string", "description": "GitHub status or conclusion: in_progress | queued | completed | success | failure | cancelled" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 15 }
@@ -141,6 +147,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "Jobs of one workflow run with their state, duration and the steps that failed.",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "runId": { "type": "integer" }
             }, "required": ["runId"] }),
             false,
@@ -174,6 +181,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "The end of a GitHub Actions job's log as plain text (timestamps and ANSI colours removed). Logs exist once the job has finished.",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "jobId": { "type": "integer" },
                 "tailLines": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 200 }
             }, "required": ["jobId"] }),
@@ -223,6 +231,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "List the repository's pull requests (recently updated first).",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "state": { "type": "string", "enum": ["open", "closed", "merged", "all"], "default": "open" },
                 "search": { "type": "string" }
             }}),
@@ -255,6 +264,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "One pull request: state, branches, mergeability, checks, reviews, description and its review threads.",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "number": { "type": "integer" }
             }, "required": ["number"] }),
             false,
@@ -341,6 +351,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "The unified diff of a pull request (all files, or one file with `path`). Large diffs are cut at 200 KB.",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "number": { "type": "integer" },
                 "path": { "type": "string", "description": "Only this file (current or previous path)." }
             }, "required": ["number"] }),
@@ -397,6 +408,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "Create a pull request (head defaults to the project's current branch, base to the default branch). The branch must already be pushed. Opens the pull request in Workbench.",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "title": { "type": "string" },
                 "body": { "type": "string", "description": "Markdown." },
                 "head": { "type": "string" },
@@ -414,10 +426,17 @@ pub fn mcp_tools() -> Vec<McpTool> {
                     draft: b(&args, "draft").unwrap_or(false),
                 };
                 let p = pulls::create_pr(&ctx, &body).await?;
+                // A repository other than the default one is part of the panel's identity.
+                let mut id = format!("pr:{}:{}", ctx.project.id, p.number);
+                let mut params = json!({ "projectId": ctx.project.id, "number": p.number });
+                if let Some(repo) = crate::forge::panel_repo(&state, &ctx.project) {
+                    id = format!("pr:{}::{repo}:{}", ctx.project.id, p.number);
+                    params["repo"] = json!(repo);
+                }
                 state.events.ui_open_id(
                     "pr",
-                    &format!("pr:{}:{}", ctx.project.id, p.number),
-                    json!({ "projectId": ctx.project.id, "number": p.number }),
+                    &id,
+                    params,
                     Some(&format!("#{} {}", p.number, p.title)),
                 );
                 Ok(ToolOutput::Text(format!(
@@ -435,6 +454,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "Comment on a pull request: a conversation comment, a reply to a review comment (`inReplyTo`), or a line comment (`path` plus `line`; `side` LEFT for a removed line).",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "number": { "type": "integer" },
                 "body": { "type": "string", "description": "Markdown." },
                 "inReplyTo": { "type": "integer", "description": "Id of the review comment that starts the thread." },
@@ -471,6 +491,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
             "Re-run a GitHub Actions workflow run (all jobs, or only the failed ones with failedOnly), or a single job with jobId.",
             json!({ "type": "object", "properties": {
                 "projectId": project_prop(),
+                "repo": repo_prop(),
                 "runId": { "type": "integer" },
                 "failedOnly": { "type": "boolean", "default": false },
                 "jobId": { "type": "integer" }

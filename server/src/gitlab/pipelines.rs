@@ -22,6 +22,7 @@ use super::model::{self, Job, ListPage, Pipeline, PipelineDetail, TestSummary, g
 use super::trace;
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::forge::RepoParam;
 
 /// Bytes of log kept in memory per read (the tail wins when a log is larger).
 pub const TRACE_KEEP: usize = 4 * 1024 * 1024;
@@ -108,7 +109,7 @@ pub async fn enrich_pipelines(ctx: &GlCtx, list: Vec<Pipeline>) -> Vec<Pipeline>
 
 async fn add_commit_titles(ctx: &GlCtx, pipelines: &mut [Pipeline]) {
     let shas: Vec<String> = pipelines.iter().map(|p| p.sha.clone()).collect();
-    let titles = local_commit_titles(&ctx.project.root, &shas).await;
+    let titles = local_commit_titles(ctx.project.repo_dir(), &shas).await;
     for p in pipelines {
         if p.commit_title.is_none() {
             p.commit_title = titles.get(&p.sha).cloned();
@@ -271,7 +272,7 @@ pub async fn job_action(ctx: &GlCtx, id: u64, action: &str, vars: &[Variable]) -
         "gitlab.job",
         Some(&ctx.project.id),
         json!({ "jobId": j.id, "previousJobId": id, "action": action, "status": j.status,
-                "pipelineId": j.pipeline.as_ref().map(|p| p.id) }),
+                "pipelineId": j.pipeline.as_ref().map(|p| p.id), "repo": ctx.project.repo_id() }),
     );
     if let Some(p) = &j.pipeline {
         // The job's embedded pipeline status may lag; the poller refines it.
@@ -413,24 +414,26 @@ pub async fn log_tail(ctx: &GlCtx, id: u64, n: usize, plain: bool) -> ApiResult<
 
 async fn h_list(
     State(state): State<AppState>,
+    Query(repo): Query<RepoParam>,
     Path(pid): Path<String>,
     Query(q): Query<PipelinesQuery>,
 ) -> ApiResult<Json<ListPage<Pipeline>>> {
-    let ctx = ctx(&state, &pid).await?;
+    let ctx = ctx(&state, &pid, &repo).await?;
     Ok(Json(list_pipelines(&ctx, &q).await?))
 }
 
 async fn h_create(
     State(state): State<AppState>,
+    Query(repo): Query<RepoParam>,
     Path(pid): Path<String>,
     Json(body): Json<CreatePipeline>,
 ) -> ApiResult<Json<Pipeline>> {
-    let ctx = ctx(&state, &pid).await?;
+    let ctx = ctx(&state, &pid, &repo).await?;
     Ok(Json(create_pipeline(&ctx, &body).await?))
 }
 
-async fn h_detail(State(state): State<AppState>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<PipelineDetail>> {
-    let ctx = ctx(&state, &pid).await?;
+async fn h_detail(State(state): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<PipelineDetail>> {
+    let ctx = ctx(&state, &pid, &repo).await?;
     Ok(Json(pipeline_detail(&ctx, id).await?))
 }
 
@@ -618,42 +621,43 @@ pub async fn pipeline_test_failures(ctx: &GlCtx, id: u64) -> ApiResult<Option<Te
     Ok(r.map(test_failures))
 }
 
-async fn h_tests(State(state): State<AppState>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<TestFailures>> {
-    let ctx = ctx(&state, &pid).await?;
+async fn h_tests(State(state): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<TestFailures>> {
+    let ctx = ctx(&state, &pid, &repo).await?;
     pipeline_test_failures(&ctx, id).await?.map(Json).ok_or_else(|| ApiError::not_found("this pipeline has no test report"))
 }
 
-async fn h_retry(State(state): State<AppState>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<Pipeline>> {
-    let ctx = ctx(&state, &pid).await?;
+async fn h_retry(State(state): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<Pipeline>> {
+    let ctx = ctx(&state, &pid, &repo).await?;
     Ok(Json(pipeline_action(&ctx, id, "retry").await?))
 }
 
-async fn h_cancel(State(state): State<AppState>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<Pipeline>> {
-    let ctx = ctx(&state, &pid).await?;
+async fn h_cancel(State(state): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<Pipeline>> {
+    let ctx = ctx(&state, &pid, &repo).await?;
     Ok(Json(pipeline_action(&ctx, id, "cancel").await?))
 }
 
-async fn h_job(State(state): State<AppState>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<Job>> {
-    let ctx = ctx(&state, &pid).await?;
+async fn h_job(State(state): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<Job>> {
+    let ctx = ctx(&state, &pid, &repo).await?;
     Ok(Json(get_job(&ctx, id).await?))
 }
 
-async fn h_job_retry(State(state): State<AppState>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<Job>> {
-    let ctx = ctx(&state, &pid).await?;
+async fn h_job_retry(State(state): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<Job>> {
+    let ctx = ctx(&state, &pid, &repo).await?;
     Ok(Json(job_action(&ctx, id, "retry", &[]).await?))
 }
 
-async fn h_job_cancel(State(state): State<AppState>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<Job>> {
-    let ctx = ctx(&state, &pid).await?;
+async fn h_job_cancel(State(state): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Json<Job>> {
+    let ctx = ctx(&state, &pid, &repo).await?;
     Ok(Json(job_action(&ctx, id, "cancel", &[]).await?))
 }
 
 async fn h_job_play(
     State(state): State<AppState>,
+    Query(repo): Query<RepoParam>,
     Path((pid, id)): Path<(String, u64)>,
     body: Option<Json<PlayBody>>,
 ) -> ApiResult<Json<Job>> {
-    let ctx = ctx(&state, &pid).await?;
+    let ctx = ctx(&state, &pid, &repo).await?;
     let vars = body.map(|Json(b)| b.variables).unwrap_or_default();
     Ok(Json(job_action(&ctx, id, "play", &vars).await?))
 }
@@ -670,10 +674,11 @@ struct TraceQuery {
 
 async fn h_trace(
     State(state): State<AppState>,
+    Query(repo): Query<RepoParam>,
     Path((pid, id)): Path<(String, u64)>,
     Query(q): Query<TraceQuery>,
 ) -> ApiResult<Json<Value>> {
-    let ctx = ctx(&state, &pid).await?;
+    let ctx = ctx(&state, &pid, &repo).await?;
     if let Some(n) = q.tail {
         let (job, text, total, truncated) = log_tail(&ctx, id, n.clamp(1, 5000), q.plain.unwrap_or(false)).await?;
         return Ok(Json(json!({
@@ -695,10 +700,11 @@ struct LogQuery {
 /// Download the job log as a file.
 async fn h_log_download(
     State(state): State<AppState>,
+    Query(repo): Query<RepoParam>,
     Path((pid, id)): Path<(String, u64)>,
     Query(q): Query<LogQuery>,
 ) -> ApiResult<Response> {
-    let ctx = ctx(&state, &pid).await?;
+    let ctx = ctx(&state, &pid, &repo).await?;
     let (text, _) = full_log(&ctx, id).await?;
     let text = if q.ansi.unwrap_or(false) { text } else { trace::plain(&text) };
     let mut resp = (text + "\n").into_response();
@@ -711,8 +717,8 @@ async fn h_log_download(
 }
 
 /// Stream the job's artifacts archive through (never buffered whole).
-async fn h_artifacts(State(state): State<AppState>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Response> {
-    let ctx = ctx(&state, &pid).await?;
+async fn h_artifacts(State(state): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, id)): Path<(String, u64)>) -> ApiResult<Response> {
+    let ctx = ctx(&state, &pid, &repo).await?;
     let job = get_job(&ctx, id).await?;
     if !job.has_archive() {
         return Err(ApiError::not_found("this job has no artifacts archive"));

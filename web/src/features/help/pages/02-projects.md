@@ -1,10 +1,28 @@
 # Projects and files
 
-A **project** is a git repository. Switch between them with the project switcher at the top of the agents window. Every tool window follows the current project.
+A **project** is a folder, usually one git repository. Switch between them with the project switcher at the top of the agents window. Every tool window follows the current project.
 
 ## Adding and removing projects
 
 Workbench lists each repository directly under the folders in `[projects] roots` (default `~/workspace`). Change that list in **Settings → Projects**, or add single repositories with `include` and hide some with `exclude`.
+
+## Several repositories in one project
+
+A project folder may hold more than one git repository: services cloned side by side, a monorepo with a submodule, a folder that is no repository itself. Workbench lists them all, and git and CI work on one at a time. The **repository switcher** in the top bar (it appears when a project has two or more) picks which one the Commit window, the Git Log, the branch widget, merge requests, pipelines and Actions show. The file tree and editor show the changes of every repository, and agents, terminals, runs and search work on the whole project.
+
+Workbench finds repositories up to three folders below the project root (not in dependency or build folders, and not linked worktrees). List them yourself, or give one its own GitLab or GitHub project, with `[[repository]]` in `.workbench.toml`:
+
+```toml
+[[repository]]
+path = "services/api"          # relative to the project root
+name = "API"                   # shown in the switcher
+[repository.gitlab]
+host = "gitlab.example.com"
+path = "acme/api"
+token = "api_token"            # the name of a [secrets] entry in your machine file
+```
+
+It takes the same keys as `[repo]`. Put `nested_repos = false` under `[project]` to list only the entries you wrote. A folder with a `.workbench.toml` and no `.git` of its own is a project too, which is how a folder of repositories becomes one: its first repository is the default.
 
 ## What Workbench detects
 

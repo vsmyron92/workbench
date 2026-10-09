@@ -4,6 +4,7 @@
 
 import { useState } from 'react'
 import { Bot, ChevronDown, ChevronRight, CircleX, Copy, FileCode, OctagonAlert, TriangleAlert } from 'lucide-react'
+import { fileInProject, repoNote, scopeProject } from '@/api/repos'
 import { askAgent } from '@/shell/agentBridge'
 import { openPanel, toast, toastError } from '@/shell/actions'
 import { Badge, Button, EmptyState, ErrorBox, formatDuration, IconButton, Loading } from '@/ui'
@@ -11,9 +12,9 @@ import { useTestFailures } from './api'
 import { testFixPrompt } from './logic'
 import type { FailedCase, Pipeline, SuiteFailures } from './types'
 
-/** A report path as a project path (`./spec/a_spec.rb` → `spec/a_spec.rb`). */
-function projectPath(file: string): string {
-  return file.replace(/^\.\//, '').replace(/^\/+/, '')
+/** A report path as a project path (`./spec/a_spec.rb` → `spec/a_spec.rb`; in a repository below the root, `<repo>/spec/a_spec.rb`). */
+function projectPath(scope: string, file: string): string {
+  return fileInProject(scope, file)
 }
 
 function CaseRow({ projectId, repoPath, pipeline, suite, c }: { projectId: string; repoPath: string; pipeline: Pipeline; suite: string; c: FailedCase }) {
@@ -21,7 +22,7 @@ function CaseRow({ projectId, repoPath, pipeline, suite, c }: { projectId: strin
   const Icon = c.status === 'error' ? OctagonAlert : CircleX
   const ask = async () => {
     try {
-      await askAgent({ projectId, prompt: testFixPrompt({ projectPath: repoPath, pipeline, suite, test: c }) })
+      await askAgent({ projectId: scopeProject(projectId), prompt: testFixPrompt({ projectPath: repoPath, pipeline, suite, test: c }) + repoNote(projectId) })
     } catch (e) {
       toastError(e, 'Could not ask an agent')
     }
@@ -63,11 +64,12 @@ function CaseRow({ projectId, repoPath, pipeline, suite, c }: { projectId: strin
                 size="small"
                 icon={FileCode}
                 onClick={() => {
-                  const path = projectPath(c.file!)
-                  openPanel({ kind: 'editor', id: `editor:${projectId}:${path}`, params: { projectId, path } })
+                  const path = projectPath(projectId, c.file!)
+                  const real = scopeProject(projectId)
+                  openPanel({ kind: 'editor', id: `editor:${real}:${path}`, params: { projectId: real, path } })
                 }}
               >
-                {projectPath(c.file)}
+                {projectPath(projectId, c.file)}
               </Button>
             )}
             <span className="wb-grow" />

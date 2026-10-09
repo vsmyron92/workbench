@@ -1,6 +1,6 @@
 //! Shelf (JetBrains): set local changes aside outside git's own stash.
 //!
-//! A shelf lives in `data_dir/git/shelf/<pid>/<id>/`: `meta.json` (name, created,
+//! A shelf lives in `data_dir/git/shelf/<scope>/<id>/` (`<scope>` as for changelists): `meta.json` (name, created,
 //! base commit, branch, files) and one binary-safe patch per file under `files/`
 //! (`git diff --binary --full-index`, so a new or binary file is complete and a
 //! 3-way unshelve finds its base blobs).
@@ -63,8 +63,8 @@ pub struct ShelfMeta {
     pub view_commit: Option<String>,
 }
 
-pub fn shelf_root(data_dir: &Path, pid: &str) -> PathBuf {
-    data_dir.join("git").join("shelf").join(pid)
+pub fn shelf_root(data_dir: &Path, scope: &str) -> PathBuf {
+    data_dir.join("git").join("shelf").join(scope)
 }
 
 fn check_id(id: &str) -> Result<(), ApiError> {

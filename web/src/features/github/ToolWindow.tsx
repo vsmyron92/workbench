@@ -4,8 +4,9 @@
 
 import type { ReactNode } from 'react'
 import { GitPullRequestCreate } from 'lucide-react'
+import { NotOnForge } from '@/shell/RepoUi'
 import { Badge, EmptyState, ErrorBox, Loading, Tabs } from '@/ui'
-import { useGithubSummary } from './api'
+import { useGithubSummary, useHasGithub } from './api'
 import { Duration, ExtLink, GitHubIcon, openPr, openRun, PublicModeBanner, RefLabel, runTitle, StatusIcon, useGhUi, type GhTab } from './components'
 import { ghLabel } from './logic'
 import { PrStateIcon } from './icons'
@@ -66,10 +67,13 @@ function Header({ projectId, s }: { projectId: string; s: GithubSummary }) {
 }
 
 export function GithubToolWindow({ projectId }: { projectId: string | null }) {
-  const summary = useGithubSummary(projectId)
+  const has = useHasGithub(projectId)
+  const summary = useGithubSummary(projectId, has)
   const tab = useGhUi((s) => s.tab)
   const setTab = useGhUi((s) => s.setTab)
   if (!projectId) return <EmptyState title="No project selected" />
+  // The project has a repository on GitHub, but not the active one.
+  if (!has) return <NotOnForge scope={projectId} forge="github" icon={GitHubIcon} />
   const s = summary.data
   if (summary.error && !s) return <ErrorBox error={summary.error} onRetry={() => summary.refetch()} />
   if (!s) return <Loading />

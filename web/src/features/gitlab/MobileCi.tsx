@@ -2,6 +2,8 @@
 
 import { useEffect, useState, type ReactNode } from 'react'
 import { ArrowLeft } from 'lucide-react'
+import { useGitScope } from '@/api/useRepos'
+import { NotOnForge, RepoSelect } from '@/shell/RepoUi'
 import { EmptyState, ErrorBox, GitLabIcon, IconButton, Loading } from '@/ui'
 import { useGitlabSummary, useHasGitlab, useJob, usePipeline } from './api'
 import { StatusIcon, StatusText } from './components'
@@ -70,13 +72,30 @@ function MobilePipeline({ projectId, id, onBack, onJob }: { projectId: string; i
   )
 }
 
+/** The phone's CI tab: the pipelines of the project's active repository. */
 export function MobileCi({ projectId }: { projectId: string | null }) {
+  const scope = useGitScope(projectId)
+  if (!projectId || !scope) return <EmptyState title="No project selected" />
+  return <MobileCiView key={scope} projectId={scope} real={projectId} />
+}
+
+function MobileCiView({ projectId, real }: { projectId: string; real: string }) {
   const has = useHasGitlab(projectId)
   const summary = useGitlabSummary(projectId, has)
   const [view, setView] = useState<View>({ kind: 'list' })
   useEffect(() => setView({ kind: 'list' }), [projectId])
-  if (!projectId) return <EmptyState title="No project selected" />
-  if (!has) return <EmptyState icon={GitLabIcon} title="This project is not on GitLab" />
+  const repoBar = (
+    <div className="wb-repo-bar">
+      <RepoSelect projectId={real} />
+    </div>
+  )
+  if (!has)
+    return (
+      <>
+        {repoBar}
+        <NotOnForge scope={projectId} forge="gitlab" icon={GitLabIcon} />
+      </>
+    )
   if (view.kind === 'job')
     return (
       <MobileJob
@@ -97,6 +116,7 @@ export function MobileCi({ projectId }: { projectId: string | null }) {
   if (summary.error && !summary.data) return <ErrorBox error={summary.error} onRetry={() => summary.refetch()} />
   return (
     <div className="wb-fill gl-mobile">
+      {repoBar}
       <PipelinesList projectId={projectId} summary={summary.data} compact onOpen={(p) => setView({ kind: 'pipeline', id: p.id })} />
     </div>
   )

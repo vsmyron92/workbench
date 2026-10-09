@@ -1,6 +1,7 @@
-//! Which repository a project is, and translating between project-relative paths
-//! (what the UI and the other slices use) and repository-relative paths (what git
-//! prints). They differ only when a project root is a subdirectory of a repository.
+//! Which repository of a project this is, and translating between project-relative
+//! paths (what the UI and the other slices use) and repository-relative paths (what git
+//! prints). They differ when a project root is a subdirectory of its repository
+//! (`prefix`) and for a repository below the project root (`base`).
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -9,11 +10,17 @@ use axum::http::StatusCode;
 
 use super::cmd::{Git, GitOutput};
 use crate::error::ApiError;
+use crate::projects::{Project, ROOT_REPO};
 
 #[derive(Debug, Clone)]
 pub struct Repo {
     /// Project id (for events).
     pub project_id: String,
+    /// Which repository of the project this is (`.`, or its directory below the root).
+    pub id: String,
+    /// Key of the state kept per repository (`Project::scope_key`): changelists,
+    /// shelves, running operations.
+    pub scope: String,
     /// The working tree root (`git rev-parse --show-toplevel`).
     pub top: PathBuf,
     /// This worktree's git dir (MERGE_HEAD, rebase-merge… live here). For a linked
@@ -22,8 +29,15 @@ pub struct Repo {
     /// The shared git dir (refs, objects).
     #[allow(dead_code)]
     pub common_dir: PathBuf,
-    /// Project root relative to `top`, with a trailing `/`, or empty.
+    /// Project root relative to `top`, with a trailing `/`, or empty. Set for the repository
+    /// the project root is in when the root is a subdirectory of it.
     pub prefix: String,
+    /// `top` relative to the project root, with a trailing `/` (`services/api/`), or empty.
+    /// Set for a repository below the project root.
+    pub base: String,
+    /// Directories (project-relative, no trailing `/`) of other repositories of the project
+    /// inside this one's tree. Paths strictly inside them belong to those repositories.
+    pub inner: Vec<String>,
 }
 
 pub(super) const DISCOVER_ARGS: [&str; 5] = ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir", "--show-prefix"];
@@ -37,9 +51,52 @@ pub(super) fn discover_error(out: &GitOutput, root: &Path) -> ApiError {
     })
 }
 
+/// Directories of the project's other repositories that lie inside repository `id`'s tree.
+pub(super) fn inner_repos(project: &Project, id: &str) -> Vec<String> {
+    project
+        .repos
+        .iter()
+        .filter(|r| r.id != id && !r.is_root() && (id == ROOT_REPO || r.id.strip_prefix(id).is_some_and(|rest| rest.starts_with('/'))))
+        .map(|r| r.id.clone())
+        .collect()
+}
+
 impl Repo {
-    /// Resolve the repository containing `root`.
-    pub async fn discover(project_id: &str, root: &Path) -> Result<Self, ApiError> {
+    /// Resolve the repository `project` is seen through (see `Project::scoped`): the
+    /// working tree of a repository below the root, or the one containing the root.
+    pub async fn discover(project: &Project) -> Result<Self, ApiError> {
+        let inner = inner_repos(project, project.repo_id());
+        match project.repo_entry().filter(|r| !r.is_root()) {
+            None => Self::discover_at(&project.id, &project.root, ROOT_REPO, inner).await,
+            Some(entry) => {
+                let mut repo = Self::discover_at(&project.id, &entry.dir, &entry.id, inner).await?;
+                // The entry is the top of a working tree; one that is none any more (its
+                // `.git` is gone) would silently be the enclosing repository.
+                use crate::util::os::path::{canonicalize, starts_with};
+                let want = canonicalize(&entry.dir).unwrap_or_else(|_| entry.dir.clone());
+                let top = canonicalize(&repo.top).unwrap_or_else(|_| repo.top.clone());
+                if !(starts_with(&top, &want) && starts_with(&want, &top)) {
+                    return Err(ApiError::new(
+                        StatusCode::NOT_FOUND,
+                        "not_a_repo",
+                        format!("{} is not a git repository of its own any more", crate::config::contract_tilde(&entry.dir)),
+                    ));
+                }
+                repo.base = format!("{}/", entry.id);
+                repo.prefix = String::new();
+                Ok(repo)
+            }
+        }
+    }
+
+    /// Resolve the repository containing `root` as the project `project_id`'s root
+    /// repository.
+    #[cfg(test)]
+    pub async fn discover_root(project_id: &str, root: &Path) -> Result<Self, ApiError> {
+        Self::discover_at(project_id, root, ROOT_REPO, vec![]).await
+    }
+
+    async fn discover_at(project_id: &str, root: &Path, id: &str, inner: Vec<String>) -> Result<Self, ApiError> {
         let out = Git::read(root).args(DISCOVER_ARGS).run().await?;
         if !out.ok() {
             return Err(discover_error(&out, root));
@@ -59,7 +116,8 @@ impl Repo {
             if p.is_absolute() { p } else { root.join(p) }
         };
         let common_dir = crate::util::os::path::canonicalize(&common_dir).unwrap_or(common_dir);
-        Ok(Self { project_id: project_id.to_string(), top, git_dir, common_dir, prefix })
+        let scope = crate::projects::scope_key(project_id, id);
+        Ok(Self { project_id: project_id.to_string(), id: id.to_string(), scope, top, git_dir, common_dir, prefix, base: String::new(), inner })
     }
 
     pub fn arc(self) -> Arc<Self> {
@@ -67,7 +125,8 @@ impl Repo {
     }
 
     /// Project-relative client path → repository-relative path. Rejects absolute
-    /// paths, NULs and anything that escapes the working tree.
+    /// paths, NULs, anything that escapes the working tree and any path that belongs to
+    /// another repository of the project.
     pub fn to_repo(&self, rel: &str) -> Result<String, ApiError> {
         if rel.contains('\0') {
             return Err(ApiError::bad_request("path contains NUL"));
@@ -107,12 +166,31 @@ impl Repo {
         if parts.iter().any(|p| crate::util::os::path::same_name(p, ".git")) {
             return Err(ApiError::forbidden("paths inside .git are not allowed"));
         }
+        let elsewhere = |what: &str| ApiError::bad_request(format!("{rel} belongs to {what}: choose that repository first"));
+        // `parts` are relative to the repository top for a repository holding the root and
+        // to the project root for one below it. A path strictly inside another repository
+        // of the project is that repository's (the directory itself is a plain path here:
+        // a submodule's entry).
+        let joined = parts.join("/");
+        if self.inner.iter().any(|d| joined.strip_prefix(&format!("{}{d}", self.prefix)).is_some_and(|rest| rest.starts_with('/'))) {
+            return Err(elsewhere("another repository of this project"));
+        }
+        if !self.base.is_empty() {
+            let base: Vec<&str> = self.base.trim_end_matches('/').split('/').collect();
+            if parts.len() <= base.len() || !parts.iter().zip(&base).all(|(a, b)| a == b) {
+                return Err(elsewhere(&format!("another repository than {}", self.id)));
+            }
+            parts.drain(..base.len());
+        }
         Ok(parts.join("/"))
     }
 
     /// Repository-relative path (as git prints it) → project-relative path. Paths
     /// outside a subdirectory project come back with `../` segments.
     pub fn to_project(&self, repo_rel: &str) -> String {
+        if !self.base.is_empty() {
+            return format!("{}{repo_rel}", self.base);
+        }
         if self.prefix.is_empty() {
             return repo_rel.to_string();
         }
@@ -128,7 +206,7 @@ impl Repo {
     }
 
     /// Is this repository path inside the project (always true without a prefix)?
-#[cfg(test)]
+    #[cfg(test)]
     pub fn in_project(&self, repo_rel: &str) -> bool {
         self.prefix.is_empty() || repo_rel.starts_with(&self.prefix)
     }
@@ -158,10 +236,28 @@ mod tests {
     fn repo(prefix: &str) -> Repo {
         Repo {
             project_id: "p".into(),
+            id: ".".into(),
+            scope: "p".into(),
             top: "/r".into(),
             git_dir: "/r/.git".into(),
             common_dir: "/r/.git".into(),
             prefix: prefix.into(),
+            base: String::new(),
+            inner: vec![],
+        }
+    }
+
+    /// The repository `services/api` below the project root, with a deeper one inside it.
+    fn nested() -> Repo {
+        Repo {
+            id: "services/api".into(),
+            scope: "p@services~2Fapi".into(),
+            top: "/p/services/api".into(),
+            git_dir: "/p/services/api/.git".into(),
+            common_dir: "/p/services/api/.git".into(),
+            base: "services/api/".into(),
+            inner: vec!["services/api/vendor/lib".into()],
+            ..repo("")
         }
     }
 
@@ -197,5 +293,44 @@ mod tests {
         assert!(r.in_project("app/web/x"));
         assert!(!r.in_project("app/server/x"));
         assert_eq!(r.scope(), "app/web");
+    }
+
+    #[test]
+    fn translates_paths_for_repositories_below_the_root() {
+        let r = nested();
+        assert_eq!(r.to_repo("services/api/src/a.rs").unwrap(), "src/a.rs");
+        assert_eq!(r.to_repo("./services/api/x/../y.rs").unwrap(), "y.rs");
+        assert_eq!(r.to_repo("services/web/../api/z").unwrap(), "z");
+        assert_eq!(r.to_project("src/a.rs"), "services/api/src/a.rs");
+        assert_eq!(r.scope(), ".");
+        // Another repository's path, the repository itself and anything above the root.
+        for other in ["README.md", "services/web/a.rs", "services/api", "services/apix/a", "services", "../x", "services/api/../../a"] {
+            assert!(r.to_repo(other).is_err(), "{other}");
+        }
+        assert_eq!(r.to_repo("services/web/a.rs").unwrap_err().status, StatusCode::BAD_REQUEST);
+        assert!(r.to_repo("services/api/.git/config").is_err());
+        // A repository nested in this one owns its paths; its directory is a plain entry.
+        assert_eq!(r.to_repo("services/api/vendor/lib").unwrap(), "vendor/lib");
+        let err = r.to_repo("services/api/vendor/lib/x.c").unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("belongs to"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_root_repository_refuses_paths_inside_the_repositories_below_it() {
+        let mut r = repo("");
+        r.inner = vec!["services/api".into(), "web".into()];
+        assert_eq!(r.to_repo("services/api").unwrap(), "services/api");
+        assert_eq!(r.to_repo("services/other/a").unwrap(), "services/other/a");
+        assert_eq!(r.to_repo("webby/a").unwrap(), "webby/a");
+        for inside in ["services/api/a.rs", "web/x/y", "./web/../web/a"] {
+            assert_eq!(r.to_repo(inside).unwrap_err().status, StatusCode::BAD_REQUEST, "{inside}");
+        }
+        // The project is a subfolder of its repository: inner directories are project-relative.
+        let mut sub = repo("app/");
+        sub.inner = vec!["web".into()];
+        assert_eq!(sub.to_repo("web").unwrap(), "app/web");
+        assert!(sub.to_repo("web/a.ts").is_err());
+        assert_eq!(sub.to_repo("webx/a.ts").unwrap(), "app/webx/a.ts");
     }
 }

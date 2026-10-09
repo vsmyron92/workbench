@@ -5,7 +5,7 @@
 //! explicitly: every `.gitignore` from the directory up to the project root
 //! (deepest wins), then `.git/info/exclude`, then the user's global excludes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{Match, WalkBuilder};
@@ -34,18 +34,49 @@ fn ignore_file_leaves(dir: &Path) -> bool {
 /// watcher walks can lead below one that the walk from the root left out. `start` itself
 /// must not be reached through a link to another computer (callers check). Callers may
 /// add options, but must not turn ignore files on again or replace `filter_entry`.
-pub fn walk(start: &Path) -> WalkBuilder {
-    let keep = |e: &ignore::DirEntry| {
+///
+/// `nested` are the working trees of the project's repositories below `start`
+/// (`Project::nested_repo_dirs`). Their content belongs to them: the walk visits each as a
+/// start of its own, so a root `.gitignore` that lists the clone (`web/`) does not hide what
+/// is in it, and the walk from `start` leaves them out so nothing is visited twice.
+pub fn walk(start: &Path, nested: &[PathBuf]) -> WalkBuilder {
+    let tops: Vec<PathBuf> = nested.iter().filter(|t| t.starts_with(start) && *t != start).cloned().collect();
+    let keep_tops = tops.clone();
+    let keep = move |e: &ignore::DirEntry| {
         !HARD_IGNORE.contains(&e.file_name().to_string_lossy().as_ref())
             && !(e.file_type().is_some_and(|t| t.is_dir()) && ignore_file_leaves(e.path()))
+            && !keep_tops.iter().any(|t| t == e.path())
     };
     let mut b = WalkBuilder::new(start);
     b.hidden(false).git_ignore(true).git_global(true).git_exclude(true).require_git(false).follow_links(false).filter_entry(keep);
+    // An explicit start is never filtered or ignored by the walk itself.
+    for top in &tops {
+        if !ignore_file_leaves(top) && !os::path::leaves_machine(top) {
+            b.add(top);
+        }
+    }
     if os::path::ancestors_leave(start, ignore_file_leaves) {
         tracing::warn!("{}: an ignore file there or above it (or above where its links lead) links to another computer; walking it without ignore files", start.display());
         b.git_ignore(false).ignore(false);
     }
     b
+}
+
+/// The folder whose ignore files govern `dir` first: the nearest folder from `dir` up to
+/// `root` with a `.git` of its own (a clone below the root has its own ignore rules, as
+/// git applies them), else `root`.
+fn repo_top<'a>(root: &'a Path, dir: &'a Path) -> &'a Path {
+    let mut cur = Some(dir);
+    while let Some(d) = cur {
+        if d == root || !d.starts_with(root) {
+            break;
+        }
+        if !os::path::leaves_machine_below(d, &d.join(".git")) && d.join(".git").exists() {
+            return d;
+        }
+        cur = d.parent();
+    }
+    root
 }
 
 pub struct IgnoreChecker {
@@ -54,13 +85,16 @@ pub struct IgnoreChecker {
 }
 
 impl IgnoreChecker {
-    /// Matchers that apply to entries of `dir` (which must be inside `root`). A
-    /// `.gitignore` that is a link to another computer (Windows) is not read.
+    /// Matchers that apply to entries of `dir` (which must be inside `root`): the
+    /// `.gitignore` files from `dir` up to the top of its repository (`root`, or a clone
+    /// below it that has a `.git` of its own). A `.gitignore` that is a link to another
+    /// computer (Windows) is not read.
     pub fn for_dir(root: &Path, dir: &Path) -> Self {
         let mut layers = vec![];
+        let base = repo_top(root, dir);
         let mut cur = Some(dir);
         while let Some(d) = cur {
-            if !d.starts_with(root) {
+            if !d.starts_with(base) {
                 break;
             }
             let f = d.join(".gitignore");
@@ -70,14 +104,14 @@ impl IgnoreChecker {
                     layers.push(gi);
                 }
             }
-            if d == root {
+            if d == base {
                 break;
             }
             cur = d.parent();
         }
-        let exclude = root.join(".git/info/exclude");
+        let exclude = base.join(".git/info/exclude");
         if exclude.is_file() {
-            let mut b = GitignoreBuilder::new(root);
+            let mut b = GitignoreBuilder::new(base);
             b.add(&exclude);
             if let Ok(gi) = b.build() {
                 if !gi.is_empty() {
@@ -157,7 +191,7 @@ mod tests {
             return;
         }
         let entries = |start: &Path| -> Vec<String> {
-            let mut v: Vec<String> = walk(start).build().flatten().filter(|e| e.depth() > 0).map(|e| crate::util::os::path::to_slash(e.path().strip_prefix(start).unwrap())).collect();
+            let mut v: Vec<String> = walk(start, &[]).build().flatten().filter(|e| e.depth() > 0).map(|e| crate::util::os::path::to_slash(e.path().strip_prefix(start).unwrap())).collect();
             v.sort();
             v
         };
@@ -171,6 +205,50 @@ mod tests {
         std::fs::write(root.join("a").join("deep").join("y.log"), "").unwrap();
         std::os::windows::fs::symlink_dir(Path::new("a").join("deep"), root.join("lnk")).unwrap();
         assert_eq!(entries(&root.join("lnk")), ["y.log"]);
+    }
+
+    /// A clone below the root has its own ignore rules: the root's `.gitignore` lists the clone
+    /// (`web/`) and its patterns (`*.log`) do not reach into it, as in git. The walk visits the
+    /// clone once, whether the root ignores it or not.
+    #[test]
+    fn a_clone_below_the_root_is_governed_by_its_own_ignore_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for d in ["web/.git", "web/src", "tools/.git", "src"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join(".gitignore"), "web/\n*.log\n").unwrap();
+        std::fs::write(root.join("web/.gitignore"), "dist/\n").unwrap();
+        for f in ["web/src/app.js", "web/run.log", "web/dist.txt", "tools/t.sh", "src/main.rs", "src/x.log"] {
+            std::fs::write(root.join(f), "").unwrap();
+        }
+        // The folder itself is the root's to ignore; what is in it is not.
+        let top = IgnoreChecker::for_dir(root, root);
+        assert!(top.is_ignored(&root.join("web"), true));
+        let web = IgnoreChecker::for_dir(root, &root.join("web"));
+        assert!(!web.is_ignored(&root.join("web/src"), true));
+        assert!(!web.is_ignored(&root.join("web/run.log"), false), "the root's `*.log` stops at the clone");
+        assert!(web.is_ignored(&root.join("web/dist"), true), "its own .gitignore applies");
+        assert!(!IgnoreChecker::for_dir(root, &root.join("web/src")).is_ignored(&root.join("web/src/app.js"), false));
+        assert!(IgnoreChecker::for_dir(root, &root.join("src")).is_ignored(&root.join("src/x.log"), false));
+
+        let tops = [root.join("web"), root.join("tools")];
+        let entries = |nested: &[PathBuf]| -> Vec<String> {
+            let mut v: Vec<String> = walk(root, nested)
+                .build()
+                .flatten()
+                .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+                .map(|e| crate::util::os::path::to_slash(e.path().strip_prefix(root).unwrap()))
+                .collect();
+            v.sort();
+            v
+        };
+        // Without the clones listed, the root's rules hide `web` (and `tools` is walked as a folder).
+        assert_eq!(entries(&[]), [".gitignore", "src/main.rs", "tools/t.sh"]);
+        // With them, each is walked once: `tools` is not repeated, `web` is no longer hidden.
+        // (The `ignore` crate reads the ignore files above every start it walks, so the root's
+        // `*.log` still reaches `web/run.log` here, unlike in git and in `IgnoreChecker`.)
+        assert_eq!(entries(&tops), [".gitignore", "src/main.rs", "tools/t.sh", "web/.gitignore", "web/dist.txt", "web/src/app.js"]);
     }
 
     #[test]

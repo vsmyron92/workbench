@@ -10,6 +10,7 @@ import {
   CloudDownload,
   Crosshair,
   FileDiff,
+  FolderGit2,
   GitBranch,
   GitBranchPlus,
   GitCommitHorizontal,
@@ -23,8 +24,11 @@ import {
   Tag,
   Undo,
 } from 'lucide-react'
+import type { ProjectSummary } from '@/api/types'
+import { activeScope, resolveRepo, setActiveRepo, useActiveRepoStore } from '@/api/repos'
+import { withGitScope } from '@/api/useRepos'
 import { showToolWindow, toast, toastError } from '@/shell/actions'
-import type { Command, FeatureModule } from '@/shell/types'
+import type { Command, CommandContext, FeatureModule } from '@/shell/types'
 import { gitApi } from './api'
 import {
   askCommitMessage,
@@ -49,11 +53,14 @@ import { DiffPanel } from './DiffPanel'
 import { GitProvider } from './GitProvider'
 import { GitLogPanel, GitLogToolWindow } from './LogView'
 import { MobileGit } from './MobileGit'
+import { openRepoSwitcher, RepoTopbarWidget } from './RepoSwitcher'
 import { useDrafts, useGitPrefs, useGitUi } from './store'
 import { BranchTopbarWidget, ChangesBadge, CommitBadge, GitStatusbarWidget } from './Widgets'
 
-const commands = ({ projectId: pid }: { projectId: string | null }): Command[] => {
-  if (!pid) return []
+const commands = ({ projectId, project }: CommandContext): Command[] => {
+  if (!projectId) return []
+  // The repository the git views are on when the command runs, not when the palette was built.
+  const scope = () => activeScope(projectId)
   return [
     {
       id: 'git.commit',
@@ -67,12 +74,12 @@ const commands = ({ projectId: pid }: { projectId: string | null }): Command[] =
         useDrafts.getState().focus()
       },
     },
-    { id: 'git.update', title: 'Update Project…', group: 'Git', shortcut: 'mod+t', icon: ArrowDownToLine, keywords: ['pull', 'git pull'], run: () => updateProject(pid) },
-    { id: 'git.push', title: 'Push…', group: 'Git', shortcut: 'mod+shift+k', icon: ArrowUpFromLine, keywords: ['git push'], run: () => openPush(pid) },
-    { id: 'git.fetch', title: 'Fetch', group: 'Git', icon: CloudDownload, keywords: ['git fetch', 'remote'], run: () => fetchAll(pid) },
-    { id: 'git.log', title: 'Show Git Log', group: 'Git', shortcut: 'alt+9', icon: GitGraph, keywords: ['history', 'graph'], run: () => openGitLog(pid) },
-    { id: 'git.logPanel', title: 'Open Git Log in Editor Area', group: 'Git', icon: GitGraph, keywords: ['history'], run: () => openGitLog(pid, { panel: true }) },
-    { id: 'git.newBranch', title: 'New Branch…', group: 'Git', icon: GitBranchPlus, keywords: ['create branch'], run: () => newBranch(pid) },
+    { id: 'git.update', title: 'Update Project…', group: 'Git', shortcut: 'mod+t', icon: ArrowDownToLine, keywords: ['pull', 'git pull'], run: () => updateProject(scope()) },
+    { id: 'git.push', title: 'Push…', group: 'Git', shortcut: 'mod+shift+k', icon: ArrowUpFromLine, keywords: ['git push'], run: () => openPush(scope()) },
+    { id: 'git.fetch', title: 'Fetch', group: 'Git', icon: CloudDownload, keywords: ['git fetch', 'remote'], run: () => fetchAll(scope()) },
+    { id: 'git.log', title: 'Show Git Log', group: 'Git', shortcut: 'alt+9', icon: GitGraph, keywords: ['history', 'graph'], run: () => openGitLog(scope()) },
+    { id: 'git.logPanel', title: 'Open Git Log in Editor Area', group: 'Git', icon: GitGraph, keywords: ['history'], run: () => openGitLog(scope(), { panel: true }) },
+    { id: 'git.newBranch', title: 'New Branch…', group: 'Git', icon: GitBranchPlus, keywords: ['create branch'], run: () => newBranch(scope()) },
     {
       id: 'git.branches',
       title: 'Branches…',
@@ -81,7 +88,7 @@ const commands = ({ projectId: pid }: { projectId: string | null }): Command[] =
       keywords: ['checkout', 'switch branch', 'merge', 'rebase'],
       run: () => {
         const el = document.querySelector('.git-branch-btn') as HTMLElement | null
-        useGitUi.getState().openPopover(pid, el?.getBoundingClientRect() ?? null, 'topbar')
+        useGitUi.getState().openPopover(scope(), el?.getBoundingClientRect() ?? null, 'topbar')
       },
     },
     {
@@ -92,11 +99,11 @@ const commands = ({ projectId: pid }: { projectId: string | null }): Command[] =
       keywords: ['switch'],
       run: () => {
         const el = document.querySelector('.git-branch-btn') as HTMLElement | null
-        useGitUi.getState().openPopover(pid, el?.getBoundingClientRect() ?? null, 'topbar')
+        useGitUi.getState().openPopover(scope(), el?.getBoundingClientRect() ?? null, 'topbar')
       },
     },
-    { id: 'git.checkoutRevision', title: 'Checkout Tag or Revision…', group: 'Git', icon: Tag, run: () => checkoutRevision(pid) },
-    { id: 'git.stash', title: 'Stash Changes…', group: 'Git', icon: Archive, keywords: ['git stash'], run: () => useGitUi.getState().openDialog({ kind: 'stash', projectId: pid }) },
+    { id: 'git.checkoutRevision', title: 'Checkout Tag or Revision…', group: 'Git', icon: Tag, run: () => checkoutRevision(scope()) },
+    { id: 'git.stash', title: 'Stash Changes…', group: 'Git', icon: Archive, keywords: ['git stash'], run: () => useGitUi.getState().openDialog({ kind: 'stash', projectId: scope() }) },
     {
       id: 'git.unstash',
       title: 'Unstash Changes…',
@@ -116,10 +123,10 @@ const commands = ({ projectId: pid }: { projectId: string | null }): Command[] =
       keywords: ['shelf', 'set aside'],
       run: async () => {
         try {
-          const st = await gitApi.status(pid)
+          const st = await gitApi.status(scope())
           const paths = st.files.filter((f) => f.index !== '!' && !f.conflict).map((f) => f.path)
           if (!paths.length) toast('info', 'No local changes to shelve')
-          else shelveChanges(pid, paths, { name: '' })
+          else shelveChanges(scope(), paths, { name: '' })
         } catch (e) {
           toastError(e)
         }
@@ -136,7 +143,7 @@ const commands = ({ projectId: pid }: { projectId: string | null }): Command[] =
         showToolWindow('commit')
       },
     },
-    { id: 'git.newChangelist', title: 'New Changelist…', group: 'Git', icon: ListPlus, keywords: ['changelist'], run: () => editChangelist(pid) },
+    { id: 'git.newChangelist', title: 'New Changelist…', group: 'Git', icon: ListPlus, keywords: ['changelist'], run: () => editChangelist(scope()) },
     {
       id: 'git.rebaseInteractive',
       title: 'Interactively Rebase onto Branch…',
@@ -144,8 +151,8 @@ const commands = ({ projectId: pid }: { projectId: string | null }): Command[] =
       icon: GitPullRequestArrow,
       keywords: ['rebase -i', 'squash', 'reword', 'fixup'],
       run: async () => {
-        const st = await gitApi.status(pid).catch(() => null)
-        rebaseOntoInteractively(pid, st?.branch ?? null)
+        const st = await gitApi.status(scope()).catch(() => null)
+        rebaseOntoInteractively(scope(), st?.branch ?? null)
       },
     },
     {
@@ -156,21 +163,42 @@ const commands = ({ projectId: pid }: { projectId: string | null }): Command[] =
       keywords: ['reset soft', 'uncommit'],
       run: async () => {
         try {
-          const st = await gitApi.status(pid)
+          const st = await gitApi.status(scope())
           if (!st.head) return toast('info', 'There is no commit yet')
-          const { message } = await gitApi.lastMessage(pid)
-          await undoCommit(pid, st.head, message.split('\n')[0])
+          const { message } = await gitApi.lastMessage(scope())
+          await undoCommit(scope(), st.head, message.split('\n')[0])
         } catch (e) {
           toastError(e)
         }
       },
     },
-    { id: 'git.bisectStart', title: 'Bisect: Start…', group: 'Git', icon: Crosshair, keywords: ['bisect', 'find bad commit'], run: () => startBisect(pid) },
-    { id: 'git.bisectGood', title: 'Bisect: Mark Good', group: 'Git', icon: Crosshair, keywords: ['bisect'], run: () => void markBisect(pid, 'good') },
-    { id: 'git.bisectBad', title: 'Bisect: Mark Bad', group: 'Git', icon: Crosshair, keywords: ['bisect'], run: () => void markBisect(pid, 'bad') },
-    { id: 'git.bisectSkip', title: 'Bisect: Skip', group: 'Git', icon: Crosshair, keywords: ['bisect'], run: () => void markBisect(pid, 'skip') },
-    { id: 'git.bisectReset', title: 'Bisect: Reset', group: 'Git', icon: Crosshair, keywords: ['bisect'], run: () => void resetBisect(pid) },
-    { id: 'git.aiMessage', title: 'Ask Agent for a Commit Message', group: 'Git', icon: Sparkles, keywords: ['ai', 'claude'], run: () => void askCommitMessage(pid) },
+    { id: 'git.bisectStart', title: 'Bisect: Start…', group: 'Git', icon: Crosshair, keywords: ['bisect', 'find bad commit'], run: () => startBisect(scope()) },
+    { id: 'git.bisectGood', title: 'Bisect: Mark Good', group: 'Git', icon: Crosshair, keywords: ['bisect'], run: () => void markBisect(scope(), 'good') },
+    { id: 'git.bisectBad', title: 'Bisect: Mark Bad', group: 'Git', icon: Crosshair, keywords: ['bisect'], run: () => void markBisect(scope(), 'bad') },
+    { id: 'git.bisectSkip', title: 'Bisect: Skip', group: 'Git', icon: Crosshair, keywords: ['bisect'], run: () => void markBisect(scope(), 'skip') },
+    { id: 'git.bisectReset', title: 'Bisect: Reset', group: 'Git', icon: Crosshair, keywords: ['bisect'], run: () => void resetBisect(scope()) },
+    { id: 'git.aiMessage', title: 'Ask Agent for a Commit Message', group: 'Git', icon: Sparkles, keywords: ['ai', 'claude'], run: () => void askCommitMessage(scope()) },
+    ...repoCommands(projectId, project),
+  ]
+}
+
+/** Switch the git and CI views to another repository of the project. */
+function repoCommands(projectId: string, project: ProjectSummary | null): Command[] {
+  const repos = project?.repos ?? []
+  if (repos.length < 2) return []
+  const current = resolveRepo(repos, useActiveRepoStore.getState().active[projectId])?.id
+  return [
+    { id: 'git.switchRepo', title: 'Switch Repository…', group: 'Git', icon: FolderGit2, keywords: ['repo', 'repository', 'project'], run: () => openRepoSwitcher(projectId) },
+    ...repos
+      .filter((r) => r.id !== current)
+      .map<Command>((r) => ({
+        id: `git.switchRepo.${r.id}`,
+        title: `Git: Switch to ${r.name}`,
+        group: 'Git',
+        icon: FolderGit2,
+        keywords: ['repo', 'repository', r.path, r.id],
+        run: () => setActiveRepo(projectId, r.id),
+      })),
   ]
 }
 
@@ -183,13 +211,14 @@ const feature: FeatureModule = {
     conflict: { component: ConflictPanel, icon: GitMerge },
   },
   toolWindows: [
-    { id: 'commit', title: 'Commit', icon: GitCommitHorizontal, side: 'left', order: 20, component: CommitToolWindow, badge: CommitBadge },
-    { id: 'gitlog', title: 'Git Log', icon: GitGraph, side: 'bottom', order: 20, component: GitLogToolWindow },
+    { id: 'commit', title: 'Commit', icon: GitCommitHorizontal, side: 'left', order: 20, component: withGitScope(CommitToolWindow), badge: withGitScope(CommitBadge) },
+    { id: 'gitlog', title: 'Git Log', icon: GitGraph, side: 'bottom', order: 20, component: withGitScope(GitLogToolWindow) },
   ],
   commands,
-  topbar: [BranchTopbarWidget],
-  statusbar: [GitStatusbarWidget],
-  mobileTabs: [{ id: 'git', title: 'Git', icon: GitBranch, order: 20, component: MobileGit, badge: ChangesBadge }],
+  // The widgets and windows get the shell's project id and show its active repository.
+  topbar: [RepoTopbarWidget, withGitScope(BranchTopbarWidget)],
+  statusbar: [withGitScope(GitStatusbarWidget)],
+  mobileTabs: [{ id: 'git', title: 'Git', icon: GitBranch, order: 20, component: MobileGit, badge: withGitScope(ChangesBadge) }],
   providers: [GitProvider],
 }
 

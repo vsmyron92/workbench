@@ -6,6 +6,11 @@
 //! `/api/projects/{pid}/git/**` (see `routes.rs`); cross-slice shapes (`GitStatus`,
 //! `GitFileDiff`, `GitBlame`) are fixed by docs/ARCHITECTURE.md.
 //!
+//! A project may hold several repositories (docs/ARCHITECTURE.md, "Repositories of a
+//! project"): every route takes `?repo=<id>` (absent: the project's default repository),
+//! resolved by `ProjectRegistry::require_repo`; paths on the wire stay project-relative
+//! (`Repo::to_repo` / `to_project`).
+//!
 //! Concurrency: several agents may share a worktree, so every mutating operation
 //! takes a per-repository async mutex, read-only commands never take git's
 //! optional locks, and hunk operations are guarded by a diff fingerprint.
@@ -29,6 +34,7 @@ mod rebase_i;
 mod refs;
 mod remote;
 mod repo;
+mod repos;
 mod routes;
 mod shelf;
 mod stash;
@@ -39,6 +45,8 @@ mod tests;
 mod tests_credentials;
 #[cfg(test)]
 mod tests_flows;
+#[cfg(test)]
+mod tests_repos;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -57,7 +65,8 @@ pub use repo::Repo;
 pub struct GitState {
     /// One write lock per working tree (keyed by its top-level path).
     locks: DashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>,
-    /// Discovered repositories per project id (root, repo).
+    /// Discovered repositories per scope key (`Project::scope_key`): the directory git
+    /// runs in, and the repository.
     repos: DashMap<String, (PathBuf, Arc<Repo>)>,
     /// Running and recent remote operations.
     pub ops: remote::OpRegistry,
@@ -67,19 +76,19 @@ pub struct GitState {
     /// Shell command prefix of the git editor helper (`'<exe>' git-editor`; `/`
     /// separators on Windows, where Git for Windows runs it with its sh).
     pub editor: OnceLock<String>,
-    /// Serialize changelist file access per project.
+    /// Serialize changelist file access per repository (scope key).
     changelist_locks: DashMap<String, Arc<parking_lot::Mutex<()>>>,
-    /// Serialize shelf changes per project.
+    /// Serialize shelf changes per repository (scope key).
     shelf_locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl GitState {
-    pub fn changelist_lock(&self, pid: &str) -> Arc<parking_lot::Mutex<()>> {
-        self.changelist_locks.entry(pid.to_string()).or_default().clone()
+    pub fn changelist_lock(&self, scope: &str) -> Arc<parking_lot::Mutex<()>> {
+        self.changelist_locks.entry(scope.to_string()).or_default().clone()
     }
 
-    pub fn shelf_lock(&self, pid: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.shelf_locks.entry(pid.to_string()).or_default().clone()
+    pub fn shelf_lock(&self, scope: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.shelf_locks.entry(scope.to_string()).or_default().clone()
     }
 
     /// The write lock of a working tree.
@@ -87,16 +96,18 @@ impl GitState {
         self.locks.entry(top.to_path_buf()).or_default().clone()
     }
 
-    /// The repository of a project (cached; rediscovered when its git dir vanishes).
+    /// The repository `p` is seen through (`ProjectRegistry::require_repo`; cached;
+    /// rediscovered when its git dir vanishes or the project's other repositories changed).
     pub async fn repo(&self, p: &Project) -> Result<Arc<Repo>, ApiError> {
-        if let Some(e) = self.repos.get(&p.id) {
-            let (root, repo) = e.value();
-            if root == &p.root && repo.git_dir.exists() {
+        let key = p.scope_key();
+        if let Some(e) = self.repos.get(&key) {
+            let (dir, repo) = e.value();
+            if dir == p.repo_dir() && repo.git_dir.exists() && repo.inner == repo::inner_repos(p, p.repo_id()) {
                 return Ok(repo.clone());
             }
         }
-        let repo = Repo::discover(&p.id, &p.root).await?.arc();
-        self.repos.insert(p.id.clone(), (p.root.clone(), repo.clone()));
+        let repo = Repo::discover(p).await?.arc();
+        self.repos.insert(key, (p.repo_dir().to_path_buf(), repo.clone()));
         Ok(repo)
     }
 }

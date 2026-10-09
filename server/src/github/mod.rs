@@ -16,10 +16,16 @@
 //! * `poller`: background Actions watcher (`github.run` events);
 //! * `tools`: MCP tools for hosted agents.
 //!
-//! Events (all with `projectId`): `github.run {runId, workflowId, name, state,
-//! status, conclusion, branch, sha, event, runNumber, webUrl, action,
-//! previousState?}`, `github.job {jobId, runId, action}`, `github.pr {number,
-//! action}` and `github.issue {number, action}`.
+//! Events (all with `projectId`, and `repo`, the id of the git repository of the project
+//! they are about): `github.run {runId, workflowId, name, state, status, conclusion,
+//! branch, sha, event, runNumber, webUrl, action, previousState?, repo}`, `github.job
+//! {jobId, runId, action, repo}`, `github.pr {number, action, repo}` and
+//! `github.issue {number, action, repo}`.
+//!
+//! A project may have several repositories, each on its own GitHub repository: every
+//! route and tool works on the one `?repo=` (the `repo` input of a tool) names, the
+//! default repository without it (`forge::RepoParam`). Caches, polling state and
+//! summaries are kept per repository (`Project::scope_key`).
 
 mod ci;
 mod client;
@@ -32,8 +38,6 @@ mod tools;
 
 #[cfg(test)]
 mod tests;
-
-use std::sync::Arc;
 
 use axum::Router;
 use serde_json::json;
@@ -58,44 +62,54 @@ pub async fn commit_ci_status(state: &AppState, project: &Project, sha: &str) ->
         return Ok(None);
     }
     let sha = ci::valid_sha(sha)?.to_string();
-    let project = state.projects.get(&project.id).unwrap_or_else(|| Arc::new(project.clone()));
+    let project = crate::forge::shared(state, project);
     let ctx = client::ctx_for(state, project).await?;
     ci::ci_status_for(&ctx, &sha).await
 }
 
-/// Emit `github.run` for a run.
-fn emit_run(state: &AppState, project_id: &str, r: &Run, action: &str, previous: Option<&str>) {
+/// Emit `github.run` for a run of a repository of a project.
+fn emit_run(state: &AppState, project: &Project, r: &Run, action: &str, previous: Option<&str>) {
     state.events.emit(
         "github.run",
-        Some(project_id),
+        Some(&project.id),
         json!({ "runId": r.id, "workflowId": r.workflow_id, "name": r.name, "state": r.state, "status": r.status,
                 "conclusion": r.conclusion, "branch": r.head_branch, "sha": r.head_sha, "event": r.event,
-                "runNumber": r.run_number, "webUrl": r.html_url, "action": action, "previousState": previous }),
+                "runNumber": r.run_number, "webUrl": r.html_url, "action": action, "previousState": previous,
+                "repo": project.repo_id() }),
     );
 }
 
 /// A run changed because of an action here: tell the UI, remember it for the
-/// poller, and poll this project quickly for a while.
+/// poller, and poll this repository quickly for a while.
 fn run_changed(ctx: &GhCtx, r: &Run, action: &str) {
     let state = &ctx.state;
-    state.github.invalidate_summary(&ctx.project.id);
+    let scope = ctx.project.scope_key();
+    state.github.invalidate_summary(&scope);
     if let Some(b) = &r.head_branch {
-        state.github.poll.note(&ctx.project.id, b, r.id, &r.state);
+        state.github.poll.note(&scope, b, r.id, &r.state);
     }
-    state.github.poll.mark_hot(&ctx.project.id);
-    emit_run(state, &ctx.project.id, r, action, None);
+    state.github.poll.mark_hot(&scope);
+    emit_run(state, &ctx.project, r, action, None);
 }
 
 /// A pull request changed because of an action here.
 fn pr_changed(ctx: &GhCtx, number: u64, action: &str) {
-    ctx.state.github.invalidate_summary(&ctx.project.id);
-    ctx.state.events.emit("github.pr", Some(&ctx.project.id), json!({ "number": number, "action": action }));
+    ctx.state.github.invalidate_summary(&ctx.project.scope_key());
+    ctx.state.events.emit(
+        "github.pr",
+        Some(&ctx.project.id),
+        json!({ "number": number, "action": action, "repo": ctx.project.repo_id() }),
+    );
 }
 
 /// An issue changed because of an action here.
 fn issue_changed(ctx: &GhCtx, number: u64, action: &str) {
-    ctx.state.github.invalidate_summary(&ctx.project.id);
-    ctx.state.events.emit("github.issue", Some(&ctx.project.id), json!({ "number": number, "action": action }));
+    ctx.state.github.invalidate_summary(&ctx.project.scope_key());
+    ctx.state.events.emit(
+        "github.issue",
+        Some(&ctx.project.id),
+        json!({ "number": number, "action": action, "repo": ctx.project.repo_id() }),
+    );
 }
 
 pub fn router() -> Router<AppState> {

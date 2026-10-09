@@ -12,12 +12,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::CiStatus;
-use super::client::{GlCtx, ctx};
+use super::client::{GlCtx, ctx, ctx_for};
 use super::model::{CommitRef, Deployment, Environment, Issue, ListPage, Mr, Note, Pipeline, RegistryRepo, RegistryTag};
 use super::mrs::mr_for_branch;
 use super::pipelines::{latest_pipeline, valid_sha};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
+use crate::forge::RepoParam;
 
 /// Summaries are shared by all open tabs for this long.
 const SUMMARY_TTL: Duration = Duration::from_secs(5);
@@ -78,8 +79,9 @@ fn soft<T>(r: ApiResult<T>, what: &str, warnings: &mut Vec<String>) -> Option<T>
 }
 
 pub async fn summary(ctx: &GlCtx) -> ApiResult<Summary> {
-    let root = ctx.project.root.clone();
-    let (branch, head) = tokio::join!(crate::util::git::current_branch_logged(&root), crate::util::git::head_sha_logged(&root));
+    // The checkout of this repository, not the project root.
+    let dir = ctx.project.repo_dir().to_path_buf();
+    let (branch, head) = tokio::join!(crate::util::git::current_branch_logged(&dir), crate::util::git::head_sha_logged(&dir));
     let default = ctx.default_branch().map(str::to_string);
     let on_default = branch.is_some() && branch == default;
     let (branch_pipeline, default_pipeline, current_mr, head_status, mrs, issues, envs) = tokio::join!(
@@ -156,15 +158,17 @@ pub async fn summary(ctx: &GlCtx) -> ApiResult<Summary> {
     })
 }
 
-async fn h_summary(State(state): State<AppState>, Path(pid): Path<String>) -> ApiResult<Json<Value>> {
-    if let Some((at, v)) = state.gitlab.summaries.lock().get(&pid) {
+async fn h_summary(State(state): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>) -> ApiResult<Json<Value>> {
+    let project = state.projects.require_repo(&pid, repo.id())?;
+    let scope = project.scope_key();
+    if let Some((at, v)) = state.gitlab.summaries.lock().get(&scope) {
         if at.elapsed() < SUMMARY_TTL {
             return Ok(Json(v.clone()));
         }
     }
-    let ctx = ctx(&state, &pid).await?;
+    let ctx = ctx_for(&state, project).await?;
     let v = serde_json::to_value(summary(&ctx).await?)?;
-    state.gitlab.summaries.lock().insert(pid, (Instant::now(), v.clone()));
+    state.gitlab.summaries.lock().insert(scope, (Instant::now(), v.clone()));
     Ok(Json(v))
 }
 
@@ -202,16 +206,17 @@ pub async fn branch(ctx: &GlCtx, name: &str) -> ApiResult<Branch> {
     })
 }
 
-async fn h_branch(State(s): State<AppState>, Path(pid): Path<String>, Query(q): Query<BranchQuery>) -> ApiResult<Json<Branch>> {
-    Ok(Json(branch(&ctx(&s, &pid).await?, &q.name).await?))
+async fn h_branch(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>, Query(q): Query<BranchQuery>) -> ApiResult<Json<Branch>> {
+    Ok(Json(branch(&ctx(&s, &pid, &repo).await?, &q.name).await?))
 }
 
 async fn h_commit_status(
     State(s): State<AppState>,
+    Query(repo): Query<RepoParam>,
     Path((pid, sha)): Path<(String, String)>,
 ) -> ApiResult<Json<Option<CiStatus>>> {
     let sha = valid_sha(&sha)?.to_string();
-    Ok(Json(super::ci_status_for(&ctx(&s, &pid).await?, &sha).await?))
+    Ok(Json(super::ci_status_for(&ctx(&s, &pid, &repo).await?, &sha).await?))
 }
 
 // ---------------------------------------------------------------- issues
@@ -354,32 +359,38 @@ pub async fn add_issue_note(ctx: &GlCtx, iid: u64, body: &str) -> ApiResult<Note
 }
 
 fn issue_changed(ctx: &GlCtx, iid: u64, action: &str) {
-    ctx.state.gitlab.invalidate_summary(&ctx.project.id);
-    ctx.state.events.emit("gitlab.issue", Some(&ctx.project.id), json!({ "iid": iid, "action": action }));
+    ctx.state.gitlab.invalidate_summary(&ctx.project.scope_key());
+    ctx.state.events.emit(
+        "gitlab.issue",
+        Some(&ctx.project.id),
+        json!({ "iid": iid, "action": action, "repo": ctx.project.repo_id() }),
+    );
 }
 
-async fn h_issues(State(s): State<AppState>, Path(pid): Path<String>, Query(q): Query<IssuesQuery>) -> ApiResult<Json<ListPage<Issue>>> {
-    Ok(Json(list_issues(&ctx(&s, &pid).await?, &q).await?))
+async fn h_issues(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>, Query(q): Query<IssuesQuery>) -> ApiResult<Json<ListPage<Issue>>> {
+    Ok(Json(list_issues(&ctx(&s, &pid, &repo).await?, &q).await?))
 }
-async fn h_issue_create(State(s): State<AppState>, Path(pid): Path<String>, Json(b): Json<CreateIssue>) -> ApiResult<Json<Issue>> {
-    Ok(Json(create_issue(&ctx(&s, &pid).await?, &b).await?))
+async fn h_issue_create(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>, Json(b): Json<CreateIssue>) -> ApiResult<Json<Issue>> {
+    Ok(Json(create_issue(&ctx(&s, &pid, &repo).await?, &b).await?))
 }
-async fn h_issue(State(s): State<AppState>, Path((pid, iid)): Path<(String, u64)>) -> ApiResult<Json<IssueDetail>> {
-    Ok(Json(issue_detail(&ctx(&s, &pid).await?, iid).await?))
+async fn h_issue(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, iid)): Path<(String, u64)>) -> ApiResult<Json<IssueDetail>> {
+    Ok(Json(issue_detail(&ctx(&s, &pid, &repo).await?, iid).await?))
 }
 async fn h_issue_update(
     State(s): State<AppState>,
+    Query(repo): Query<RepoParam>,
     Path((pid, iid)): Path<(String, u64)>,
     Json(b): Json<UpdateIssue>,
 ) -> ApiResult<Json<Issue>> {
-    Ok(Json(update_issue(&ctx(&s, &pid).await?, iid, &b).await?))
+    Ok(Json(update_issue(&ctx(&s, &pid, &repo).await?, iid, &b).await?))
 }
 async fn h_issue_note(
     State(s): State<AppState>,
+    Query(repo): Query<RepoParam>,
     Path((pid, iid)): Path<(String, u64)>,
     Json(b): Json<super::mrs::NoteBody>,
 ) -> ApiResult<Json<Note>> {
-    Ok(Json(add_issue_note(&ctx(&s, &pid).await?, iid, &b.body).await?))
+    Ok(Json(add_issue_note(&ctx(&s, &pid, &repo).await?, iid, &b.body).await?))
 }
 
 // ---------------------------------------------------------------- environments
@@ -425,15 +436,16 @@ pub async fn deployments(ctx: &GlCtx, q: &DeploymentsQuery) -> ApiResult<ListPag
     Ok(ListPage { items: res.items, page: res.page.unwrap_or(page), next_page: res.next_page, total: res.total })
 }
 
-async fn h_envs(State(s): State<AppState>, Path(pid): Path<String>) -> ApiResult<Json<Vec<Environment>>> {
-    Ok(Json(environments(&ctx(&s, &pid).await?).await?))
+async fn h_envs(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>) -> ApiResult<Json<Vec<Environment>>> {
+    Ok(Json(environments(&ctx(&s, &pid, &repo).await?).await?))
 }
 async fn h_deployments(
     State(s): State<AppState>,
+    Query(repo): Query<RepoParam>,
     Path(pid): Path<String>,
     Query(q): Query<DeploymentsQuery>,
 ) -> ApiResult<Json<ListPage<Deployment>>> {
-    Ok(Json(deployments(&ctx(&s, &pid).await?, &q).await?))
+    Ok(Json(deployments(&ctx(&s, &pid, &repo).await?, &q).await?))
 }
 
 // ---------------------------------------------------------------- registry
@@ -546,18 +558,19 @@ pub async fn registry_tag(ctx: &GlCtx, rid: u64, tag: &str) -> ApiResult<Registr
     Ok(t)
 }
 
-async fn h_registry(State(s): State<AppState>, Path(pid): Path<String>) -> ApiResult<Json<Vec<RegistryRepo>>> {
-    Ok(Json(registry_repos(&ctx(&s, &pid).await?).await?))
+async fn h_registry(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path(pid): Path<String>) -> ApiResult<Json<Vec<RegistryRepo>>> {
+    Ok(Json(registry_repos(&ctx(&s, &pid, &repo).await?).await?))
 }
 async fn h_tags(
     State(s): State<AppState>,
+    Query(repo): Query<RepoParam>,
     Path((pid, rid)): Path<(String, u64)>,
     Query(q): Query<TagsQuery>,
 ) -> ApiResult<Json<TagsPage>> {
-    Ok(Json(registry_tags(&ctx(&s, &pid).await?, rid, &q).await?))
+    Ok(Json(registry_tags(&ctx(&s, &pid, &repo).await?, rid, &q).await?))
 }
-async fn h_tag(State(s): State<AppState>, Path((pid, rid, tag)): Path<(String, u64, String)>) -> ApiResult<Json<RegistryTag>> {
-    Ok(Json(registry_tag(&ctx(&s, &pid).await?, rid, &tag).await?))
+async fn h_tag(State(s): State<AppState>, Query(repo): Query<RepoParam>, Path((pid, rid, tag)): Path<(String, u64, String)>) -> ApiResult<Json<RegistryTag>> {
+    Ok(Json(registry_tag(&ctx(&s, &pid, &repo).await?, rid, &tag).await?))
 }
 
 // ---------------------------------------------------------------- global
