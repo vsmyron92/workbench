@@ -703,7 +703,14 @@ or `all` (the home panel's "All" view): the registry reserves them, so a directo
   steps), tool window `workspace` (left, order 35), palette commands (Workspace home, New card…, Open
   card…) and the phone tab `workspace` (order 25). Markdown drafts are kept per file (and in the tab's
   sessionStorage) across step switches, `ui.open` and reloads, with an unload warning; links out of a
-  repository card open the project's file, others out of the card only toast. The 3D viewer is a lazy three.js chunk; it decodes
+  repository card open the project's file, others out of the card only toast. The 3D viewer is a lazy three.js chunk. Its panes sit in rows that are never shorter than a pane needs
+  (`grid-auto-rows: minmax(max-content, 1fr)`); a single row (`data-one-row`, counted from the rendered
+  columns) lets its stages shrink so it always fits, and several rows keep `clamp(160px, 24svh, 220px)`.
+  Rows that hide more than 24px scroll (`data-scrolls`): capture-phase listeners on each canvas's host keep a
+  plain wheel from the orbit controls so it scrolls (Ctrl/⌘ + wheel still zooms) and hold back a one-finger
+  vertical touch until it shows a direction (canvases take `touch-action: pan-y`), a pointercancel restores
+  the spin, and an overlay says so. A middle press never starts the browser's autoscroll. Disposing a pane
+  calls `forceContextLoss()` so its WebGL context is freed at once. It decodes
   Draco with the asm.js decoder because the SPA's CSP allows no WebAssembly (meshopt-compressed models
   are not supported; `vite.config.ts` drops DRACOLoader's default WebAssembly decoder URLs so they are not
   bundled), and decodes textures through `<img>` because ImageBitmapLoader's `fetch(blob:)` is refused by

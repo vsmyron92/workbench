@@ -181,6 +181,8 @@ export class ModelViewer {
   private raf = 0
   private disposed = false
   private applying = false
+  /** The spin last asked for with setAutoRotate; a grab pauses it without forgetting it. */
+  private spinWanted = false
   private mode: ShadingMode = 'solid'
   private clay: THREE.Color
   private wireBody: THREE.Color
@@ -213,8 +215,14 @@ export class ModelViewer {
       if (this.applying || !this.onCameraChange) return
       this.onCameraChange(this.cameraState())
     })
-    // A manual grab stops auto-rotate.
-    this.controls.addEventListener('start', () => this.setAutoRotate(false))
+    // A manual grab stops auto-rotate. A touch the browser takes over as a scroll ends in
+    // pointercancel: that was no grab, so the spin the toolbar asked for comes back.
+    this.controls.addEventListener('start', () => {
+      this.controls.autoRotate = false
+    })
+    this.renderer.domElement.addEventListener('pointercancel', () => {
+      this.controls.autoRotate = this.spinWanted
+    })
 
     this.pmrem = new THREE.PMREMGenerator(this.renderer)
 
@@ -412,6 +420,7 @@ export class ModelViewer {
   }
 
   setAutoRotate(on: boolean): void {
+    this.spinWanted = on
     this.controls.autoRotate = on
   }
 
@@ -478,6 +487,10 @@ export class ModelViewer {
     this.envRT?.dispose()
     this.pmrem.dispose()
     this.renderer.dispose()
+    // dispose() leaves the WebGL context alive until garbage collection. Browsers cap live
+    // contexts (Chrome: 16) and drop the oldest past that, so a test with many panes, switched a
+    // few times, could take the context of a live pane or of a terminal. Release it now.
+    this.renderer.forceContextLoss()
     this.renderer.domElement.remove()
   }
 }

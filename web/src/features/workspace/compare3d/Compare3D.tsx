@@ -2,9 +2,11 @@
 // Adapted from Mr. Mak Workspace (MIT), src/components/Compare3D.tsx: one list of
 // tests, a pane per model, one shading toolbar for all panes, cameras locked
 // together. Keys work while the viewer has focus: 1–8 modes, ←/→ tests, S sync,
-// R re-frame, Space spin, I reference image.
+// R re-frame, Space spin, I reference image. A test with more rows of panes than fit
+// scrolls; then the wheel scrolls the panes and Ctrl/⌘ + wheel (or a pinch) zooms. A
+// single row always fits.
 
-import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MutableRefObject } from 'react'
 import { ChevronLeft, ChevronRight, Eye, EyeOff, ImageIcon, Link2, Link2Off, RotateCw, Scan } from 'lucide-react'
 import { ErrorBox, IconButton, Loading, Select, Spinner } from '@/ui'
 import { manifestMode } from '../logic'
@@ -48,6 +50,9 @@ const MODES: { id: ShadingMode; label: string; hint: string }[] = [
 ]
 
 const fmt = (n: number) => n.toLocaleString('en-US')
+
+/** Pixels of panes that must be out of view before the wheel and vertical drags switch to scrolling. */
+const SCROLL_MODE_PX = 24
 
 function texLabel(px: number): string {
   if (!px) return 'untextured'
@@ -137,6 +142,59 @@ function Pane({
   useEffect(() => {
     viewerRef.current?.setMode(mode)
   }, [mode])
+
+  // Input that must reach the panes, not the camera. Each listener runs in the capture phase on the
+  // canvas's host, before the orbit controls (on the canvas, and on the document while it holds
+  // pointer capture) see the event.
+  // - While the panes scroll, a plain wheel scrolls them. Ctrl/⌘ + wheel (a trackpad pinch sends
+  //   ctrlKey) still reaches the controls and zooms.
+  // - While they scroll, a one-finger touch moving mostly up or down is about to become the browser's
+  //   scroll (touch-action: pan-y). Its first moves would otherwise tilt the camera (and, synced,
+  //   every pane's) before the browser cancels the pointer. Held back until the touch shows its
+  //   direction; a sideways drag then turns the model from where the finger came down, and a second
+  //   finger frees both so a pinch zooms.
+  // - A middle-button press keeps its drag for the controls' dolly instead of the browser's
+  //   autoscroll, which the scrolling panes would otherwise start.
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    const scrolling = () => !!host.closest('.c3d-panes')?.hasAttribute('data-scrolls')
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey && scrolling()) e.stopPropagation()
+    }
+    const touches = new Map<number, { x: number; y: number; free: boolean }>()
+    const onDown = (e: PointerEvent) => {
+      if (e.pointerType !== 'touch') return
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY, free: false })
+      if (touches.size > 1) for (const t of touches.values()) t.free = true
+    }
+    const onMove = (e: PointerEvent) => {
+      const t = touches.get(e.pointerId)
+      if (!t || t.free) return
+      if (!scrolling() || Math.abs(e.clientX - t.x) > Math.abs(e.clientY - t.y)) t.free = true
+      else e.stopPropagation()
+    }
+    const onEnd = (e: PointerEvent) => {
+      touches.delete(e.pointerId)
+    }
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button === 1) e.preventDefault()
+    }
+    host.addEventListener('wheel', onWheel, { capture: true, passive: true })
+    host.addEventListener('pointerdown', onDown, { capture: true })
+    host.addEventListener('pointermove', onMove, { capture: true })
+    host.addEventListener('pointerup', onEnd, { capture: true })
+    host.addEventListener('pointercancel', onEnd, { capture: true })
+    host.addEventListener('mousedown', onMouseDown)
+    return () => {
+      host.removeEventListener('wheel', onWheel, { capture: true })
+      host.removeEventListener('pointerdown', onDown, { capture: true })
+      host.removeEventListener('pointermove', onMove, { capture: true })
+      host.removeEventListener('pointerup', onEnd, { capture: true })
+      host.removeEventListener('pointercancel', onEnd, { capture: true })
+      host.removeEventListener('mousedown', onMouseDown)
+    }
+  }, [])
 
   const name = model.alias && redacted ? model.alias : model.label
   return (
@@ -235,6 +293,36 @@ export default function Compare3D({ manifestUrl, manifest: given }: { manifestUr
     else if (b.offsetLeft + b.offsetWidth > seg.scrollLeft + seg.clientWidth) seg.scrollLeft = b.offsetLeft + b.offsetWidth - seg.clientWidth
   }, [mode, manifest])
 
+  // One row of panes always fits: its stages may shrink below their usual minimum, so a short viewer
+  // keeps the wheel for zooming. Two or more rows keep that minimum, and when they do not fit (see
+  // .c3d-panes) they scroll; then the wheel and a vertical swipe move them instead of the camera.
+  // Rows are counted from the rendered columns (phones show one column). Re-measured when the
+  // viewer or a pane resizes (a pane grows when its stats line wraps) and when the test changes,
+  // before the browser paints, so a test never flashes in the other layout first.
+  const panesRef = useRef<HTMLDivElement>(null)
+  const [oneRow, setOneRow] = useState(true)
+  const [scrolls, setScrolls] = useState(false)
+  const shownTest = test?.id
+  useLayoutEffect(() => {
+    const panes = panesRef.current
+    if (!panes) return
+    const measure = () => {
+      const style = getComputedStyle(panes)
+      const columns = style.gridTemplateColumns.split(' ').filter(Boolean).length || 1
+      const single = panes.children.length <= columns
+      setOneRow(single)
+      // A few hidden pixels (or only the end padding) are not worth taking the wheel and the
+      // vertical drag from every model: they stay reachable with the scrollbar or over a header.
+      const hidden = panes.scrollHeight - (parseFloat(style.paddingBottom) || 0) - panes.clientHeight
+      setScrolls(!single && hidden > SCROLL_MODE_PX)
+    }
+    const ro = new ResizeObserver(measure)
+    ro.observe(panes)
+    for (const pane of Array.from(panes.children)) ro.observe(pane)
+    measure()
+    return () => ro.disconnect()
+  }, [shownTest, manifest])
+
   const setMode = useCallback((m: ShadingMode) => test && setModeByTest((prev) => ({ ...prev, [test.id]: m })), [test])
   const reframe = useCallback(() => {
     for (const v of viewers.current) v.frame()
@@ -298,10 +386,18 @@ export default function Compare3D({ manifestUrl, manifest: given }: { manifestUr
         </div>
       </div>
       {test.note && count > 1 && <div className="c3d-note wb-small wb-muted">{test.note}</div>}
-      <div className="c3d-panes" style={{ gridTemplateColumns: `repeat(${Math.min(test.models.length, 3)}, minmax(0, 1fr))` }}>
-        {test.models.map((m) => (
+      <div
+        className="c3d-panes"
+        ref={panesRef}
+        data-one-row={oneRow || undefined}
+        data-scrolls={scrolls || undefined}
+        style={{ gridTemplateColumns: `repeat(${Math.min(test.models.length, 3)}, minmax(0, 1fr))` }}
+      >
+        {test.models.map((m, i) => (
           <Pane
-            key={`${test.id}:${m.file}`}
+            // The index too: a test may list the same file twice (another rotationY or alias), and
+            // duplicate keys left panes of the previous test behind when the test changed.
+            key={`${test.id}:${i}:${m.file}`}
             url={resolve(m.file)}
             model={m}
             redacted={redacted}
@@ -313,6 +409,8 @@ export default function Compare3D({ manifestUrl, manifest: given }: { manifestUr
           />
         ))}
       </div>
+      {/* Laid over the panes, not in the flow: a row of its own would add to the overflow it explains. */}
+      {scrolls && <div className="c3d-hint wb-small">Wheel or swipe to scroll · Ctrl + wheel or pinch to zoom</div>}
       {test.input && showInput && (
         <div className="c3d-input" onClick={() => setShowInput(false)} role="presentation">
           <img src={resolve(test.input)} alt={`Reference image for ${test.name}`} />
