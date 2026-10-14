@@ -355,10 +355,17 @@ const sameFolder = (a: string, b: string) => a.trim().replace(/[\\/]+$/, '') ===
 
 /**
  * Why `home` cannot be the folder (Aider: the keys file) of an account of `kind` (`null`: it
- * can). Two accounts in one place are one login, and the default place is the account the CLI
- * uses outside Workbench.
+ * can). Two accounts that sign in with a login in one place are one login, and the default place
+ * is the account the CLI uses outside Workbench. An account on a model of your own or an API key
+ * (`login` false) has no login in its folder, so it can share a folder, and its history, with
+ * another account.
  */
-export function accountHomeError(kind: AccountKind, home: string, others: { id: string; home: string }[]): string | null {
+export function accountHomeError(
+  kind: AccountKind,
+  home: string,
+  others: { id: string; home: string; login?: boolean }[],
+  login = true,
+): string | null {
   const k = accountKind(kind)!
   const noun = homeNoun(kind)
   const h = home.trim()
@@ -366,9 +373,22 @@ export function accountHomeError(kind: AccountKind, home: string, others: { id: 
   if (!/^(~[\\/]|[\\/]|[A-Za-z]:[\\/])/.test(h)) return 'Use an absolute path, or one starting with ~/'
   if (h.includes('${')) return 'A plain path: no ${…} references'
   if (k.file && /[\\/]$/.test(h)) return 'A file, not a folder'
+  if (!login) return null
   if (k.defaultHome !== null && sameFolder(h, k.defaultHome)) return `${k.defaultHome} is the default account: it is already listed as “${k.label}”`
-  const clash = others.find((o) => sameFolder(o.home, h))
+  const clash = others.find((o) => o.login !== false && sameFolder(o.home, h))
   return clash ? `Already the ${noun} of “${clash.id}”` : null
+}
+
+/** The CLIs whose memory accounts can share (`memory_dir`); Kimi's is written by hand and Aider keeps none. */
+export const MEMORY_KINDS: AccountKind[] = ['claude', 'codex', 'gemini']
+
+/** Why `dir` cannot be a shared memory folder (`null`: it can; empty is the default account's). Mirrors the server's `valid_memory_dir`. */
+export function memoryDirError(dir: string): string | null {
+  const d = dir.trim()
+  if (!d) return null
+  if (!/^(~[\\/]|[\\/]|[A-Za-z]:[\\/])/.test(d)) return 'Use an absolute path, or one starting with ~/'
+  if (d.includes('${')) return 'A plain path: no ${…} references'
+  return null
 }
 
 // ---------------------------------------------------------------- local models

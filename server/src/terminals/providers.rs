@@ -314,6 +314,9 @@ pub struct Provider {
     /// Claude Code: the account keeps its auto-memory in its own folder instead of sharing
     /// the default account's.
     pub own_memory: bool,
+    /// The folder whose memory the account shares instead of the default account's
+    /// (`ProviderConfig::memory_dir`), already checked to be a plain absolute path.
+    pub memory_dir: Option<String>,
     /// A model server of your own instead of the vendor's.
     pub local: Option<LocalModelConfig>,
     /// A hosted model API reached with an API key.
@@ -396,6 +399,7 @@ fn build(id: &str, kind: ProviderKind, c: Option<&ProviderConfig>, agents: &Agen
         install_hint: non_empty(&c.install_hint).unwrap_or_else(|| kind.default_install_hint().to_string()),
         fallback: c.fallback.iter().map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect(),
         own_memory: c.own_memory,
+        memory_dir: non_empty(&c.memory_dir),
         local: c.local.clone(),
         api: c.api.clone(),
     }
@@ -409,12 +413,32 @@ pub fn valid_model(m: &str) -> bool {
 /// Drop configured defaults the provider's kind cannot take, each with a warning. A
 /// default that stayed would fail every start (`resolve_launch` refuses it) while the
 /// provider looked available.
+/// A memory folder is a plain absolute path (or `~/…`), as the account folders are.
+pub fn valid_memory_dir(d: &str) -> bool {
+    let d = d.trim();
+    let absolute = d.starts_with("~/") || d.starts_with("~\\") || std::path::Path::new(d).is_absolute();
+    absolute && !d.contains("${") && !d.contains('\0')
+}
+
 fn check_defaults(p: &mut Provider, c: Option<&ProviderConfig>, warnings: &mut Vec<String>) {
     let k = p.kind;
     let id = p.id.clone();
     // Claude's defaults may come from `[agents]` instead of its provider section.
     let section = |set: bool| if k == ProviderKind::Claude && id == "claude" && !set { "agents".to_string() } else { format!("agents.providers.{id}") };
     let own = |f: fn(&ProviderConfig) -> &Option<String>| c.is_some_and(|c| non_empty(f(c)).is_some());
+    if let Some(d) = p.memory_dir.clone() {
+        let why = if !matches!(k, ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Gemini) {
+            Some(format!("{} keeps no memory Workbench can share", p.label))
+        } else if !valid_memory_dir(&d) {
+            Some("an absolute path, or one starting with ~/, without ${…}".to_string())
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            warnings.push(format!("{}: memory_dir {d:?} ignored ({why})", section(own(|c| &c.memory_dir))));
+            p.memory_dir = None;
+        }
+    }
     if let Some(m) = p.model.clone() {
         let why = if k == ProviderKind::Custom {
             Some(format!("{} takes no model option; put it in `args`", p.label))
@@ -1692,6 +1716,8 @@ mod tests {
         let f = CodexFeatures::from_help("      --no-alt-screen\n          Disable alternate screen mode\n");
         assert_eq!(f, CodexFeatures { no_daemon: false, no_alt_screen: true });
         assert_eq!(toml_str("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        assert!(valid_memory_dir("/shared/mem") && valid_memory_dir("~/mem"));
+        assert!(!valid_memory_dir("mem") && !valid_memory_dir("") && !valid_memory_dir("~/${secret:x}"));
         assert!(valid_provider_id("codex-work") && valid_provider_id("aider") && !valid_provider_id("-x") && !valid_provider_id("A"));
     }
 

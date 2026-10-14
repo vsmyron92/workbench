@@ -343,12 +343,24 @@ fn copy_dir(from: &Path, to: &Path, left: &mut u64) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Whether `a` and `b` are the same existing file.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Copy a Claude Code transcript into another account's folder, where `claude --resume <id>`
 /// finds it, with the folder next to it that holds the session's large tool outputs and
 /// sub-agent work. Returns the new path.
 pub fn copy_claude(src: &Path, dest_claude_dir: &Path, cwd: &Path, id: &str) -> anyhow::Result<PathBuf> {
-    let bytes = read_capped(src)?;
     let dest = transcript::transcript_path(dest_claude_dir, cwd, id);
+    // Two accounts on one folder (a local model beside the default account) already share the file.
+    if same_file(src, &dest) {
+        return Ok(dest);
+    }
+    let bytes = read_capped(src)?;
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
         util::fs::set_mode(dest_claude_dir, 0o700);
@@ -369,6 +381,9 @@ pub fn copy_claude(src: &Path, dest_claude_dir: &Path, cwd: &Path, id: &str) -> 
 
 /// Copy a Codex rollout into another `CODEX_HOME`, under the same dated path.
 pub fn copy_codex(src: &Path, src_home: &Path, dest_home: &Path) -> anyhow::Result<PathBuf> {
+    if src_home == dest_home {
+        return Ok(src.to_path_buf());
+    }
     let bytes = read_capped(src)?;
     let name = src.file_name().and_then(|n| n.to_str()).context("the rollout has no name")?;
     let rel = match src.strip_prefix(src_home) {
@@ -565,6 +580,23 @@ mod tests {
         copy_claude(&src, &b, &cwd, id).unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "{\"type\":\"user\"}\n");
         assert!(copy_claude(&a.join("missing.jsonl"), &b, &cwd, id).is_err());
+    }
+
+    #[test]
+    fn accounts_on_one_folder_share_the_transcript_without_copying() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let cwd = dir.path().join("proj");
+        let id = "11111111-2222-4333-8444-555555555555";
+        let src = transcript::transcript_path(&a, &cwd, id);
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(src.with_extension("")).unwrap();
+        // A half-written last line stays: nothing is rewritten.
+        std::fs::write(&src, "{\"type\":\"user\"}\n{\"type\":\"us").unwrap();
+        assert_eq!(copy_claude(&src, &a, &cwd, id).unwrap(), src);
+        assert_eq!(std::fs::read_to_string(&src).unwrap(), "{\"type\":\"user\"}\n{\"type\":\"us");
+        let rollout = a.join("sessions/2026/10/03/rollout-2026-10-03T11-01-56-01a1016d-8459-7410-bb89-262e6f8aec4d.jsonl");
+        assert_eq!(copy_codex(&rollout, &a, &a).unwrap(), rollout);
     }
 
     #[test]

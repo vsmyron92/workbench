@@ -7,6 +7,8 @@ import { Group, Note, Row } from '../common'
 import {
   ACCOUNT_KINDS,
   accountHomeError,
+  MEMORY_KINDS,
+  memoryDirError,
   accountIdError,
   accountKind,
   accountName,
@@ -189,6 +191,7 @@ function AccountEditor({
   const [idTouched, setIdTouched] = useState(editing)
   const [home, setHome] = useState(initial?.env?.[k.homeVar] ?? '')
   const [homeTouched, setHomeTouched] = useState(editing)
+  const [memoryDir, setMemoryDir] = useState(initial?.memory_dir ?? '')
   const [enabled, setEnabled] = useState(initial?.enabled !== false)
   const [fallback, setFallback] = useState<string[]>(initial?.fallback ?? [])
   const [busy, setBusy] = useState(false)
@@ -197,13 +200,15 @@ function AccountEditor({
   const needsHome = !builtIn && !((local || api) && kind === 'aider')
   const effectiveId = idTouched ? id : label.trim() ? suggestAccountId(kind, label) : local ? suggestLocalId(kind, server, model) : api ? suggestApiId(kind, apiService, '') : ''
   const effectiveHome = homeTouched ? home : effectiveId ? k.suggest(effectiveId.replace(`${kind}-`, '')) : ''
-  const others = rows.filter((r) => r.id !== editId && r.kind?.kind === kind && r.home).map((r) => ({ id: r.id, home: r.home }))
+  const others = rows.filter((r) => r.id !== editId && r.kind?.kind === kind && r.home).map((r) => ({ id: r.id, home: r.home, login: !r.config.local && !r.config.api }))
   const idError = editing ? null : accountIdError(effectiveId, Object.keys(providers))
-  const homeError = needsHome ? accountHomeError(kind, effectiveHome, others) : null
+  const homeError = needsHome ? accountHomeError(kind, effectiveHome, others, !local && !api) : null
   const takesContext = kind === 'claude' || kind === 'codex'
   const localError = local && !builtIn ? (localUrlError(server, url) ?? (model.trim() ? (takesContext ? contextError(context) : null) : 'Enter the model the server runs')) : null
   const apiError = api && !builtIn ? (apiUrlError(kind, apiService, apiUrl) ?? apiKeyError(apiKey, secrets) ?? (model.trim() || (kind === 'claude' && apiService === 'anthropic') ? (takesContext ? contextError(context) : null) : 'Enter the model, as the service names it')) : null
-  const error = builtIn ? null : (idError ?? homeError ?? localError ?? apiError)
+  const hasMemory = !builtIn && MEMORY_KINDS.includes(kind)
+  const memoryError = hasMemory ? memoryDirError(memoryDir) : null
+  const error = builtIn ? null : (idError ?? homeError ?? memoryError ?? localError ?? apiError)
 
   const detect = async () => {
     setDetecting(true)
@@ -248,6 +253,7 @@ function AccountEditor({
           enabled: enabled ? null : false,
           fallback,
           env,
+          memory_dir: hasMemory ? memoryDir.trim() || null : null,
           model: local || api ? model.trim() : (initial?.model ?? null),
           local: local ? { server, url: url.trim(), context: takesContext ? parseContext(context) : null } : null,
           api: api ? { service: apiService, url: apiUrl.trim(), key: apiKey, context: takesContext ? parseContext(context) : null } : null,
@@ -460,6 +466,16 @@ function AccountEditor({
               </div>
             </>
           )}
+        </>
+      )}
+      {hasMemory && (
+        <>
+          <label className="wb-small wb-muted">Shared memory folder</label>
+          <Input className="mono" value={memoryDir} onChange={(e) => setMemoryDir(e.target.value)} placeholder={`${k.defaultHome}: the default account’s`} />
+          <div className="wb-small wb-muted">
+            Accounts that name the same folder read and write one memory. Empty: the default account’s memory. It is laid out like an account’s folder
+            ({kind === 'claude' ? 'projects/<project>/memory' : kind === 'codex' ? 'memories' : '.gemini/GEMINI.md'} inside it). Memory an account already has is kept.
+          </div>
         </>
       )}
       <label className="wb-small wb-muted">When it is at its usage limit, use</label>

@@ -245,15 +245,20 @@ pub fn user_defines_statusline(claude_dir: &Path, dirs: &[&Path]) -> bool {
     })
 }
 
-/// Where an account's session keeps its auto-memory when it shares the default account's
-/// (`~/.claude/projects/<project>/memory`, so one memory serves every account), or `None`
-/// to leave the CLI to its own folder: the default account itself, `own_memory`, a
+/// Where an account's session keeps its auto-memory when it shares the default account's, or
+/// the folder its `memory_dir` names (`<folder>/projects/<project>/memory`, so one memory
+/// serves every account), or `None` to leave the CLI to its own folder: the account whose
+/// folder that is, `own_memory` (without a `memory_dir`), a
 /// memory location the user set (`autoMemoryDirectory` in the account's `settings.json` or
 /// the project's `settings.local.json`, the only files Claude honours it in; or
 /// `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` in the environment), or a path Claude hashes.
 pub fn shared_memory_dir(provider: &providers::Provider, claude_dir: &Path, cwd: &Path, env: &[(String, Option<String>)]) -> Option<PathBuf> {
-    let default = transcript::claude_dir(None);
-    if provider.own_memory || claude_dir == default || env_value(env, "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE").is_some() {
+    let shared = match provider.memory_dir.as_deref() {
+        Some(d) => transcript::claude_dir(Some(d)),
+        None if provider.own_memory => return None,
+        None => transcript::claude_dir(None),
+    };
+    if claude_dir == shared || env_value(env, "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE").is_some() {
         return None;
     }
     let sets_dir = [claude_dir.join("settings.json"), cwd.join(".claude/settings.local.json")].iter().any(|f| {
@@ -265,24 +270,25 @@ pub fn shared_memory_dir(provider: &providers::Provider, claude_dir: &Path, cwd:
     if sets_dir {
         return None;
     }
-    transcript::memory_dir(&default, cwd)
+    transcript::memory_dir(&shared, cwd)
 }
 
 /// Before a Codex or Gemini CLI session of an account: its memory becomes the default
-/// account's (see `memory`), unless the account has `own_memory`. Never fails the launch.
+/// account's, or the folder its `memory_dir` names (see `memory`), unless the account has
+/// `own_memory`. Never fails the launch.
 async fn share_memory(provider: &providers::Provider, env: &[(String, Option<String>)]) {
     // The default account is the real one in the owner's home: tests must not touch it
     // (`memory::tests` covers the links on scratch folders).
     if cfg!(test) {
         return;
     }
-    let (kind, own) = (provider.kind, provider.own_memory);
+    let (kind, shared) = (provider.kind, provider.memory_dir.as_deref());
     let (account, default) = match kind {
-        ProviderKind::Codex => (codex::codex_home(env_value(env, "CODEX_HOME").as_deref()), codex::codex_home(None)),
-        ProviderKind::Gemini => (gemini::gemini_dir(env_value(env, "GEMINI_CLI_HOME").as_deref()), gemini::gemini_dir(None)),
+        ProviderKind::Codex => (codex::codex_home(env_value(env, "CODEX_HOME").as_deref()), codex::codex_home(shared)),
+        ProviderKind::Gemini => (gemini::gemini_dir(env_value(env, "GEMINI_CLI_HOME").as_deref()), gemini::gemini_dir(shared)),
         _ => return,
     };
-    if own {
+    if provider.own_memory && shared.is_none() {
         return;
     }
     if let Ok(Err(e)) = tokio::task::spawn_blocking(move || memory::link_shared(kind, &account, &default)).await {
@@ -2952,6 +2958,21 @@ mod tests {
         assert_eq!(shared_memory_dir(&work, acct.path(), proj.path(), &env), None);
         std::fs::write(acct.path().join("settings.json"), r#"{"autoMemoryDirectory":"~/mem"}"#).unwrap();
         assert_eq!(shared_memory_dir(&work, acct.path(), proj.path(), &[]), None);
+    }
+
+    #[test]
+    fn accounts_can_share_a_folder_of_their_choosing() {
+        let c = cfg(
+            "[agents.providers.a]\nkind = \"claude\"\nmemory_dir = \"/shared/mem\"\n[agents.providers.b]\nkind = \"claude\"\nown_memory = true\nmemory_dir = \"/shared/mem\"\n",
+        );
+        let (a, b) = (providers::find(&c, Some("a")).unwrap(), providers::find(&c, Some("b")).unwrap());
+        let (acct, proj) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let want = Path::new("/shared/mem").join("projects").join(transcript::slug(proj.path())).join("memory");
+        assert_eq!(shared_memory_dir(&a, acct.path(), proj.path(), &[]), Some(want.clone()));
+        assert_eq!(shared_memory_dir(&b, acct.path(), proj.path(), &[]), Some(want), "a folder named is not own_memory");
+        // The default account joins too, and the account whose folder it is has nothing to point at.
+        assert!(shared_memory_dir(&a, &transcript::claude_dir(None), proj.path(), &[]).is_some());
+        assert_eq!(shared_memory_dir(&a, Path::new("/shared/mem"), proj.path(), &[]), None);
     }
 
     #[test]

@@ -109,6 +109,11 @@ beside the CLI as "Claude · Work", and its sessions carry that name. A new acco
 login yet: press **Sign in** on its row (see below), or start a session with it, which shows
 the CLI's own sign-in the first time.
 
+Each account that signs in with a login needs a folder of its own: two logins in one place are one
+login. An account on a hosted API or a model of your own has no login in its folder, so it may use
+the folder of another account, the default `~/.claude` included, and then shares that account's
+history and settings.
+
 Behind the form this is `[agents.providers.claude-work]` with `kind = "claude"` and
 `env = { CLAUDE_CONFIG_DIR = "~/.claude-work" }`. The variable is `CODEX_HOME` for Codex,
 `KIMI_CODE_HOME` for Kimi Code, `GEMINI_CLI_HOME` for Gemini CLI (the folder that holds its
@@ -129,6 +134,13 @@ would start with none. Workbench makes every account of a CLI use the default ac
 - **Gemini CLI**: the account's `.gemini/GEMINI.md`, where `save_memory` writes, becomes a link to
   `~/.gemini/GEMINI.md`. Gemini's private per-project notes stay with each account.
 - **Kimi Code** (`AGENTS.md` is written by hand) and **Aider** (no memory) are left alone.
+
+To share a memory other than the default account's, give the accounts the same `memory_dir`
+(`~/shared-memory`) in `[agents.providers.<name>]`, or fill **Shared memory folder** in the account's
+form. The folder is laid out like an account's folder: Claude Code's memory is
+`<dir>/projects/<project>/memory`, Codex's `<dir>/memories`, Gemini CLI's `<dir>/.gemini/GEMINI.md`. The
+default account can name it too (`[agents.providers.claude]`), and an account whose own folder it is
+is left alone. A `memory_dir` wins over `own_memory`.
 
 Set `own_memory = true` in `[agents.providers.<name>]` to give an account a memory of its own.
 Memory the account already has is never replaced: a link is made only where its folder or file is
