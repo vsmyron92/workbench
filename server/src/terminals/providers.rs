@@ -1716,7 +1716,8 @@ mod tests {
         let f = CodexFeatures::from_help("      --no-alt-screen\n          Disable alternate screen mode\n");
         assert_eq!(f, CodexFeatures { no_daemon: false, no_alt_screen: true });
         assert_eq!(toml_str("a\"b\\c"), "\"a\\\"b\\\\c\"");
-        assert!(valid_memory_dir("/shared/mem") && valid_memory_dir("~/mem"));
+        // `/x` has no drive on Windows, so an absolute path is made from the temp folder.
+        assert!(valid_memory_dir(&std::env::temp_dir().join("mem").to_string_lossy()) && valid_memory_dir("~/mem"));
         assert!(!valid_memory_dir("mem") && !valid_memory_dir("") && !valid_memory_dir("~/${secret:x}"));
         assert!(valid_provider_id("codex-work") && valid_provider_id("aider") && !valid_provider_id("-x") && !valid_provider_id("A"));
     }

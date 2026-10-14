@@ -2962,17 +2962,20 @@ mod tests {
 
     #[test]
     fn accounts_can_share_a_folder_of_their_choosing() {
-        let c = cfg(
-            "[agents.providers.a]\nkind = \"claude\"\nmemory_dir = \"/shared/mem\"\n[agents.providers.b]\nkind = \"claude\"\nown_memory = true\nmemory_dir = \"/shared/mem\"\n",
-        );
+        let shared = tempfile::tempdir().unwrap();
+        // TOML literal strings: a Windows path has backslashes.
+        let dir = shared.path().to_string_lossy();
+        let c = cfg(&format!(
+            "[agents.providers.a]\nkind = \"claude\"\nmemory_dir = '{dir}'\n[agents.providers.b]\nkind = \"claude\"\nown_memory = true\nmemory_dir = '{dir}'\n"
+        ));
         let (a, b) = (providers::find(&c, Some("a")).unwrap(), providers::find(&c, Some("b")).unwrap());
         let (acct, proj) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let want = Path::new("/shared/mem").join("projects").join(transcript::slug(proj.path())).join("memory");
+        let want = shared.path().join("projects").join(transcript::slug(proj.path())).join("memory");
         assert_eq!(shared_memory_dir(&a, acct.path(), proj.path(), &[]), Some(want.clone()));
         assert_eq!(shared_memory_dir(&b, acct.path(), proj.path(), &[]), Some(want), "a folder named is not own_memory");
         // The default account joins too, and the account whose folder it is has nothing to point at.
         assert!(shared_memory_dir(&a, &transcript::claude_dir(None), proj.path(), &[]).is_some());
-        assert_eq!(shared_memory_dir(&a, Path::new("/shared/mem"), proj.path(), &[]), None);
+        assert_eq!(shared_memory_dir(&a, shared.path(), proj.path(), &[]), None);
     }
 
     #[test]
