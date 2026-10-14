@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.15.0 - 2026-10-14
+
+- **Accounts can share one memory folder of your choosing.** Memory was shared only with the default
+  account's folder. Give Claude Code, Codex or Gemini CLI accounts the same **Shared memory folder**
+  (Settings → Agents → Accounts, or `memory_dir` in `[agents.providers.<name>]`) and they read and write one
+  memory; the default account can take part too. The folder is laid out like an account's folder
+  (`projects/<project>/memory`, `memories`, `.gemini/GEMINI.md`). Memory an account already has is kept, and
+  `memory_dir` wins over `own_memory`.
+- **Accounts without a login may share a folder.** An account on a hosted API or a model of your own can use
+  the folder of another account, the default `~/.claude` included, and so shares its history and settings.
+  Two accounts that sign in with a login still need folders of their own. Continuing a session on another
+  account of the same folder no longer copies its transcript onto itself.
+
 ## 0.14.0 - 2026-10-14
 
 - **Speak a session's prompt.** The new-session composer (the agents column's first tab, the **New agent

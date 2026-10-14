@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   accountHomeError,
+  memoryDirError,
   scopeUiOpen,
   accountIdError,
   accountKind,
@@ -276,7 +277,20 @@ describe('accounts', () => {
     expect(accountHomeError('claude', '~/.claude-work', others)).toMatch(/claude-work/)
     expect(accountHomeError('claude', '~/.claude/', others)).toMatch(/default account/)
     expect(accountHomeError('codex', '~/.claude', [])).toBeNull()
+    // No login in the folder: a model of your own or an API key can share it, and its history.
+    expect(accountHomeError('claude', '~/.claude-work', others, false)).toBeNull()
+    expect(accountHomeError('claude', '~/.claude', others, false)).toBeNull()
+    expect(accountHomeError('claude', '~/.claude-work', [{ id: 'claude-ollama', home: '~/.claude-work', login: false }])).toBeNull()
+    expect(accountHomeError('claude', '.claude-x', others, false)).toMatch(/absolute/)
     expect(accountHomeError('codex', '~/${secret:x}', [])).toMatch(/plain path/)
+  })
+
+  it('takes a memory folder as a plain absolute path, or none', () => {
+    expect(memoryDirError('')).toBeNull()
+    expect(memoryDirError('~/shared-memory')).toBeNull()
+    expect(memoryDirError('/srv/mem')).toBeNull()
+    expect(memoryDirError('mem')).toMatch(/absolute/)
+    expect(memoryDirError('~/${x}')).toMatch(/plain path/)
   })
 
   it('knows Gemini’s home holds .gemini and Aider’s is a keys file', () => {

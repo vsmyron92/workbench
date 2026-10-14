@@ -207,6 +207,13 @@ pub struct ProviderConfig {
     /// account reads and writes the memory of the default account (`~/.claude`), per project.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub own_memory: bool,
+    /// A folder whose memory this account uses instead of the default account's, so any
+    /// number of accounts (the default one too) share one memory. It is laid out like an
+    /// account's folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, the folder holding `.gemini`): Claude
+    /// Code's memory is `<dir>/projects/<project>/memory`, Codex's `<dir>/memories`, Gemini's
+    /// `<dir>/.gemini/GEMINI.md`. An absolute path or one starting with `~/`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_dir: Option<String>,
     /// A default permission preset of the provider. Dangerous presets (Codex `bypass`,
     /// Kimi `yolo`/`auto`, Gemini `yolo`, Aider `yes-always`) are never defaults: the user
     /// picks them per session.

@@ -20,6 +20,8 @@ export interface ProviderSettings {
   permission_mode?: string | null
   /** Accounts to use, in order, when this one is at its usage limit. */
   fallback?: string[]
+  /** A folder whose memory this account shares (Claude Code, Codex, Gemini CLI), instead of the default account's. */
+  memory_dir?: string | null
   env?: Record<string, string>
   install_hint?: string | null
   /** A model server of your own instead of the vendor's. */
