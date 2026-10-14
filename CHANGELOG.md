@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.14.0 - 2026-10-14
+
+- **Speak a session's prompt.** The new-session composer (the agents column's first tab, the **New agent
+  session** dialog, and **New** on the phone) has a microphone button beside **Start session**. Click it,
+  say the task, and the words appear in the prompt at the caret as you speak; click it again to stop. The
+  session starts only when you press **Start session**, so a misheard word is fixed first, and typing in the
+  prompt stops the listening. Recognition is your browser's own (Chrome, Edge, Safari): the audio goes to
+  its speech service, never to Workbench. It needs `localhost` or https (over plain http the button says
+  so), and Firefox, which has no speech recognition, shows no button. On a touch screen one tap takes one
+  sentence.
+
 ## 0.13.0 - 2026-10-09
 
 - **One project, several git repositories.** A project folder can hold more than one repository: services

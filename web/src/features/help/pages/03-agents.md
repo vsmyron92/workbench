@@ -12,6 +12,8 @@ Use the **Agents** tab, the first tab of the agents column on the left, or press
 
 Selected code in the editor can be sent to an agent with **Ctrl+Shift+A** (*Ask Agent About Selection*). A debugger stop can be handed over with *Ask agent about this stop*.
 
+**Speak the prompt.** The microphone beside **Start session** takes the task by voice: click it, say what you want, and the words appear in the prompt at the caret; click it again to stop. Nothing starts until you press **Start session**, so a misheard word is fixed first, and typing in the prompt stops the listening. The recognition is your browser's (Chrome, Edge and Safari have it, Firefox does not): the audio goes to its speech service, not to Workbench. It needs Workbench on `localhost` or over HTTPS ([Remote access](remote-access)); on plain HTTP the button tells you so.
+
 ## Permission requests
 
 When Claude Code asks for permission, Workbench shows the request on the session's card, on its tab, in a toast, and on the phone's Agents tab. Choose:
