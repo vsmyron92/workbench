@@ -1,7 +1,7 @@
 // "New session" composer: the agent CLI (provider), prompt, name, model, effort,
 // permission mode, Remote Control (Claude), and the project's starter prompts as chips.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { CircleQuestionMark, Container, FileCode, Play, Plus, Sparkles, TriangleAlert } from 'lucide-react'
 import { useProjects } from '@/api/queries'
 import type { TerminalInfo } from '@/api/types'
@@ -9,6 +9,7 @@ import { confirmDialog, openPanel, openSettings } from '@/shell/actions'
 import { useUi } from '@/state/store'
 import { Button, Checkbox, ErrorBox, IconButton, Input, Kbd, Select, TextArea } from '@/ui'
 import { startAgent, useAgentDefaults, useContainerAgents, type AgentDefaults, type ProviderInfo } from './api'
+import { DictateButton, useDictation } from './Dictate'
 import { displayLabel, initialProvider, limitNote, isDangerous, pickerProviders, presetOf, PROVIDER_CONFIG_EXAMPLE, stateNote } from './lib/providers'
 import { ProviderIcon } from './parts'
 import { useAgentsUi, type NewSessionPrefill } from './store'
@@ -173,6 +174,20 @@ export function NewSessionForm({
   const dcRunning = dc?.state === 'running'
   const containerAgents = useContainerAgents(projectId, dcRunning)
 
+  // Voice input writes into the prompt at its caret; the caret moves behind the speech once
+  // React has put the new text into the field.
+  const caretAt = useRef<number | null>(null)
+  const dictation = useDictation(ref, (value, caret) => {
+    caretAt.current = caret
+    setPrompt(value)
+  })
+  useLayoutEffect(() => {
+    const caret = caretAt.current
+    if (caret === null) return
+    caretAt.current = null
+    ref.current?.setSelectionRange(caret, caret)
+  }, [prompt])
+
   useEffect(() => {
     if (autoFocus) ref.current?.focus()
   }, [autoFocus])
@@ -209,6 +224,8 @@ export function NewSessionForm({
 
   const start = async (text: string, n?: string) => {
     if (busy || !p || (!p.available && !runInside)) return
+    // What is on screen is what starts: late words must not refill a prompt that was sent.
+    dictation.cancel()
     if (dangerous) {
       const ok = await confirmDialog({
         title: `Start ${displayLabel(p)} without approvals?`,
@@ -282,7 +299,11 @@ export function NewSessionForm({
         rows={3}
         value={prompt}
         placeholder={`What should ${label} do? Leave empty to start an interactive session.`}
-        onChange={(e) => setPrompt(e.target.value)}
+        onChange={(e) => {
+          // An edit while listening: the next words would overwrite it.
+          dictation.cancel()
+          setPrompt(e.target.value)
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
             e.preventDefault()
@@ -380,6 +401,7 @@ export function NewSessionForm({
             <Kbd>Ctrl+Enter</Kbd>
           </span>
         )}
+        <DictateButton d={dictation} />
         <Button variant="primary" icon={Play} loading={busy} disabled={!p?.available && !runInside} onClick={() => void start(prompt)}>
           Start session
         </Button>

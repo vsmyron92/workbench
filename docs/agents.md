@@ -15,6 +15,16 @@ how many sessions are working or need you; click it to go to the next one that w
 effort, the permission mode, Claude Code's Remote Control, and, when the project has a
 running dev container, **Run in dev container**.
 
+**Speak the prompt.** The microphone beside **Start session** takes the task by voice:
+click it, say what you want, and the words appear in the prompt at the caret; click it
+again to stop. Nothing starts until you press **Start session** (or Ctrl+Enter), so a
+misheard word is fixed first, and typing in the prompt stops the listening. The speech
+recognition is your browser's (Chrome, Edge and Safari have it, Firefox does not): the
+audio goes to the browser's speech service, not to Workbench, and the browser asks for the
+microphone the first time. It needs Workbench on `localhost` or over HTTPS (see
+[Remote access](remote-access.md)); on plain HTTP the button tells you so. On a touch
+screen one tap takes one sentence.
+
 You also start sessions from where the work is:
 
 - **Ask Agent About Selection** in the editor (Ctrl+Shift+A with a selection).

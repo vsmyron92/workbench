@@ -297,6 +297,27 @@
 .wb-ag-composer .wb-error {
   margin: 0;
 }
+/* Voice input: the microphone is the recording colour while it listens. */
+.wb-icon-btn.wb-ag-mic.listening {
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+.wb-icon-btn.wb-ag-mic.listening svg {
+  animation: wb-ag-listen 1.4s ease-in-out infinite;
+}
+@keyframes wb-ag-listen {
+  50% {
+    opacity: 0.5;
+  }
+}
+.wb-icon-btn.wb-ag-mic.unavailable {
+  color: var(--fg-subtle);
+}
+@media (prefers-reduced-motion: reduce) {
+  .wb-icon-btn.wb-ag-mic.listening svg {
+    animation: none;
+  }
+}
 
 /* ---------------------------------------------------------------- agent providers */
 .wb-ag-composer-head {
