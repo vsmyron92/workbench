@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   accountHomeError,
+  accountHomeNote,
   memoryDirError,
   scopeUiOpen,
   accountIdError,
@@ -267,22 +268,29 @@ describe('accounts', () => {
     expect(accountIdError('claude-work', ['claude-work'])).toMatch(/exists/)
   })
 
-  it('wants a folder of its own, spelled as a path', () => {
-    const others = [{ id: 'claude-work', home: '~/.claude-work/' }]
-    expect(accountHomeError('claude', '~/.claude-personal', others)).toBeNull()
-    expect(accountHomeError('claude', '/home/me/.claude-x', others)).toBeNull()
-    expect(accountHomeError('claude', 'C:\\Users\\me\\.claude-x', others)).toBeNull()
-    expect(accountHomeError('claude', '', others)).toMatch(/Enter/)
-    expect(accountHomeError('claude', '.claude-x', others)).toMatch(/absolute/)
-    expect(accountHomeError('claude', '~/.claude-work', others)).toMatch(/claude-work/)
-    expect(accountHomeError('claude', '~/.claude/', others)).toMatch(/default account/)
-    expect(accountHomeError('codex', '~/.claude', [])).toBeNull()
-    // No login in the folder: a model of your own or an API key can share it, and its history.
-    expect(accountHomeError('claude', '~/.claude-work', others, false)).toBeNull()
-    expect(accountHomeError('claude', '~/.claude', others, false)).toBeNull()
-    expect(accountHomeError('claude', '~/.claude-work', [{ id: 'claude-ollama', home: '~/.claude-work', login: false }])).toBeNull()
-    expect(accountHomeError('claude', '.claude-x', others, false)).toMatch(/absolute/)
-    expect(accountHomeError('codex', '~/${secret:x}', [])).toMatch(/plain path/)
+  it('wants a folder spelled as a path', () => {
+    expect(accountHomeError('claude', '~/.claude-personal')).toBeNull()
+    expect(accountHomeError('claude', '/home/me/.claude-x')).toBeNull()
+    expect(accountHomeError('claude', 'C:\\Users\\me\\.claude-x')).toBeNull()
+    expect(accountHomeError('claude', '')).toMatch(/Enter/)
+    expect(accountHomeError('claude', '.claude-x')).toMatch(/absolute/)
+    expect(accountHomeError('codex', '~/${secret:x}')).toMatch(/plain path/)
+    // The place of another account, the default one included, is allowed.
+    expect(accountHomeError('claude', '~/.claude/')).toBeNull()
+  })
+
+  it('says so when an account takes the place of another, and only then', () => {
+    const others = [
+      { id: 'claude-work', home: '~/.claude-work/' },
+      { id: 'claude-ollama', home: '~/.claude-ollama', login: false },
+    ]
+    expect(accountHomeNote('claude', '~/.claude-personal', others)).toBeNull()
+    expect(accountHomeNote('claude', '~/.claude-work', others)).toMatch(/“claude-work”/)
+    expect(accountHomeNote('claude', '~/.claude/', others)).toMatch(/default account/)
+    // No login in the place: nothing to say, either way.
+    expect(accountHomeNote('claude', '~/.claude-ollama', others)).toBeNull()
+    expect(accountHomeNote('claude', '~/.claude-work', others, false)).toBeNull()
+    expect(accountHomeNote('claude', '~/.claude', others, false)).toBeNull()
   })
 
   it('takes a memory folder as a plain absolute path, or none', () => {
@@ -294,12 +302,12 @@ describe('accounts', () => {
   })
 
   it('knows Gemini’s home holds .gemini and Aider’s is a keys file', () => {
-    expect(accountHomeError('gemini', '~/.gemini-work', [])).toBeNull()
-    expect(accountHomeError('gemini', '~/', [])).toMatch(/default account/)
-    expect(accountHomeError('aider', '~/.aider-work.env', [])).toBeNull()
-    expect(accountHomeError('aider', '~/.aider-work.env', [{ id: 'aider-a', home: '~/.aider-work.env' }])).toBe('Already the keys file of “aider-a”')
-    expect(accountHomeError('aider', '~/keys/', [])).toMatch(/file/)
-    expect(accountHomeError('aider', '', [])).toMatch(/\.env file/)
+    expect(accountHomeError('gemini', '~/.gemini-work')).toBeNull()
+    expect(accountHomeNote('gemini', '~/', [])).toMatch(/default account/)
+    expect(accountHomeError('aider', '~/.aider-work.env')).toBeNull()
+    expect(accountHomeNote('aider', '~/.aider-work.env', [{ id: 'aider-a', home: '~/.aider-work.env' }])).toMatch(/keys file of “aider-a”/)
+    expect(accountHomeError('aider', '~/keys/')).toMatch(/file/)
+    expect(accountHomeError('aider', '')).toMatch(/\.env file/)
     expect(accountIdError('gemini', [])).toMatch(/built-in/)
     expect(accountIdError('aider', [])).toMatch(/built-in/)
     expect(accountKind('aider')?.suggest('work')).toBe('~/.aider-work.env')
