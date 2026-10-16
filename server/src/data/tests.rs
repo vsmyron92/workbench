@@ -326,7 +326,8 @@ async fn a_file_is_followed_while_the_capture_writes_it() {
     let id = started["id"].as_str().unwrap().to_string();
 
     append_to(&file, "Time [s],Current [uA],Mode\n0.0,10.5,sleep\n0.1,11.0,sleep\n0.2,5200,tx\n");
-    wait_for("the first rows", || count(&e, "Current") == 3).await;
+    // Each column is its own series, appended one after the other: wait for all of them.
+    wait_for("the first rows", || count(&e, "Current") == 3 && count(&e, "Mode") == 3).await;
     let infos = e.state.data.series_infos(&e.state, &e.pid);
     let cur = infos.iter().find(|i| i["name"] == "Current").unwrap();
     assert_eq!((cur["unit"].as_str(), cur["group"].as_str(), cur["kind"].as_str()), (Some("uA"), Some("run 1"), Some("analog")));
@@ -337,7 +338,8 @@ async fn a_file_is_followed_while_the_capture_writes_it() {
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(count(&e, "Current"), 3);
     append_to(&file, ".5,idle\n0.4,12.6,idle\n");
-    wait_for("the rest", || count(&e, "Current") == 5).await;
+    // The row count is set after the samples are in, so it is waited for too.
+    wait_for("the rest", || count(&e, "Current") == 5 && e.state.data.sources.list(&e.pid)[0]["rows"] == 5).await;
     assert_eq!(e.state.data.stats(&e.state, &e.pid, &["Current".into()], None, None)["Current"]["max"], 5200.0);
 
     // The tool lists it, and it shows progress.
