@@ -1,0 +1,367 @@
+/* Data viewer: the plot panel and the tool window. Tokens only. */
+
+/* ---------------------------------------------------------------- plot panel */
+.wb-data-plot {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-inset);
+}
+.wb-data-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex: none;
+}
+.wb-data-bar .grow,
+.wb-data-toolbar .grow,
+.wb-data-row .grow,
+.wb-data-measure .grow {
+  flex: 1;
+}
+.wb-data-bar .title {
+  max-width: 260px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.wb-data-bar .title:hover {
+  background: var(--bg-hover);
+}
+.wb-data-bar .wb-select {
+  width: auto;
+  height: 24px;
+}
+
+.wb-data-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-inset);
+  flex: none;
+  max-height: 96px;
+  overflow-y: auto;
+}
+.wb-data-legend .chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  font-size: var(--fs-sm);
+}
+.wb-data-legend .key {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.wb-data-legend .key:hover {
+  background: var(--bg-hover);
+}
+.wb-data-legend .name {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-data-legend .val {
+  font-family: var(--font-mono);
+  color: var(--fg-muted);
+  min-width: 6ch;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-data-legend .val.muted {
+  color: var(--fg-subtle);
+  font-family: inherit;
+}
+.wb-data-legend .chip.off .name,
+.wb-data-legend .chip.off .val {
+  color: var(--fg-subtle);
+  text-decoration: line-through;
+}
+.wb-data-legend .remove {
+  opacity: 0;
+}
+.wb-data-legend .chip:hover .remove,
+.wb-data-legend .chip:focus-within .remove {
+  opacity: 1;
+}
+.wb-data-swatch {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 3px;
+  border-radius: 1.5px;
+  background: var(--fg);
+}
+/* Digital lanes and events are drawn in the text colour: a stepped mark and a tick say so. */
+.wb-data-swatch.digital {
+  height: 8px;
+  background: none;
+  border-top: 2px solid var(--fg);
+  border-left: 2px solid var(--fg);
+  border-radius: 0;
+  width: 10px;
+}
+.wb-data-swatch.events,
+.wb-data-swatch.marker {
+  width: 2px;
+  height: 12px;
+  border-radius: 0;
+  background: var(--fg);
+}
+.wb-data-swatch.marker {
+  background: var(--accent);
+}
+.wb-data-note {
+  color: var(--fg-subtle);
+  font-size: var(--fs-sm);
+  padding: 4px 8px;
+}
+
+.wb-data-region {
+  position: relative;
+  flex: 1;
+  min-height: 80px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.wb-data-region .inner {
+  position: relative;
+}
+.wb-data-region canvas {
+  display: block;
+  cursor: crosshair;
+  touch-action: none;
+  outline: none;
+}
+.wb-data-region canvas.dragging {
+  cursor: grabbing;
+}
+.wb-data-region canvas:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: -1px;
+}
+.wb-data-lanebtn {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  opacity: 0.55;
+}
+.wb-data-lanebtn:hover,
+.wb-data-lanebtn:focus-visible {
+  opacity: 1;
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.wb-data-tip {
+  position: absolute;
+  top: 2px;
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.wb-data-scroll {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 74px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex: none;
+  min-height: 24px;
+}
+.wb-data-scroll.off {
+  min-height: 6px;
+  padding: 0;
+}
+.wb-data-scroll .bar {
+  position: relative;
+  flex: 1;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  touch-action: none;
+}
+.wb-data-scroll .thumb {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 4px;
+  background: var(--border-strong);
+  min-width: 6px;
+}
+.wb-data-scroll .bar:hover .thumb {
+  background: var(--fg-subtle);
+}
+.wb-data-scroll .live.on {
+  color: var(--accent);
+}
+
+.wb-data-measure {
+  flex: none;
+  max-height: 40%;
+  overflow: auto;
+  border-top: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+  font-size: var(--fs-sm);
+}
+.wb-data-measure .head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel);
+}
+.wb-data-measure .muted {
+  color: var(--fg-subtle);
+}
+.wb-data-measure table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+}
+.wb-data-measure th,
+.wb-data-measure td {
+  padding: 2px 10px;
+  text-align: right;
+  white-space: nowrap;
+  font-weight: 400;
+}
+.wb-data-measure thead th {
+  color: var(--fg-subtle);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-ui);
+}
+.wb-data-measure tbody th {
+  text-align: left;
+  font-family: var(--font-ui);
+  color: var(--fg);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wb-data-measure thead th:first-child {
+  text-align: left;
+}
+.wb-data-measure td.note {
+  text-align: left;
+  color: var(--fg-muted);
+}
+
+/* ---------------------------------------------------------------- tool window */
+.wb-data {
+  display: flex;
+  flex-direction: column;
+}
+.wb-data-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 30px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.wb-data-body {
+  flex: 1;
+  min-height: 0;
+  padding-bottom: 8px;
+}
+.wb-data-group {
+  padding: 4px 10px 1px;
+  color: var(--fg-subtle);
+  font-size: var(--fs-xs);
+}
+.wb-data-row {
+  font-size: var(--fs-sm);
+  gap: 6px;
+}
+.wb-data-row .kind {
+  flex: none;
+  color: var(--fg-muted);
+}
+.wb-data-row .name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 3ch;
+}
+.wb-data-row .unit {
+  color: var(--fg-subtle);
+  flex: none;
+}
+.wb-data-row .last {
+  font-family: var(--font-mono);
+  color: var(--fg);
+  min-width: 9ch;
+  text-align: right;
+  flex: none;
+}
+.wb-data-row .count,
+.wb-data-row .span {
+  font-family: var(--font-mono);
+  color: var(--fg-subtle);
+  min-width: 6ch;
+  text-align: right;
+  flex: none;
+}
+.wb-data-row .span {
+  min-width: 8ch;
+}
+.wb-data-row .count.err {
+  color: var(--danger);
+  max-width: 50%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.wb-data-row input[type='checkbox'] {
+  flex: none;
+  margin: 0;
+}

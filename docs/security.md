@@ -35,6 +35,11 @@ model is in [the architecture](ARCHITECTURE.md#security-model).
   or reaches another host is refused to everyone.
 - Workspace reports an agent writes are served sandboxed: they cannot read Workbench's
   cookies, storage or API.
+- Agents fill the data viewer and make its plots (`data_*`, confined to the session's
+  project): that is what it is for. `data_follow` reads only files inside the project, and
+  not hidden folders, key-like names or anything the project marks `sensitive`. A script in
+  the session may post samples with the session's own token; it can only write that
+  session's project.
 
 ## What repositories can and cannot do
 

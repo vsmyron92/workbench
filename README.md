@@ -28,6 +28,10 @@ separate installations, with your own accounts, and are not bundled with Workben
   firmware through OpenOCD, J-Link, pyOCD or QEMU, with the chip's registers by name from
   its SVD file and the target's UART or RTT output ([embedded debugging](docs/embedded-debugging.md)),
   Local History, scratch files and an HTTP client for `.http` files.
+- **Measurements next to the agent.** An agent puts a logic analyzer capture, a probe waveform or a
+  power profile into the Data viewer while it captures, and plots open beside its session: lanes
+  under one time axis (log current, rails, digital lines, decoded events), live, with range
+  measurements and CSV ([data viewer](docs/data-viewer.md)).
 - **Version control you can see.** Line staging and partial commits, changelists, the
   shelf, interactive rebase, bisect and a log graph, all without leaving the window.
 - **CI and reviews.** GitLab merge requests, pipelines, job logs and failed tests;
@@ -166,7 +170,7 @@ access and notifications. Per project, Workbench detects run configurations from
 package.json, Python, Go, CMake, Gradle, Maven, Make, compose files, Unity, .NET and
 more; you add or override them in `.workbench.toml` or a machine-local overlay. See
 [customization](docs/customization.md), [working with agents](docs/agents.md),
-[embedded debugging](docs/embedded-debugging.md),
+[embedded debugging](docs/embedded-debugging.md), the [data viewer](docs/data-viewer.md),
 [your phone and remote access](docs/remote-access.md) and the
 [keyboard shortcuts](docs/keyboard-shortcuts.md).
 

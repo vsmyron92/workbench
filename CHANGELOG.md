@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.16.0 - 2026-10-15
+
+- **Live measurements next to the agent: the data viewer.** An agent that captures a logic analyzer trace,
+  a differential probe or scope waveform or a power profile can now put the samples in front of you while it
+  works. The **Data** tool window lists the series; plots open beside the session and fill live. A plot is
+  **lanes** under one time axis, like a scope or a logic analyzer: current on a logarithmic lane in µA and
+  mA, rails in volts, each digital line on a thin lane of its own (buses as boxes with their value), decoded
+  events as a row of labels, markers as lines through everything. Wheel zooms around the pointer, drag
+  pans, **Shift + drag** measures a range (min, max, mean, RMS, peak-to-peak and the area under the trace:
+  charge or energy; frequency, duty and edges for digital lines), double-click or End follows the newest
+  samples again, and plots can be **linked** so a power plot and a logic plot pan and zoom together.
+  Samples are drawn from what the server returns for the window in view, so a million-sample capture costs
+  a few thousand points a redraw and a spike always survives; the plot is the same in a second browser.
+- **Agents fill it and make the plots while capturing.** `data_append` puts samples or events into series
+  (analog, digital, events), `data_plot` creates and changes plots (a plot may be made before its series have
+  a sample, and series are added or removed while the capture runs), `data_series` lists, defines, clears and
+  deletes, and `data_query` reads back statistics and thinned samples of a window: the sleep current, the
+  width of a pulse, whether a rail dipped. A script the agent runs can post samples with the session's own
+  token (`POST $WORKBENCH_URL/api/hooks/data/$WORKBENCH_TERMINAL_ID/append`).
+- **`data_follow` reads a capture file while the tool is still writing it.** CSV (headers such as
+  `Current [uA]` and `Time (ms)` give units and the time base; text cells become events), JSON lines and VCD
+  (sigrok, PulseView, simulators) are decoded as they grow, and a file that is replaced starts the capture
+  over. Only files inside the project are read, by the rules of every agent file read. **Follow file…** in
+  the Data window does the same for you.
+- Samples are kept in memory (the newest million per series by default, 30 million across projects); the
+  series' names and units and the plots survive a restart. See `docs/data-viewer.md`.
+
 ## 0.15.0 - 2026-10-14
 
 - **Accounts can share one memory folder of your choosing.** Memory was shared only with the default

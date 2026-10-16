@@ -60,6 +60,7 @@ server/            Rust crate `workbench`
   src/git/           SLICE git: CLion-style VCS, line staging, interactive rebase, changelists, shelf, bisect
   src/lsp/           SLICE lsp: language servers → Monaco (process manager, trust gate, URI mapping, editor socket)
   src/debug/         SLICE debug: Debug Adapter Protocol sessions, launch configurations, breakpoints, remote (embedded) targets
+  src/data/          SLICE data: the data viewer: series (analog, digital, events), lane plots, followed capture files, MCP data_* tools
   src/gitlab/        SLICE gitlab: MRs, pipelines, jobs, envs, issues, registry
   src/github/        SLICE github: PRs, Actions runs/jobs/logs, issues, releases
   src/workspace/     SLICE workspace: Mr. Mak-style deliverable cards and Home examples, sandboxed report serving, trash
@@ -127,7 +128,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 - `project-ids.json`: which directory each project id belongs to (see Configuration).
 - `scratches/` (0700): scratch files (see "Scratch files").
 - Slice state such as terminal metadata and screens (`terminals/`) also lives here, and `devcontainer/<id>.json`: dev container approvals (sha256 of approved plans), settings and the last start.
-- Third phase: `lsp/<id>.json` (code intelligence enabled for that directory), `debug/<project>.json` (breakpoints, watches) and `debug/adapter/` (the adapters' working directory), `push/vapid.json` and `push/subscriptions.json`, `local-history/<project>/` (index and zstd blobs), `git/changelists/<project>.json`, `git/shelf/<project>/`, `git/rebase/` (a running interactive rebase's staging), `workspace-trash/<scope>/`.
+- Third phase: `lsp/<id>.json` (code intelligence enabled for that directory), `debug/<project>.json` (breakpoints, watches) and `debug/adapter/` (the adapters' working directory), `push/vapid.json` and `push/subscriptions.json`, `local-history/<project>/` (index and zstd blobs), `git/changelists/<project>.json`, `data/<project>.json` (the data viewer's series definitions and plots; never samples), `git/shelf/<project>/`, `git/rebase/` (a running interactive rebase's staging), `workspace-trash/<scope>/`.
 
 ## Repositories of a project
 
@@ -174,6 +175,7 @@ A project is a directory, and it may hold **several git repositories**: a folder
 - **Docker (Services)** is root on this computer: `/api/docker/**` acts only for devices (agent tokens are not valid there; in-process callers get 403 on every route that changes something or opens a terminal). Details and `inspect` mask values of secret-looking names (`*PASSWORD*`, `*TOKEN*`, `*_KEY`, `*SECRET*`…), passwords in URLs, and those inside JSON labels (`devcontainer.metadata`'s `remoteEnv`).
 - **Databases** (`/api/projects/{pid}/db/**`): a console runs what the user types with the database user's rights, so everything but the list refuses in-process callers (agents over MCP get 403; agent tokens are not valid there at all). Credentials are secret names resolved in the backend; the list shows the names, never values; a password typed into the browser is refused. Connection errors are redacted of the secrets used.
 - **Language servers, debug adapters and debug servers** run project code. Their commands come only from config.toml; a project's servers start only after the user enabled code intelligence for that directory (`data_dir/lsp/<id>.json`), a debug session only on a click; debug adapters start in `data_dir/debug/adapter` so a repository's modules cannot shadow the adapter's (debugpy). Every write route of both slices refuses in-process callers: agents (MCP) read diagnostics, symbols and a stopped session's state, and never enable, start, step, evaluate or stop anything. See "Code intelligence" and "Debugger".
+- **The data viewer** (`/api/projects/{pid}/data/**`) holds measurements, which are numbers, levels and short notes: filling it and making plots is what agents are for, so nothing there is refused to an in-process caller (MCP `data_*` tools, confined to the session's project like every project tool). What it can reach is bounded: `data_follow` reads only files inside the project by the rules of every agent file read (no hidden or key-like files, nothing `sensitive`, symbolic links resolved and checked first; Windows' network paths are refused like everywhere), text from files is cut to one short line, and memory is capped (per series, per request, and 30 million samples across projects). A script posts with `POST /api/hooks/data/{terminalId}/append`, which accepts only that terminal's own agent token (or the master token): the project is the terminal's, so a token never writes into another project; agent tokens remain invalid on the rest of `/api`. See "Data viewer".
 - **Permission requests** of Claude Code sessions are answered only by signed-in devices (`POST /api/agents/{id}/permission`: agent tokens 401, the master token and in-process calls 403), so a session never approves itself through Workbench. One-tap Allow (the attention toast, a push notification) is offered only for a request shown whole: `pendingPermission.complete` and at most 300 characters on 4 lines. See "Approvals".
 - **Web Push** posts to a browser-supplied endpoint: an SSRF boundary. Only the browsers' push services (FCM, Mozilla, Apple, WNS) and `[push] extra_endpoint_hosts` are accepted, https on the default port, no IP literals, no redirects; payloads carry titles and short summaries only. The service worker answers Allow / Deny with the device key it keeps in IndexedDB (as exposed as the page's `localStorage` copy). See "Phone app and push".
 - **Voice input** uses the browser's own speech recognition: the microphone permission is the browser's, Workbench receives no audio and has no endpoint for it, and a transcript is only text in the new-session prompt until the user starts the session, so a misheard word never reaches an agent by itself. See "Voice input" under TypeScript.
@@ -357,7 +359,7 @@ Panel ids must be stable so reopening focuses the existing panel. Params must be
 | `jira.board` | `{boardId}` | atlassian | `jira.board:<boardId>` |
 | `app` | `{projectId, env?, run?, url}` | apps | `app:<projectId>:<env\|run>` |
 | `settings` | `{section?}` | platform | `settings` |
-| `help` | `{page?}` (a page slug: `getting-started`, `projects`, `agents`, `version-control`, `remote-access`, `service`, `configuration`) | help | `help` |
+| `help` | `{page?}` (a page slug: `getting-started`, `projects`, `agents`, `version-control`, `remote-access`, `service`, `configuration`, `data-viewer`) | help | `help` |
 | `pr` | `{projectId, number}` | github | `pr:<projectId>:<number>` |
 | `gh.run` | `{projectId, runId}` | github | `gh.run:<projectId>:<runId>` |
 | `gh.job` | `{projectId, jobId}` | github | `gh.job:<projectId>:<jobId>` |
@@ -370,6 +372,7 @@ Panel ids must be stable so reopening focuses the existing panel. Params must be
 | `lsp.source` | `{projectId, uri, line?, column?, endColumn?, t?}`: a read-only library file a language server pointed to (`lsp-src:` URI) | lsp | `lsp.source:<projectId>:<path>` |
 | `debug.source` | `{projectId, sessionId, path \| sourceReference, name?, line?, column?, t?}`: a frame's source outside the project, or source only the debugger has | debug | `debug.source:<projectId>:<path>` or `debug.source:<projectId>:<sessionId>:ref<n>` |
 | `debug.plot` | `{projectId, plotId}`: Live Watch values drawn together on one chart; the plot is a saved configuration of the project (see "Plot viewer" under Debugger) | debug | `debug.plot:<projectId>:<plotId>` |
+| `data.plot` | `{projectId, plotId}`: lanes of measurement series under one time axis; the plot is a saved layout of the project (see "Data viewer") | data | `data.plot:<projectId>:<plotId>` |
 
 ### Tool windows
 
@@ -377,7 +380,7 @@ The IDs below are the defaults. The left stripe, right of the agents column, als
 
 - **left:** `files` (the project, or the scratch files: see "Scratch files" under Configuration), `commit` (Changes, with Changes / Stash / Shelf tabs), `search`, and first of all `workspace` (order 5: the default one).
 - **right:** `gitlab` (when `project.gitlab`), `github` (order 12, when `project.github`), `confluence`, `jira` (only when the project or site has Jira; Issues and Boards tabs), `apps`, `database` (db, 60: see "Database").
-- **bottom:** `problems` (lsp: diagnostics, 15, Alt+6), `todo` (files: TODO / FIXME / XXX / HACK comments of the project or the current file, 16; `GET /api/projects/{pid}/files/todos` reuses Find in Files' walker and keeps matches inside a comment of the file's language; rescans 1.5 s after `fs.changed`), `usages` (lsp: Find Usages results, 17), `gitlog` (20, Alt+9), `debug` (25, Alt+5), `run` (run-configuration output, 30), `services` (devcontainer: this computer's Docker containers, compose projects and images, 35, Alt+8; see "Services (Docker)" under Dev containers), `activity` (platform: MCP calls and notifications, 40). Stripe icons are distinct: Find (left) is the only magnifier; Find Usages has a crosshair.
+- **bottom:** `problems` (lsp: diagnostics, 15, Alt+6), `todo` (files: TODO / FIXME / XXX / HACK comments of the project or the current file, 16; `GET /api/projects/{pid}/files/todos` reuses Find in Files' walker and keeps matches inside a comment of the file's language; rescans 1.5 s after `fs.changed`), `usages` (lsp: Find Usages results, 17), `gitlog` (20, Alt+9), `debug` (25, Alt+5), `data` (the data viewer's series, plots and followed files, 27), `run` (run-configuration output, 30), `services` (devcontainer: this computer's Docker containers, compose projects and images, 35, Alt+8; see "Services (Docker)" under Dev containers), `activity` (platform: MCP calls and notifications, 40). Stripe icons are distinct: Find (left) is the only magnifier; Find Usages has a crosshair.
 - **CLion keys.** Tool windows: Alt+1 Files, Alt+2 Bookmarks, Alt+3 Find, Alt+4 Run, Alt+5 Debug, Alt+6 Problems, Alt+7 Structure (lsp: the focused file's symbols in source order, the caret's one marked), Alt+8 Services, Alt+9 Git Log, Alt+0 Commit; Alt+F12 collapses and expands the workspace window beside the agents column (see "Desktop layout"). Editor keymap (`lib/editorKeymap.ts`, Settings › General, per browser): CLion by default — Ctrl+D duplicate, Ctrl+Y delete line, Ctrl+Shift+Z redo, Alt+J / Alt+Shift+J / Ctrl+Alt+Shift+J occurrences, Ctrl+Shift+J join, Ctrl+Shift+Up/Down and Alt+Shift+Up/Down move lines, Shift+Enter / Ctrl+Alt+Enter new line after / before, Ctrl+Q quick docs, Ctrl+Shift+/ block comment, Ctrl+Alt+O optimize imports, Ctrl+Alt+I auto-indent, Ctrl+Shift+M matching brace, Ctrl+Shift+U toggle case, Ctrl+NumPad+/- folding — as keybinding rules and one global editor action, swapped live; "VS Code" keeps Monaco's own keys. Ctrl+W (Extend Selection) cannot be taken from a browser.
 - **Navigation (files):** `navHistory.ts` keeps where the caret has been in the active editor (one entry per place: moves within 10 lines update it, a file switch or a longer jump adds one; Back / Forward update the entry they go to instead of adding). Navigate Back / Forward: Ctrl+Alt+Left / Right (also as editor actions), Alt+Left / Right outside terminals, and the mouse's back / forward buttons (which would otherwise leave Workbench). Recent Files (Ctrl+E; again: changed files only, from the shared git status query) preselects the previous file; Recent Locations (Ctrl+Shift+E) lists the places with their code. Kept in memory per browser tab.
 - **HTTP Client (apps):** JetBrains `.http` / `.rest` files. `server/src/apps/http_client.rs` parses them (`###` blocks, `# @name`, `@var = value`, `METHOD URL [HTTP/x]`, `?`/`&` continuation lines, headers, a body or `< ./file`; response-handler scripts and `>>` redirects are skipped, never run), fills `{{variables}}` from the file, `http-client.env.json` and `http-client.private.env.json` (nearest ones up to the project root; `$shared` plus the chosen environment; the private file is a default-sensitive file) and dynamic ones (`$uuid`, `$timestamp`, `$isoTimestamp`, `$randomInt`), and sends one request on the user's click (`POST /api/projects/{pid}/http/run {path, line, env?}`; devices only, agent tokens refused; http/https only; 60 s, 10 redirects, 5 MB of body). Values from the private file are masked (`••••`) in the request echoed back. `GET …/http/envs?path=` lists environments and requests. Editor (`features/apps/http`): a Monarch grammar (`http` language), CodeLenses "▶ Send Request" and "Environment: …" above every request, Ctrl+Enter at the caret; unsaved files are saved first. Responses go to the `httpResponse` panel (`{projectId}`, id `http:<projectId>`): status, time, size, Body (JSON pretty-printed), Headers, Request, Send Again, and the last 30 runs.
@@ -417,6 +420,10 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `debug.output` | `{sessionId, lines}` (a flood sends 500 lines; the UI fetches the rest) | debug |
 | `debug.breakpoints` | the whole breakpoints view (lines, functions, exception filters, muted, watches) | debug |
 | `debug.plots` | `{projectId, plots}`: the project's plots after a change (see "Plots" under Debugger) | debug |
+| `data.series` | `{projectId, series: SeriesInfo[]}`: the series list after one was made, changed, cleared or deleted | data |
+| `data.changed` | `{projectId, series: SeriesInfo[]}`: the series that took samples since the last one, at most every 100 ms; a plot refetches its window | data |
+| `data.plots` | `{projectId, plots}`: the project's plots after a change | data |
+| `data.sources` | `{projectId, sources}`: followed files and how far they are | data |
 | `run.state` | `{name, state, port?, url?, terminalId?, startedAt?, readyAt?, exit?, result?, error?, terminated?, phase?, inContainer?, reach?}` | apps |
 | `devcontainer.state` | `{projectId, state, containerId?, inContainer}` (`none`, `stopped`, `running`, `building`, `error`) | devcontainer |
 | `docker.changed` | `{kinds: ('container' \| 'image')[]}` (a container or image changed; `docker events`, 300 ms debounce, `exec_*` ignored; also after each Services action) | devcontainer |
@@ -451,6 +458,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `/api/projects/{pid}/files/**` (incl. `files/history/**`: Local History), `/api/projects/{pid}/search`, `/api/fs/**` | files |
 | `/api/projects/{pid}/lsp/**` (incl. the `lsp/ws` editor socket) | lsp |
 | `/api/projects/{pid}/debug/**` | debug |
+| `/api/projects/{pid}/data/**`, `POST /api/hooks/data/{terminalId}/append` (a script in a hosted session, with its agent token) | data |
 | `/api/projects/{pid}/git/**` (`?repo=<id>` on every route; `GET git/repos`: the repositories with their branch, ahead/behind, changed files, state and forge, one entry's `error` instead of failing them all) | git |
 | `/api/projects/{pid}/gitlab/**` (`?repo=<id>`, `forge::RepoParam`), `/api/gitlab/**` | gitlab |
 | `/api/projects/{pid}/github/**` (`?repo=<id>`, `forge::RepoParam`), `/api/github/**` | github |
@@ -528,7 +536,7 @@ interface PendingPermission {
 
 ### MCP tools
 
-Tool names are prefixed by domain: `workbench_` (the UI, sessions, and the files and git tools: `workbench_open_file`, `workbench_show_diff`, `workbench_set_commit_message`, `workbench_changelists`…; git tools take `project` and are confined to the session's project), `gitlab_`, `github_`, `workspace_`, `confluence_`, `jira_`, `env_`, `run_`, `devcontainer_` (`devcontainer_status`, read-only), `code_` (lsp), `debug_` (`debug_state`), `files_` (`files_local_history`). `GET /api/platform/tools` lists them. Each has a JSON Schema for its input. Set `mutating: true` when the tool changes remote state.
+Tool names are prefixed by domain: `workbench_` (the UI, sessions, and the files and git tools: `workbench_open_file`, `workbench_show_diff`, `workbench_set_commit_message`, `workbench_changelists`…; git tools take `project` and are confined to the session's project), `gitlab_`, `github_`, `workspace_`, `confluence_`, `jira_`, `env_`, `run_`, `devcontainer_` (`devcontainer_status`, read-only), `code_` (lsp), `debug_` (`debug_state`), `data_` (the data viewer), `files_` (`files_local_history`). `GET /api/platform/tools` lists them. Each has a JSON Schema for its input. Set `mutating: true` when the tool changes remote state.
 
 Added in the third phase (all confined with `McpCtx::project_for`):
 
@@ -537,6 +545,11 @@ Added in the third phase (all confined with `McpCtx::project_for`):
 | `code_diagnostics {path?}`, `code_symbols {query}`, `code_definition {path, line, column}`, `code_references {path, line, column}` | lsp | read-only; only servers that already run (a tool never enables or starts one) |
 | `debug_state {sessionId?, frame?, registers?}` | debug | read-only: sessions, the stop, the stack, a frame's locals (secret values masked), the CPU registers on request, the console's newest tail |
 | `debug_plots {plot?, seconds?, maxPoints?}` | debug | read-only: the project's plots, or the data behind one (statistics and thinned readings of each series) |
+| `data_append {series, t?, v?, values?, t0?, dt?, rate?, points?, events?, text?, unit?, kind?, group?, clear?, batch?}` | data | `mutating`: puts samples or events into the data viewer's series (created on the way); times in seconds, in order; a series keeps its kind |
+| `data_series {action?: list\|define\|clear\|delete, …}` | data | `mutating`: the series, their settings, clearing and deleting; `clear` needs names or a group |
+| `data_plot {action: create\|update\|open\|delete\|list, title?, series?, lanes?, add?, remove?, markers?, span?, follow?, linked?, open?}` | data | `mutating`: creates and changes plots (lanes by unit and kind when only `series` are given) and opens them in the UI |
+| `data_follow {action?: start\|list\|stop, path, format?, follow?, timeColumn?, timeUnit?, rate?, …}` | data | `mutating`: reads a project file (csv, jsonl, vcd) into series while a capture tool writes it |
+| `data_query {series? \| plot?, from?, to?, last?, maxPoints?, events?}` | data | read-only: statistics and thinned samples of a window |
 | `debug_start {config, stopOnEntry?, pid?, waitSeconds?, frame?, registers?}`, `debug_attach {pid, adapter?, language?, program?, …}`, `debug_restart {sessionId?, …}` | debug | `mutating`: start a configuration (its build step and debug server run), attach to a process, rerun a session (a new sessionId); wait (default 60 s, ≤300) for a stop and answer like `debug_state` |
 | `debug_evaluate {expression, context?, frame?, threadId?, sessionId?}` | debug | `mutating`: `watch` (default) or `repl` (debugger commands, echoed into the console as `(agent)`) in a stopped session |
 | `debug_control {action, sessionId?, threadId?, path?, line?, waitSeconds?, frame?, registers?}` | debug | `mutating`: continue, pause, next, stepIn, stepOut, runTo, stop on a live session; waits (≤300 s) for the program to stop and answers like `debug_state` |
@@ -1305,6 +1318,123 @@ installed in it, where the gateway is a local address (a browser on Windows then
 published ports: `container-ip` links stay inside the distribution); with Docker Desktop's WSL
 integration it may not be, and the bridge fails as on Windows (docs/windows-port.md §5;
 neither is tested).
+
+## Data viewer (data)
+
+Live measurements next to an agent session: logic analyzer captures, differential probe and scope waveforms,
+power profiles; anything that is a number, a level or a note over time. Agents (and scripts they run, and files
+their capture tools write) put samples into named **series**; saved **plots** draw them as lanes under one time
+axis while the capture runs. User guide: `docs/data-viewer.md`.
+
+**Server** (`server/src/data/`). `series.rs`: one series is time-ordered samples in two `VecDeque<f64>`s (times in
+seconds; relative to the instrument, or Unix seconds when above `WALL_CLOCK_MIN`, reported as `wall`), a rolling
+buffer of the newest `max_points` (default 1,000,000, at most 10,000,000; events 20,000). Kinds: `analog`;
+`digital`, stored as transitions only (a repeat of the level is dropped but still advances the series' end, so
+the line reaches the capture's end), a value above 1 being a bus; `events` (time and a line of text). Times must
+not go backwards within a series (a new capture clears first). `view(from, to, buckets)` is what a plot of that
+width needs: the samples when they are no more than two per pixel column, else each column's lowest, highest and
+first failed reading in time order (so a spike survives), with one sample either side of the window so a line
+enters from the edge and a digital lane starts at the right level. `stats` answers a measurement cursor:
+analog min, max, peak-to-peak, mean, RMS, stddev, median, p95, p99, the trapezoid integral (charge for A,
+energy for W) and its time-weighted mean; digital edges, frequency, period, duty, high and low pulse widths and
+the distinct values of a bus. A series' `offset` is added to every time shown or asked for (it lines instruments
+up without rewriting what was captured).
+
+`plots.rs`: a plot is `{id, title, lanes, span, follow, linked, markers}`; a lane `{title, traces, min, max,
+log, weight}`; a trace `{series, color, hidden, style}`. A plot only names series, so it can be made before the
+series has a sample. `validated()` bounds everything (40 plots, 32 lanes, 8 traces a lane, 64 traces, one series
+once); `assign_colors` gives analog traces the first free chart colour (`--plot-N`) once, on the way in, and
+leaves digital and events traces at 0 (the viewer draws those in the text colour: their lane names them, so
+colour need not carry identity and there is no limit of eight). `auto_lanes` lays out series given without
+lanes: analog series of one unit share a lane (a unit-less one is alone, since nothing says it is comparable),
+each digital line and each events series gets its own; analog lanes first, then digital, then events.
+
+`store.rs` (`DataState` on `AppState.data`): per project the series and plots, loaded lazily from
+`data_dir/data/<project>.json`, which holds **definitions and plots only**: samples are in memory and a restart
+brings the same plots back, empty (a file that cannot be read is kept as `<project>.json.corrupt`, never
+overwritten). Every writer goes through it, so the rules hold for all senders: an `AppendReq` (`from_json`:
+`{series, t, v}`, `points`, `values` with `t0`/`dt` or `rate` (an even stream continues where the series left
+off; with no time it is stamped now), one `v`, `events`/`text`; `clear`; unit, kind, label, group, offset,
+maxPoints) is refused when it mixes shapes (samples and events, a list of times beside one value…) rather than
+guessed at. Everything that could refuse it is settled **before anything changes** (`append`: the series as it
+would be is probed on a copy without samples, the body's times are resolved and checked, then it is applied), so
+a failed request leaves the series, its settings and its samples as they were and creates nothing. A series
+keeps its kind: events into an analog series, or numbers into an events one, are refused; a new series that is
+sent events is an events series; a sender who sets `kind` on purpose empties the series. A batch is read whole
+before it is applied (at most 256 items); items are then applied in order and one the series refuses stops the
+batch there, the error naming it and how many before it were taken. Memory: 256 series a project, 2,000,000
+samples a request, at most 64 series named in one request (once each), and past 30,000,000 samples held
+(an event counts as 16: it holds text) the biggest series lose their oldest tenth, the writer's own project's
+first; buffers are released on clear and shrink. Changes are announced by a 100 ms ticker (`data.changed` names the series that took samples,
+`data.series` after a definition, clear or delete, `data.plots`, `data.sources`).
+
+`formats.rs`: incremental line decoders, so a file still being written and a finished one go through the same
+code: CSV and tables (delimiter and header found from the first line; `Name [unit]` / `Name (unit)` headers give
+units; a time column by name or number with `s`/`ms`/`us`/`ns` or an ISO date; no time column: `rate`, else the
+caller stamps arrival; non-numeric cells become events; `digital`, `columns`, `prefix`, `group`), JSON lines
+(`{"t": …, "name": value}` or `{"series", "t", "v"}`; booleans are levels, strings events) and VCD (timescale,
+scopes as dotted names, scalar wires digital, vectors numbers with unknown bits a gap, reals analog).
+
+`sources.rs`: a followed file is a task that polls the file every 150 ms, reads what was appended (whole lines
+only; up to 8 MiB a round), decodes off the async workers (`spawn_blocking`) and appends. A file that does not
+exist yet is waited for (60 s, and again if it disappears); one that shrinks or is replaced (length below the
+offset, another inode, or a different beginning: its first 64 bytes) starts the capture over and clears the
+series the source wrote; rows whose time is not a number or goes backwards are skipped and counted
+(`skipped`, never fatal); a binary file or a line over 1 MB is an error; a finished import (`follow: false`)
+with no times counts its rows as seconds; a byte order mark is ignored. Text cells in a column that also has
+numbers (an instrument's `OVLD`) go to a series `<name> (text)` and never turn the numbers into events. At
+most 8 running per project, the same file (by its canonical path) never twice. **Only files inside the project
+are read**, by the rules of every agent file read (`check_readable`: no hidden path component, no key-like
+name, nothing `Sensitive` matches), and **checked again at every look**, not once at the start: the name is
+resolved and its canonical path checked as well as the named one, so a file that becomes a link later (to a
+key, to something outside the project) is refused, only "not found" is waited for, and the canonical path is
+opened with `O_NOFOLLOW`. A decoder takes at most 256 columns or keys and 4096 VCD signals of a file.
+
+`routes.rs`: REST (`GET data`; `PUT series`, `POST series/clear|delete` (names, a non-empty group, or `all:
+true`: never "everything" by omission); `POST append`, `view`, `stats`, `export`; `GET|POST plots` (an existing
+`id` is a 409), `PUT|DELETE plots/{id}`; `GET|POST sources`, `POST sources/{id}/stop`, `DELETE sources/{id}`;
+series are named in bodies, never in paths, so a name may hold `/`) and the hook scripts post to, `POST
+/api/hooks/data/{terminalId}/append`: the terminal's own agent token (or the master token), the project the
+terminal's. The hook is outside the device guard, so its body is taken as bytes (16 MiB at most) and parsed only
+after the token is checked. `tools.rs`: `data_append`, `data_series`, `data_plot` (create opens the panel with `ui.open`),
+`data_follow`, `data_query`.
+
+**Web** (`web/src/features/data/`). `store.ts` keeps the series, plots and sources per project current from the
+events and holds nothing large: a plot asks the server for the window it draws (`POST data/view`, one request in
+flight, the newest wish wins, at least 60 ms apart; `useChangeTick` says when a series took samples).
+`draw.ts` is the canvas renderer with no React in it, so the geometry pointer handlers use is the one drawn:
+lanes by weight (analog 3, digital 1, events 1) with minimums, below which the panel scrolls; each analog lane
+fits the values in view (the samples inside and where the line crosses the edges, not the samples beyond), fixed
+`min`/`max`, or decades when `log`; time ticks in the unit the step calls for or as a clock; analog lines
+(1.75 px, broken at a failed reading, steps or dots by `style`), digital steps and buses as boxes with their
+value in hex, events as ticks with text, markers as dashed lines through every lane, the cursor with a dot per
+trace, a selected range. `math.ts` is the pure part (SI prefixes of a unit, ticks, lane layout, durations) and
+`PlotPanel.tsx` the panel: toolbar (title, Follow, span, fit, linked, add series, CSV), legend with values under
+the cursor, the canvas (wheel zooms around the pointer, drag pans, Shift+drag measures, double-click or End
+follows, F fits, +/−/arrows/Home), an overview bar and the measurements table (`POST data/stats` for the range:
+only the columns that apply to the kinds shown). A plot's saved layout is the server's; the view (where in time,
+following or not) is the browser's own unless the plot is **linked**, when linked plots of a project share it
+(`useLinked`). `DataToolWindow.tsx` (bottom, order 27): series by group with the newest value, count, span and a
+live dot, plots, followed files; Plot, CSV, Clear, Delete, Follow file…. Commands: Show Data, Open Plot: …. Desktop
+only.
+
+**Verified:** Rust unit tests (series ordering, rolling, digital transitions, thinning keeps a spike and a gap,
+statistics, offsets; plot validation, colours and automatic lanes; every append shape, persistence across a new
+`DataState`, CSV export; every decoder), integration tests through the router (a capture over REST, the hook with
+the right, another and no token, agent tokens refused on the rest of `/api`, the tools end to end including
+`ui.open`, a followed file written while it is read, truncation, VCD import, refusals of `.env`, hidden folders,
+keys, `..`, absolute paths outside and links to either); web unit tests (maths, drawing against a recording
+canvas, the store against its events, lane choice); headless Chrome against a scratch instance with a synthetic
+capture streamed through MCP, REST and a followed CSV (live follow, hover readout, wheel zoom, drag pan,
+Shift+drag measurement, the tool window, a 1 MS/s probe waveform, a plot made before its data, both themes).
+An independent read of the slice (a second model, given the code and the security rules, not the author's
+conclusions) found, and tests now pin: a followed file that became a symlink after it was checked, a hook that
+parsed 64 MiB before looking at the token, a numeric column with one word in it that turned into events and
+lost its samples, a note into an analog series that did the same, appends that failed half way, open-ended
+windows that collapsed to three points, digital columns that ended on the wrong level, one out-of-order row
+rejecting a whole chunk, a byte order mark hiding the time column, and unbounded name lists and batches.
+**Not verified:** a real logic analyzer or power profiler (the data is synthetic), captures of tens of millions
+of samples in the browser, Windows (it builds and its tests are portable, but nothing ran there).
 
 ## Third phase (2026-09-27): code intelligence, debugger, CLion VCS, Confluence authoring, push, approvals, local history
 
