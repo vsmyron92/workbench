@@ -206,7 +206,7 @@ export const api = {
   get: <T>(path: string, query?: Query, signal?: AbortSignal) => request<T>('GET', path, undefined, query, signal),
   /** Raw-body file upload with progress (see `upload`). */
   upload,
-  post: <T>(path: string, body?: unknown, query?: Query) => request<T>('POST', path, body ?? {}, query),
+  post: <T>(path: string, body?: unknown, query?: Query, signal?: AbortSignal) => request<T>('POST', path, body ?? {}, query, signal),
   put: <T>(path: string, body?: unknown, query?: Query) => request<T>('PUT', path, body ?? {}, query),
   patch: <T>(path: string, body?: unknown, query?: Query) => request<T>('PATCH', path, body ?? {}, query),
   del: <T>(path: string, query?: Query) => request<T>('DELETE', path, undefined, query),

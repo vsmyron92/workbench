@@ -128,6 +128,7 @@ pub fn all_tools() -> Vec<McpTool> {
     v.extend(crate::devcontainer::mcp_tools());
     v.extend(crate::lsp::mcp_tools());
     v.extend(crate::debug::mcp_tools());
+    v.extend(crate::data::mcp_tools());
     v.extend(crate::platform::mcp_tools());
     v
 }

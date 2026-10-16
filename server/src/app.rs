@@ -21,7 +21,7 @@ use crate::error::ApiError;
 use crate::events::EventBus;
 use crate::projects::{Project, ProjectRegistry};
 use crate::secrets::{Secret, SecretStore};
-use crate::{apps, atlassian, auth, db, debug, devcontainer, events, files, git, github, gitlab, lsp, platform, projects, spa, terminals, util, workspace};
+use crate::{apps, atlassian, auth, data, db, debug, devcontainer, events, files, git, github, gitlab, lsp, platform, projects, spa, terminals, util, workspace};
 
 #[derive(Clone)]
 pub struct AppState(Arc<Inner>);
@@ -61,6 +61,7 @@ pub struct Inner {
     pub lsp: lsp::LspState,
     pub debug: debug::DebugState,
     pub db: db::DbState,
+    pub data: data::DataState,
 }
 
 impl AppState {
@@ -95,6 +96,7 @@ impl AppState {
             lsp: lsp::LspState::default(),
             debug: debug::DebugState::default(),
             db: db::DbState::default(),
+            data: data::DataState::default(),
         }));
         state.projects.reload(&state).await;
         Ok(state)
@@ -209,6 +211,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(lsp::router())
         .merge(debug::router())
         .merge(db::router())
+        .merge(data::router())
         .merge(platform::router());
 
     let router = Router::new()
@@ -238,6 +241,7 @@ pub async fn start_background(state: &AppState) {
     lsp::start(state).await;
     debug::start(state).await;
     db::start(state).await;
+    data::start(state).await;
     platform::start(state).await;
 }
 
@@ -248,6 +252,7 @@ pub async fn shutdown(state: &AppState) {
     lsp::shutdown(state).await;
     devcontainer::shutdown(state).await;
     db::shutdown(state).await;
+    data::shutdown(state).await;
     terminals::shutdown(state).await;
     let _ = std::fs::remove_file(state.paths.data_dir.join("runtime.json"));
 }

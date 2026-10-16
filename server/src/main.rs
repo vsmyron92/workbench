@@ -19,6 +19,7 @@ mod util;
 // Feature slices. Each owns its module directory and its `web/src/features/<slice>/`.
 mod apps;
 mod atlassian;
+mod data;
 mod db;
 mod debug;
 mod devcontainer;
