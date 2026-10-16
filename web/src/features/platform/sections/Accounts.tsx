@@ -7,6 +7,7 @@ import { Group, Note, Row } from '../common'
 import {
   ACCOUNT_KINDS,
   accountHomeError,
+  accountHomeNote,
   MEMORY_KINDS,
   memoryDirError,
   accountIdError,
@@ -202,7 +203,8 @@ function AccountEditor({
   const effectiveHome = homeTouched ? home : effectiveId ? k.suggest(effectiveId.replace(`${kind}-`, '')) : ''
   const others = rows.filter((r) => r.id !== editId && r.kind?.kind === kind && r.home).map((r) => ({ id: r.id, home: r.home, login: !r.config.local && !r.config.api }))
   const idError = editing ? null : accountIdError(effectiveId, Object.keys(providers))
-  const homeError = needsHome ? accountHomeError(kind, effectiveHome, others, !local && !api) : null
+  const homeError = needsHome ? accountHomeError(kind, effectiveHome) : null
+  const homeNote = needsHome && !homeError ? accountHomeNote(kind, effectiveHome, others, !local && !api) : null
   const takesContext = kind === 'claude' || kind === 'codex'
   const localError = local && !builtIn ? (localUrlError(server, url) ?? (model.trim() ? (takesContext ? contextError(context) : null) : 'Enter the model the server runs')) : null
   const apiError = api && !builtIn ? (apiUrlError(kind, apiService, apiUrl) ?? apiKeyError(apiKey, secrets) ?? (model.trim() || (kind === 'claude' && apiService === 'anthropic') ? (takesContext ? contextError(context) : null) : 'Enter the model, as the service names it')) : null
@@ -454,6 +456,7 @@ function AccountEditor({
                 }}
                 placeholder={k.suggest('work')}
               />
+              {homeNote && <div className="wb-small wb-warning">{homeNote}</div>}
               <div className="wb-small wb-muted">
                 Becomes <code>{k.homeVar}</code> for this account’s sessions.{' '}
                 {local || api

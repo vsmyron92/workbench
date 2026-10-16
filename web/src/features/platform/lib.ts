@@ -355,28 +355,33 @@ const sameFolder = (a: string, b: string) => a.trim().replace(/[\\/]+$/, '') ===
 
 /**
  * Why `home` cannot be the folder (Aider: the keys file) of an account of `kind` (`null`: it
- * can). Two accounts that sign in with a login in one place are one login, and the default place
- * is the account the CLI uses outside Workbench. An account on a model of your own or an API key
- * (`login` false) has no login in its folder, so it can share a folder, and its history, with
- * another account.
+ * can). Only its spelling is checked: another account may use the same place (see
+ * `accountHomeNote`).
  */
-export function accountHomeError(
-  kind: AccountKind,
-  home: string,
-  others: { id: string; home: string; login?: boolean }[],
-  login = true,
-): string | null {
+export function accountHomeError(kind: AccountKind, home: string): string | null {
   const k = accountKind(kind)!
-  const noun = homeNoun(kind)
   const h = home.trim()
   if (!h) return k.file ? 'Enter the .env file that holds this account’s API keys' : 'Enter the folder that holds this account’s login'
   if (!/^(~[\\/]|[\\/]|[A-Za-z]:[\\/])/.test(h)) return 'Use an absolute path, or one starting with ~/'
   if (h.includes('${')) return 'A plain path: no ${…} references'
   if (k.file && /[\\/]$/.test(h)) return 'A file, not a folder'
-  if (!login) return null
-  if (k.defaultHome !== null && sameFolder(h, k.defaultHome)) return `${k.defaultHome} is the default account: it is already listed as “${k.label}”`
+  return null
+}
+
+/**
+ * What to tell whoever gives an account the place of another one (`null`: nothing). It is
+ * allowed: two accounts in one place are one login with different settings (a model, an effort,
+ * a permission mode), and share their history. Accounts on a model of your own or an API key
+ * (`login` false) have no login in the place to share.
+ */
+export function accountHomeNote(kind: AccountKind, home: string, others: { id: string; home: string; login?: boolean }[], login = true): string | null {
+  const k = accountKind(kind)!
+  const h = home.trim()
+  if (!login || !h) return null
   const clash = others.find((o) => o.login !== false && sameFolder(o.home, h))
-  return clash ? `Already the ${noun} of “${clash.id}”` : null
+  const name = k.defaultHome !== null && sameFolder(h, k.defaultHome) ? `“${k.label}”, the default account` : clash ? `“${clash.id}”` : null
+  if (!name) return null
+  return `Shares the ${homeNoun(kind)} of ${name}: one login and one history, with settings of its own. Its usage limit is the same one, so it is no use as a fallback for ${name}.`
 }
 
 /** The CLIs whose memory accounts can share (`memory_dir`); Kimi's is written by hand and Aider keeps none. */

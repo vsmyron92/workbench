@@ -109,10 +109,11 @@ beside the CLI as "Claude · Work", and its sessions carry that name. A new acco
 login yet: press **Sign in** on its row (see below), or start a session with it, which shows
 the CLI's own sign-in the first time.
 
-Each account that signs in with a login needs a folder of its own: two logins in one place are one
-login. An account on a hosted API or a model of your own has no login in its folder, so it may use
-the folder of another account, the default `~/.claude` included, and then shares that account's
-history and settings.
+Accounts may share a folder. Two that sign in with a login in one place are one login with settings
+of their own (a model, an effort, a permission mode), and share their history; the form says so, and
+such an account is no use as the other's fallback, since they reach the same usage limit. An account on
+a hosted API or a model of your own has no login in its folder, so it may use the folder of another
+account, the default `~/.claude` included.
 
 Behind the form this is `[agents.providers.claude-work]` with `kind = "claude"` and
 `env = { CLAUDE_CONFIG_DIR = "~/.claude-work" }`. The variable is `CODEX_HOME` for Codex,

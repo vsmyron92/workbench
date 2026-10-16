@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.1 - 2026-10-16
+
+- **A second account may use the same folder.** The Accounts form no longer refuses the folder of another
+  account, or the default `~/.claude`: it says the two share one login and one history, with settings of
+  their own, and that the second is no use as a fallback for the first. Use it for a model or effort preset
+  of the same subscription, or point a new account's **Shared memory folder** at any folder.
+
 ## 0.16.0 - 2026-10-15
 
 - **Live measurements next to the agent: the data viewer.** An agent that captures a logic analyzer trace,
