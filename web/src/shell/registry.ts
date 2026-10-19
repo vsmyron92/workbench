@@ -14,11 +14,12 @@ import gitlab from '@/features/gitlab'
 import help from '@/features/help'
 import lsp from '@/features/lsp'
 import platform from '@/features/platform'
+import skills from '@/features/skills'
 import workspace from '@/features/workspace'
 import { toolWindowSides } from './actions'
 import type { Command, CommandContext, FeatureModule, MobileTabDef, PanelDef, SearchProvider, ToolWindowDef } from './types'
 
-export const features: FeatureModule[] = [agents, files, lsp, debug, data, git, gitlab, github, atlassian, apps, devcontainer, db, workspace, help, platform]
+export const features: FeatureModule[] = [agents, files, lsp, debug, data, git, gitlab, github, atlassian, apps, devcontainer, db, workspace, skills, help, platform]
 
 export const panelDefs: Record<string, PanelDef> = Object.assign({}, ...features.map((f) => f.panels ?? {}))
 

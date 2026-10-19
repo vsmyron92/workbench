@@ -32,6 +32,10 @@ separate installations, with your own accounts, and are not bundled with Workben
   power profile into the Data viewer while it captures, and plots open beside its session: lanes
   under one time axis (log current, rails, digital lines, decoded events), live, with range
   measurements and CSV ([data viewer](docs/data-viewer.md)).
+- **Skills at a glance.** The Skills window lists what Claude Code, Codex, Gemini CLI and
+  Kimi Code can use in the project (personal, project, plugin and built-in skills), where each
+  comes from, what they cost every session and which need a look, and offers optional skills
+  that teach an agent to use Workbench ([agent skills](docs/agent-skills.md)).
 - **Version control you can see.** Line staging and partial commits, changelists, the
   shelf, interactive rebase, bisect and a log graph, all without leaving the window.
 - **CI and reviews.** GitLab merge requests, pipelines, job logs and failed tests;
@@ -171,7 +175,7 @@ package.json, Python, Go, CMake, Gradle, Maven, Make, compose files, Unity, .NET
 more; you add or override them in `.workbench.toml` or a machine-local overlay. See
 [customization](docs/customization.md), [working with agents](docs/agents.md),
 [embedded debugging](docs/embedded-debugging.md), the [data viewer](docs/data-viewer.md),
-[your phone and remote access](docs/remote-access.md) and the
+[agent skills](docs/agent-skills.md), [your phone and remote access](docs/remote-access.md) and the
 [keyboard shortcuts](docs/keyboard-shortcuts.md).
 
 Developed and tested on Linux (x86_64). The UI runs in any current browser, phones

@@ -57,7 +57,8 @@ other people since are flagged before you revert.
 ## What agents can do in Workbench
 
 Claude Code and Codex sessions get Workbench's MCP server, with tools grouped by what
-they touch. Every tool is confined to the session's own project.
+they touch. Every tool is confined to the session's own project, except the debugger's
+(below).
 
 | Tools | What they are for |
 | --- | --- |
@@ -66,12 +67,25 @@ they touch. Every tool is confined to the session's own project.
 | `confluence_*`, `jira_*` | Search, read and write pages, comments, attachments and labels; issues, transitions and boards |
 | `workspace_*` | Create Workspace cards and add their steps: the way an agent hands you a report |
 | `run_*`, `env_status` | Start and read run configurations; environment health |
-| `code_*`, `debug_state`, `files_local_history` | Diagnostics and symbols from running language servers; a paused debugger's state; Local History |
+| `code_*`, `debug_*`, `files_local_history` | Diagnostics and symbols from running language servers; driving the debugger (start, attach, step, evaluate, breakpoints) and reading its state; Local History |
+| `data_*` | Fill the data viewer and read statistics back ([data viewer](data-viewer.md)) |
 | `devcontainer_status` | Whether the dev container runs |
 
-Tools never deploy, never run destructive git operations, never start a language server
-or debugger, and never answer a permission request. Run configurations that deploy or
-release are refused to agents; you start them.
+Tools never deploy, never run destructive git operations, never start a language server,
+never query a database, never update or restart Workbench and never answer a permission
+request. Run configurations that deploy or release are refused to agents; you start them.
+The debugger's tools are the exception to two rules: an agent may start, attach, step and
+evaluate, and may name any project. What they start (the configuration's build step, a debug
+server, gdb commands) runs on your computer outside the sandbox of an agent such as Codex, so
+your agent's own permission prompts treat them as the writes they are
+([security](security.md)).
+
+## Skills
+
+Skills are the instructions your agents load on demand. The **Skills** tool window shows
+which ones each agent can use in the project, where each comes from and what the lot costs
+every session, and offers a few optional skills that teach an agent to use Workbench's
+tools. See [Agent skills](agent-skills.md).
 
 ## Workspace cards
 

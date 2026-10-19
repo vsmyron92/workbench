@@ -25,12 +25,14 @@ Config files hold *references*, never values:
 gitlab    = { file = "~/.gitlab_token" }
 github    = { env = "GITHUB_TOKEN" }
 atlassian = { keyring = "workbench/atlassian" }
-db_url    = { dotenv = { path = "app/.env", key = "DATABASE_URL" } }
+db_url    = { dotenv = { path = "~/shop/app/.env", key = "DATABASE_URL" } }
 staging   = { command = ["pass", "show", "shop/staging"] }
 ```
 
 Values are read by the server when needed. They never reach the browser, a command line
-or a log, and terminal output that contains one is masked.
+or a log, and terminal output that contains one is masked. A `file` or `dotenv` path is
+absolute or starts with `~/`: a relative one is read from Workbench's own working directory,
+not the project's.
 
 On Windows (experimental), `~` is your user folder (`%USERPROFILE%`), `config.toml` and the
 overlays are in `%APPDATA%\workbench`, and a `keyring` reference reads Windows Credential

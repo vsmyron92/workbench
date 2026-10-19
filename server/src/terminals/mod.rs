@@ -94,6 +94,44 @@ pub fn provider_commands(cfg: &crate::config::global::AgentsConfig) -> Vec<Strin
         .collect()
 }
 
+/// One configured agent account (a preset or `[agents.providers.<name>]`), for slices that look at
+/// what an account's CLI keeps on disk (the skills overview): the folder is as configured, `None`
+/// meaning the CLI's own default.
+#[derive(Debug, Clone)]
+pub struct AgentAccount {
+    pub id: String,
+    pub kind: ProviderKind,
+    pub label: String,
+    pub enabled: bool,
+    /// The CLI's command was found on this machine (a PATH lookup: touches the disk).
+    pub installed: bool,
+    /// `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `KIMI_CODE_HOME` or `GEMINI_CLI_HOME` of the account.
+    pub home: Option<String>,
+    /// Its sessions get Workbench's MCP tools.
+    pub mcp: bool,
+}
+
+/// Every configured account, presets first (see [`AgentAccount`]).
+pub fn agent_accounts(cfg: &crate::config::global::AgentsConfig) -> Vec<AgentAccount> {
+    providers::list(cfg)
+        .0
+        .into_iter()
+        .map(|p| AgentAccount {
+            installed: agent::resolve_command(&p.command).is_some(),
+            mcp: matches!(p.kind, ProviderKind::Claude | ProviderKind::Codex),
+            home: p.home().map(str::to_string),
+            id: p.id,
+            kind: p.kind,
+            label: p.label,
+            enabled: p.enabled,
+        })
+        .collect()
+}
+
+/// Where Claude Code keeps the transcripts of sessions started in `cwd` under its config folder
+/// (read-only: the skills overview reads the listing a session received).
+pub use transcript::project_dir as claude_project_dir;
+
 /// Whether a terminal runs inside its project's dev container (`meta.inContainer`).
 pub fn in_container(info: &TerminalInfo) -> bool {
     info.meta.get("inContainer") == Some(&Value::Bool(true))

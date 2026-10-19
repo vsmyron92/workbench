@@ -35,6 +35,12 @@ model is in [the architecture](ARCHITECTURE.md#security-model).
   or reaches another host is refused to everyone.
 - Workspace reports an agent writes are served sandboxed: they cannot read Workbench's
   cookies, storage or API.
+- Skills are instructions an agent follows, so adding one is yours to decide: agents have no
+  tool to install or remove a skill, and the install route refuses their requests. Workbench's
+  own optional skills are installed only when you press **Install**, only into an agent
+  account's own skills folder, and only the files Workbench wrote are ever changed or removed.
+  The Skills window reads skills and never runs anything in them; a repository's skills are
+  untrusted text, shown like any other repository Markdown.
 - Agents fill the data viewer and make its plots (`data_*`, confined to the session's
   project): that is what it is for. `data_follow` reads only files inside the project, and
   not hidden folders, key-like names or anything the project marks `sensitive`. A script in

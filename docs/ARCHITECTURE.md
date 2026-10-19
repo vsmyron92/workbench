@@ -61,6 +61,7 @@ server/            Rust crate `workbench`
   src/lsp/           SLICE lsp: language servers → Monaco (process manager, trust gate, URI mapping, editor socket)
   src/debug/         SLICE debug: Debug Adapter Protocol sessions, launch configurations, breakpoints, remote (embedded) targets
   src/data/          SLICE data: the data viewer: series (analog, digital, events), lane plots, followed capture files, MCP data_* tools
+  src/skills/        SLICE skills: which skills each agent CLI can load (folders, plugins, settings, the newest session's listing), what they cost, and Workbench's own optional skills (install, update, remove)
   src/gitlab/        SLICE gitlab: MRs, pipelines, jobs, envs, issues, registry
   src/github/        SLICE github: PRs, Actions runs/jobs/logs, issues, releases
   src/workspace/     SLICE workspace: Mr. Mak-style deliverable cards and Home examples, sandboxed report serving, trash
@@ -81,6 +82,7 @@ web/               React 19 + TS + Vite 8
   src/lib/           monacoSetup, languages.ts (file → Monaco language), vhdl.ts (grammar) (core)
   src/features/<slice>/   one folder per slice; index.ts exports a FeatureModule
 docs/              this file
+skills/            Workbench's own optional agent skills (text only), embedded in the binary: `skills/<name>/SKILL.md` and `references/`
 packaging/linux/   install.sh shipped in the Linux release archive
 packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows release archive; workbench.ico (from web/scripts/icons.mjs) and workbench.manifest, embedded in the Windows executables
 .github/workflows/ ci.yml (web and server build + tests, Linux and Windows), release.yml (tag → Linux archive, Windows zip when `RELEASE_WINDOWS` is set, + GitHub release)
@@ -174,8 +176,9 @@ A project is a directory, and it may hold **several git repositories**: a folder
 - **Dev containers:** a `devcontainer.json` (with its Dockerfile and compose files) is repository content that runs code on the host's Docker. Nothing builds or starts without the user's approval of the exact plan (a sha256 the server checks); agents can only read the status. The bridge listener on a container network's gateway serves only `/api/hooks/**` and `/mcp`, only with agent tokens. See "Dev containers".
 - **Docker (Services)** is root on this computer: `/api/docker/**` acts only for devices (agent tokens are not valid there; in-process callers get 403 on every route that changes something or opens a terminal). Details and `inspect` mask values of secret-looking names (`*PASSWORD*`, `*TOKEN*`, `*_KEY`, `*SECRET*`…), passwords in URLs, and those inside JSON labels (`devcontainer.metadata`'s `remoteEnv`).
 - **Databases** (`/api/projects/{pid}/db/**`): a console runs what the user types with the database user's rights, so everything but the list refuses in-process callers (agents over MCP get 403; agent tokens are not valid there at all). Credentials are secret names resolved in the backend; the list shows the names, never values; a password typed into the browser is refused. Connection errors are redacted of the secrets used.
-- **Language servers, debug adapters and debug servers** run project code. Their commands come only from config.toml; a project's servers start only after the user enabled code intelligence for that directory (`data_dir/lsp/<id>.json`), a debug session only on a click; debug adapters start in `data_dir/debug/adapter` so a repository's modules cannot shadow the adapter's (debugpy). Every write route of both slices refuses in-process callers: agents (MCP) read diagnostics, symbols and a stopped session's state, and never enable, start, step, evaluate or stop anything. See "Code intelligence" and "Debugger".
+- **Language servers, debug adapters and debug servers** run project code. Their commands come only from config.toml; a project's servers start only after the user enabled code intelligence for that directory (`data_dir/lsp/<id>.json`), a debug session only on a click; debug adapters start in `data_dir/debug/adapter` so a repository's modules cannot shadow the adapter's (debugpy). Every write route of both slices refuses in-process callers: agents (MCP) read diagnostics and symbols (`code_*`), and never enable code intelligence. The debugger has tools of its own for agents (`debug_start`, `debug_attach`, `debug_restart`, `debug_evaluate`, `debug_control`, `debug_breakpoints`, beside the read-only `debug_state`): the owner decided they start, step and evaluate with no opt-in, so what holds them is the agent's own permission prompts (the tools are `mutating`) and the Activity view. See "Code intelligence" and "Debugger" (*Agents*).
 - **The data viewer** (`/api/projects/{pid}/data/**`) holds measurements, which are numbers, levels and short notes: filling it and making plots is what agents are for, so nothing there is refused to an in-process caller (MCP `data_*` tools, confined to the session's project like every project tool). What it can reach is bounded: `data_follow` reads only files inside the project by the rules of every agent file read (no hidden or key-like files, nothing `sensitive`, symbolic links resolved and checked first; Windows' network paths are refused like everywhere), text from files is cut to one short line, and memory is capped (per series, per request, and 30 million samples across projects). A script posts with `POST /api/hooks/data/{terminalId}/append`, which accepts only that terminal's own agent token (or the master token): the project is the terminal's, so a token never writes into another project; agent tokens remain invalid on the rest of `/api`. See "Data viewer".
+- **Skills** (`/api/projects/{pid}/skills/**`, `/api/skills/**`) are instructions an agent follows, so the overview reads and never runs: `SKILL.md` and file names are read (text capped at 256 KB, only plain files are opened, folder walks and skill counts are bounded), nothing in a skill is executed, a skill of content someone else wrote (a repository, a plugin, claude.ai's sync: `Root.boundary`) whose file resolves outside it (a link to a private file) is listed with the `link_out` warning and never read (`Located.readable`; the detail and file routes refuse it), while a personal skill may link anywhere, and the client never names a path: a skill is found by an id the scan made and a file by a name inside its folder (`resolve_in_root`: `..` and links that leave the folder are refused). Repository skills are untrusted text, rendered like any repository Markdown. Installing and removing Workbench's own skills (`POST /api/skills/install|remove`) refuses in-process callers (403: agents have no tool for it, and no agent token is valid under `/api`); the folders written are the accounts' own (`<account folder>/skills/<name>/`, from config, never from the request); only files Workbench wrote (listed with their SHA-256 in the folder's `.workbench-skill.json`) are replaced or removed, an edited skill needs `force`, and a folder without Workbench's marker is never touched, not even with `force`. The marker is data on the user's disk that anything able to write there could have written, so it is trusted only after every path it lists resolves inside the skill's folder (`trusted_marker`: an absolute path, a `..`, or a link that leaves the folder makes the folder `foreign`, and nothing is read, replaced or deleted through it); writes into an existing folder resolve their paths the same way. Only a skill directly in the skills folder of a Claude Code or Codex account can be labelled Workbench's, and only a skill of the bundle whose marker holds up (a repository could forge the marker). A repository that is the home folder is no boundary for a project inside it: its links must stay inside the project. See "Agent skills".
 - **Permission requests** of Claude Code sessions are answered only by signed-in devices (`POST /api/agents/{id}/permission`: agent tokens 401, the master token and in-process calls 403), so a session never approves itself through Workbench. One-tap Allow (the attention toast, a push notification) is offered only for a request shown whole: `pendingPermission.complete` and at most 300 characters on 4 lines. See "Approvals".
 - **Web Push** posts to a browser-supplied endpoint: an SSRF boundary. Only the browsers' push services (FCM, Mozilla, Apple, WNS) and `[push] extra_endpoint_hosts` are accepted, https on the default port, no IP literals, no redirects; payloads carry titles and short summaries only. The service worker answers Allow / Deny with the device key it keeps in IndexedDB (as exposed as the page's `localStorage` copy). See "Phone app and push".
 - **Voice input** uses the browser's own speech recognition: the microphone permission is the browser's, Workbench receives no audio and has no endpoint for it, and a transcript is only text in the new-session prompt until the user starts the session, so a misheard word never reaches an agent by itself. See "Voice input" under TypeScript.
@@ -192,6 +195,7 @@ A project is a directory, and it may hold **several git repositories**: a folder
 | `Terminals::{spawn, spawn_redacted, respawn_redacted, info, list, kill, write, send_text, subscribe_output, exit_watch, screen_text}` and `SpawnSpec`, `TerminalInfo`, `AgentInfo`, `ExitInfo` | terminals | apps (runs, deploy/logs), platform (MCP), git (optional), debug (pre-launch commands, `runInTerminal` debuggees) |
 | `terminals::{PendingPermission, permission_wait_secs}`, `AgentInfo.pending_permission` (the request a session waits on; `complete` and `detail` decide one-tap Allow) | terminals | platform (push: Allow / Deny, the push TTL) |
 | `terminals::in_container(&TerminalInfo)` | terminals | files (local history: a dev-container agent's paths) |
+| `terminals::agent_accounts(&AgentsConfig) -> Vec<AgentAccount>` (id, kind, label, enabled, `installed`: a PATH lookup, the configured folder, whether it gets MCP tools), `terminals::claude_project_dir(claude_dir, cwd)` | terminals | skills (the accounts whose folders are read; where Claude Code keeps a project's transcripts) |
 | `files::history::agent_hook(state, terminal_id, payload)` (every Claude hook payload: Write/Edit attribution) | files | terminals (hook route) |
 | `files::history::auto_label(state, pid, text)` ("Before git checkout main", best effort) | files | git (before every operation that rewrites the working tree) |
 | `apps::runs::{start, needs_confirmation, resolve_cwd, RunState}`, `apps::expand::{run_env, base_vars, placeholders, shell_quote}` | apps | debug (a launch configuration's `pre_launch` run and its variables) |
@@ -359,7 +363,7 @@ Panel ids must be stable so reopening focuses the existing panel. Params must be
 | `jira.board` | `{boardId}` | atlassian | `jira.board:<boardId>` |
 | `app` | `{projectId, env?, run?, url}` | apps | `app:<projectId>:<env\|run>` |
 | `settings` | `{section?}` | platform | `settings` |
-| `help` | `{page?}` (a page slug: `getting-started`, `projects`, `agents`, `version-control`, `remote-access`, `service`, `configuration`, `data-viewer`) | help | `help` |
+| `help` | `{page?}` (a page slug: `getting-started`, `projects`, `agents`, `version-control`, `remote-access`, `service`, `configuration`, `data-viewer`, `agent-skills`) | help | `help` |
 | `pr` | `{projectId, number}` | github | `pr:<projectId>:<number>` |
 | `gh.run` | `{projectId, runId}` | github | `gh.run:<projectId>:<runId>` |
 | `gh.job` | `{projectId, jobId}` | github | `gh.job:<projectId>:<jobId>` |
@@ -373,13 +377,14 @@ Panel ids must be stable so reopening focuses the existing panel. Params must be
 | `debug.source` | `{projectId, sessionId, path \| sourceReference, name?, line?, column?, t?}`: a frame's source outside the project, or source only the debugger has | debug | `debug.source:<projectId>:<path>` or `debug.source:<projectId>:<sessionId>:ref<n>` |
 | `debug.plot` | `{projectId, plotId}`: Live Watch values drawn together on one chart; the plot is a saved configuration of the project (see "Plot viewer" under Debugger) | debug | `debug.plot:<projectId>:<plotId>` |
 | `data.plot` | `{projectId, plotId}`: lanes of measurement series under one time axis; the plot is a saved layout of the project (see "Data viewer") | data | `data.plot:<projectId>:<plotId>` |
+| `skill` | `{projectId, skillId}`: one skill, read-only (`s…`/`b…` found on disk or in Claude Code's listing, `wb:<name>` one of Workbench's own, where it is installed and removed; see "Agent skills") | skills | `skill:<projectId>:<skillId>` |
 
 ### Tool windows
 
 The IDs below are the defaults. The left stripe, right of the agents column, also carries the bottom-side icons, CLion-style, and ends with Settings. Agents are not a tool window: they are the agents column (see "Agents column"); the Terminal tool window (`terminal`, bottom, 10) holds only the shells started from it.
 
 - **left:** `files` (the project, or the scratch files: see "Scratch files" under Configuration), `commit` (Changes, with Changes / Stash / Shelf tabs), `search`, and first of all `workspace` (order 5: the default one).
-- **right:** `gitlab` (when `project.gitlab`), `github` (order 12, when `project.github`), `confluence`, `jira` (only when the project or site has Jira; Issues and Boards tabs), `apps`, `database` (db, 60: see "Database").
+- **right:** `gitlab` (when `project.gitlab`), `github` (order 12, when `project.github`), `confluence`, `jira` (only when the project or site has Jira; Issues and Boards tabs), `apps`, `database` (db, 60: see "Database"), `skills` (skills, 70: see "Agent skills"; desktop only).
 - **bottom:** `problems` (lsp: diagnostics, 15, Alt+6), `todo` (files: TODO / FIXME / XXX / HACK comments of the project or the current file, 16; `GET /api/projects/{pid}/files/todos` reuses Find in Files' walker and keeps matches inside a comment of the file's language; rescans 1.5 s after `fs.changed`), `usages` (lsp: Find Usages results, 17), `gitlog` (20, Alt+9), `debug` (25, Alt+5), `data` (the data viewer's series, plots and followed files, 27), `run` (run-configuration output, 30), `services` (devcontainer: this computer's Docker containers, compose projects and images, 35, Alt+8; see "Services (Docker)" under Dev containers), `activity` (platform: MCP calls and notifications, 40). Stripe icons are distinct: Find (left) is the only magnifier; Find Usages has a crosshair.
 - **CLion keys.** Tool windows: Alt+1 Files, Alt+2 Bookmarks, Alt+3 Find, Alt+4 Run, Alt+5 Debug, Alt+6 Problems, Alt+7 Structure (lsp: the focused file's symbols in source order, the caret's one marked), Alt+8 Services, Alt+9 Git Log, Alt+0 Commit; Alt+F12 collapses and expands the workspace window beside the agents column (see "Desktop layout"). Editor keymap (`lib/editorKeymap.ts`, Settings › General, per browser): CLion by default — Ctrl+D duplicate, Ctrl+Y delete line, Ctrl+Shift+Z redo, Alt+J / Alt+Shift+J / Ctrl+Alt+Shift+J occurrences, Ctrl+Shift+J join, Ctrl+Shift+Up/Down and Alt+Shift+Up/Down move lines, Shift+Enter / Ctrl+Alt+Enter new line after / before, Ctrl+Q quick docs, Ctrl+Shift+/ block comment, Ctrl+Alt+O optimize imports, Ctrl+Alt+I auto-indent, Ctrl+Shift+M matching brace, Ctrl+Shift+U toggle case, Ctrl+NumPad+/- folding — as keybinding rules and one global editor action, swapped live; "VS Code" keeps Monaco's own keys. Ctrl+W (Extend Selection) cannot be taken from a browser.
 - **Navigation (files):** `navHistory.ts` keeps where the caret has been in the active editor (one entry per place: moves within 10 lines update it, a file switch or a longer jump adds one; Back / Forward update the entry they go to instead of adding). Navigate Back / Forward: Ctrl+Alt+Left / Right (also as editor actions), Alt+Left / Right outside terminals, and the mouse's back / forward buttons (which would otherwise leave Workbench). Recent Files (Ctrl+E; again: changed files only, from the shared git status query) preselects the previous file; Recent Locations (Ctrl+Shift+E) lists the places with their code. Kept in memory per browser tab.
@@ -423,6 +428,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `data.series` | `{projectId, series: SeriesInfo[]}`: the series list after one was made, changed, cleared or deleted | data |
 | `data.changed` | `{projectId, series: SeriesInfo[]}`: the series that took samples since the last one, at most every 100 ms; a plot refetches its window | data |
 | `data.plots` | `{projectId, plots}`: the project's plots after a change | data |
+| `skills.changed` | `{}` (Workbench installed or removed one of its own skills; the Skills views refetch, as they do on `settings.changed` and `projects.changed`) | skills |
 | `data.sources` | `{projectId, sources}`: followed files and how far they are | data |
 | `run.state` | `{name, state, port?, url?, terminalId?, startedAt?, readyAt?, exit?, result?, error?, terminated?, phase?, inContainer?, reach?}` | apps |
 | `devcontainer.state` | `{projectId, state, containerId?, inContainer}` (`none`, `stopped`, `running`, `building`, `error`) | devcontainer |
@@ -459,6 +465,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `/api/projects/{pid}/lsp/**` (incl. the `lsp/ws` editor socket) | lsp |
 | `/api/projects/{pid}/debug/**` | debug |
 | `/api/projects/{pid}/data/**`, `POST /api/hooks/data/{terminalId}/append` (a script in a hosted session, with its agent token) | data |
+| `/api/projects/{pid}/skills`, `…/skills/{id}`, `…/skills/{id}/file?path=`, `POST /api/skills/install`, `POST /api/skills/remove` (devices and the master token; in-process callers refused on the two writes) | skills |
 | `/api/projects/{pid}/git/**` (`?repo=<id>` on every route; `GET git/repos`: the repositories with their branch, ahead/behind, changed files, state and forge, one entry's `error` instead of failing them all) | git |
 | `/api/projects/{pid}/gitlab/**` (`?repo=<id>`, `forge::RepoParam`), `/api/gitlab/**` | gitlab |
 | `/api/projects/{pid}/github/**` (`?repo=<id>`, `forge::RepoParam`), `/api/github/**` | github |
@@ -1435,6 +1442,107 @@ windows that collapsed to three points, digital columns that ended on the wrong 
 rejecting a whole chunk, a byte order mark hiding the time column, and unbounded name lists and batches.
 **Not verified:** a real logic analyzer or power profiler (the data is synthetic), captures of tens of millions
 of samples in the browser, Windows (it builds and its tests are portable, but nothing ran there).
+
+## Agent skills (skills)
+
+What the agent CLIs can load as skills in a project, from where, and what the lot costs every session; and the few
+skills Workbench itself offers. The CLIs share the `SKILL.md` format (agentskills.io) and differ in where they look, so the
+overview is a table of rules, each from the CLI's documentation or source. User guide: `docs/agent-skills.md`.
+
+**Server** (`server/src/skills/`). `parse.rs`: front matter (`serde_norway`; a block that does not parse leaves no fields and
+says why, as Claude Code loads such a skill with no metadata), lenient flags (`yes/no/on/off`), `allowed-tools` split with
+parentheses kept whole, shell injection found outside fenced code, and the checks (`front_matter`, `no_description`,
+`description_long` at Claude Code's 1,536 characters or the standard's 1,024, `name_mismatch`, `name_invalid`, `long_text`;
+a command without a description is a remark). `discover.rs`: `Account::resolve` (the account's folder from its configured
+`CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`KIMI_CODE_HOME`/`GEMINI_CLI_HOME`, else Workbench's own variable, else the default under
+the home it is given: tests pass a scratch one, `SkillsState::set_home`) and the roots of each CLI: Claude Code
+(`<dir>/skills` without `synced`, `skills/synced/<account>/<name>`, `commands`, plugins, a managed folder, `.claude/skills`
+and `.claude/commands` from the project up to the repository root, and `.claude/skills` in folders up to three levels below
+it, skipping hidden and dependency folders and never following links), Codex (`$CODEX_HOME/skills` recursive to depth 6,
+`.system`, `~/.agents/skills`, `.agents/skills` and `.codex/skills` from the repository root down to the project,
+`/etc/codex/skills`; the loader's `host_roots.rs`), Gemini CLI (`<dir>/skills`, `~/.agents/skills`, the project's `.gemini` and
+`.agents`), Kimi Code (`<dir>/skills` with loose `.md` files, `~/.agents/skills`, the repository root's `.kimi-code/skills`
+and `.agents/skills`, `extra_skill_dirs` of its `config.toml`; the 2.2.0 bundle's `skillRoots`). Plugins come from
+`plugins/installed_plugins.json` (the cache keeps every version it fetched), only below Claude's own plugin folder, only
+the entry for this project, enabled by `enabledPlugins` of the merged settings; a plugin's commands are listed as skills,
+as Claude Code does. A scan gathers hits, merges the ones reached through several roots (`~/.agents/skills` is read by three
+CLIs; links) by canonical path with the union of their readers, and builds each entry once. An entry keeps how **each
+account that reads it** sees it (`Seen`: active, name-only, off, or hidden, and whether only the user starts it), because
+accounts never meet: a setting turns a skill off, and a personal skill hides a project skill of its name, only for the
+account it belongs to. Then: `skillOverrides` and Codex's `[[skills.config]]` apply to the account whose settings they are
+(before precedence, so a skill that is off hides nothing); precedence runs per account (Claude Code: managed over personal
+over project, a skill over a command; Kimi Code and Gemini CLI: project over personal over extra; Codex lists them side by
+side, so only a remark); `settle` gives the skill its one status, the best of its readers' (`shadowed` or `disabled` only
+when no account has it), with a `per_account` remark saying for whom it is off or hidden; and the costs: a listing line is
+`- name: description` (+ `when_to_use`, cut at 1,536 characters), four characters to a token, nothing for a skill only the
+user starts, the name for `name-only`, nested skills left out (Claude Code lists them once a file below is read); each
+account's skill count and listing cost follow its own view (a skill's own cost is the longest line among the accounts that
+list it). Bounds (`Limits`, `Walk`): reading a folder costs one unit and one more for each name in it, so links that make one
+big folder look like many cannot multiply the work; each root may cost 20,000 units, the roots of someone else's content (a
+repository, plugins, claude.ai's sync: those with a `boundary`) 100,000 together, so a flood in one root leaves the others and
+the user's own folders alone; the search below the project has 200,000 of its own (a repository decides how many folders it
+has, and that must not leave the user's own skills unread); 5,000 names are read from one folder, and 1,500 skills in all;
+each cut says so in `notes` (tests lower the limits through `Inputs.limits`). 256 KB per `SKILL.md`, 300 files listed per
+skill (read from a folder to 1,200 names), six levels for Codex's recursion; a non-regular file is never opened; a project
+file that leaves the machine (Windows) is not read. A repository's content stays inside the repository
+(`Inputs::repo_boundary`): the project's own skill folders are looked for from there down to the project, and links must stay
+inside it. It is the project itself when the "repository" holds the home folder (a dotfiles checkout in `~`), so such a
+project neither takes `~/.agents/skills` for its own folder nor can reach `~/.ssh` through a link. Codex's repeated-name remark
+is per account, like the rest.
+
+`session.rs` reads the **skill listing a Claude Code session received**, which is the only way to know its built-in skills
+(`/init`, `/loop`…; in no folder) and what it really loaded: the project's newest transcripts under
+`projects/<slug>/` (`terminals::claude_project_dir`), the first `attachment` line of type `skill_listing`
+(`names`, `content`; undocumented, so read leniently: another shape gives nothing and nothing else depends on it), with caps on
+lines (3,000), bytes (16 MB) and line length (2 MB; a longer line is skipped unread), and the text split by walking the
+names in order (descriptions run over several lines and names hold colons). Skills in that listing that no folder explains
+become `builtin` entries (nothing on disk tells a skill built into Claude Code from one removed after that session began, so
+the panel says both; Workbench's own bundled names are never counted as built in, so removing one from the window does not
+make it reappear there); the others get `in_session` (not for a nested one, or one that is off, hidden or only the user's to
+start: none is meant to be in the listing).
+
+`catalog.rs`: the bundle is `skills/` embedded with `rust-embed` (read from disk in debug builds). **Install** copies a
+skill into `<account folder>/skills/<name>/` (a fresh install is written into a hidden folder and renamed, so a failure
+leaves nothing behind that looks like someone else's) and writes `.workbench-skill.json` last: the skill, the version, each
+file's SHA-256. State per account is derived from it: `available` (no folder), `installed`, `update` (the bundle changed,
+nothing edited: files replaced, files a newer version dropped removed, files the user added kept), `modified` (a listed file
+differs or is gone: only `force` replaces or removes) and `foreign` (a folder without the marker, or with another skill's:
+never touched; the same state for a marker that lists a path outside the folder). A skill is labelled Workbench's in the report
+(`workbench`) only when it sits directly in the skills folder of an account the catalog offers skills for (`is_target`:
+Install writes there, and the catalog follows those folders), is named after a skill of the bundle and its marker holds up
+(`installed_as`): a copy in `~/.agents/skills` or in another CLI's folder, or a marker on any other folder, says nothing and
+the skill stays an ordinary one in its group. The offered accounts are the enabled Claude Code and Codex ones that are installed (those get the MCP tools).
+`routes.rs`: `GET /skills` → `{agents, skills, catalog, notes}`; `GET /skills/{id}` → `{skill, text, truncated, files,
+filesTruncated}` or, for `wb:<name>`, `{catalog, text, files}`; `GET /skills/{id}/file?path=` → `{path, text, truncated, binary}`;
+the two writes take `{skill, account, force?}` and emit `skills.changed`. Everything blocking runs in `spawn_blocking`.
+
+**Web** (`web/src/features/skills/`). `logic.ts` (filters, grouping by account folder, the summary, install choices; pure,
+unit-tested), `SkillsToolWindow.tsx` (right, 70: summary card, search, groups folded above eight skills, the Workbench group),
+`SkillPanel.tsx` (the `skill` panel: facts, what it can do on its own, issues, a file browser, `SKILL.md` rendered by the shared
+`Markdown` or as source, relative links between a skill's files, the install card), `Provider.tsx` (refetch on
+`skills.changed`, `settings.changed`, `projects.changed`). Desktop only.
+
+**The bundled skills** (`skills/`): `workbench` (routing and etiquette), `workbench-report-card`, `workbench-data-capture`,
+`workbench-debug-session`, `workbench-project-setup`. Text only, the portable front matter, each opening with the guard that
+it applies only where the `workbench` tools exist. They add what tool descriptions cannot: *when* to reach for a tool
+(MCP tools may be deferred behind a search, so intent routing needs a description loaded up front), workflows across several
+tools in the order that works, the limits and refusals found in the code, and facts that exist nowhere in a user's repository
+(the `.workbench.toml` schema, the report sandbox). A test fails the build when a skill names a tool that does not exist,
+links to a file it does not have, has a TOML example that does not parse as `ProjectFile` (or `GlobalConfig` when it says
+`# config.toml`), or front matter that does not parse or uses a key other CLIs reject.
+
+**Verified:** unit tests (front matter in every YAML style skills use, the checks, the session listing including a 2 MB line,
+every root rule with scratch folders laid out as each CLI lays its own, plugins by registry only and not outside Claude's
+folder or for another project, shadowing per CLI and per account (two accounts with a skill of one name, a setting that turns
+one off for one account), a repository with thousands of folders or files, a project inside a home that is a repository, a hostile tree and a FIFO, the marker only in a personal folder, install,
+update, edit, restore and remove, hostile markers and links that would carry a write or a delete out of the folder, and the refusals), the routes through the real router (path escapes, a link leaving a skill,
+agents refused), web unit tests, and headless Chrome against a scratch instance with a fake home (generic skills in every
+place, two CLIs, a transcript with a listing): both themes, filters, the panel, installing and removing with its confirmation.
+A read-only look at a real `~/.claude` (a personal skill, 13 synced ones, two plugins whose cache holds eleven versions of
+one of them, a 22 MB transcript; 10 ms) found exactly the 45 skills its newest session was given, 18 of them built in, none
+missing and none unexplained, with a listing estimate within 0.2% of the characters that session measured. **Not verified:** Codex, Gemini CLI
+and Kimi Code themselves (none installed here; their folders come from their documentation and, for Codex and Kimi Code, their
+source), Windows (the paths compile and the tests are portable, but nothing ran there), a dev container's accounts.
 
 ## Third phase (2026-09-27): code intelligence, debugger, CLion VCS, Confluence authoring, push, approvals, local history
 
