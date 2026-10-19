@@ -686,7 +686,8 @@ fn text_is_read_up_to_the_cap_without_a_character_cut_in_two() {
     let (text, cut) = super::discover::read_text(&big, cap).unwrap();
     assert!(cut && text.is_some_and(|t| t.ends_with('日')));
     // Not text: a NUL, or bytes that are not UTF-8. Text that has a replacement mark of its own is text.
-    let (nul, bad, mark) = (t.path().join("nul"), t.path().join("bad"), t.path().join("mark"));
+    // (Not named `nul`: on Windows that is a device, not a file.)
+    let (nul, bad, mark) = (t.path().join("has-a-nul-byte"), t.path().join("not-utf8"), t.path().join("replacement-mark"));
     std::fs::write(&nul, b"ab\0cd").unwrap();
     std::fs::write(&bad, b"ab\xffcd").unwrap();
     std::fs::write(&mark, "a \u{fffd} b").unwrap();
