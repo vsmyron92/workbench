@@ -293,8 +293,8 @@ and the first answer wins. See [working with agents](agents.md).
   project switcher and, at the right, how many sessions are working or need you. Alt+F12
   collapses the workspace window beside it.
 - **The stripes** open tool windows around the workspace area: Workspace, Files, Commit
-  and Find on the left, right of the Agents column; GitLab, GitHub, Confluence, Jira, Apps
-  and Database on the right; Problems, TODO, Git Log, Debug, Run and Services at the
+  and Find on the left, right of the Agents column; GitLab, GitHub, Confluence, Jira, Apps,
+  Database and Skills on the right; Problems, TODO, Git Log, Debug, Run and Services at the
   bottom. Settings is the last button of the left stripe.
 - **The command palette** (Ctrl+K) lists every action; **Search Everywhere** (double
   Shift) finds files, symbols, text and actions.
@@ -348,5 +348,7 @@ administrator rights:
 - [Customization](customization.md): project config, run configurations, environments,
   data sources, language servers and secrets.
 - [Working with agents](agents.md): providers, permissions, Review Changes, Workspace cards.
+- [Agent skills](agent-skills.md): which skills your agents can use here, what they cost, and
+  Workbench's own optional ones.
 - [Your phone and remote access](remote-access.md): pairing, TLS and push notifications.
 - [Security and privacy](security.md): what Workbench trusts and what it never does.

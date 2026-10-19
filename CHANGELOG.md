@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.17.0 - 2026-10-19
+
+- **A Skills window: what your agents can use here, and what it costs.** Claude Code, Codex, Gemini CLI and Kimi
+  Code read the same `SKILL.md` format from different folders, so no one of them can say which skills your agents
+  have in a project. The **Skills** tool window (right stripe, or Ctrl+K → *Show Agent Skills*) lists them from
+  every place each CLI looks: personal and project skills, nested ones, plugins (through Claude Code's own registry,
+  not its cache of old versions), claude.ai's synced skills, slash command files, an organization's, and Claude
+  Code's **built-in** skills, which are in no folder and are known from the skill listing it recorded in its newest
+  session here. A summary counts what is available, what is off or hidden by another skill of the same name, what
+  needs a look and what can act without asking (pre-approved tools, hooks, shell commands), and shows per account what
+  the descriptions cost **every session** in tokens: what that session really received for Claude Code, else an
+  estimate. A row opens the skill's panel: what it is for, where it is, who reads it, how to start it, what is wrong
+  with it (front matter that does not parse, no description, a name that differs from its folder), its files and its
+  text. Nothing in a skill is run, and the browser never names a path.
+- **Workbench's own skills, optional.** Five skills in the program's `skills/` teach an agent to work well inside
+  Workbench: `workbench` (which tool for which intent, CI and review triage, etiquette), `workbench-report-card`
+  (Workspace cards: sandbox-safe reports, the shared style, step types), `workbench-data-capture`,
+  `workbench-debug-session` and `workbench-project-setup` (the `.workbench.toml` schema, what Workbench drops
+  silently). They are never installed unless you press **Install** for a Claude Code or Codex account; Workbench
+  then knows exactly which files it wrote, offers **Update**, never replaces a file you edited without asking and
+  never touches a folder it did not make. Agents cannot install skills. A test keeps them honest: every tool they
+  name exists, every link and TOML example is valid.
+- **Fixes in the docs.** `docs/agents.md` and the architecture notes said no tool starts a debugger and every tool is
+  confined to its project; the debugger's tools do both. The secrets example read a `dotenv` file by a relative path, which is resolved from
+  Workbench's own working directory, not the project's.
+
 ## 0.16.1 - 2026-10-16
 
 - **A second account may use the same folder.** The Accounts form no longer refuses the folder of another

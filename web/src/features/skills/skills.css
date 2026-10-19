@@ -1,0 +1,534 @@
+/* Agent skills: the tool window and the skill panel. Tokens only. */
+
+/* ---------------------------------------------------------------- CLI icons */
+.sk-cli {
+  flex: none;
+  color: var(--fg-muted);
+}
+.sk-cli.claude {
+  color: var(--vcs-modified);
+}
+.sk-cli.codex {
+  color: var(--success);
+}
+.sk-cli.kimi {
+  color: var(--vcs-renamed);
+}
+.sk-cli.gemini {
+  color: var(--important);
+}
+.sk-clis {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+}
+
+/* ---------------------------------------------------------------- tool window */
+.sk-top {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.sk-top .wb-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.sk-summary {
+  margin: 8px;
+  padding: 8px 10px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+}
+.sk-stats {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+}
+.sk-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.sk-stat b {
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.sk-stat b.warn {
+  color: var(--warning);
+}
+.sk-stat span {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.sk-stat.button {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+  margin: 0 -4px;
+}
+.sk-stat.button:hover,
+.sk-stat.button.on {
+  background: var(--warning-bg);
+}
+.sk-stat.button:focus-visible {
+  outline: 1px solid var(--focus);
+}
+.sk-shown {
+  margin-left: auto;
+}
+
+.sk-agents {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 8px;
+}
+.sk-agent {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  text-align: left;
+}
+.sk-agent:hover {
+  background: var(--bg-hover);
+}
+.sk-agent.on {
+  background: var(--accent-bg);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.sk-agent:focus-visible {
+  outline: 1px solid var(--focus);
+}
+.sk-agent-name {
+  flex: 1;
+  min-width: 0;
+}
+.sk-agent-count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.sk-agent-tokens {
+  min-width: 78px;
+  text-align: right;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+.sk-note {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 4px 2px 0;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-xs);
+  color: var(--warning);
+}
+
+.sk-hint-box {
+  margin: 4px 8px 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+.sk-hint-box.tight {
+  margin-top: 0;
+  background: none;
+  padding-top: 0;
+  font-size: var(--fs-xs);
+}
+.sk-hint-box.warn {
+  background: var(--warning-bg);
+  color: var(--fg);
+}
+.sk-hint-box code,
+.sk-card code,
+.sk-code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.sk-group {
+  padding-bottom: 4px;
+}
+.sk-ghead {
+  gap: 6px;
+}
+.sk-ghead.static {
+  cursor: default;
+}
+.sk-ghint {
+  flex: 1;
+  min-width: 0;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  text-align: right;
+}
+
+.sk-row {
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+.sk-row:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: -1px;
+}
+.sk-row.dim .sk-main {
+  opacity: 0.6;
+}
+.sk-main {
+  flex: 1;
+  min-width: 0;
+}
+.sk-name {
+  font-weight: 600;
+  line-height: 1.3;
+}
+.sk-ns {
+  color: var(--fg-muted);
+  font-weight: 400;
+}
+.sk-kind {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  color: var(--fg-muted);
+  font-size: 10px;
+  font-weight: 500;
+  vertical-align: 1px;
+}
+.sk-desc {
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.3;
+}
+.sk-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+.sk-attn {
+  display: inline-flex;
+  color: var(--warning);
+}
+.sk-attn.error {
+  color: var(--danger);
+}
+.sk-attn.info {
+  color: var(--info);
+}
+
+/* ---------------------------------------------------------------- shared by both */
+.sk-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+.sk-issues {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sk-issue {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  background: var(--warning-bg);
+}
+.sk-issue svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--warning);
+}
+.sk-issue.error {
+  background: var(--danger-bg);
+}
+.sk-issue.error svg {
+  color: var(--danger);
+}
+.sk-issue.info {
+  background: var(--bg-inset);
+}
+.sk-issue.info svg {
+  color: var(--info);
+}
+
+/* ---------------------------------------------------------------- the skill panel */
+.sk-head {
+  flex: none;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.sk-head h2 {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 650;
+  line-height: 1.3;
+}
+.sk-head-icon {
+  padding-top: 1px;
+  color: var(--accent);
+}
+.sk-sub {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 4px;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+.sk-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.sk-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 980px;
+  padding: 12px 14px 28px;
+}
+.sk-card {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+.sk-card.tone-info {
+  background: var(--accent-bg);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  font-size: var(--fs-sm);
+}
+.sk-card p {
+  margin: 0 0 6px;
+}
+.sk-card p:last-child {
+  margin-bottom: 0;
+}
+.sk-card-title {
+  margin-bottom: 4px;
+  font-weight: 650;
+}
+.sk-about {
+  font-size: var(--fs);
+  line-height: 1.55;
+  white-space: pre-line;
+}
+
+.sk-facts {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+.sk-fact {
+  display: contents;
+}
+.sk-fact dt {
+  color: var(--fg-muted);
+}
+.sk-fact dd {
+  margin: 0;
+  min-width: 0;
+}
+.sk-where {
+  display: block;
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+.sk-code {
+  margin-right: 8px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+}
+
+.sk-installs {
+  display: flex;
+  flex-direction: column;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.sk-install {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+}
+.sk-install-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+.sk-install-who {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.sk-install-path {
+  padding-left: 22px;
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.sk-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sk-files-box {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.sk-files-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  background: var(--bg-panel);
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.sk-files-title:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: -1px;
+}
+.sk-files {
+  margin: 0;
+  padding: 2px 0;
+  max-height: 220px;
+  overflow: auto;
+  list-style: none;
+}
+.sk-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding-right: 8px;
+  font-size: var(--fs-sm);
+}
+.sk-file.dir {
+  color: var(--fg-muted);
+}
+.sk-file button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sk-file:hover {
+  background: var(--bg-hover);
+}
+.sk-file.active {
+  background: var(--bg-active);
+}
+.sk-file button:focus-visible {
+  outline: 1px solid var(--focus);
+}
+
+.sk-viewer {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg);
+}
+.sk-viewer-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 8px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-sm);
+}
+.sk-mini-tabs {
+  border-bottom: 0;
+  padding: 0;
+}
+.sk-mini-tabs .wb-tab {
+  height: 28px;
+}
+.sk-pad {
+  padding: 12px 16px;
+}
+.sk-source {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}

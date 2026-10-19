@@ -29,6 +29,7 @@ mod github;
 mod gitlab;
 mod lsp;
 mod platform;
+mod skills;
 mod terminals;
 mod workspace;
 

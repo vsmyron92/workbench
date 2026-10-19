@@ -21,7 +21,7 @@ use crate::error::ApiError;
 use crate::events::EventBus;
 use crate::projects::{Project, ProjectRegistry};
 use crate::secrets::{Secret, SecretStore};
-use crate::{apps, atlassian, auth, data, db, debug, devcontainer, events, files, git, github, gitlab, lsp, platform, projects, spa, terminals, util, workspace};
+use crate::{apps, atlassian, auth, data, db, debug, devcontainer, events, files, git, github, gitlab, lsp, platform, projects, skills, spa, terminals, util, workspace};
 
 #[derive(Clone)]
 pub struct AppState(Arc<Inner>);
@@ -62,6 +62,7 @@ pub struct Inner {
     pub debug: debug::DebugState,
     pub db: db::DbState,
     pub data: data::DataState,
+    pub skills: skills::SkillsState,
 }
 
 impl AppState {
@@ -97,6 +98,7 @@ impl AppState {
             debug: debug::DebugState::default(),
             db: db::DbState::default(),
             data: data::DataState::default(),
+            skills: skills::SkillsState::default(),
         }));
         state.projects.reload(&state).await;
         Ok(state)
@@ -212,6 +214,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(debug::router())
         .merge(db::router())
         .merge(data::router())
+        .merge(skills::router())
         .merge(platform::router());
 
     let router = Router::new()
