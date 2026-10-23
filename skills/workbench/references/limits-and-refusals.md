@@ -4,6 +4,7 @@
 
 - Every tool acts on the session's own project. A tool's `projectId` defaults to it and must be it: another project is refused ("this session belongs to project X and cannot act on project Y"). Only the debug tools may name another project.
 - `workbench_sessions` and `workbench_terminal_output` show only the sessions and terminals of your project. `workbench_terminal_output` reads at most 500 lines (default 100) of a session, shell, run or command.
+- `workbench_start_session` starts a session in your project only, in a folder inside it, in your own permission mode for the same CLI. It refuses a session that would run without asking (or Codex without its sandbox) when you do not, a chain deeper than two sessions and more than 8 running agent-started sessions in the project. Tell the user when you hit one; do not work around it.
 - File paths are resolved inside a project root (or an allowed extra root): `..` and symbolic links that leave it are refused. `workbench_open_file` and `workbench_open_markdown` also refuse a folder and a path that does not exist.
 - Workspace cards live in your project, in `home` or in `wb-sandbox`.
 

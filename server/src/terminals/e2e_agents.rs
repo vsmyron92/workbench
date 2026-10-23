@@ -599,3 +599,97 @@ async fn permission_requests_reach_phones_as_pushes_that_answer_them() {
     wait_long("the terminal's answer", 10, || pending(&state, &a.id).is_none()).await;
     t.kill(&a.id).await.ok();
 }
+
+/// `workbench_start_session` as the session `terminal` of project `pid` calls it.
+async fn start_session(state: &AppState, terminal: &str, pid: &str, args: Value) -> Result<Value, crate::error::ApiError> {
+    let tool = crate::terminals::mcp_tools().into_iter().find(|t| t.name == "workbench_start_session").expect("the tool");
+    let ctx = crate::mcp::McpCtx { terminal_id: Some(terminal.to_string()), project_id: Some(pid.to_string()) };
+    match (tool.handler)(state.clone(), ctx, args).await? {
+        crate::mcp::ToolOutput::Json(v) => Ok(v),
+        crate::mcp::ToolOutput::Text(t) => panic!("text answer {t}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_starts_sessions_within_its_project_its_mode_and_the_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    let log = dir.path().join("claude.log");
+    let (state, _addr, pid) = served_with(dir.path(), &fake, |cfg| {
+        let home = dir.path().join("claude-home");
+        std::fs::create_dir_all(&home).unwrap();
+        cfg.agents.providers.insert(
+            "claude".into(),
+            crate::config::global::ProviderConfig {
+                env: [("CLAUDE_CONFIG_DIR".to_string(), home.display().to_string()), ("FAKE_CLAUDE_LOG".to_string(), log.display().to_string())].into(),
+                // What a fresh session would get: the new one must not.
+                permission_mode: Some("bypassPermissions".into()),
+                ..Default::default()
+            },
+        );
+        // A Codex account with its sandbox switched off in its arguments.
+        cfg.agents.providers.insert(
+            "loose".into(),
+            crate::config::global::ProviderConfig {
+                kind: Some("codex".into()),
+                args: vec!["--dangerously-bypass-approvals-and-sandbox".into()],
+                ..Default::default()
+            },
+        );
+    })
+    .await;
+    let t = &state.terminals;
+    let parent = t
+        .spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), permission_mode: Some("plan".into()), ..Default::default() })
+        .await
+        .unwrap();
+    wait_long("the session to start", 10, || agent_of(&state, &parent.id).state == AgentState::Idle).await;
+
+    // The new session is in the project, takes the parent's mode, and knows who started it.
+    let out = start_session(&state, &parent.id, &pid, json!({ "prompt": "check the parser", "name": "Parser check" })).await.unwrap();
+    let child = out["terminalId"].as_str().unwrap().to_string();
+    assert_eq!((out["title"].as_str(), out["permissionMode"].as_str()), (Some("Parser check"), Some("plan")), "{out}");
+    let info = t.info(&child).unwrap();
+    assert_eq!((info.project_id.as_deref(), info.meta["spawnedBy"].as_str()), (Some(pid.as_str()), Some(parent.id.as_str())));
+    assert_eq!(info.cwd, parent.cwd);
+    wait_long("the new session to start", 10, || agent_of(&state, &child).state == AgentState::Idle).await;
+
+    // Nothing outside the project: another project, a folder that climbs out of it, an absolute one.
+    for (args, code) in [
+        (json!({ "prompt": "x", "projectId": "other" }), "forbidden"),
+        (json!({ "prompt": "x", "cwd": "../elsewhere" }), "forbidden"),
+        (json!({ "prompt": "x", "cwd": "/" }), "bad_request"),
+        (json!({ "prompt": "  " }), "bad_request"),
+    ] {
+        let e = start_session(&state, &parent.id, &pid, args.clone()).await.unwrap_err();
+        assert_eq!(e.code, code, "{args}: {e}");
+    }
+
+    // A session that asks first cannot start one that does not, here Codex outside its sandbox…
+    let e = start_session(&state, &parent.id, &pid, json!({ "prompt": "x", "provider": "loose" })).await.unwrap_err();
+    assert_eq!(e.code, "forbidden", "{e}");
+    // …and only a session that is itself unrestricted may.
+    let free = t
+        .spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), permission_mode: Some("bypassPermissions".into()), ..Default::default() })
+        .await
+        .unwrap();
+    let e = start_session(&state, &free.id, &pid, json!({ "prompt": "x", "provider": "loose" })).await.unwrap_err();
+    assert_ne!(e.code, "forbidden", "refused for what it is, not by the guard: {e}");
+
+    // Chains stop at the limit: parent (a person's) → child → grandchild → no more.
+    let grand = start_session(&state, &child, &pid, json!({ "prompt": "go deeper" })).await.unwrap()["terminalId"].as_str().unwrap().to_string();
+    let e = start_session(&state, &grand, &pid, json!({ "prompt": "deeper still" })).await.unwrap_err();
+    assert_eq!(e.code, "conflict", "{e}");
+
+    // Crowds too: two are running (child, grandchild).
+    for _ in 0..super::agent::MAX_SPAWNED_RUNNING - 2 {
+        start_session(&state, &parent.id, &pid, json!({ "prompt": "one more" })).await.unwrap();
+    }
+    let e = start_session(&state, &parent.id, &pid, json!({ "prompt": "too many" })).await.unwrap_err();
+    assert_eq!(e.code, "conflict", "{e}");
+
+    // A caller that is no session (nothing names a terminal) is not held to this.
+    let tool = crate::terminals::mcp_tools().into_iter().find(|t| t.name == "workbench_start_session").unwrap();
+    let master = crate::mcp::McpCtx { terminal_id: None, project_id: Some(pid.clone()) };
+    assert!((tool.handler)(state.clone(), master, json!({ "prompt": "from the owner's script" })).await.is_ok());
+}

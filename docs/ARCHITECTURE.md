@@ -561,6 +561,7 @@ Added in the third phase (all confined with `McpCtx::project_for`):
 | `debug_evaluate {expression, context?, frame?, threadId?, sessionId?}` | debug | `mutating`: `watch` (default) or `repl` (debugger commands, echoed into the console as `(agent)`) in a stopped session |
 | `debug_control {action, sessionId?, threadId?, path?, line?, waitSeconds?, frame?, registers?}` | debug | `mutating`: continue, pause, next, stepIn, stepOut, runTo, stop on a live session; waits (≤300 s) for the program to stop and answers like `debug_state` |
 | `debug_breakpoints {action, path?, breakpoints?, lines?, muted?}` | debug | `mutating`: list, add, remove, set, functions, mute, clear for the project's breakpoints; conditions and log messages are accepted |
+| `workbench_start_session {prompt, name?, provider?, model?, effort?, cwd?, projectId?}` | terminals | `mutating`: starts another agent session (any provider) in the caller's project; see "Sessions starting sessions" below |
 | `workbench_changelists` | git | read-only: changelists and shelves with their files |
 | `files_local_history {path, limit?, revision?, diff?, against?, content?}` | files | read-only; sensitive paths refused |
 | `confluence_add_inline_comment` (mutating), `confluence_upload_attachment` (mutating; a file of the session's project, never hidden, key/token-named or `sensitive` files, symlinks resolved first), `confluence_labels` (mutating) | atlassian | Confluence authoring |
@@ -576,6 +577,12 @@ Only expose what an agent cannot do easily with its own shell, or what needs Wor
 - environment health;
 - run-configuration output;
 - what only Workbench's running services know: language servers' diagnostics and symbols, a debug session's state, Local History, changelists.
+
+**Sessions starting sessions** (`workbench_start_session`, 0.18.0). `Terminals::spawn_agent` with `AgentRequest.spawned_by` (serde-skipped, so the REST body cannot set it) runs `Terminals::check_spawn` after `resolve_launch`, and stores `meta.spawnedBy` (the starter's terminal id) on the new terminal. What holds a prompt-injected agent:
+- **Project:** the tool resolves the project with `McpCtx::project_for`; `cwd` goes through `util::paths::resolve_in_root` (no absolute path, no `..`, no link out); the default is the starter's own folder. A dev container session starts its children in the container.
+- **No escalation:** the tool takes no permission mode. The same CLI starts in the starter's mode (not in the configuration's default for a fresh session, which may be `bypassPermissions`); otherwise the provider's default. A start that would run without asking (a dangerous preset) or Codex outside its sandbox (`Provider::sandboxed`) is refused with 403 unless the starter itself runs that way (`Terminals::runs_unrestricted`). No `resume`, `fork`, `addDirs` or `remoteControl` parameter exists.
+- **Bounds:** `MAX_SPAWN_DEPTH` (2: chains of `spawnedBy` links, counted by `spawn_depth`) and `MAX_SPAWNED_RUNNING` (8 per project); both answer 409. A caller that is no session (the master token without a terminal) is not held to them.
+- **Visible:** the tool is `mutating` (Activity view, the agent's own permission prompt); the new session is an ordinary tab, its permission requests are answered by devices only.
 
 Agents never enable code intelligence, answer a permission request, stage, commit, shelve, rebase or bisect, update or restart Workbench through MCP. They do drive the debugger (the owner's decision, 0.7.1, no opt-in): start, attach, rerun, steer, evaluate and set conditional breakpoints, through `mutating` tools (see the debug slice).
 

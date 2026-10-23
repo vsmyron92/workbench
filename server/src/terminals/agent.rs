@@ -83,7 +83,17 @@ pub struct AgentRequest {
     /// (moving a session to another account). Not part of the REST body.
     #[serde(skip)]
     pub exact: bool,
+    /// The hosted session that asked for this one (MCP `workbench_start_session`): the
+    /// start is then held to `Terminals::check_spawn`. Not part of the REST body.
+    #[serde(skip)]
+    pub spawned_by: Option<String>,
 }
+
+/// How many sessions deep agents may start each other: a session you started (depth 0)
+/// may start one (1), which may start one (2), which may not start another.
+pub const MAX_SPAWN_DEPTH: usize = 2;
+/// Agent-started sessions of a project that may run at once.
+pub const MAX_SPAWNED_RUNNING: usize = 8;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -639,6 +649,9 @@ impl Terminals {
             return Err(ApiError::bad_request("fork needs resume: the session to fork"));
         }
         let launch = resolve_launch(&provider, &cfg, &project, &req)?;
+        if let Some(parent) = &req.spawned_by {
+            self.check_spawn(state, parent, &project.id, &provider, &launch)?;
+        }
         // In the dev container, the CLI must exist there; on the host, here.
         let container = if req.in_container {
             crate::devcontainer::require_supported()?;
@@ -723,6 +736,9 @@ impl Terminals {
                     m["inContainer"] = json!(true);
                     m["container"] = t.describe();
                 }
+                if let Some(p) = &req.spawned_by {
+                    m["spawnedBy"] = json!(p);
+                }
                 m
             },
             lingering: 0,
@@ -743,6 +759,71 @@ impl Terminals {
         let _l = entry.lifecycle.lock().await;
         self.launch_agent(state, &entry, cont, prompt, true, false).await?;
         Ok(entry.info())
+    }
+
+    /// Whether the session `id` runs without its CLI's guard rails: a dangerous permission
+    /// preset (never asks), or Codex outside its sandbox.
+    fn runs_unrestricted(&self, state: &AppState, id: &str) -> bool {
+        let Some(e) = self.get(id) else { return false };
+        let (kind, mode) = {
+            let r = e.rec.lock();
+            let Some(a) = r.info.agent.as_ref() else { return false };
+            (a.provider, a.permission_mode.clone())
+        };
+        let dangerous = mode.as_deref().and_then(|m| kind.permission_modes().iter().find(|x| x.id == m)).is_some_and(|x| x.dangerous);
+        dangerous || (kind == ProviderKind::Codex && self.sandboxed_agent(state, id).is_none())
+    }
+
+    /// How many sessions started by sessions lie above `id` (0: started by a person).
+    fn spawn_depth(&self, id: &str) -> usize {
+        let mut depth = 0;
+        let mut at = id.to_string();
+        while let Some(parent) = self.info(&at).and_then(|i| i.meta.get("spawnedBy").and_then(Value::as_str).map(str::to_string)) {
+            depth += 1;
+            if depth > MAX_SPAWN_DEPTH + 1 {
+                break;
+            }
+            at = parent;
+        }
+        depth
+    }
+
+    /// What a hosted session may start (MCP `workbench_start_session`). Agents are
+    /// confined by what you let each of them do, so starting another is held to the same:
+    /// - the new session belongs to the starter's project;
+    /// - it never runs without guard rails (a dangerous permission preset, Codex outside
+    ///   its sandbox) unless its starter already does: a session that asks before it acts
+    ///   cannot get a copy of itself that does not;
+    /// - chains and crowds are bounded, so a loop cannot fill the computer with sessions.
+    fn check_spawn(&self, state: &AppState, parent: &str, project_id: &str, provider: &Provider, launch: &AgentLaunch) -> Result<(), ApiError> {
+        let info = self.info(parent).filter(|i| i.kind == TerminalKind::Agent).ok_or_else(|| ApiError::forbidden("only an agent session starts sessions"))?;
+        if info.project_id.as_deref() != Some(project_id) {
+            return Err(ApiError::forbidden("a session starts sessions in its own project only"));
+        }
+        let mode = launch.permission_mode.as_deref();
+        let loose = mode.and_then(|m| provider.permission_preset(m)).is_some_and(|p| p.dangerous) || (provider.kind == ProviderKind::Codex && !provider.sandboxed(mode));
+        if loose && !self.runs_unrestricted(state, parent) {
+            return Err(ApiError::forbidden(format!(
+                "{} would start without asking or without its sandbox, and this session does not: pick a provider whose default mode asks (or ask the user to start it)",
+                provider.label
+            )));
+        }
+        if self.spawn_depth(parent) >= MAX_SPAWN_DEPTH {
+            return Err(ApiError::conflict(format!("sessions started by sessions may go {MAX_SPAWN_DEPTH} deep; ask the user to start this one")));
+        }
+        let running = self
+            .all()
+            .into_iter()
+            .filter(|e| e.running_pty().is_some())
+            .filter(|e| {
+                let r = e.rec.lock();
+                r.info.project_id.as_deref() == Some(project_id) && r.info.meta.get("spawnedBy").is_some()
+            })
+            .count();
+        if running >= MAX_SPAWNED_RUNNING {
+            return Err(ApiError::conflict(format!("{running} sessions started by agents are running in this project; wait for some to finish")));
+        }
+        Ok(())
     }
 
     /// Continue the entry's conversation in a fresh process (a new one when it has none
