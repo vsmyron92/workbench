@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.18.0 - 2026-10-23
+
+- **Agent sessions can start agent sessions.** A new tool, `workbench_start_session`, lets an agent hand a separate
+  piece of work to another session of any provider (Claude Code, Codex, Kimi, Gemini, Aider or a custom CLI): a
+  prompt, an optional name, folder, model and effort. The new session opens as a tab beside the starter, works on its
+  own and asks you for permission like any other; the starter follows it with `workbench_sessions` and
+  `workbench_terminal_output`.
+- **Held to what its starter may do.** The new session is in the starter's project and in a folder inside it, and
+  the same CLI starts in the permission mode the starter runs in. A session that asks before it acts cannot start one
+  that does not (a "never ask" mode, Codex outside its sandbox). Sessions started by sessions go two levels deep, and
+  at most 8 run in a project at once; past that the agent is told to ask you.
+
 ## 0.17.0 - 2026-10-19
 
 - **A Skills window: what your agents can use here, and what it costs.** Claude Code, Codex, Gemini CLI and Kimi

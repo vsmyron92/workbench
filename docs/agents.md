@@ -62,7 +62,7 @@ they touch. Every tool is confined to the session's own project, except the debu
 
 | Tools | What they are for |
 | --- | --- |
-| `workbench_*` | Open a file, a diff, Markdown or a URL in your window; notify you; list sessions and read their output; propose a commit message; read changelists |
+| `workbench_*` | Open a file, a diff, Markdown or a URL in your window; notify you; list sessions and read their output; start another session; propose a commit message; read changelists |
 | `gitlab_*`, `github_*` | Pipelines and runs, job logs, failed tests, merge and pull requests with their diffs; comments, retries and new MRs/PRs |
 | `confluence_*`, `jira_*` | Search, read and write pages, comments, attachments and labels; issues, transitions and boards |
 | `workspace_*` | Create Workspace cards and add their steps: the way an agent hands you a report |
@@ -70,6 +70,14 @@ they touch. Every tool is confined to the session's own project, except the debu
 | `code_*`, `debug_*`, `files_local_history` | Diagnostics and symbols from running language servers; driving the debugger (start, attach, step, evaluate, breakpoints) and reading its state; Local History |
 | `data_*` | Fill the data viewer and read statistics back ([data viewer](data-viewer.md)) |
 | `devcontainer_status` | Whether the dev container runs |
+
+An agent can hand a separate piece of work to **another agent session** (`workbench_start_session`:
+any provider, a prompt, an optional name and folder). The new session opens as a tab beside yours and
+runs on its own, with its permission requests coming to you like any other. It is held to what its
+starter may do: the same project and a folder inside it; the same CLI starts in the permission mode
+the starter runs in; it never runs without asking (or Codex without its sandbox) unless its starter
+already does; sessions started by sessions go two levels deep, and at most 8 of them run in a project
+at once. Beyond that, the agent is told to ask you.
 
 Tools never deploy, never run destructive git operations, never start a language server,
 never query a database, never update or restart Workbench and never answer a permission

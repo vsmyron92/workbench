@@ -24,6 +24,7 @@ Use them for what needs Workbench's window, services or credentials. Do plain fi
 | | Interrupt the user (see Etiquette) | `workbench_notify` (`message`, `level`) |
 | Project and sessions | Know the projects, repositories and connected services | `workbench_projects` |
 | | See what other sessions did | `workbench_sessions`, then `workbench_terminal_output` (`terminalId`, `lines`) |
+| | Hand a separate piece of work to another agent session | `workbench_start_session` (`prompt`, `name`, `provider`, `cwd`); it knows only the prompt and does not report back, so say what it should leave behind, then follow it with `workbench_sessions` |
 | | Respect how the user grouped their changes | `workbench_changelists` |
 | CI and reviews | Pipelines or runs, their jobs and logs | `gitlab_pipelines`, `gitlab_pipeline_jobs`, `gitlab_job_log` / `github_runs`, `github_run_jobs`, `github_job_log` |
 | | Failed tests of a GitLab pipeline | `gitlab_test_failures` |
