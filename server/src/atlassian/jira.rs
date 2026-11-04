@@ -424,13 +424,20 @@ pub async fn create_issue(state: &AppState, api: &Api, input: CreateIn) -> Resul
         Some(t) => t,
         None => {
             let types = issue_types(api, &project).await?;
-            let want = input.issue_type.as_deref().unwrap_or("Task").to_lowercase();
-            types
-                .iter()
-                .find(|t| t.name.to_lowercase() == want)
-                .or_else(|| types.iter().find(|t| !t.subtask))
-                .map(|t| t.id.clone())
-                .ok_or_else(|| ApiError::bad_request(format!("project {project} has no issue type {want:?}")))?
+            let asked = input.issue_type.as_deref().map(str::trim).filter(|t| !t.is_empty()).unwrap_or("Task");
+            let want = asked.to_lowercase();
+            // No fallback to "some other type": a mismatch used to land on the
+            // first non-subtask type, which is often Epic.
+            match types.iter().find(|t| t.name.to_lowercase() == want) {
+                Some(t) => t.id.clone(),
+                None => {
+                    let names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
+                    return Err(ApiError::bad_request(format!(
+                        "project {project} has no issue type {asked:?}; available: {}",
+                        names.join(", ")
+                    )));
+                }
+            }
         }
     };
     let mut fields = json!({ "project": { "key": project }, "issuetype": { "id": type_id }, "summary": summary });

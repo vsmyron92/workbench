@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.1 - 2026-11-04
+
+- **`jira_create_issue` no longer makes an Epic by mistake.** When the issue type asked for was not in the project
+  (or none was given and the project has no Task), the first non-subtask type was used, which is often Epic. It now
+  refuses, and the error lists the types the project has.
+
 ## 0.18.0 - 2026-10-23
 
 - **Agent sessions can start agent sessions.** A new tool, `workbench_start_session`, lets an agent hand a separate

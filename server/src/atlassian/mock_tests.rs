@@ -1652,6 +1652,15 @@ async fn jira_flows_and_detection() {
     assert_eq!(post["fields"]["issuetype"]["id"], "10002");
     assert_eq!(post["fields"]["project"]["key"], "WB");
 
+    // An unknown type is an error that lists the choices, never another type.
+    let before = mock.data.lock().requests.len();
+    let e = jira::create_issue(&state, &api, jira::CreateIn { project_key: "wb".into(), summary: "x".into(), issue_type: Some("Story".into()), ..Default::default() })
+        .await
+        .err()
+        .unwrap();
+    assert!(e.message.contains("available: Task, Bug, Sub-task"), "{}", e.message);
+    assert!(mock.data.lock().requests.iter().skip(before).all(|r| r.1 != "/rest/api/3/issue"));
+
     // A site without Jira: detection turns it off and Jira calls are not_configured.
     mock.data.lock().jira = false;
     let st = super::status::check(&state, None, true).await.unwrap();
