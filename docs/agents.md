@@ -77,7 +77,23 @@ runs on its own, with its permission requests coming to you like any other. It i
 starter may do: the same project and a folder inside it; the same CLI starts in the permission mode
 the starter runs in; it never runs without asking (or Codex without its sandbox) unless its starter
 already does; sessions started by sessions go two levels deep, and at most 8 of them run in a project
-at once. Beyond that, the agent is told to ask you.
+at once. Beyond that, the agent is told to ask you. A session that was started **Restricted** (below)
+starts only restricted ones.
+
+Claude Code sessions can also message each other (its own `SendMessage` and `ListAgents`, by
+session name): a session that gives its child a distinct `name` can message it and ask to be told
+when it is idle, instead of reading its terminal. A message arrives in the child as a prompt
+(`<cross-session-message from="…">`), so it is answered like any other prompt; a session in another
+permission mode may hold it for its user. Claude Code derives a name (`workbench-3f`) when none is
+given, which only `ListAgents` shows.
+
+**Restricted** (New session › options, Claude Code): the session starts with `claude --restricted`, for
+a repository you do not trust: no shell or code-running tools, no web fetch, files confined to the
+project, your own Claude settings files ignored, and no `bypassPermissions`. It stays restricted when
+it restarts or moves to another account (an account of another CLI refuses it), and it starts only
+restricted Claude Code sessions itself. Workbench's own tools still work for it (files, CI, Confluence…),
+except `run_start`, which is refused as it is for a sandboxed Codex session: a run's command comes from
+files of the repository. The debugger's tools are not confined for any session, restricted or not.
 
 Tools never deploy, never run destructive git operations, never start a language server,
 never query a database, never update or restart Workbench and never answer a permission

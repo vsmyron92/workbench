@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use super::permission::{self, OpenTools, Queue};
 use super::transcript::{clean_line, is_uuid, tail_chars};
-use super::{AgentInfo, AgentState};
+use super::{AgentInfo, AgentState, ResumeCost};
 
 /// Runtime-only agent bookkeeping (not persisted).
 #[derive(Debug, Default)]
@@ -88,6 +88,19 @@ fn model_of(v: &Value) -> Option<String> {
             .map(str::to_string),
         _ => None,
     }
+}
+
+/// The resume report of a `SessionStart` (`context_tokens`, `seconds_since_last_response`,
+/// `prompt_cache_likely_expired`, `estimated_cache_write_usd`): only with a token count, and a
+/// cost that is not a plain non-negative number is dropped.
+fn resume_cost_of(v: &Value) -> Option<ResumeCost> {
+    let tokens = v.get("context_tokens").and_then(Value::as_u64)?;
+    Some(ResumeCost {
+        context_tokens: tokens,
+        seconds_since_last_response: v.get("seconds_since_last_response").and_then(Value::as_u64),
+        cache_expired: v.get("prompt_cache_likely_expired").and_then(Value::as_bool).unwrap_or(false),
+        estimated_cache_write_usd: v.get("estimated_cache_write_usd").and_then(Value::as_f64).filter(|c| c.is_finite() && *c >= 0.0),
+    })
 }
 
 fn set<T: PartialEq>(slot: &mut T, value: T, changed: &mut bool) {
@@ -168,8 +181,13 @@ pub fn apply_hook(agent: &mut AgentInfo, rt: &mut AgentRt, v: &Value, now: i64) 
             rt.open_tools.clear();
             rt.trust_prompt = false;
             out.session_started = true;
+            // A resumed or forked conversation says what its first request will re-send.
+            let cost = matches!(str_at(v, "source"), Some("resume" | "fork")).then(|| resume_cost_of(v)).flatten();
+            set(&mut agent.resume_cost, cost, &mut ch);
         }
         "UserPromptSubmit" => {
+            // The first request is on its way: what it cost is no longer news.
+            set(&mut agent.resume_cost, None, &mut ch);
             set(&mut agent.state, AgentState::Working, &mut ch);
             set(&mut agent.unread, false, &mut ch);
             set(&mut agent.attention, None, &mut ch);
@@ -269,6 +287,37 @@ pub fn apply_hook(agent: &mut AgentInfo, rt: &mut AgentRt, v: &Value, now: i64) 
                     set(&mut agent.state, AgentState::Working, &mut ch);
                     set(&mut agent.attention, None, &mut ch);
                 }
+            }
+            // A usage limit stopped the turn and Claude Code (`autoContinueAtUsageLimit`, on by
+            // default for claude.ai sign-ins) waited in the session. It went on by itself: the
+            // `StopFailure` error state is over.
+            "quota_auto_resume_fired" => {
+                if prev == AgentState::Error {
+                    set(&mut agent.state, AgentState::Working, &mut ch);
+                    set(&mut agent.attention, None, &mut ch);
+                }
+            }
+            // The wait ended without going on: after the computer slept past the reset Claude
+            // Code waits for Enter (`_stale`); with the setting off or a reset more than a day
+            // away it just stops waiting (`_disabled`). Either way it needs the user.
+            "quota_auto_resume_stale" | "quota_auto_resume_disabled" => {
+                let text = message.unwrap_or_else(|| {
+                    if str_at(v, "notification_type") == Some("quota_auto_resume_stale") {
+                        "The usage limit has reset — press Enter in the terminal to continue".into()
+                    } else {
+                        "Claude stopped waiting for the usage limit to reset".into()
+                    }
+                });
+                set(&mut agent.state, AgentState::NeedsInput, &mut ch);
+                set(&mut agent.attention, Some(text), &mut ch);
+                out.attention = prev != AgentState::NeedsInput;
+            }
+            // The sign-in completed but Claude Code could not save it: the next session on
+            // this account will ask again. Say so without changing what the session is doing.
+            "auth_storage_failure" => {
+                let text = message.unwrap_or_else(|| "Signed in, but Claude Code could not save the sign-in".into());
+                set(&mut agent.attention, Some(text), &mut ch);
+                out.attention = true;
             }
             _ => {}
         },
@@ -442,6 +491,77 @@ mod tests {
 
         apply_hook(&mut a, &mut rt, &json!({"hook_event_name":"SessionEnd","reason":"exit"}), 4);
         assert_eq!(a.state, AgentState::Exited);
+    }
+
+    #[test]
+    fn a_resumed_conversation_says_what_its_first_request_costs_until_it_is_sent() {
+        let (mut a, mut rt) = (agent(), AgentRt::default());
+        let start = json!({"hook_event_name":"SessionStart","source":"resume","model":"claude-opus-5","seconds_since_last_response":5400,
+            "context_tokens":182340,"prompt_cache_likely_expired":true,"estimated_cache_write_usd":1.1396});
+        let o = apply_hook(&mut a, &mut rt, &start, 1);
+        assert!(o.changed);
+        assert_eq!(
+            a.resume_cost,
+            Some(ResumeCost { context_tokens: 182_340, seconds_since_last_response: Some(5400), cache_expired: true, estimated_cache_write_usd: Some(1.1396) })
+        );
+        // The same report again changes nothing; a fork reports as a resume does.
+        assert!(!apply_hook(&mut a, &mut rt, &start, 2).changed);
+        // The prompt that goes out ends the news.
+        apply_hook(&mut a, &mut rt, &json!({"hook_event_name":"UserPromptSubmit","prompt":"go on"}), 3);
+        assert_eq!(a.resume_cost, None);
+        // A new, cleared or compacted session has none; neither has a resume without the numbers (nothing to resume).
+        for source in ["startup", "clear", "compact"] {
+            let mut b = agent();
+            apply_hook(&mut b, &mut rt, &json!({"hook_event_name":"SessionStart","source":source,"context_tokens":10,"prompt_cache_likely_expired":true}), 1);
+            assert_eq!(b.resume_cost, None, "{source}");
+        }
+        let mut c = agent();
+        apply_hook(&mut c, &mut rt, &json!({"hook_event_name":"SessionStart","source":"resume"}), 1);
+        assert_eq!(c.resume_cost, None);
+        // A warm cache is reported too, and a cost that is not a number is dropped.
+        apply_hook(&mut c, &mut rt, &json!({"hook_event_name":"SessionStart","source":"fork","context_tokens":900,"estimated_cache_write_usd":-3.0}), 2);
+        let r = c.resume_cost.clone().unwrap();
+        assert_eq!((r.cache_expired, r.estimated_cache_write_usd, r.seconds_since_last_response), (false, None, None));
+    }
+
+    #[test]
+    fn a_usage_limit_wait_is_followed_through_its_notifications() {
+        let notify = |a: &mut AgentInfo, rt: &mut AgentRt, v: Value| apply_hook(a, rt, &v, 1);
+        // The limit stops the turn, Claude Code waits and then goes on by itself.
+        let (mut a, mut rt) = (agent(), AgentRt::default());
+        apply_hook(&mut a, &mut rt, &json!({"hook_event_name":"StopFailure","error":"rate_limit"}), 1);
+        assert_eq!(a.state, AgentState::Error);
+        let o = notify(&mut a, &mut rt, json!({"hook_event_name":"Notification","notification_type":"quota_auto_resume_fired"}));
+        assert_eq!((a.state, a.attention.clone(), o.attention), (AgentState::Working, None, false));
+
+        // Fired for a session that was not in error changes nothing.
+        let mut idle = agent();
+        apply_hook(&mut idle, &mut rt, &json!({"hook_event_name":"Stop"}), 1);
+        assert_eq!(idle.state, AgentState::Idle);
+        notify(&mut idle, &mut rt, json!({"hook_event_name":"Notification","notification_type":"quota_auto_resume_fired"}));
+        assert_eq!(idle.state, AgentState::Idle);
+
+        // After a sleep past the reset it waits for Enter: that needs the user, once.
+        let o = notify(&mut a, &mut rt, json!({"hook_event_name":"Notification","notification_type":"quota_auto_resume_stale"}));
+        assert_eq!((a.state, o.attention), (AgentState::NeedsInput, true));
+        assert!(a.attention.as_deref().unwrap().contains("press Enter"), "{:?}", a.attention);
+        let o = notify(&mut a, &mut rt, json!({"hook_event_name":"Notification","notification_type":"quota_auto_resume_stale"}));
+        assert!(!o.attention, "the same news is not announced twice");
+
+        // Claude's own words win over ours.
+        let o = notify(&mut a, &mut rt, json!({"hook_event_name":"Notification","notification_type":"quota_auto_resume_disabled","message":"Stopped waiting: the reset is 3 days away"}));
+        assert_eq!(a.attention.as_deref(), Some("Stopped waiting: the reset is 3 days away"));
+        assert!(!o.attention);
+
+        // A sign-in that could not be saved is told without changing the state.
+        let mut w = agent();
+        apply_hook(&mut w, &mut rt, &json!({"hook_event_name":"UserPromptSubmit"}), 1);
+        let o = notify(&mut w, &mut rt, json!({"hook_event_name":"Notification","notification_type":"auth_storage_failure"}));
+        assert_eq!((w.state, o.attention), (AgentState::Working, true));
+        assert!(w.attention.as_deref().unwrap().contains("could not save"));
+        // The next prompt clears it again.
+        apply_hook(&mut w, &mut rt, &json!({"hook_event_name":"UserPromptSubmit"}), 2);
+        assert_eq!(w.attention, None);
     }
 
     #[test]

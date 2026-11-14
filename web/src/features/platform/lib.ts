@@ -493,6 +493,26 @@ export function signInText(s: Pick<AccountSignIn, 'state' | 'method' | 'plan'> |
   return ['Signed in', s.method, s.plan].filter(Boolean).join(' · ')
 }
 
+/** How soon before a login ends it is pointed out (Claude Code itself warns earlier than it ends, too). */
+export const SIGNIN_EXPIRY_WARN_DAYS = 14
+
+/**
+ * The login's end, worded, when it is near or past: "Login ends in 3 days (Nov 24)", "Login ended Nov 24".
+ * `null` when the CLI did not say or it is more than {@link SIGNIN_EXPIRY_WARN_DAYS} days away.
+ */
+export function signInExpiry(
+  s: Pick<AccountSignIn, 'state' | 'expiresAt'> | undefined,
+  now: number = Date.now(),
+): { text: string; tone: 'warning' | 'danger' } | null {
+  if (!s || s.state !== 'signedIn' || typeof s.expiresAt !== 'number') return null
+  const date = new Date(s.expiresAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  const left = s.expiresAt - now
+  if (left <= 0) return { text: `Login ended ${date}`, tone: 'danger' }
+  const days = Math.ceil(left / 86_400_000)
+  if (days > SIGNIN_EXPIRY_WARN_DAYS) return null
+  return { text: days <= 1 ? `Login ends within a day (${date})` : `Login ends in ${days} days (${date})`, tone: days <= 3 ? 'danger' : 'warning' }
+}
+
 /** Why `text` cannot be a context window in tokens (`null`: it can; empty is "not set"). Mirrors the server's range. */
 export function contextError(text: string): string | null {
   const t = text.trim().replace(/[_,\s]/g, '')

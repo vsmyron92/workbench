@@ -76,11 +76,11 @@ pub fn tools() -> Vec<McpTool> {
                 let p = project_of(&state, &ctx, &args)?;
                 let name = name_arg(&args)?;
                 // A run's command comes from files the agent can edit (Makefile, package.json):
-                // started for a sandboxed session, it would run outside that sandbox.
+                // started for a sandboxed or restricted session, it would run outside that confinement.
                 if let Some(who) = ctx.terminal_id.as_deref().and_then(|t| state.terminals.sandboxed_agent(&state, t)) {
                     return Err(ApiError::forbidden(format!(
-                        "{who} runs its commands in a sandbox, and run configurations run outside it; ask the user to \
-                         start {name} from Workbench"
+                        "{who} is confined (a sandbox, or restricted mode), and run configurations run outside that; \
+                         ask the user to start {name} from Workbench"
                     )));
                 }
                 let gated = runs::gated(&state, &p, &name, false, true).await?;

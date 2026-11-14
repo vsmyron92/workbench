@@ -166,6 +166,19 @@ export interface AgentInfo {
   lastEventAt: number
   /** The permission request Workbench can answer (Claude Code), or null. */
   pendingPermission: PendingPermission | null
+  /** After a resume or fork: what the next message re-sends (Claude Code's `SessionStart` report), until it is sent. */
+  resumeCost: ResumeCost | null
+}
+
+/** terminals/mod.rs ResumeCost. */
+export interface ResumeCost {
+  /** Tokens the first request sends again. */
+  contextTokens: number
+  secondsSinceLastResponse: number | null
+  /** The prompt cache that held the conversation ran out: that request pays to write it again. */
+  cacheExpired: boolean
+  /** Claude Code's estimate of that write, in USD. */
+  estimatedCacheWriteUsd: number | null
 }
 
 export interface TerminalInfo {

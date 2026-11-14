@@ -583,6 +583,8 @@ Only expose what an agent cannot do easily with its own shell, or what needs Wor
 - **No escalation:** the tool takes no permission mode. The same CLI starts in the starter's mode (not in the configuration's default for a fresh session, which may be `bypassPermissions`); otherwise the provider's default. A start that would run without asking (a dangerous preset) or Codex outside its sandbox (`Provider::sandboxed`) is refused with 403 unless the starter itself runs that way (`Terminals::runs_unrestricted`). No `resume`, `fork`, `addDirs` or `remoteControl` parameter exists.
 - **Bounds:** `MAX_SPAWN_DEPTH` (2: chains of `spawnedBy` links, counted by `spawn_depth`) and `MAX_SPAWNED_RUNNING` (8 per project); both answer 409. A caller that is no session (the master token without a terminal) is not held to them.
 - **Visible:** the tool is `mutating` (Activity view, the agent's own permission prompt); the new session is an ordinary tab, its permission requests are answered by devices only.
+- **Restricted starters** (Claude Code's `--restricted`, `AgentLaunch.restricted`, `AgentRequest.restricted`, never a config default): the tool passes `restricted` on for a Claude child and `check_spawn` refuses every other child (`Terminals::is_restricted`). `resolve_launch` refuses `restricted` for another CLI and with `bypassPermissions`; failover (`switch_account`) carries it, so an account that cannot honour it refuses the session instead of starting it open. `Terminals::sandboxed_agent` also answers for a restricted session, so MCP `run_start` refuses it (its command comes from repository files and would run outside the restriction); the debug tools are gated for no confined session, a sandboxed Codex one included.
+- **Messaging.** Claude Code 2.1.3xx lets sessions on one machine message each other by name (`ListAgents`, `SendMessage`, `notify_when_idle`; `~/.claude/sessions/<pid>.json` carries `messagingSocketPath`). Verified with 2.1.325 against a Workbench-style session: the message arrives as a `UserPromptSubmit` whose prompt is `<cross-session-message from="…" from-name="…" from-mode="…">`, and a session in `manual` mode answered one from an `auto` session. The tool result names the address (`SendMessage` to the title) when the starter gave a `name` and the child is Claude Code; a derived name (`nameSource: "derived"`) is not known to Workbench.
 
 Agents never enable code intelligence, answer a permission request, stage, commit, shelve, rebase or bisect, update or restart Workbench through MCP. They do drive the debugger (the owner's decision, 0.7.1, no opt-in): start, attach, rerun, steer, evaluate and set conditional breakpoints, through `mutating` tools (see the debug slice).
 
@@ -1459,7 +1461,12 @@ overview is a table of rules, each from the CLI's documentation or source. User 
 **Server** (`server/src/skills/`). `parse.rs`: front matter (`serde_norway`; a block that does not parse leaves no fields and
 says why, as Claude Code loads such a skill with no metadata), lenient flags (`yes/no/on/off`), `allowed-tools` split with
 parentheses kept whole, shell injection found outside fenced code, and the checks (`front_matter`, `no_description`,
-`description_long` at Claude Code's 1,536 characters or the standard's 1,024, `name_mismatch`, `name_invalid`, `long_text`;
+`description_long` at Claude Code's 1,536 characters or the standard's 1,024, `name_mismatch`, `name_invalid`, `name_refused` and
+`name_too_long` (Claude Code 2.1.299/2.1.292: hidden, direction-changing or blank characters or `<` `>` in a file or folder name
+make it skip the skill, an error; the same in `name:` or more than 256 characters make it ignore the name, a warning), `long_text`;
+`nested_sandbox` (a remark on nested skills when `sandbox.enabled` is on in any layer of an account's settings: Claude Code 2.1.319
+loads them only for a session started in their folder); a plugin whose `hooks/hooks.json` has a non-empty `modules` array and is
+enabled is a mod: `Discovery.notes` says so once per plugin (`Roots.mods`), since it has no skill to list;
 a command without a description is a remark). `discover.rs`: `Account::resolve` (the account's folder from its configured
 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`KIMI_CODE_HOME`/`GEMINI_CLI_HOME`, else Workbench's own variable, else the default under
 the home it is given: tests pass a scratch one, `SkillsState::set_home`) and the roots of each CLI: Claude Code
@@ -3295,6 +3302,36 @@ So Workbench can hold the hook's HTTP response until a device answers:
   should Claude do instead?", no file. Not verified with the real CLI: answering in the terminal
   (the third prompt raised no request: Haiku suggested `!` after the denial), subagent requests,
   and the edit dialog's marker (from the bundle, not seen live).
+
+**Claude Code 2.1.325 (0.19.0).** Checked against the installed 2.1.325 (its changelog from 2.1.283 on, its `--help`, `claude auth status --json` and a live Haiku
+session on a stub hook server in a scratch folder, whose transcript and trust entry were removed with `claude purge`):
+- **Unchanged:** the hook payloads (a `PermissionRequest` still has no `tool_use_id`, `effort` is `{level}`, `permission_mode` is `default` for
+  `--permission-mode manual`), the `--effort` and `--permission-mode` lists, `~/.claude/sessions/<pid>.json`, the status line's `rate_limits`, the
+  "5-hour limit" wording of the limit message, and `SessionStart` being command-only.
+- **Dialog text** (`permission::DIALOG_MARKERS`, `QUESTION_WITH_YES`). The Bash dialog still asks `Do you want to proceed?`; the Write dialog asks
+  `Do you want to create <file>?` with three options (no `make this edit to`, no `tell Claude`), and both end with `Esc to cancel · Tab to amend`
+  (a rebindable key). A file dialog is `Do you want to <verb> <file>?` (verb phrases are built in its bundle), so the screen check also takes any
+  `Do you want to …?` line directly followed by a numbered `1. Yes`, which prose does not have. Not seen live: the overwrite and notebook
+  dialogs (their verbs are in the bundle), subagent dialogs.
+- **`Notification` types** (`hooks::apply_hook`): `quota_auto_resume_fired` ends a `StopFailure` error state (Claude Code waits in the session at a
+  claude.ai usage limit and goes on by itself: `autoContinueAtUsageLimit`, default on); `quota_auto_resume_stale` and `_disabled` need the user
+  (after a sleep past the reset it waits for Enter); `auth_storage_failure` sets the attention text only.
+- **Resume cost** (`AgentInfo.resume_cost: ResumeCost`, `terminal.updated` as for any change). A `SessionStart` with `source` `resume` or `fork` carries
+  `context_tokens`, `seconds_since_last_response`, `prompt_cache_likely_expired` and `estimated_cache_write_usd` (verified live); until the next
+  `UserPromptSubmit` the UI tells a session whose cache ran out what its next message re-sends (`resumeNote`: a chip on the card and the tab header).
+- **Sign-in expiry** (`signin::Status.expires_at`, `GET /api/agents/signin` → `expiresAt` in ms): `loginExpiresAt` of `claude auth status --json`,
+  a date outside 2000–2200 dropped. Settings › Agents › Accounts shows "Login ends in N days" in the last 14 days and "Login ended" after it.
+- **Agent view is off in hosted sessions** (`session_settings`: `"disableAgentView": true`). With it on, `←` at an empty prompt moves the session
+  into Claude Code's background service, out of its terminal tab and Workbench's restore and permission card. Verified: no "← for agents" hint and
+  no service started after the key. Claude Code's own background sessions (`claude --bg`, `claude attach <id>`) were tried too, as a way for sessions
+  to survive a Workbench restart: `--bg` keeps `--settings` hooks and passes the starter's environment on (the helper's `WORKBENCH_*` variables
+  arrive), and `claude agents --json` lists hosted sessions as `interactive`; but `--bg` ignores `--session-id` (the id is learned from the first
+  hook), the terminal would run `claude attach`, closing a tab would have to mean detach or stop, and a service outside Workbench's cgroup runs the
+  session. Not built: restore, kill, fork, failover and the screen mirror all assume the PTY child is the session.
+- **Restricted** (`AgentRequest.restricted`, `AgentLaunch.restricted`, `providers[].supports.restricted`): `claude --restricted` from the composer.
+  See "Sessions starting sessions" for how it is held.
+- **Not done:** `--safe-mode` (it switches off hooks and MCP servers, which are how Workbench follows and serves a session) and channels
+  (a research preview behind `--dangerously-load-development-channels`; its `claude/channel/permission` relay could one day replace the screen check).
 
 **Codex approvals** stay recognized on the screen (HEURISTIC, texts of codex-cli 0.157.1, the
 current release) plus the rollout; the UI marks such states "recognized on the session's screen".

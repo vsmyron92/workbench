@@ -82,6 +82,8 @@ export interface AccountSignIn {
   method?: string
   /** The plan's short name ("max"). */
   plan?: string
+  /** When the stored login stops working (ms), when the CLI says (`loginExpiresAt`). */
+  expiresAt?: number
   /** ms */
   checkedAt: number
 }

@@ -1358,6 +1358,8 @@ pub fn describe(p: &Provider, available: Option<&PathBuf>) -> Value {
             "model": k != ProviderKind::Custom,
             "mcp": matches!(k, ProviderKind::Claude | ProviderKind::Codex),
             "remoteControl": k == ProviderKind::Claude,
+            // `claude --restricted`: no commands or web fetch, for a repository you do not trust.
+            "restricted": k == ProviderKind::Claude,
             "addDirs": k.takes_add_dirs(),
             "history": k.resumes(),
             // Permission requests answered from Workbench (Claude Code's hooks).

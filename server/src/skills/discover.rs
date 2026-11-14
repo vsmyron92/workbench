@@ -345,6 +345,9 @@ struct Root {
     /// whose file resolves outside it is a link to something that is not the content's own, and is not read.
     /// Personal skills have none: people link their own checkouts into them.
     boundary: Option<PathBuf>,
+    /// Nested skills of an account whose Bash sandbox is on: Claude Code 2.1.319 loads them only for a session started in
+    /// their folder (or moved there with `/cd`).
+    sandboxed: bool,
 }
 
 fn is_dir(p: &Path) -> bool {
@@ -363,6 +366,8 @@ fn chain(git_root: &Path, root: &Path) -> Vec<PathBuf> {
 
 struct Roots {
     list: Vec<Root>,
+    /// Enabled Claude Code plugins that carry a mod (`hooks/hooks.json` with `modules`): the account and the plugin's name.
+    mods: Vec<(usize, String)>,
 }
 
 impl Roots {
@@ -380,7 +385,7 @@ impl Roots {
 }
 
 fn root(dir: PathBuf, scope: Scope, layout: Layout, readers: impl IntoIterator<Item = usize>) -> Root {
-    Root { dir, scope, layout, readers: readers.into_iter().collect(), label: None, plugin_enabled: true, under_project: false, skip_synced: false, boundary: None }
+    Root { dir, scope, layout, readers: readers.into_iter().collect(), label: None, plugin_enabled: true, under_project: false, skip_synced: false, boundary: None, sandboxed: false }
 }
 
 fn read_json(path: &Path, under: Option<&Path>) -> Option<Value> {
@@ -400,6 +405,8 @@ struct ClaudeSettings {
     /// `skillOverrides`: skill name → `on`, `name-only`, `user-invocable-only` or `off`.
     overrides: BTreeMap<String, String>,
     enabled_plugins: BTreeMap<String, bool>,
+    /// `sandbox.enabled`: Claude Code's Bash sandbox is on (the last layer that says so wins).
+    sandbox: bool,
 }
 
 /// Claude Code's settings, lowest priority first: the account's, the project's, the project's own
@@ -420,6 +427,9 @@ fn claude_settings(acct: &Account, inp: &Inputs) -> ClaudeSettings {
                     s.overrides.insert(k.clone(), val.to_string());
                 }
             }
+        }
+        if let Some(on) = v.pointer("/sandbox/enabled").and_then(Value::as_bool) {
+            s.sandbox = on;
         }
         if let Some(o) = v.get("enabledPlugins").and_then(Value::as_object) {
             for (k, val) in o {
@@ -454,6 +464,13 @@ fn plugin_roots(idx: usize, acct: &Account, inp: &Inputs, settings: &ClaudeSetti
         let manifest = read_json(&install.join(".claude-plugin").join("plugin.json"), None);
         let name = manifest.as_ref().and_then(|m| m.get("name")).and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| id.split('@').next().unwrap_or(id).to_string());
         let enabled = settings.enabled_plugins.get(id) == Some(&true);
+        // A mod is a plugin whose hooks file names a module: code that runs inside Claude Code, not text it reads.
+        let has_mod = read_json(&install.join("hooks").join("hooks.json"), None)
+            .and_then(|h| h.get("modules").and_then(Value::as_array).map(|m| !m.is_empty()))
+            .unwrap_or(false);
+        if enabled && has_mod {
+            roots.mods.push((idx, name.clone()));
+        }
         let mut add = |dir: PathBuf, layout: Layout| {
             // A manifest may name folders of its own; they stay inside the plugin.
             let inside = ospath::canonicalize(&dir).ok().zip(ospath::canonicalize(&install).ok()).is_some_and(|(d, i)| ospath::starts_with(&d, &i));
@@ -559,7 +576,7 @@ fn nested_skill_dirs(root: &Path, walk: &mut Walk) -> Vec<(PathBuf, String)> {
 }
 
 fn roots_of(inp: &Inputs, nested: &mut Walk) -> Roots {
-    let mut roots = Roots { list: vec![] };
+    let mut roots = Roots { list: vec![], mods: vec![] };
     let boundary = inp.repo_boundary();
     let by_cli = |c: Cli| -> Vec<usize> { inp.accounts.iter().enumerate().filter(|(_, a)| a.cli == c).map(|(i, _)| i).collect() };
     let (claude, codex, gemini, kimi) = (by_cli(Cli::Claude), by_cli(Cli::Codex), by_cli(Cli::Gemini), by_cli(Cli::Kimi));
@@ -591,8 +608,10 @@ fn roots_of(inp: &Inputs, nested: &mut Walk) -> Roots {
             project(&mut roots, d.join(".claude").join("skills"), folders, &claude);
             project(&mut roots, d.join(".claude").join("commands"), Layout::Commands, &claude);
         }
+        let sandboxed = claude.iter().any(|&i| claude_settings(&inp.accounts[i], inp).sandbox);
         for (dir, rel) in nested_skill_dirs(&inp.root, nested) {
             let mut r = root(dir, Scope::Nested, folders, claude.iter().copied());
+            r.sandboxed = sandboxed;
             r.label = Some(rel);
             r.under_project = true;
             r.boundary = Some(boundary.clone());
@@ -1084,6 +1103,13 @@ fn entry_of(inp: &Inputs, r: &Root, hit: &Hit, readers: &BTreeSet<usize>) -> Ent
     if issues.is_empty() {
         issues.extend(parse::check(&p, if hit.command { &name } else { &hit.folder }, lines, claude, others, hit.command));
     }
+    if r.sandboxed && claude {
+        issues.push(Issue::new(
+            "info",
+            "nested_sandbox",
+            "Claude Code's sandbox is on: since 2.1.319 a skill in a folder below the project loads only in a session started in that folder (or moved there with /cd)",
+        ));
+    }
     let qualified = qualified_of(r.scope, r.label.as_deref(), &name);
     let (kind, tag) = if hit.command { ("command", "c") } else { ("skill", "s") };
     let invoke = clis.iter().filter_map(|c| invoke_for(*c, &qualified, &name, &flags, hit.command).map(|text| Invoke { agent: *c, text })).collect();
@@ -1327,6 +1353,17 @@ pub fn discover(inp: &Inputs) -> Discovery {
     }
     if nested.cut {
         notes.push("The search for skills in folders below the project was cut short (a bound on how many are read): some may be missing".to_string());
+    }
+    // A mod is code, not text: it runs inside Claude Code with the user's permissions and can hold, change or answer its tool calls.
+    let mut mods: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (i, name) in &roots.mods {
+        mods.entry(name.as_str()).or_default().push(inp.accounts[*i].label.as_str());
+    }
+    for (name, accounts) in mods {
+        notes.push(format!(
+            "The plugin “{name}” ({}) carries a mod: code that runs inside Claude Code with your permissions and can hold, change or answer its tool calls. It is not a skill and is not listed here",
+            accounts.join(", ")
+        ));
     }
 
     // What Claude Code received in each of its accounts' newest session here.

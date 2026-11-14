@@ -600,6 +600,109 @@ async fn permission_requests_reach_phones_as_pushes_that_answer_them() {
     t.kill(&a.id).await.ok();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resumed_session_reports_what_its_next_message_costs() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    let log = dir.path().join("claude.log");
+    let report = r#"{"source":"resume","seconds_since_last_response":5400,"context_tokens":182340,"prompt_cache_likely_expired":true,"estimated_cache_write_usd":1.1396}"#;
+    let (state, _addr, pid) = served_with(dir.path(), &fake, |cfg| {
+        let home = dir.path().join("claude-home");
+        std::fs::create_dir_all(&home).unwrap();
+        cfg.agents.providers.insert(
+            "claude".into(),
+            crate::config::global::ProviderConfig {
+                env: [
+                    ("CLAUDE_CONFIG_DIR".to_string(), home.display().to_string()),
+                    ("FAKE_CLAUDE_LOG".to_string(), log.display().to_string()),
+                    ("FAKE_CLAUDE_SESSION_START".to_string(), report.to_string()),
+                ]
+                .into(),
+                ..Default::default()
+            },
+        );
+    })
+    .await;
+    let t = &state.terminals;
+    let s = t.spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), ..Default::default() }).await.unwrap();
+    wait_long("the session to start", 10, || agent_of(&state, &s.id).state == AgentState::Idle).await;
+    // Through the hook route into the record, and out as the browser reads it.
+    let cost = agent_of(&state, &s.id).resume_cost.expect("the report of a resumed conversation");
+    assert_eq!((cost.context_tokens, cost.cache_expired, cost.estimated_cache_write_usd), (182_340, true, Some(1.1396)));
+    let wire = serde_json::to_value(t.info(&s.id).unwrap()).unwrap();
+    assert_eq!(wire["agent"]["resumeCost"]["contextTokens"], 182_340);
+    assert_eq!(wire["agent"]["resumeCost"]["cacheExpired"], true);
+    // The first prompt that goes out ends the news.
+    t.send_text(&s.id, "hello", true).await.unwrap();
+    wait_long("the news to end", 10, || agent_of(&state, &s.id).resume_cost.is_none()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restricted_session_starts_only_restricted_claude_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    let log = dir.path().join("claude.log");
+    let (state, _addr, pid) = served_with(dir.path(), &fake, |cfg| {
+        let home = dir.path().join("claude-home");
+        std::fs::create_dir_all(&home).unwrap();
+        cfg.agents.providers.insert(
+            "claude".into(),
+            crate::config::global::ProviderConfig {
+                env: [("CLAUDE_CONFIG_DIR".to_string(), home.display().to_string()), ("FAKE_CLAUDE_LOG".to_string(), log.display().to_string())].into(),
+                ..Default::default()
+            },
+        );
+        cfg.agents.providers.insert("cdx".into(), crate::config::global::ProviderConfig { kind: Some("codex".into()), ..Default::default() });
+    })
+    .await;
+    let t = &state.terminals;
+    // Asked for it, and the record keeps it (a restart or a restore starts the same way).
+    let parent = t
+        .spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), permission_mode: Some("plan".into()), restricted: Some(true), ..Default::default() })
+        .await
+        .unwrap();
+    assert!(t.is_restricted(&parent.id));
+    wait_long("the restricted session to start", 10, || agent_of(&state, &parent.id).state == AgentState::Idle).await;
+    // Open with bypass is refused outright.
+    let e = t
+        .spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), restricted: Some(true), permission_mode: Some("bypassPermissions".into()), ..Default::default() })
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "bad_request", "{e}");
+
+    // What it starts is restricted too; a CLI that has no such mode is refused by the guard.
+    let out = start_session(&state, &parent.id, &pid, json!({ "prompt": "check the parser" })).await.unwrap();
+    let child = out["terminalId"].as_str().unwrap().to_string();
+    assert!(t.is_restricted(&child), "a restricted session cannot get a copy of itself that runs commands");
+    assert!(!out["next"].as_str().unwrap().contains("SendMessage"), "no name was given: {out}");
+    let e = start_session(&state, &parent.id, &pid, json!({ "prompt": "x", "provider": "cdx" })).await.unwrap_err();
+    assert_eq!(e.code, "forbidden", "{e}");
+    assert!(e.to_string().contains("restricted"), "{e}");
+
+    // Workbench starts no run configuration for it either: its command comes from files the repository controls.
+    let run_start = crate::apps::mcp_tools().into_iter().find(|x| x.name == "run_start").unwrap();
+    let ctx = crate::mcp::McpCtx { terminal_id: Some(parent.id.clone()), project_id: Some(pid.clone()) };
+    let err = (run_start.handler)(state.clone(), ctx, json!({ "name": "test" })).await.unwrap_err();
+    assert_eq!(err.code, "forbidden", "{err}");
+    assert!(err.message.contains("restricted"), "{}", err.message);
+
+    // A session that is not restricted starts what it likes (here: unrestricted).
+    let free = t.spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), permission_mode: Some("plan".into()), ..Default::default() }).await.unwrap();
+    wait_long("the open session to start", 10, || agent_of(&state, &free.id).state == AgentState::Idle).await;
+    let out = start_session(&state, &free.id, &pid, json!({ "prompt": "go" })).await.unwrap();
+    let open_child = out["terminalId"].as_str().unwrap().to_string();
+    assert!(!t.is_restricted(&open_child));
+    for id in [&child, &open_child] {
+        wait_long("the started sessions to run", 10, || agent_of(&state, id).state == AgentState::Idle).await;
+    }
+
+    // The command lines: `--restricted` on the restricted session and what it started, on no other.
+    let text = std::fs::read_to_string(&log).unwrap();
+    let args: Vec<&str> = text.lines().filter(|l| l.starts_with("ARGS ")).collect();
+    assert_eq!(args.iter().filter(|l| l.contains("--restricted")).count(), 2, "{args:#?}");
+    assert_eq!(args.len(), 4, "{args:#?}");
+}
+
 /// `workbench_start_session` as the session `terminal` of project `pid` calls it.
 async fn start_session(state: &AppState, terminal: &str, pid: &str, args: Value) -> Result<Value, crate::error::ApiError> {
     let tool = crate::terminals::mcp_tools().into_iter().find(|t| t.name == "workbench_start_session").expect("the tool");
@@ -649,6 +752,8 @@ async fn an_agent_starts_sessions_within_its_project_its_mode_and_the_limits() {
     let out = start_session(&state, &parent.id, &pid, json!({ "prompt": "check the parser", "name": "Parser check" })).await.unwrap();
     let child = out["terminalId"].as_str().unwrap().to_string();
     assert_eq!((out["title"].as_str(), out["permissionMode"].as_str()), (Some("Parser check"), Some("plan")), "{out}");
+    // A name the starter chose is the child's address for Claude Code's SendMessage; without one there is none to give.
+    assert!(out["next"].as_str().unwrap().contains(r#"SendMessage to "Parser check""#), "{out}");
     let info = t.info(&child).unwrap();
     assert_eq!((info.project_id.as_deref(), info.meta["spawnedBy"].as_str()), (Some(pid.as_str()), Some(parent.id.as_str())));
     assert_eq!(info.cwd, parent.cwd);

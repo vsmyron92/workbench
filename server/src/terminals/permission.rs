@@ -44,12 +44,18 @@ use tokio::sync::oneshot;
 use super::transcript::{clean_line, truncate_chars};
 use crate::secrets::Secret;
 
-/// Lines of Claude Code 2.1.283's permission dialogs: `Do you want to proceed?` (Bash,
-/// reads; seen with the real CLI), the file dialogs' question built from the verb phrase
-/// `make this edit to` (from its bundle), and the reject option's `tell Claude what to do
-/// differently` of other dialogs. Only their disappearance after they were seen counts,
-/// so a dialog without them is never mistaken for an answer.
-const DIALOG_MARKERS: &[&str] = &["Do you want to proceed?", "make this edit to", "tell Claude what to do differently"];
+/// Lines of Claude Code's permission dialogs. A file dialog asks `Do you want to <verb> <file>?`: `make this
+/// edit to` (Edit, from its bundle) or `create` (Write, seen with the real CLI of 2.1.325, whose Write dialog
+/// has neither of the other two lines); a Bash, read or MCP dialog asks `Do you want to proceed?` (seen with
+/// 2.1.283 and 2.1.325). Both 2.1.325 dialogs end with the footer `Esc to cancel · Tab to amend` (the key is a
+/// rebindable one, hence `QUESTION_WITH_YES` for any verb), and the reject option of other dialogs reads `tell
+/// Claude what to do differently`. Only their disappearance after they were seen counts, so a dialog without
+/// them is never mistaken for an answer.
+const DIALOG_MARKERS: &[&str] = &["Do you want to proceed?", "make this edit to", "Esc to cancel · Tab to amend", "tell Claude what to do differently"];
+/// Any permission question with its first option under it: `Do you want to create notes.txt?` then `❯ 1. Yes`.
+/// Whatever the verb (create, overwrite, insert this cell into, fetch…), prose that asks the same thing has no
+/// numbered option below it.
+static QUESTION_WITH_YES: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?m)Do you want to [^\n]*\?[ \t]*\r?\n\s*(?:❯\s*)?1\.\s*Yes").unwrap());
 /// Rows at the bottom of the screen where the dialog is looked for.
 pub const DIALOG_ROWS: usize = 30;
 /// How long a subagent's request is held (a background subagent's dialog waits for it).
@@ -492,7 +498,7 @@ impl Queue {
 
 /// Whether Claude's permission dialog is on this (bottom of the) screen.
 pub fn dialog_visible(screen: &str) -> bool {
-    DIALOG_MARKERS.iter().any(|m| screen.contains(m))
+    DIALOG_MARKERS.iter().any(|m| screen.contains(m)) || QUESTION_WITH_YES.is_match(screen)
 }
 
 /// Tool calls between their `PreToolUse` and their end, to find the `tool_use_id` of a
@@ -1093,6 +1099,18 @@ mod tests {
             " Bash command\n\n   touch allowed-from-workbench.txt\n   Create file allowed-from-workbench.txt\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and always allow access to /w/p from this project\n   3. No\n\n Esc to cancel · Tab to amend"
         ));
         assert!(dialog_visible(" Do you want to make this edit to main.rs?\n ❯ 1. Yes"));
+        // Claude Code 2.1.325, captured from a real session: Bash (four options, one of them to switch to auto mode)…
+        assert!(dialog_visible(
+            " Bash command\n\n   touch hello.txt\n   Create empty hello.txt in working directory\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and always allow access to /w/p from this project\n   3. Yes, and switch to auto mode · auto mode handles these prompts for you\n   4. No\n\n Esc to cancel · Tab to amend"
+        ));
+        // …and Write, which asks neither `proceed?` nor `make this edit to` and has no `tell Claude` option.
+        let write = " Create file notes.txt\n  1 hi\n\n Do you want to create notes.txt?\n ❯ 1. Yes\n   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)\n   3. No\n\n Esc to cancel · Tab to amend";
+        assert!(dialog_visible(write));
+        assert!(dialog_visible(" Do you want to overwrite notes.txt?\n ❯ 1. Yes"));
+        assert!(dialog_visible(" Do you want to delete this cell from analysis.ipynb?\n ❯ 1. Yes"));
+        // The footer alone is enough, and prose that merely says something similar is not.
+        assert!(dialog_visible("some new dialog\n Esc to cancel · Tab to amend"));
+        assert!(!dialog_visible("Do you want to create a new branch for this? I can do that."));
         assert!(!dialog_visible("> run the tests"));
     }
 }

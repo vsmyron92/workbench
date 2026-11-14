@@ -36,6 +36,7 @@ import {
   restartText,
   secretRefFields,
   signInText,
+  signInExpiry,
   suggestAccountId,
   timeline,
   updateFraction,
@@ -380,6 +381,24 @@ describe('local models and fallback', () => {
     for (const k of ['claude', 'codex', 'kimi', 'gemini']) expect(hasLogin(k), k).toBe(true)
     // Aider has API keys in a file; anything else is not one of the CLIs.
     for (const k of ['aider', 'custom', '', null, undefined]) expect(hasLogin(k), String(k)).toBe(false)
+  })
+
+  it('points out a login that is about to end', () => {
+    const now = Date.UTC(2026, 10, 14, 12)
+    const day = 86_400_000
+    const at = (ms: number) => signInExpiry({ state: 'signedIn', expiresAt: now + ms }, now)
+    // Far away, not told, or nothing to end: nothing to say.
+    expect(at(30 * day)).toBeNull()
+    expect(at(15 * day)).toBeNull()
+    expect(signInExpiry({ state: 'signedIn' }, now)).toBeNull()
+    expect(signInExpiry({ state: 'signedOut', expiresAt: now + day }, now)).toBeNull()
+    expect(signInExpiry(undefined, now)).toBeNull()
+    // Two weeks out is a warning, the last three days and a login that ended are alarms.
+    expect(at(14 * day)).toMatchObject({ tone: 'warning', text: expect.stringContaining('ends in 14 days') })
+    expect(at(10 * day - 1000)).toMatchObject({ tone: 'warning', text: expect.stringContaining('ends in 10 days') })
+    expect(at(3 * day)).toMatchObject({ tone: 'danger' })
+    expect(at(day / 2)?.text).toContain('within a day')
+    expect(at(-day)).toMatchObject({ tone: 'danger', text: expect.stringContaining('Login ended') })
   })
 
   it('words a sign-in status', () => {

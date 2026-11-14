@@ -24,6 +24,9 @@ pub struct AgentLaunch {
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
     pub remote_control: bool,
+    /// Claude Code's `--restricted`: no shell or code-running tools, no web fetch, files inside the
+    /// working directories, and the user's own settings files ignored. For repositories you do not trust.
+    pub restricted: bool,
     pub add_dirs: Vec<String>,
 }
 

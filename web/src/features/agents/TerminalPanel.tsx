@@ -13,7 +13,7 @@ import { closeTerminal, colorMenu, interrupt, killTerminal, ownerHint, renameTer
 import { openTerminal, terminalsApi } from './api'
 import { pendingOf } from './lib/permission'
 import { dialogSeenOnScreen, resumes, SEEN_ON_SCREEN } from './lib/providers'
-import { agentMeta, colorCss, isRunning, lingering, restartMode } from './lib/sessions'
+import { agentMeta, colorCss, isRunning, lingering, restartMode, resumeNote } from './lib/sessions'
 import { ContainerBadge, ProviderBadge, RemoteLink, StateChip, StateDot } from './parts'
 import { PermissionActions, PermissionDetail, PermissionRule, PermissionSummary } from './Permission'
 import { dismissPermissionToasts } from './permissionToasts'
@@ -109,6 +109,7 @@ function AgentHeader({ t, view }: { t: TerminalInfo; view: React.RefObject<Termi
   const a = t.agent!
   const running = isRunning(t)
   const meta = agentMeta(a)
+  const resume = running ? resumeNote(a) : null
   const color = colorCss(t.color)
   return (
     <div className="wb-ag-header" style={color ? { boxShadow: `inset 3px 0 0 ${color}` } : undefined}>
@@ -119,6 +120,11 @@ function AgentHeader({ t, view }: { t: TerminalInfo; view: React.RefObject<Termi
         {t.title}
       </span>
       {meta.length > 0 && <span className="wb-ag-header-meta wb-ellipsis">{meta.join(' · ')}</span>}
+      {resume && (
+        <span className="wb-badge warning" title={resume.title}>
+          {resume.label}
+        </span>
+      )}
       {a.permissionMode && a.permissionMode !== 'default' && <span className="wb-badge">{a.permissionMode}</span>}
       <span style={{ flex: 1 }} />
       {a.remoteUrl && <RemoteLink url={a.remoteUrl} />}

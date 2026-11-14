@@ -34,7 +34,7 @@ function provider(id: string, kind: AgentProvider, over: Partial<ProviderInfo> =
     installHint: null,
     stateSource: kind === 'claude' ? 'hooks' : kind === 'codex' ? 'rollout' : 'activity',
     initialPrompt: kind === 'claude' || kind === 'codex' ? 'argv' : 'paste',
-    supports: { resume: kind !== 'custom', fork: kind === 'claude' || kind === 'codex', model: kind !== 'custom', mcp: false, remoteControl: kind === 'claude', addDirs: true, history: kind !== 'custom' },
+    supports: { resume: kind !== 'custom', fork: kind === 'claude' || kind === 'codex', model: kind !== 'custom', mcp: false, remoteControl: kind === 'claude', restricted: kind === 'claude', addDirs: true, history: kind !== 'custom' },
     efforts: [],
     permissionModes: [],
     defaults: { model: null, effort: null, permissionMode: null },

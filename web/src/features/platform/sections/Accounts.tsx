@@ -26,6 +26,7 @@ import {
   localUrlError,
   moveItem,
   parseContext,
+  signInExpiry,
   signInText,
   suggestAccountId,
   suggestApiId,
@@ -631,6 +632,7 @@ export function AccountsGroup({ onGoto }: { onGoto: (section: string) => void })
               const ap = r.config.api
               const si = signIns.data?.accounts[r.id]
               const siText = signInText(si)
+              const siExpiry = signInExpiry(si)
               const loginAccount = !l && !ap && hasLogin(r.kind?.kind)
               return (
                 <div key={r.id} className="wb-acct">
@@ -673,6 +675,14 @@ export function AccountsGroup({ onGoto }: { onGoto: (section: string) => void })
                       <Badge tone={si?.state === 'signedIn' ? 'success' : 'warning'} title="As the CLI itself reports it. Workbench reads no login.">
                         {siText}
                       </Badge>
+                      {siExpiry && (
+                        <>
+                          {' '}
+                          <Badge tone={siExpiry.tone} title="Claude Code asks for a new sign-in after this. Use Sign in again.">
+                            {siExpiry.text}
+                          </Badge>
+                        </>
+                      )}
                     </div>
                   )}
                   {!l && !ap && <UsageCell usage={usageOf(r.id)} />}

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.19.0 - 2026-11-14
+
+Checked against Claude Code 2.1.325 (about 40 releases newer than what 0.18 was verified with). Nothing was broken;
+these close the gaps and use what is new.
+
+- **A file dialog Workbench could not see.** Claude Code's Write dialog asks `Do you want to create notes.txt?` and has
+  neither of the lines Workbench looked for, so a request answered in the terminal stayed pending until its tool call
+  ended. The screen check now also knows any `Do you want to …?` followed by a numbered `1. Yes`, and the footer
+  `Esc to cancel · Tab to amend`.
+- **A session at a usage limit that waits.** Claude Code now waits in the session at a claude.ai limit and goes on by
+  itself. Workbench ends the error state when it does, and says "press Enter in the terminal to continue" when it waits
+  for you after the computer slept past the reset. A sign-in Claude Code could not save is told too.
+- **What a resumed conversation will cost.** A session resumed or forked after a pause says on its card and tab when its
+  prompt cache ran out: "Cache expired · $1.14", with the tokens its next message sends again in the tooltip.
+- **Sign-in expiry.** Settings › Agents › Accounts shows "Login ends in 7 days (Nov 20)" in the last two weeks of a Claude
+  login, and "Login ended" after it.
+- **Restricted sessions.** A *Restricted* box in the new-session composer starts `claude --restricted`: no commands, no web
+  fetch, files inside the project, your own Claude settings ignored. For a repository you do not trust. It stays
+  restricted when it restarts or moves to another account, it starts only restricted Claude Code sessions itself, and
+  Workbench's `run_start` tool refuses it, as it does a sandboxed Codex session.
+- **Sessions can message the sessions they start.** `workbench_start_session` tells a starter that gave its child a `name`
+  to use Claude Code's own `SendMessage` to that name (`notify_when_idle` says when it is done), instead of reading its
+  terminal. Checked with 2.1.325: the message arrives as a prompt in the child.
+- **A stray `←` no longer moves a session out of Workbench.** Claude Code's `←` at an empty prompt opens its agent view and
+  hands the session to a background service of its own. Hosted sessions now start with agent view off.
+- **The Skills window follows Claude Code 2.1.2xx–3xx.** A skill whose file or folder name has an invisible or
+  direction-changing character is an error (Claude Code skips it), a name over 256 characters a warning, nested skills say
+  they load only in a session started in their folder when its sandbox is on, and a plugin that carries a **mod** (code
+  that runs inside Claude Code) is named in a note, since it has no skill to list.
+
 ## 0.18.1 - 2026-11-04
 
 - **`jira_create_issue` no longer makes an Epic by mistake.** When the issue type asked for was not in the project

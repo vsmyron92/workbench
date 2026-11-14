@@ -235,6 +235,24 @@ pub struct AgentInfo {
     /// answer it (`POST /api/agents/{id}/permission`); `null` otherwise.
     #[serde(default)]
     pub pending_permission: Option<PendingPermission>,
+    /// What the next message of a resumed or forked conversation will cost, as Claude Code's
+    /// `SessionStart` reports it, until the next prompt is sent.
+    #[serde(default)]
+    pub resume_cost: Option<ResumeCost>,
+}
+
+/// Claude Code (2.1.2xx and later) tells a hook that resumes or forks a conversation how much of it
+/// the first request will send again, and whether the prompt cache that held it has run out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeCost {
+    /// Tokens the first request re-sends as its prompt.
+    pub context_tokens: u64,
+    pub seconds_since_last_response: Option<u64>,
+    /// The last response is older than the cache lifetime, or a compaction replaced what was cached.
+    pub cache_expired: bool,
+    /// Claude Code's estimate of writing `context_tokens` to the cache on the session's model, in USD.
+    pub estimated_cache_write_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1666,6 +1684,7 @@ pub(crate) fn test_agent() -> AgentInfo {
         cost_usd: None,
         last_event_at: 0,
         pending_permission: None,
+        resume_cost: None,
     }
 }
 

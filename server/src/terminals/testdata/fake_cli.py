@@ -210,6 +210,9 @@ def claude_auth(args):
     if args[:1] == ["status"]:
         if os.path.exists(marker):
             reply = {"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty", "email": "person@example.com", "subscriptionType": "max"}
+            # 2.1.325 adds when the stored login ends (RFC 3339), among others.
+            if os.environ.get("FAKE_CLAUDE_LOGIN_EXPIRES"):
+                reply["loginExpiresAt"] = os.environ["FAKE_CLAUDE_LOGIN_EXPIRES"]
             out(json.dumps(reply, indent=2) + "\n")
             return
         out(json.dumps({"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"}, indent=2) + "\n")
@@ -282,7 +285,11 @@ def claude(args):
             return ""
 
     here = pwd()
-    post({"hook_event_name": "SessionStart", "source": "startup", "session_id": sid, "model": "fake-haiku"})
+    start = {"hook_event_name": "SessionStart", "source": "startup", "session_id": sid, "model": "fake-haiku"}
+    # What a resumed session adds in 2.1.325 (`context_tokens`, `prompt_cache_likely_expired`, …).
+    if os.environ.get("FAKE_CLAUDE_SESSION_START"):
+        start.update(json.loads(os.environ["FAKE_CLAUDE_SESSION_START"]))
+    post(start)
     out(f"Fake Claude Code  {here}\n> ")
     n = 0
     while (line := term.line()) is not None:

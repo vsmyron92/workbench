@@ -253,6 +253,29 @@ export function formatContext(pct: number | null | undefined): string | null {
   return `${Math.round(pct)}% ctx`
 }
 
+/** 182340 → "182k", 1_250_000 → "1.3M". */
+export function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '?'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+  if (n >= 1000) return `${Math.round(n / 1000)}k`
+  return String(Math.round(n))
+}
+
+/**
+ * A resumed conversation whose prompt cache ran out pays to write it again with its next message:
+ * what to tell, or `null` when the cache is still warm or Claude Code did not say.
+ */
+export function resumeNote(a: AgentInfo | null | undefined): { label: string; title: string } | null {
+  const r = a?.resumeCost
+  if (!r || !r.cacheExpired) return null
+  const cost = formatCost(r.estimatedCacheWriteUsd)
+  const tokens = formatTokens(r.contextTokens)
+  return {
+    label: cost ? `Cache expired · ${cost}` : 'Cache expired',
+    title: `Claude Code’s prompt cache for this conversation ran out: your next message sends its ${tokens} tokens again${cost ? `, about ${cost} to write them to the cache (its estimate)` : ''}. A fresh conversation, or /compact first, sends less.`,
+  }
+}
+
 /** "Haiku 4.5 · low · 18% ctx · $0.03" pieces. */
 export function agentMeta(a: AgentInfo | null | undefined): string[] {
   if (!a) return []

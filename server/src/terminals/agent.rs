@@ -72,6 +72,8 @@ pub struct AgentRequest {
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
     pub remote_control: Option<bool>,
+    /// Claude Code's `--restricted` (see `AgentLaunch::restricted`). A request only: never a default.
+    pub restricted: Option<bool>,
     pub resume: Option<String>,
     pub fork: bool,
     pub add_dirs: Vec<String>,
@@ -175,6 +177,9 @@ pub fn build_argv(
     if l.remote_control {
         push(&["--remote-control"]);
     }
+    if l.restricted {
+        push(&["--restricted"]);
+    }
     // `--` ends the options: variadic flags (`--add-dir`, `--mcp-config`) and the
     // optional `--remote-control [name]` cannot swallow the prompt.
     if let Some(p) = prompt.filter(|p| !p.trim().is_empty()) {
@@ -214,7 +219,9 @@ pub fn session_settings(hook_url: &str, token: &str, helper: Option<&str>, statu
     if let Some(cmd) = helper {
         hooks.insert("SessionStart".into(), json!([{ "hooks": [{ "type": "command", "command": cmd, "timeout": 5 }] }]));
     }
-    let mut s = json!({ "hooks": hooks });
+    // Workbench hosts and manages the session: Claude Code's own agent view (`←` at an empty prompt, 2.1.2xx and later)
+    // would move it into Claude's background service, out of its terminal tab, its restore and its permission card.
+    let mut s = json!({ "hooks": hooks, "disableAgentView": true });
     if let (Some(cmd), true) = (helper, statusline) {
         s["statusLine"] = json!({ "type": "command", "command": cmd, "padding": 0 });
     }
@@ -382,6 +389,14 @@ pub fn resolve_launch(provider: &Provider, cfg: &AgentsConfig, project: &Project
             }));
         }
     }
+    // `--restricted` is Claude Code's own (a local model or an API key runs the same CLI, which has it too).
+    let restricted = claude && req.restricted == Some(true);
+    if req.restricted == Some(true) && !claude {
+        return Err(ApiError::bad_request(format!("{} has no restricted mode (only Claude Code does)", provider.label)));
+    }
+    if restricted && permission_mode.as_deref() == Some("bypassPermissions") {
+        return Err(ApiError::bad_request("restricted mode refuses bypassPermissions: pick another permission mode"));
+    }
     let mut add_dirs: Vec<String> = vec![];
     if kind.takes_add_dirs() {
         for d in pa.add_dirs.iter().chain(req.add_dirs.iter()) {
@@ -406,6 +421,7 @@ pub fn resolve_launch(provider: &Provider, cfg: &AgentsConfig, project: &Project
         effort,
         permission_mode,
         remote_control: claude && provider.local.is_none() && provider.api.is_none() && req.remote_control.unwrap_or(pa.remote_control || cfg.remote_control),
+        restricted,
         add_dirs,
     })
 }
@@ -723,6 +739,7 @@ impl Terminals {
                 cost_usd: None,
                 last_event_at: now,
                 pending_permission: None,
+                resume_cost: None,
             }),
             meta: {
                 let mut m = match &cont {
@@ -763,6 +780,11 @@ impl Terminals {
 
     /// Whether the session `id` runs without its CLI's guard rails: a dangerous permission
     /// preset (never asks), or Codex outside its sandbox.
+    /// Whether session `id` runs in Claude Code's restricted mode (`--restricted`).
+    pub(crate) fn is_restricted(&self, id: &str) -> bool {
+        self.get(id).is_some_and(|e| e.rec.lock().launch.as_ref().is_some_and(|l| l.restricted))
+    }
+
     fn runs_unrestricted(&self, state: &AppState, id: &str) -> bool {
         let Some(e) = self.get(id) else { return false };
         let (kind, mode) = {
@@ -799,6 +821,13 @@ impl Terminals {
         let info = self.info(parent).filter(|i| i.kind == TerminalKind::Agent).ok_or_else(|| ApiError::forbidden("only an agent session starts sessions"))?;
         if info.project_id.as_deref() != Some(project_id) {
             return Err(ApiError::forbidden("a session starts sessions in its own project only"));
+        }
+        // A session that cannot run commands cannot get a copy of itself that can.
+        if self.is_restricted(parent) && !launch.restricted {
+            return Err(ApiError::forbidden(format!(
+                "this session is restricted (no commands, no web fetch): it starts only restricted Claude Code sessions, and {} would not be",
+                provider.label
+            )));
         }
         let mode = launch.permission_mode.as_deref();
         let loose = mode.and_then(|m| provider.permission_preset(m)).is_some_and(|p| p.dangerous) || (provider.kind == ProviderKind::Codex && !provider.sandboxed(mode));
@@ -2278,16 +2307,17 @@ impl Terminals {
         Ok(info)
     }
 
-    /// When `terminal_id` is a hosted agent session whose CLI runs its commands in a
-    /// sandbox (`Provider::sandboxed`: Codex unless it bypasses it), how to name it in a
-    /// refusal; `None` otherwise. Workbench must not run commands for such a session
-    /// outside that sandbox: MCP `run_start` refuses it.
+    /// When `terminal_id` is a hosted agent session whose CLI is confined (it runs its commands
+    /// in a sandbox, `Provider::sandboxed`: Codex unless it bypasses it; or it runs none at all,
+    /// Claude Code's `--restricted`), how to name it in a refusal; `None` otherwise. Workbench
+    /// must not run commands for such a session outside that confinement: MCP `run_start`
+    /// refuses it.
     pub fn sandboxed_agent(&self, state: &AppState, terminal_id: &str) -> Option<String> {
         let e = self.get(terminal_id)?;
-        let (kind, provider_id, mode) = {
+        let (kind, provider_id, mode, restricted) = {
             let r = e.rec.lock();
             let a = r.info.agent.as_ref()?;
-            (a.provider, a.provider_id.clone().unwrap_or_else(|| "claude".into()), a.permission_mode.clone())
+            (a.provider, a.provider_id.clone().unwrap_or_else(|| "claude".into()), a.permission_mode.clone(), r.launch.as_ref().is_some_and(|l| l.restricted))
         };
         let cfg = state.config.read().agents.clone();
         let (sandboxed, label) = match providers::find(&cfg, Some(&provider_id)) {
@@ -2299,6 +2329,9 @@ impl Terminals {
             }
         };
         let preset = mode.as_deref().and_then(|m| kind.permission_modes().iter().find(|x| x.id == m)).map(|x| x.label);
+        if restricted {
+            return Some(format!("This {label} session (restricted)"));
+        }
         sandboxed.then(|| match preset {
             Some(p) => format!("This {label} session ({p})"),
             None => format!("This {label} session"),
@@ -3018,6 +3051,7 @@ mod tests {
             effort: Some("high".into()),
             permission_mode: Some("plan".into()),
             remote_control: true,
+            restricted: false,
             add_dirs: vec!["/tmp/x".into()],
         }
     }
@@ -3102,6 +3136,33 @@ mod tests {
     }
 
     #[test]
+    fn restricted_is_a_flag_of_claude_code_only_and_never_with_bypass() {
+        let (s, m) = (Path::new("/d/s.json"), Path::new("/d/m.json"));
+        let l = AgentLaunch { restricted: true, ..Default::default() };
+        let a = build_argv("claude", &SessionArg::Resume("u2".into()), s, m, &l, Some("hi"));
+        assert_eq!(a, ["claude", "--resume", "u2", "--settings", "/d/s.json", "--mcp-config", "/d/m.json", "--restricted", "--", "hi"]);
+        assert!(!build_argv("claude", &SessionArg::New("u".into()), s, m, &AgentLaunch::default(), None).contains(&"--restricted".to_string()));
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = project(dir.path(), "");
+        let c = cfg("[agents.providers.codex]\nmodel = \"gpt-5.5\"\n");
+        let prov = |id: &str| providers::find(&c, Some(id)).unwrap();
+        let ask = AgentRequest { restricted: Some(true), ..Default::default() };
+        assert!(resolve_launch(&prov("claude"), &c, &p, &ask).unwrap().restricted);
+        // Never a default, and `false` is the same as not asking.
+        assert!(!resolve_launch(&prov("claude"), &c, &p, &AgentRequest::default()).unwrap().restricted);
+        assert!(!resolve_launch(&prov("claude"), &c, &p, &AgentRequest { restricted: Some(false), ..Default::default() }).unwrap().restricted);
+        // It is Claude Code's flag: another CLI says so instead of starting open.
+        let e = resolve_launch(&prov("codex"), &c, &p, &ask).unwrap_err();
+        assert!(e.to_string().contains("no restricted mode"), "{e}");
+        // Claude Code refuses bypass in it; so do we, before it starts.
+        let both = AgentRequest { restricted: Some(true), permission_mode: Some("bypassPermissions".into()), ..Default::default() };
+        assert!(resolve_launch(&prov("claude"), &c, &p, &both).unwrap_err().to_string().contains("refuses bypassPermissions"));
+        let plan = AgentRequest { restricted: Some(true), permission_mode: Some("plan".into()), ..Default::default() };
+        assert!(resolve_launch(&prov("claude"), &c, &p, &plan).is_ok());
+    }
+
+    #[test]
     fn settings_carry_hooks_and_optional_status_line() {
         let s = session_settings("http://127.0.0.1:1/api/hooks/claude/abc", "wba_tok", Some("/bin/wb statusline"), true, Some(600));
         let stop = &s["hooks"]["Stop"][0]["hooks"][0];
@@ -3116,6 +3177,8 @@ mod tests {
         assert_eq!(start["command"], "/bin/wb statusline");
         assert_eq!(s["statusLine"]["command"], "/bin/wb statusline");
         assert_eq!(s["hooks"].as_object().unwrap().len(), HOOK_EVENTS.len() + 1);
+        // A hosted session is not moved into Claude Code's background service by a stray `←`.
+        assert_eq!(s["disableAgentView"], true);
         let no_status = session_settings("u", "t", Some("/bin/wb statusline"), false, None);
         assert!(no_status.get("statusLine").is_none());
         assert!(no_status["hooks"].get("SessionStart").is_some());

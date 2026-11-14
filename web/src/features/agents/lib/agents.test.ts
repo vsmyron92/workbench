@@ -10,12 +10,14 @@ import {
   counts,
   tabPlace,
   formatCost,
+  formatTokens,
   lingering,
   needsAttention,
   nextAttention,
   quotePath,
   removeTerminal,
   restartMode,
+  resumeNote,
   sortSessions,
   stateLabel,
   tabAfterClose,
@@ -43,6 +45,7 @@ function agent(over: Partial<AgentInfo> = {}): AgentInfo {
     costUsd: null,
     lastEventAt: 0,
     pendingPermission: null,
+    resumeCost: null,
     ...over,
   }
 }
@@ -72,6 +75,26 @@ function term(id: string, over: Partial<TerminalInfo> = {}, a: Partial<AgentInfo
 }
 
 describe('session state', () => {
+  it('counts tokens the way people say them', () => {
+    expect(formatTokens(182_340)).toBe('182k')
+    expect(formatTokens(999)).toBe('999')
+    expect(formatTokens(1_250_000)).toBe('1.3M')
+    expect(formatTokens(2_000_000)).toBe('2M')
+    expect(formatTokens(-1)).toBe('?')
+  })
+
+  it('tells a resumed conversation that its cache ran out, and says nothing while it is warm', () => {
+    const cold = agent({ resumeCost: { contextTokens: 182_340, secondsSinceLastResponse: 5400, cacheExpired: true, estimatedCacheWriteUsd: 1.1396 } })
+    const note = resumeNote(cold)
+    expect(note?.label).toBe('Cache expired · $1.14')
+    expect(note?.title).toContain('182k tokens')
+    // No estimate: still told, without a price. Warm, unknown or not an agent: nothing.
+    expect(resumeNote(agent({ resumeCost: { contextTokens: 5000, secondsSinceLastResponse: null, cacheExpired: true, estimatedCacheWriteUsd: null } }))?.label).toBe('Cache expired')
+    expect(resumeNote(agent({ resumeCost: { contextTokens: 5000, secondsSinceLastResponse: 60, cacheExpired: false, estimatedCacheWriteUsd: 0.2 } }))).toBeNull()
+    expect(resumeNote(agent())).toBeNull()
+    expect(resumeNote(null)).toBeNull()
+  })
+
   it('maps states to tones and labels', () => {
     expect(tone(term('a', {}, { state: 'working' }))).toBe('working')
     expect(tone(term('a', {}, { state: 'needs_permission' }))).toBe('attention')
