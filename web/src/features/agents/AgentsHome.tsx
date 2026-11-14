@@ -29,7 +29,7 @@ import { openTerminal, startAgent, useAgentDefaults, useAgentHistory, useExterna
 import { pendingOf } from './lib/permission'
 import { dialogSeenOnScreen, displayLabel, historyProviders, providerKindOf, reportsAnswers, resumes, SEEN_ON_SCREEN } from './lib/providers'
 import { newShell } from './commands'
-import { agentMeta, agentSessions, colorCss, counts, isRunning, lastActivity, sortSessions, tone } from './lib/sessions'
+import { agentMeta, agentSessions, colorCss, counts, isRunning, lastActivity, resumeNote, sortSessions, tone } from './lib/sessions'
 import { NewSessionForm } from './NewSession'
 import { ColorBar, ContainerBadge, ProviderBadge, ProviderIcon, RemoteLink, StateChip, StateDot } from './parts'
 import { PermissionRequest } from './Permission'
@@ -53,6 +53,7 @@ export function SessionCard({ t, showProject }: { t: TerminalInfo; showProject?:
   const attention = running ? a?.attention : null
   const pending = pendingOf(t)
   const meta = agentMeta(a)
+  const resume = running ? resumeNote(a) : null
   return (
     <div
       className={`wb-ag-card ${tone(t)}`}
@@ -96,6 +97,11 @@ export function SessionCard({ t, showProject }: { t: TerminalInfo; showProject?:
         <ProviderBadge t={t} />
         <ContainerBadge t={t} />
         {showProject && t.projectId && <Badge>{t.projectId}</Badge>}
+        {resume && (
+          <Badge tone="warning" title={resume.title}>
+            {resume.label}
+          </Badge>
+        )}
         <span className="wb-ellipsis wb-muted">{meta.join(' · ')}</span>
         <span style={{ flex: 1 }} />
         {a?.remoteUrl && (

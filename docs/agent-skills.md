@@ -84,9 +84,20 @@ A warning or an error on a row means one of:
   description, so nothing can match it), or there is no description;
 - the description is longer than the standard's 1,024 characters (or Claude Code's 1,536);
 - the `name` differs from its folder, or is not a name the standard allows;
+- Claude Code will not offer it: its file or folder name has an invisible, direction-changing or blank
+  character, or `<` or `>` (an error, Claude Code 2.1.299 and later), or its `name` is such a name or
+  longer than 256 characters (Claude Code ignores the `name` and uses the folder's);
 - the file is unreadable, not text, or larger than 256 KB (it is not read further);
 - the text is over 500 lines (a remark);
 - a skill of a repository, plugin or sync is a link out of it (nothing of it is read).
+
+A skill in a folder below the project says, when Claude Code's sandbox is on in its settings, that
+Claude Code (2.1.319 and later) loads it only in a session started in that folder.
+
+A **mod** is not a skill: it is code in a plugin (its `hooks/hooks.json` names a module) that runs inside
+Claude Code with your permissions and can hold, change or answer its tool calls, and a plugin made only of
+a mod holds no skill to list. The window therefore says so in a note, once per enabled plugin that carries
+one, with the accounts that load it. A plugin that is switched off has no note.
 
 A note at the bottom of the window says when a look was cut short: more than 1,500 skills, a
 folder of more than 5,000 names, or more reading than a bound allows in a repository's or a

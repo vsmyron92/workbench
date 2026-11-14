@@ -74,12 +74,24 @@ pub struct Status {
     /// The plan's short name (`max`, `pro`), when the CLI names it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// When the stored login stops working (ms), when the CLI says (`loginExpiresAt`): a date,
+    /// not a secret. Claude Code warns about it from 2.1.318 on; here it is shown per account,
+    /// because a failover target whose login ran out starts no session.
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
 }
 
 impl Status {
     pub fn unknown() -> Self {
-        Self { state: State::Unknown, method: None, plan: None }
+        Self { state: State::Unknown, method: None, plan: None, expires_at: None }
     }
+}
+
+/// `2026-11-24T11:54:58.993Z` as ms. A date outside 2000..2200 is not one (the CLI's text is
+/// never passed on, so it is dropped).
+fn parse_expiry(text: &str) -> Option<i64> {
+    let t = chrono::DateTime::parse_from_rfc3339(text.trim()).ok()?.timestamp_millis();
+    (946_684_800_000..7_258_118_400_000).contains(&t).then_some(t)
 }
 
 /// A plan name is a short word. Anything else (the CLI's text, a path) is not passed on.
@@ -87,12 +99,13 @@ fn valid_plan(p: &str) -> bool {
     !p.is_empty() && p.len() <= 24 && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// `claude auth status --json`: `{"loggedIn": bool, "authMethod": …, "apiProvider": …, "subscriptionType": …}`.
+/// `claude auth status --json`: `{"loggedIn": bool, "authMethod": …, "apiProvider": …, "subscriptionType": …,
+/// "loginExpiresAt": "<RFC 3339>"}`.
 fn parse_claude(stdout: &str) -> Status {
     let Ok(v) = serde_json::from_str::<Value>(stdout.trim()) else { return Status::unknown() };
     let Some(logged_in) = v.get("loggedIn").and_then(Value::as_bool) else { return Status::unknown() };
     if !logged_in {
-        return Status { state: State::SignedOut, method: None, plan: None };
+        return Status { state: State::SignedOut, method: None, plan: None, expires_at: None };
     }
     let method = if v.get("apiProvider").and_then(Value::as_str).is_some_and(|p| p != "firstParty") {
         Some("Cloud provider")
@@ -105,7 +118,8 @@ fn parse_claude(stdout: &str) -> Status {
         }
     };
     let plan = v.get("subscriptionType").and_then(Value::as_str).filter(|p| valid_plan(p)).map(str::to_lowercase);
-    Status { state: State::SignedIn, method, plan }
+    let expires_at = v.get("loginExpiresAt").and_then(Value::as_str).and_then(parse_expiry);
+    Status { state: State::SignedIn, method, plan, expires_at }
 }
 
 /// `codex login status` says `Logged in using ChatGPT`, `Logged in using an API key` or `Not logged
@@ -113,7 +127,7 @@ fn parse_claude(stdout: &str) -> Status {
 fn parse_codex(text: &str) -> Status {
     let t = text.to_lowercase();
     if t.contains("not logged in") {
-        return Status { state: State::SignedOut, method: None, plan: None };
+        return Status { state: State::SignedOut, method: None, plan: None, expires_at: None };
     }
     if t.contains("logged in") {
         let method = if t.contains("chatgpt") {
@@ -123,7 +137,7 @@ fn parse_codex(text: &str) -> Status {
         } else {
             None
         };
-        return Status { state: State::SignedIn, method, plan: None };
+        return Status { state: State::SignedIn, method, plan: None, expires_at: None };
     }
     Status::unknown()
 }
@@ -315,20 +329,36 @@ mod tests {
     #[test]
     fn reads_the_claude_status() {
         let out = parse_claude(r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"me@example.com","subscriptionType":"Max"}"#);
-        assert_eq!(out, Status { state: State::SignedIn, method: Some("Claude subscription"), plan: Some("max".into()) });
+        assert_eq!(out, Status { state: State::SignedIn, method: Some("Claude subscription"), plan: Some("max".into()), expires_at: None });
         let key = parse_claude(r#"{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}"#);
         assert_eq!((key.state, key.method, key.plan), (State::SignedIn, Some("API key"), None));
         let token = parse_claude(r#"{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty"}"#);
         assert_eq!(token.method, Some("Access token"));
         let cloud = parse_claude(r#"{"loggedIn":true,"authMethod":"api_key","apiProvider":"bedrock"}"#);
         assert_eq!(cloud.method, Some("Cloud provider"));
-        assert_eq!(parse_claude(r#"{"loggedIn":false}"#), Status { state: State::SignedOut, method: None, plan: None });
+        assert_eq!(parse_claude(r#"{"loggedIn":false}"#), Status { state: State::SignedOut, method: None, plan: None, expires_at: None });
         // A method this version has no word for, and a plan that is not a short word, are dropped.
         let odd = parse_claude(r#"{"loggedIn":true,"authMethod":"something new","subscriptionType":"max; rm -rf /"}"#);
-        assert_eq!(odd, Status { state: State::SignedIn, method: None, plan: None });
+        assert_eq!(odd, Status { state: State::SignedIn, method: None, plan: None, expires_at: None });
         for junk in ["", "Not logged in", "<html>", r#"{"loggedIn":"yes"}"#, "[]"] {
             assert_eq!(parse_claude(junk).state, State::Unknown, "{junk:?}");
         }
+    }
+
+    #[test]
+    fn reads_when_the_login_expires() {
+        // `claude auth status --json` of 2.1.325.
+        let v = r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","loginExpiresAt":"2026-11-24T11:54:58.993Z","subscriptionType":"max","planTier":"max_20x"}"#;
+        let s = parse_claude(v);
+        assert_eq!(s.expires_at, Some(1_795_521_298_993));
+        assert_eq!(serde_json::to_value(&s).unwrap()["expiresAt"], 1_795_521_298_993_i64);
+        // Not a date, or one nobody means: dropped, and the account is still signed in.
+        for junk in [r#""soon""#, r#""""#, r#""1970-01-01T00:00:00Z""#, r#""9999-01-01T00:00:00Z""#, "12345", "null"] {
+            let s = parse_claude(&format!(r#"{{"loggedIn":true,"authMethod":"claude.ai","loginExpiresAt":{junk}}}"#));
+            assert_eq!((s.state, s.expires_at), (State::SignedIn, None), "{junk}");
+        }
+        // A signed-out account has none.
+        assert_eq!(parse_claude(r#"{"loggedIn":false,"loginExpiresAt":"2026-11-24T11:54:58.993Z"}"#).expires_at, None);
     }
 
     #[test]
@@ -360,7 +390,7 @@ mod tests {
     fn an_answer_is_reused_until_it_is_forgotten() {
         let cache = Cache::default();
         assert!(cache.fresh("claude").is_none());
-        cache.put("claude", Status { state: State::SignedOut, method: None, plan: None });
+        cache.put("claude", Status { state: State::SignedOut, method: None, plan: None, expires_at: None });
         assert_eq!(cache.fresh("claude").unwrap().status.state, State::SignedOut);
         assert!(cache.fresh("claude-work").is_none(), "another account has its own answer");
         cache.forget("claude");
@@ -401,7 +431,7 @@ mod tests {
         };
         assert_eq!(ask().await.state, State::SignedOut, "a failing exit code still carries the answer");
         std::fs::write(account.join("signed-in"), "").unwrap();
-        assert_eq!(ask().await, Status { state: State::SignedIn, method: Some("Claude subscription"), plan: Some("max".into()) });
+        assert_eq!(ask().await, Status { state: State::SignedIn, method: Some("Claude subscription"), plan: Some("max".into()), expires_at: None });
         // A CLI that is not there, and one that cannot be asked, are not "signed out".
         assert_eq!(probe(&dir.path().join("missing"), ProviderKind::Claude, &env).await.state, State::Unknown);
         assert_eq!(probe(&fake, ProviderKind::Gemini, &env).await.state, State::Unknown);

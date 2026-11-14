@@ -64,8 +64,10 @@ pub fn mcp_tools() -> Vec<McpTool> {
              Kimi, Gemini, Aider or a custom CLI) and give it a prompt, to hand off a separate piece of work or \
              get an independent opinion. The new session appears beside yours in Workbench and works on its own: \
              it does not report back, so say in the prompt what it should leave behind (a file, a Workspace card), \
-             then follow it with workbench_sessions (state, last message) and workbench_terminal_output. The same CLI \
-             starts in your permission mode; it never runs without asking when you ask first, and its permission \
+             then follow it with workbench_sessions (state, last message) and workbench_terminal_output. A Claude \
+             Code child can also be messaged: give it a distinct `name` and send to that name with SendMessage \
+             (`notify_when_idle` tells you when it is done); a name you chose is the only address Workbench can \
+             hand you. The same CLI starts in your permission mode; it never runs without asking when you ask first, and its permission \
              requests go to the user like yours. Sessions may start sessions \
              a few levels deep and only a few at a time. The prompt is all it knows of this conversation.",
             json!({
@@ -100,10 +102,14 @@ pub fn mcp_tools() -> Vec<McpTool> {
                     let same_cli = super::agent::find_provider(&cfg, text("provider").as_deref()).is_ok_and(|p| p.kind == a.provider);
                     a.permission_mode.clone().filter(|_| same_cli)
                 });
+                // A restricted session starts restricted Claude Code sessions; `check_spawn` refuses any other.
+                let restricted = state.terminals.is_restricted(parent.as_ref().map(|p| p.id.as_str()).unwrap_or(""))
+                    && super::agent::find_provider(&state.config.read().agents, text("provider").as_deref()).is_ok_and(|p| p.kind == super::providers::ProviderKind::Claude);
                 let request = AgentRequest {
                     project_id: project.id.clone(),
                     provider: text("provider"),
                     permission_mode,
+                    restricted: restricted.then_some(true),
                     cwd,
                     prompt: Some(prompt),
                     name: text("name"),
@@ -114,8 +120,19 @@ pub fn mcp_tools() -> Vec<McpTool> {
                     spawned_by: ctx.terminal_id.clone(),
                     ..Default::default()
                 };
+                let named = request.name.is_some();
                 let info = state.terminals.spawn_agent(&state, request).await?;
                 let agent = info.agent.as_ref();
+                // A Claude Code session is a peer other sessions can message (`SendMessage`, by its name); only a name
+                // the starter chose is known here: Claude Code derives one otherwise (`workbench-3f`).
+                let next = if named && agent.is_some_and(|a| a.provider == super::providers::ProviderKind::Claude) {
+                    format!(
+                        "It runs on its own. Follow it with workbench_sessions and workbench_terminal_output, or send it a message with SendMessage to \"{}\" (notify_when_idle: true tells you when it is idle). Do not ask it to do what was refused to you.",
+                        info.title
+                    )
+                } else {
+                    "It runs on its own. Follow it with workbench_sessions and workbench_terminal_output.".to_string()
+                };
                 Ok(ToolOutput::Json(json!({
                     "terminalId": info.id,
                     "title": info.title,
@@ -124,7 +141,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
                     "provider": agent.and_then(|a| a.provider_id.clone()).unwrap_or_else(|| "claude".into()),
                     "permissionMode": agent.and_then(|a| a.permission_mode.clone()),
                     "limits": { "depth": MAX_SPAWN_DEPTH, "running": MAX_SPAWNED_RUNNING },
-                    "next": "It runs on its own. Follow it with workbench_sessions and workbench_terminal_output.",
+                    "next": next,
                 })))
             },
         ),

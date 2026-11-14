@@ -242,6 +242,25 @@ pub fn valid_name(n: &str) -> bool {
         && n.chars().all(|c| (c.is_alphanumeric() && !c.is_uppercase()) || c == '-')
 }
 
+/// The longest `name:` Claude Code takes (2.1.292): a longer one is ignored and the folder's name stands.
+pub const CLAUDE_NAME_MAX: usize = 256;
+
+/// A character Claude Code 2.1.299 will not have in a skill's or command's file or folder name: one that is
+/// invisible, changes the direction of text or is blank (a no-break space, a hangul filler, a braille blank), or
+/// `<` or `>`. A plain space is none of these. The set is Unicode's format and control characters plus the
+/// blanks that are letters or symbols, which is what the changelog's words describe; Claude Code's own list is not published.
+pub fn hidden_or_blank(c: char) -> bool {
+    matches!(c, '<' | '>')
+        || (c.is_control())
+        || (c.is_whitespace() && c != ' ')
+        || matches!(
+            c,
+            '\u{00ad}' | '\u{034f}' | '\u{061c}' | '\u{115f}' | '\u{1160}' | '\u{17b4}' | '\u{17b5}' | '\u{180b}'..='\u{180f}'
+                | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{2800}' | '\u{3164}'
+                | '\u{fe00}'..='\u{fe0f}' | '\u{feff}' | '\u{ffa0}' | '\u{fff9}'..='\u{fffb}'
+        )
+}
+
 /// What is wrong with a skill's file, for the readers that matter (`claude`: Claude Code reads it,
 /// `others`: another CLI does; `command`: it is a slash command file, which needs less).
 pub fn check(p: &Parsed, folder: &str, lines: usize, claude: bool, others: bool, command: bool) -> Vec<Issue> {
@@ -268,6 +287,23 @@ pub fn check(p: &Parsed, folder: &str, lines: usize, claude: bool, others: bool,
             out.push(Issue::new("warn", "description_long", format!("The description is {n} characters; the Agent Skills standard allows {SPEC_DESCRIPTION_MAX}")));
         }
     }
+    // Claude Code skips a skill whose file or folder name is written with hidden characters, and ignores a long `name:`.
+    if claude {
+        if folder.chars().any(hidden_or_blank) {
+            out.push(Issue::new(
+                "error",
+                "name_refused",
+                "Claude Code (2.1.299 and later) does not offer this skill: its file or folder name has an invisible, direction-changing or blank character, or < or >. Rename it",
+            ));
+        }
+        if let Some(name) = p.name() {
+            if name.chars().count() > CLAUDE_NAME_MAX {
+                out.push(Issue::new("warn", "name_too_long", format!("The name is {} characters: Claude Code ignores one over {CLAUDE_NAME_MAX} and uses the folder's name", name.chars().count())));
+            } else if name.chars().any(hidden_or_blank) {
+                out.push(Issue::new("warn", "name_refused", "Claude Code ignores this name: it has an invisible, direction-changing or blank character, or < or >. The folder's name is used instead"));
+            }
+        }
+    }
     if let Some(name) = p.name() {
         if name != folder {
             out.push(Issue::new("warn", "name_mismatch", format!("Named “{name}” in its front matter but kept in the folder “{folder}”: the standard wants them to match")));
@@ -288,6 +324,28 @@ pub fn check(p: &Parsed, folder: &str, lines: usize, claude: bool, others: bool,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_code_refuses_hidden_characters_in_names_and_ignores_very_long_ones() {
+        let ok = parse("---\nname: tidy\ndescription: d\n---\n");
+        assert!(check(&ok, "tidy", 5, true, false, false).is_empty());
+        // The folder or file name: the skill is not offered at all.
+        for bad in ["ti\u{200b}dy", "ti\u{202e}dy", "ti\u{a0}dy", "tidy\u{3164}", "<tidy>", "ti\u{feff}dy", "\u{2800}"] {
+            let codes: Vec<_> = check(&ok, bad, 5, true, false, false).iter().filter(|i| i.code == "name_refused").map(|i| i.level).collect();
+            assert_eq!(codes, ["error"], "{bad:?}");
+        }
+        // A plain space and ordinary punctuation are fine for it (the standard's own name rule is a separate remark).
+        assert!(check(&ok, "my skill", 5, true, false, false).iter().all(|i| i.code != "name_refused"));
+        // Only readers that are Claude Code care.
+        assert!(check(&ok, "ti\u{200b}dy", 5, false, true, false).iter().all(|i| i.code != "name_refused"));
+        // `name:` with such a character, or over 256 characters, is ignored: a warning.
+        let hidden = parse("---\nname: ti\u{200b}dy\ndescription: d\n---\n");
+        assert!(check(&hidden, "tidy", 5, true, false, false).iter().any(|i| i.code == "name_refused" && i.level == "warn"));
+        let long = parse(&format!("---\nname: {}\ndescription: d\n---\n", "a".repeat(257)));
+        assert!(check(&long, "a", 5, true, false, false).iter().any(|i| i.code == "name_too_long"));
+        let edge = parse(&format!("---\nname: {}\ndescription: d\n---\n", "a".repeat(256)));
+        assert!(check(&edge, "a", 5, true, false, false).iter().all(|i| i.code != "name_too_long"));
+    }
 
     #[test]
     fn front_matter_is_split_at_the_two_marker_lines() {

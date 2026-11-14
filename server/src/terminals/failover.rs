@@ -359,6 +359,8 @@ impl Terminals {
             model: launch.model,
             effort: launch.effort,
             permission_mode: launch.permission_mode,
+            // Never loosened by a move: an account without the mode refuses the session instead of starting it open.
+            restricted: launch.restricted.then_some(true),
             add_dirs: launch.add_dirs.into_iter().chain(carried.add_dirs).collect(),
             resume: carried.resume,
             exact: true,

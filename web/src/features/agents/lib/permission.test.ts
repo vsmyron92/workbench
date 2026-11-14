@@ -50,6 +50,7 @@ function term(over: Partial<TerminalInfo> = {}, agent: Partial<AgentInfo> = {}):
       costUsd: null,
       lastEventAt: 1,
       pendingPermission: pending,
+      resumeCost: null,
       ...agent,
     },
     ...over,

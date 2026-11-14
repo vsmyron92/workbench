@@ -117,6 +117,51 @@ fn claude_fixture() -> (Fx, PathBuf) {
 }
 
 #[test]
+fn a_mod_is_code_a_plugin_carries_and_the_window_says_so_for_enabled_ones_only() {
+    let (f, claude) = claude_fixture();
+    let cache = claude.join("plugins/cache/mp");
+    // `token-chart` is a mod (a hooks file that names a module) with no skills; `stripe` has skills and no mod.
+    w(cache.join("token-chart/1.0/.claude-plugin/plugin.json"), r#"{"name":"token-chart"}"#);
+    w(cache.join("token-chart/1.0/hooks/hooks.json"), r#"{"modules":["./register.js"]}"#);
+    w(cache.join("token-chart/1.0/hooks/register.js"), "export default () => {}\n");
+    // A plugin that only has ordinary hooks is not one, and a mod that is switched off does not run.
+    w(cache.join("plain/1.0/hooks/hooks.json"), r#"{"hooks":{"Stop":[]}}"#);
+    w(cache.join("dormant/1.0/hooks/hooks.json"), r#"{"modules":["./r.js"]}"#);
+    let install = |n: &str| cache.join(format!("{n}/1.0")).to_string_lossy().replace('\\', "/");
+    let mut reg: Value = serde_json::from_str(&std::fs::read_to_string(claude.join("plugins/installed_plugins.json")).unwrap()).unwrap();
+    for n in ["token-chart", "plain", "dormant"] {
+        reg["plugins"][format!("{n}@mp")] = json!([{"scope": "user", "installPath": install(n)}]);
+    }
+    w(claude.join("plugins/installed_plugins.json"), &reg.to_string());
+    let mut settings: Value = serde_json::from_str(&std::fs::read_to_string(claude.join("settings.json")).unwrap()).unwrap();
+    for (n, on) in [("token-chart", true), ("plain", true), ("dormant", false)] {
+        settings["enabledPlugins"][format!("{n}@mp")] = json!(on);
+    }
+    w(claude.join("settings.json"), &settings.to_string());
+
+    let d = discover(&inputs(&f, vec![acct("claude", Cli::Claude, claude)]));
+    let mods: Vec<&String> = d.notes.iter().filter(|n| n.contains("carries a mod")).collect();
+    assert_eq!(mods.len(), 1, "{:?}", d.notes);
+    assert!(mods[0].contains("“token-chart” (claude)") && mods[0].contains("with your permissions"), "{}", mods[0]);
+    assert!(!has(&d, "token-chart"), "a mod is not a skill");
+}
+
+#[test]
+fn nested_skills_say_so_when_claude_codes_sandbox_is_on() {
+    let (f, claude) = claude_fixture();
+    let d = discover(&inputs(&f, vec![acct("claude", Cli::Claude, claude.clone())]));
+    assert!(find(&d, "apps/web:deploy").issues.iter().all(|i| i.code != "nested_sandbox"), "off: nothing to say");
+    // The sandbox is on in the project's own settings (the layer that is read after the account's).
+    w(f.root.join(".claude/settings.json"), r#"{"sandbox":{"enabled":true}}"#);
+    let d = discover(&inputs(&f, vec![acct("claude", Cli::Claude, claude)]));
+    let issue = find(&d, "apps/web:deploy").issues.iter().find(|i| i.code == "nested_sandbox").expect("a remark");
+    assert_eq!(issue.level, "info");
+    assert!(issue.message.contains("started in that folder"), "{}", issue.message);
+    // Only nested skills: the project's own are read from the folder the session starts in.
+    assert!(find(&d, "proj-skill").issues.iter().all(|i| i.code != "nested_sandbox"));
+}
+
+#[test]
 fn claude_code_skills_come_from_every_place_it_reads_and_only_those() {
     let (f, claude) = claude_fixture();
     let d = discover(&inputs(&f, vec![acct("claude", Cli::Claude, claude)]));

@@ -66,6 +66,8 @@ export interface ProviderInfo {
     model: boolean
     mcp: boolean
     remoteControl: boolean
+    /** `claude --restricted`: no commands or web fetch, for a repository you do not trust. */
+    restricted: boolean
     addDirs: boolean
     history: boolean
     /** Its permission requests can be answered from Workbench (Claude Code). */
@@ -128,6 +130,7 @@ export interface NewAgentRequest {
   effort?: string
   permissionMode?: string
   remoteControl?: boolean
+  restricted?: boolean
   resume?: string
   fork?: boolean
   cwd?: string

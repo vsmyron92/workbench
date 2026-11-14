@@ -15,6 +15,9 @@ import { ProviderIcon } from './parts'
 import { useAgentsUi, type NewSessionPrefill } from './store'
 
 const CLAUDE_MODELS = ['fable', 'opus', 'sonnet', 'haiku']
+/** `claude --restricted`, as its own help puts it. */
+const RESTRICTED_HELP =
+  'Restricted: for a repository you do not trust. Claude can read and edit files in the project, but runs no commands, fetches no web pages and ignores your own Claude settings files. Not with “bypassPermissions”.'
 
 /**
  * Ask for notification permission once, from a user gesture, on remote devices (a phone):
@@ -163,6 +166,7 @@ export function NewSessionForm({
   const [effort, setEffort] = useState('')
   const [mode, setMode] = useState('')
   const [remote, setRemote] = useState<boolean | null>(null)
+  const [restricted, setRestricted] = useState(false)
   const [showOptions, setShowOptions] = useState(!compact)
   const [help, setHelp] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -247,6 +251,7 @@ export function NewSessionForm({
       effort: effort || undefined,
       permissionMode: mode || undefined,
       remoteControl: p.supports.remoteControl ? (remote ?? undefined) : undefined,
+      restricted: p.supports.restricted && restricted ? true : undefined,
       inContainer: runInside || undefined,
     })
     setBusy(false)
@@ -354,8 +359,16 @@ export function NewSessionForm({
               Remote Control
             </Checkbox>
           )}
+          {p.supports.restricted && (
+            <span title={RESTRICTED_HELP}>
+              <Checkbox checked={restricted} onChange={setRestricted}>
+                Restricted
+              </Checkbox>
+            </span>
+          )}
         </div>
       )}
+      {p?.supports.restricted && restricted && <div className="wb-ag-note">{RESTRICTED_HELP}</div>}
       {dangerous && preset && (
         <div className="wb-ag-danger">
           <TriangleAlert size={13} />
