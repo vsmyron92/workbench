@@ -276,7 +276,9 @@ export function ultracodeNote(t: TerminalInfo | null | undefined): { label: stri
  */
 export function resumeNote(a: AgentInfo | null | undefined): { label: string; title: string } | null {
   const r = a?.resumeCost
-  if (!r || !r.cacheExpired) return null
+  // Claude Code prices this for Anthropic's models; on a service whose prices Workbench
+  // knows (DeepSeek) the estimate would be for the wrong vendor.
+  if (!r || !r.cacheExpired || a?.priced) return null
   const cost = formatCost(r.estimatedCacheWriteUsd)
   const tokens = formatTokens(r.contextTokens)
   return {
@@ -297,10 +299,19 @@ export function artifactPages(a: AgentInfo | null | undefined): { url: string; l
   return (a?.artifacts ?? []).filter((p) => isArtifactUrl(p.url)).map((p) => ({ url: p.url, label: p.title?.trim() || 'Page' }))
 }
 
+/** The share of the session's input tokens that came from the service's prompt cache. */
+export function cacheShare(a: AgentInfo | null | undefined): string | null {
+  const u = a?.usage
+  if (!u) return null
+  const input = u.input + u.cacheRead + u.cacheCreation
+  if (input <= 0 || u.cacheRead <= 0) return null
+  return `${Math.round((u.cacheRead * 100) / input)}% cached`
+}
+
 /** "Haiku 4.5 · low · 18% ctx · $0.03" pieces. */
 export function agentMeta(a: AgentInfo | null | undefined): string[] {
   if (!a) return []
-  return [a.model, a.effort, formatContext(a.contextPct), formatCost(a.costUsd)].filter((x): x is string => !!x)
+  return [a.model, a.effort, formatContext(a.contextPct), formatCost(a.costUsd), cacheShare(a)].filter((x): x is string => !!x)
 }
 
 export function terminalPanelId(id: string): string {

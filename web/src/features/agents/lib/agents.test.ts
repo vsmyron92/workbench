@@ -46,6 +46,8 @@ function agent(over: Partial<AgentInfo> = {}): AgentInfo {
     attention: null,
     contextPct: null,
     costUsd: null,
+    usage: null,
+    priced: false,
     lastEventAt: 0,
     pendingPermission: null,
     resumeCost: null,
@@ -95,6 +97,8 @@ describe('session state', () => {
     // No estimate: still told, without a price. Warm, unknown or not an agent: nothing.
     expect(resumeNote(agent({ resumeCost: { contextTokens: 5000, secondsSinceLastResponse: null, cacheExpired: true, estimatedCacheWriteUsd: null } }))?.label).toBe('Cache expired')
     expect(resumeNote(agent({ resumeCost: { contextTokens: 5000, secondsSinceLastResponse: 60, cacheExpired: false, estimatedCacheWriteUsd: 0.2 } }))).toBeNull()
+    // A service whose own prices are known (DeepSeek): the CLI's estimate is not shown.
+    expect(resumeNote(agent({ priced: true, resumeCost: { contextTokens: 5000, secondsSinceLastResponse: null, cacheExpired: true, estimatedCacheWriteUsd: 1 } }))).toBeNull()
     expect(resumeNote(agent())).toBeNull()
     expect(resumeNote(null)).toBeNull()
   })
@@ -164,6 +168,7 @@ describe('session state', () => {
 
   it('formats meta, costs, colours and paths', () => {
     expect(agentMeta(agent({ model: 'Haiku 4.5', effort: 'low', contextPct: 18.4, costUsd: 0.025 }))).toEqual(['Haiku 4.5', 'low', '18% ctx', '$0.03'])
+    expect(agentMeta(agent({ usage: { input: 250, cacheRead: 750, cacheCreation: 0, output: 10 }, costUsd: 0.01 }))).toContain('75% cached')
     expect(formatCost(0.004)).toBe('<$0.01')
     expect(formatCost(null)).toBeNull()
     expect(colorCss('success')).toBe('var(--success)')

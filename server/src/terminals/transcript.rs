@@ -14,6 +14,8 @@ use std::time::SystemTime;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::TokenUsage;
+
 /// `~/.claude`, or `$CLAUDE_CONFIG_DIR` (the agent environment's value wins).
 pub fn claude_dir(env_override: Option<&str>) -> PathBuf {
     if let Some(d) = env_override.filter(|d| !d.is_empty()) {
@@ -103,6 +105,29 @@ pub enum Record {
     Cost(f64),
     /// A tool call's result: its permission, if it asked, was answered.
     ToolResult { tool_use_id: String },
+    /// An assistant message's token usage (the message id dedupes split records; a
+    /// sub-agent's sidechain message counts too, since the account pays for it).
+    Usage { id: String, model: String, at: Option<i64>, usage: TokenUsage },
+}
+
+/// An assistant record's `message.usage` (input, cache read, cache write, output). A
+/// record without usage, or with all zeros, says nothing.
+fn usage_record(v: &Value) -> Option<Record> {
+    let msg = v.get("message")?;
+    let u = msg.get("usage")?;
+    let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let usage = TokenUsage { input: n("input_tokens"), cache_read: n("cache_read_input_tokens"), cache_creation: n("cache_creation_input_tokens"), output: n("output_tokens") };
+    if usage.is_empty() {
+        return None;
+    }
+    let model = msg.get("model").and_then(Value::as_str).filter(|m| !m.is_empty() && !m.starts_with('<')).unwrap_or_default().to_string();
+    let id = msg.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+    let at = v
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|d| d.timestamp_millis());
+    Some(Record::Usage { id, model, at, usage })
 }
 
 fn text_blocks(content: &Value) -> String {
@@ -123,7 +148,9 @@ pub fn parse_line(line: &[u8]) -> Vec<Record> {
     let Ok(v) = serde_json::from_slice::<Value>(line) else { return vec![] };
     let s = |k: &str| v.get(k).and_then(Value::as_str);
     if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
-        return vec![];
+        // A sub-agent's conversation is left out of the session's titles and answers, but
+        // its tokens are on the same bill.
+        return usage_record(&v).into_iter().collect();
     }
     match s("type") {
         Some("ai-title") => s("aiTitle").map(|t| vec![Record::Title(clean_line(t, 120))]).unwrap_or_default(),
@@ -185,6 +212,7 @@ pub fn parse_line(line: &[u8]) -> Vec<Record> {
             if let Some(m) = msg.get("model").and_then(Value::as_str).filter(|m| !m.starts_with('<')) {
                 out.push(Record::Model(m.to_string()));
             }
+            out.extend(usage_record(&v));
             let stop = msg.get("stop_reason").and_then(Value::as_str);
             let text = text_blocks(msg.get("content").unwrap_or(&Value::Null));
             if stop == Some("end_turn") && !text.trim().is_empty() {
@@ -514,6 +542,21 @@ mod tests {
             parse_line(br#"{"type":"assistant","message":{"model":"<synthetic>","stop_reason":"tool_use","content":[]}}"#),
             vec![Record::TurnStarted]
         );
+        // A message's tokens, with its time (the service's peak hours price them).
+        assert_eq!(
+            parse_line(br#"{"type":"assistant","timestamp":"2026-11-18T08:00:00.000Z","message":{"id":"m2","model":"deepseek-v4-pro","usage":{"input_tokens":100,"cache_read_input_tokens":900,"cache_creation_input_tokens":0,"output_tokens":50},"stop_reason":"tool_use","content":[]}}"#),
+            vec![
+                Record::Model("deepseek-v4-pro".into()),
+                Record::Usage { id: "m2".into(), model: "deepseek-v4-pro".into(), at: Some(1_794_988_800_000), usage: TokenUsage { input: 100, cache_read: 900, cache_creation: 0, output: 50 } },
+                Record::TurnStarted,
+            ]
+        );
+        // A sub-agent's message counts for tokens, but not as the session's answer.
+        assert_eq!(
+            parse_line(br#"{"type":"assistant","isSidechain":true,"message":{"id":"m3","model":"deepseek-flash","usage":{"input_tokens":10,"output_tokens":2},"content":[]}}"#),
+            vec![Record::Usage { id: "m3".into(), model: "deepseek-flash".into(), at: None, usage: TokenUsage { input: 10, cache_read: 0, cache_creation: 0, output: 2 } }]
+        );
+        assert!(parse_line(br#"{"type":"assistant","message":{"id":"m4","usage":{"input_tokens":0,"output_tokens":0}}}"#).iter().all(|r| !matches!(r, Record::Usage { .. })));
         assert_eq!(parse_line(br#"{"type":"permission-mode","permissionMode":"plan"}"#), vec![Record::PermissionMode("plan".into())]);
         assert_eq!(parse_line(br#"{"type":"cost-state","totalCostUSD":0.25}"#), vec![Record::Cost(0.25)]);
         assert!(parse_line(b"not json").is_empty());

@@ -139,6 +139,12 @@ enabled = false                # hide a preset (also gemini, aider)
 [agents.providers.aider]
 args = ["--no-auto-commits"]
 
+[agents.providers.claude-deepseek]   # a hosted API: the key is a [secrets] entry
+kind = "claude"
+model = "deepseek-flash[1m]"         # DeepSeek's name for its 1M window
+api = { service = "deepseek", key = "deepseek", context = 1000000,
+        helper_model = "deepseek-flash", subagent_model = "deepseek-flash" }
+
 [agents.providers.opencode]    # any other agent CLI
 command = "opencode"
 label = "OpenCode"

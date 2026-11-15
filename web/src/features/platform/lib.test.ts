@@ -8,6 +8,9 @@ import {
   accountKind,
   accountName,
   apiKeyError,
+  apiModels,
+  apiServiceHint,
+  apiServiceUrl,
   apiUrlError,
   API_BY_KIND,
   suggestApiId,
@@ -436,7 +439,7 @@ describe('hosted APIs', () => {
   it('knows which services each CLI can use', () => {
     expect(API_BY_KIND.claude).toContain('deepseek')
     expect(API_BY_KIND.claude).not.toContain('openai')
-    expect(API_BY_KIND.codex).toEqual(['openai', 'custom'])
+    expect(API_BY_KIND.codex).toEqual(['openai', 'deepseek', 'custom'])
     expect(API_BY_KIND.gemini).toEqual([])
   })
 
@@ -453,6 +456,20 @@ describe('hosted APIs', () => {
     expect(apiUrlError('claude', 'custom', 'http://127.0.0.1:4000/x')).toBeNull()
     expect(apiUrlError('claude', 'custom', 'https://u:p@host')).toMatch(/user name/)
     expect(apiUrlError('claude', 'custom', 'gw.example.com')).toMatch(/https/)
+  })
+
+  it('uses the address and hint the CLI needs', () => {
+    expect(apiServiceUrl('claude', 'deepseek')).toBe('https://api.deepseek.com/anthropic')
+    expect(apiServiceUrl('codex', 'deepseek')).toBe('https://api.deepseek.com/')
+    expect(apiServiceHint('codex', 'deepseek')).toMatch(/Responses/)
+    expect(apiUrlError('codex', 'deepseek', '')).toBeNull()
+    // The 1M window and the text-only model are named where the model is entered.
+    const claude = apiModels('claude', 'deepseek')
+    expect(claude.map((m) => m.id)).toContain('deepseek-flash[1m]')
+    expect(claude.find((m) => m.id === 'deepseek-v4-pro')?.images).toBe(false)
+    expect(claude.every((m) => m.context === 1_048_576)).toBe(true)
+    expect(apiModels('codex', 'deepseek').map((m) => m.id)).toEqual(['deepseek-flash', 'deepseek-v4-pro'])
+    expect(apiModels('aider', 'deepseek')).toEqual([])
   })
 
   it('wants a secret that exists', () => {

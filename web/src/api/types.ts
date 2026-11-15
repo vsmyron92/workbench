@@ -163,6 +163,12 @@ export interface AgentInfo {
   attention: string | null
   contextPct: number | null
   costUsd: number | null
+  /** Tokens the transcript recorded (Claude Code's usage objects), when any were read. */
+  usage: TokenUsage | null
+  /** A cost priced from `usage` at the service's own prices (DeepSeek), when known. */
+  usageCostUsd?: number | null
+  /** Its service's prices are known, so the CLI's own estimates (priced for another vendor) are hidden. */
+  priced: boolean
   lastEventAt: number
   /** The permission request Workbench can answer (Claude Code), or null. */
   pendingPermission: PendingPermission | null
@@ -179,6 +185,14 @@ export interface ArtifactLink {
   title: string | null
   /** When it was published or last updated (ms). */
   at: number
+}
+
+/** terminals/mod.rs TokenUsage: tokens a session's transcript recorded (`input` excludes cache hits). */
+export interface TokenUsage {
+  input: number
+  cacheRead: number
+  cacheCreation: number
+  output: number
 }
 
 /** terminals/mod.rs ResumeCost. */

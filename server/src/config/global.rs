@@ -251,6 +251,19 @@ pub struct ApiConfig {
     /// The model's context window in tokens (see `local.context`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<u64>,
+    /// Claude Code: the model its cheap helper asks (the Haiku default). Empty: `model`.
+    /// DeepSeek's own guide, for one, has the helper and the sub-agents run on Flash while
+    /// the main agent may run on Pro.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub helper_model: Option<String>,
+    /// Claude Code: the model its sub-agents ask. Empty: `model`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_model: Option<String>,
+    /// Ask the service for the account's balance (DeepSeek: `GET /user/balance`) when the
+    /// usage view is opened. Off by default: Workbench otherwise asks no vendor anything.
+    /// Only the account's key is sent, and only to the service's own address.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub balance: bool,
 }
 
 /// `[agents.providers.<name>.local]`: a model server on this machine or your network.

@@ -107,6 +107,8 @@ pub enum Event {
     ContextPct(f64),
     /// The usage windows of the account (`token_count.rate_limits`).
     RateLimits(Vec<super::usage::Reported>),
+    /// The turn's tokens (`token_count.info.last_token_usage`), on the same bill.
+    Usage { usage: super::TokenUsage, at: Option<i64> },
     /// The turn failed because the account is at its usage limit (the error's text).
     UsageLimit(String),
 }
@@ -178,6 +180,19 @@ pub fn parse_line(line: &[u8]) -> Vec<Event> {
                 let windows = p.get("rate_limits").map(super::usage::codex_reported).unwrap_or_default();
                 if !windows.is_empty() {
                     out.push(Event::RateLimits(windows));
+                }
+                let n = |k: &str| p.pointer(&format!("/info/last_token_usage/{k}")).and_then(Value::as_u64).unwrap_or(0);
+                // Codex's `input_tokens` includes the cached ones (OpenAI's shape); the
+                // session keeps Anthropic's (input excludes cache hits).
+                let cached = n("cached_input_tokens");
+                let usage = super::TokenUsage {
+                    input: n("input_tokens").saturating_sub(cached),
+                    cache_read: cached,
+                    cache_creation: 0,
+                    output: n("output_tokens"),
+                };
+                if !usage.is_empty() {
+                    out.push(Event::Usage { usage, at: line_time(line) });
                 }
                 out
             }
@@ -303,8 +318,9 @@ pub fn apply(agent: &mut super::AgentInfo, t: &mut Tracker, events: Vec<Event>, 
                     out.changed = true;
                 }
             }
-            // Account usage is kept apart from the session (`Terminals::note_codex_usage`).
-            Event::RateLimits(_) | Event::UsageLimit(_) => {}
+            // Account usage is kept apart from the session (`Terminals::note_codex_usage`);
+            // tokens are added up from the same events in `Terminals::apply_codex`.
+            Event::RateLimits(_) | Event::Usage { .. } | Event::UsageLimit(_) => {}
         }
     }
     out
@@ -747,6 +763,17 @@ mod tests {
             vec![Event::ContextPct(10.0)]
         );
         assert!(parse_line(br#"{"type":"event_msg","payload":{"type":"token_count","info":null}}"#).is_empty());
+        // A turn's tokens, with its time (the service's peak hours price them).
+        assert_eq!(
+            parse_line(br#"{"timestamp":"2026-11-18T08:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":900,"output_tokens":50,"total_tokens":1050},"model_context_window":258400}}}"#),
+            vec![
+                Event::ContextPct(0.4),
+                Event::Usage {
+                    usage: super::super::TokenUsage { input: 100, cache_read: 900, cache_creation: 0, output: 50 },
+                    at: Some(1_794_988_800_000),
+                },
+            ]
+        );
         // The account's windows ride on the same event, with or without token usage.
         let full = parse_line(
             br#"{"timestamp":"2026-10-03T09:32:56.931Z","ordinal":11,"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":100.0,"window_minutes":300,"resets_at":1893456000},"secondary":{"used_percent":41.5,"window_minutes":10080,"resets_at":1893999000},"credits":null,"plan_type":null}}}"#,
