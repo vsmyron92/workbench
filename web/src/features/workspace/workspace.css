@@ -462,6 +462,24 @@
 }
 
 /* ---------------------------------------------------------------- viewers */
+.ws-bridge-ask {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg);
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--border);
+}
+.ws-bridge-ask > svg {
+  flex: none;
+  color: var(--warning);
+}
+.ws-bridge-ask .spacer {
+  flex: 1;
+}
 .ws-html {
   position: relative;
   flex: 1;

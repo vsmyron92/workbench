@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en" data-wb-report="document">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project dashboard</title>
+<link rel="stylesheet" href="../_shared/report.css">
+<script src="../_shared/chart.umd.js"></script>
+<script src="../_shared/report-charts.js"></script>
+<script defer src="../_shared/report.js"></script>
+<style>
+  .status { color: var(--wbr-muted); font-size: 13px; margin: 0 0 18px; }
+  .status b { color: var(--wbr-warn); font-weight: 600; }
+  .wb-chart { height: 240px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<main>
+<h1>Project dashboard</h1>
+<p class="status" id="status">Asking Workbench for live data…</p>
+
+<div class="kpis" id="kpis"></div>
+
+<h2>CI runs</h2>
+<div class="card" id="ci-card"><div class="wb-chart"><canvas id="ci" role="img" aria-label="Duration of the latest CI runs in seconds, red for failures"></canvas></div></div>
+<p class="status" id="ci-note" hidden></p>
+
+<h2>Agent sessions</h2>
+<table>
+  <thead><tr><th>Session</th><th>State</th><th>Model</th><th>Cost</th></tr></thead>
+  <tbody id="sessions"></tbody>
+</table>
+
+<p class="meta">This report reads live data with <code>workbench.query</code>, read-only, once you allow it. In the Sandbox, or when nothing is allowed, it shows sample data instead. Copy it into a card of a project to see the real thing.</p>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  // What the report shows when Workbench gives it nothing (the Sandbox, or the user said no).
+  const SAMPLE = {
+    sessions: { sessions: [
+      { title: 'Fix the flaky login test', state: 'working', model: 'Opus', costUsd: 0.42 },
+      { title: 'Write the migration guide', state: 'idle', model: 'Sonnet', costUsd: 0.11 },
+      { title: 'Review the cache change', state: 'needs_permission', model: 'Opus', costUsd: 0.27 },
+    ] },
+    repos: { repos: [{ name: 'shop', branch: 'main', ahead: 1, behind: 0, changed: 3 }] },
+    ci: { provider: 'github', runs: [48, 52, 47, 95, 51, 49, 53, 50, 112, 48].map((s, i) => ({ id: i, title: 'Run ' + (i + 1), conclusion: s > 90 ? 'failure' : 'success', durationSec: s })) },
+  };
+  const ask = async (kind, params) => {
+    try {
+      return { data: await workbench.query(kind, params) };
+    } catch (error) {
+      return { error };
+    }
+  };
+  const kpi = (label, value, tone) => {
+    const box = document.createElement('div');
+    box.className = 'kpi';
+    box.append(label);
+    const b = document.createElement('b');
+    if (tone) b.className = tone;
+    b.textContent = value;
+    box.append(b);
+    return box;
+  };
+  let chart;
+  const draw = (runs) => {
+    const ordered = [...runs].reverse();
+    const colour = (r) => (r.conclusion === 'failure' || r.status === 'failed' ? wbPalette[3] : r.conclusion === 'success' || r.status === 'success' ? wbPalette[1] : wbPalette[2]);
+    const data = {
+      labels: ordered.map((r) => r.title || '#' + r.id),
+      datasets: [{ label: 'seconds', data: ordered.map((r) => r.durationSec ?? 0), backgroundColor: ordered.map(colour) }],
+    };
+    if (chart) {
+      chart.data = data;
+      chart.update();
+    } else {
+      chart = new Chart($('ci'), { type: 'bar', data, options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { display: false } } } } });
+    }
+  };
+  async function load() {
+    const [sessions, repos, ci] = await Promise.all([ask('sessions'), ask('git.repos'), ask('ci.runs', { limit: 12 })]);
+    // Sessions and git decide whether this is live; a project without a forge just has no CI to draw.
+    const refused = [sessions, repos].find((x) => x.error);
+    const live = !refused;
+    const status = $('status');
+    status.textContent = '';
+    if (live) {
+      status.append('Live data of this project, refreshed every 15 seconds.');
+    } else {
+      const b = document.createElement('b');
+      b.textContent = 'Sample data. ';
+      status.append(b, refused.error.message || 'No live data.');
+    }
+    const s = (live ? sessions.data : SAMPLE.sessions).sessions;
+    const r = (live ? repos.data : SAMPLE.repos).repos;
+    const runs = live ? (ci.data ? ci.data.runs : []) : SAMPLE.ci.runs;
+    const failed = runs.filter((x) => x.conclusion === 'failure' || x.status === 'failed').length;
+    const kpis = $('kpis');
+    kpis.replaceChildren(
+      kpi('Sessions working', String(s.filter((x) => x.state === 'working').length)),
+      kpi('Waiting for you', String(s.filter((x) => x.state === 'needs_permission' || x.state === 'needs_input').length), s.some((x) => x.state === 'needs_permission') ? 'warn' : ''),
+      kpi('Files changed', String(r.reduce((n, x) => n + (x.changed || 0), 0))),
+      kpi('CI runs failed', runs.length ? failed + ' of ' + runs.length : 'no CI runs', runs.length ? (failed ? 'bad' : 'good') : ''),
+    );
+    // A project without a GitHub or GitLab remote has no runs: say so instead of drawing an empty chart.
+    $('ci-card').hidden = runs.length === 0;
+    $('ci-note').hidden = runs.length > 0;
+    $('ci-note').textContent = (ci.error && ci.error.message) || 'No CI runs yet.';
+    if (runs.length) draw(runs);
+    $('sessions').replaceChildren(...s.map((x) => {
+      const tr = document.createElement('tr');
+      for (const [text, cls] of [[x.title], [x.state], [x.model || ''], ['$' + (x.costUsd || 0).toFixed(2), 'num']]) {
+        const td = document.createElement('td');
+        td.textContent = text;
+        if (cls) td.className = cls;
+        tr.append(td);
+      }
+      return tr;
+    }));
+  }
+  load();
+  setInterval(() => document.visibilityState === 'visible' && load(), 15000);
+})();
+</script>
+</body>
+</html>

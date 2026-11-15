@@ -1,12 +1,12 @@
 // Small presentational pieces shared by the agents views.
 
-import { Asterisk, CodeXml, Container, Copy, ExternalLink, Moon, Radio, Sparkles, SquareTerminal, Wrench, type LucideIcon } from 'lucide-react'
-import type { AgentProvider, TerminalInfo } from '@/api/types'
+import { Asterisk, CodeXml, Container, Copy, ExternalLink, LayoutDashboard, Moon, Radio, Sparkles, SquareTerminal, Wrench, type LucideIcon } from 'lucide-react'
+import type { AgentInfo, AgentProvider, TerminalInfo } from '@/api/types'
 import { IconButton } from '@/ui'
-import { copyText, openRemote } from './actions'
+import { copyText, openPage, openRemote } from './actions'
 import { useAgentDefaults } from './api'
 import { providerKindOf, providerLabel } from './lib/providers'
-import { colorCss, stateLabel, tone } from './lib/sessions'
+import { artifactPages, colorCss, stateLabel, tone } from './lib/sessions'
 
 const PROVIDER_ICONS: Record<AgentProvider, LucideIcon> = {
   claude: Asterisk,
@@ -81,6 +81,32 @@ export function RemoteLink({ url, compact }: { url: string; compact?: boolean })
         <ExternalLink size={11} />
       </button>
       <IconButton icon={Copy} size="small" label="Copy Remote Control link" onClick={() => void copyText(url, 'Remote Control link copied')} />
+    </span>
+  )
+}
+
+/**
+ * Pages the session published to claude.ai with Claude Code's Artifact tool: the newest opens
+ * (a private page of the user's account until they share it), the rest are in the tab's menu.
+ */
+export function ArtifactPageLink({ a, compact }: { a: AgentInfo | null | undefined; compact?: boolean }) {
+  const pages = artifactPages(a)
+  if (!pages.length) return null
+  const [newest] = pages
+  const more = pages.length - 1
+  return (
+    <span className="wb-ag-remote" title={`${newest.label} — published to claude.ai${more ? `, and ${more} more (the tab's menu lists them)` : ''}`}>
+      <button className="wb-ag-remote-open" onClick={() => openPage(newest.url)}>
+        <LayoutDashboard size={13} />
+        {!compact && (
+          <span className="wb-ellipsis" style={{ maxWidth: 140 }}>
+            {newest.label}
+            {more > 0 && ` +${more}`}
+          </span>
+        )}
+        <ExternalLink size={11} />
+      </button>
+      <IconButton icon={Copy} size="small" label="Copy page link" onClick={() => void copyText(newest.url, 'Page link copied')} />
     </span>
   )
 }

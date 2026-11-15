@@ -168,6 +168,17 @@ export interface AgentInfo {
   pendingPermission: PendingPermission | null
   /** After a resume or fork: what the next message re-sends (Claude Code's `SessionStart` report), until it is sent. */
   resumeCost: ResumeCost | null
+  /** Pages the session published to claude.ai with Claude Code's Artifact tool, newest first. */
+  artifacts: ArtifactLink[]
+}
+
+/** terminals/mod.rs ArtifactLink: a page published to claude.ai (private to its owner until shared). */
+export interface ArtifactLink {
+  /** `https://claude.ai/artifact/<id>` or `https://claude.ai/code/artifact/<id>`. */
+  url: string
+  title: string | null
+  /** When it was published or last updated (ms). */
+  at: number
 }
 
 /** terminals/mod.rs ResumeCost. */

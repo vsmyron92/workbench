@@ -29,9 +29,9 @@ import { openTerminal, startAgent, useAgentDefaults, useAgentHistory, useExterna
 import { pendingOf } from './lib/permission'
 import { dialogSeenOnScreen, displayLabel, historyProviders, providerKindOf, reportsAnswers, resumes, SEEN_ON_SCREEN } from './lib/providers'
 import { newShell } from './commands'
-import { agentMeta, agentSessions, colorCss, counts, isRunning, lastActivity, resumeNote, sortSessions, tone } from './lib/sessions'
+import { agentMeta, agentSessions, artifactPages, colorCss, counts, isRunning, lastActivity, resumeNote, sortSessions, tone } from './lib/sessions'
 import { NewSessionForm } from './NewSession'
-import { ColorBar, ContainerBadge, ProviderBadge, ProviderIcon, RemoteLink, StateChip, StateDot } from './parts'
+import { ArtifactPageLink, ColorBar, ContainerBadge, ProviderBadge, ProviderIcon, RemoteLink, StateChip, StateDot } from './parts'
 import { PermissionRequest } from './Permission'
 import { useAgentsUi } from './store'
 
@@ -104,6 +104,11 @@ export function SessionCard({ t, showProject }: { t: TerminalInfo; showProject?:
         )}
         <span className="wb-ellipsis wb-muted">{meta.join(' · ')}</span>
         <span style={{ flex: 1 }} />
+        {artifactPages(a).length > 0 && (
+          <span onClick={(e) => e.stopPropagation()}>
+            <ArtifactPageLink a={a} compact />
+          </span>
+        )}
         {a?.remoteUrl && (
           <span onClick={(e) => e.stopPropagation()}>
             <RemoteLink url={a.remoteUrl} compact />

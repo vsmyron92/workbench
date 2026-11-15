@@ -88,6 +88,9 @@ pub async fn start(state: &AppState) {
             Err(e) => tracing::warn!("workspace: cannot add the example cards to {id}: {}", e.message),
         }
     }
+    // Scopes from earlier releases get the shared report files added since (Chart.js).
+    let st = state.clone();
+    let _ = tokio::task::spawn_blocking(move || store::top_up_all(&st)).await;
     watch::start(state).await;
 }
 

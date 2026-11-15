@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.20.0 - 2026-11-15
+
+Dashboards: what Claude can build as an interactive page now has a place inside Workbench, and the one it publishes to
+claude.ai is named for what it is.
+
+- **Charts in reports.** Chart.js 4 ships with every scope's shared report files (`../_shared/chart.umd.js`), with
+  `report-charts.js` giving it the report's dark look and a palette, so an agent can draw a real chart without a CDN
+  (which the sandbox blocks). Existing scopes get the new files at start without their edited `report.css` or
+  `report.js` being replaced.
+- **Live data in reports.** In a card of a project, `workbench.query(kind, params)` reads the project's agent sessions,
+  git branches and changes, recent CI runs (GitHub or GitLab) and data-viewer series. The first request asks you, once
+  per card (**Allow** / **Not now**, and a pulse button in the toolbar to turn it off); it is read-only, limited to the
+  card's own project, and never available in Home, the Sandbox or a card from a repository. Answers are rebuilt field by
+  field, so no folder names, terminal text or message bodies reach a report. A report you allow can still send what it
+  reads to other sites, and the question says so. The Sandbox's guide has a **Dashboard** tab that shows sample data
+  and, in a project's card, the real thing.
+- **Pages published to claude.ai.** When a Claude Code session uses its `Artifact` tool, the permission request now says
+  "Permission to publish out/ci.html to claude.ai" and that the file leaves the computer, and the session's tab, card
+  and menu keep the link to the page afterwards (only claude.ai addresses are ever offered). Not seen against the real
+  service: publishing there is a write Workbench's tests must not do, so the tool's answer is read in any shape.
+- **For agents.** The Workspace tools' authoring guide and the `workbench-report-card` skill describe the charts and
+  `workbench.query`; the `workbench` skill says when a card is the right place and when the Artifact tool is.
+
 ## 0.19.0 - 2026-11-14
 
 Checked against Claude Code 2.1.325 (about 40 releases newer than what 0.18 was verified with). Nothing was broken;

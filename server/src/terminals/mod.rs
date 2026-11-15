@@ -39,6 +39,7 @@
 
 mod activity;
 mod agent;
+mod artifact;
 mod codex;
 mod conversation;
 mod failover;
@@ -239,6 +240,25 @@ pub struct AgentInfo {
     /// `SessionStart` reports it, until the next prompt is sent.
     #[serde(default)]
     pub resume_cost: Option<ResumeCost>,
+    /// Pages the session published to claude.ai with Claude Code's `Artifact` tool, newest first
+    /// (`hooks::artifact_published`). Only claude.ai links; at most `MAX_ARTIFACTS`.
+    #[serde(default)]
+    pub artifacts: Vec<ArtifactLink>,
+}
+
+/// How many published pages a session remembers.
+pub const MAX_ARTIFACTS: usize = 8;
+
+/// A page a session published to claude.ai (private to its owner until they share it).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactLink {
+    /// `https://claude.ai/artifact/<id>` or `https://claude.ai/code/artifact/<id>`, nothing else.
+    pub url: String,
+    /// What the session called it (the call's `title`, else the page file's name).
+    pub title: Option<String>,
+    /// When it was published or last updated (ms).
+    pub at: i64,
 }
 
 /// Claude Code (2.1.2xx and later) tells a hook that resumes or forks a conversation how much of it
@@ -1685,6 +1705,7 @@ pub(crate) fn test_agent() -> AgentInfo {
         last_event_at: 0,
         pending_permission: None,
         resume_cost: None,
+        artifacts: vec![],
     }
 }
 

@@ -110,8 +110,8 @@ const SANDBOX_EXAMPLES: &[Example] = &[Example {
     category: "guide",
     icon: None,
     pinned: true,
-    steps: &[("Guide", "guide.md"), ("Playground report", "playground.html")],
-    files: &[card_file!("sandbox", "guide.md"), card_file!("sandbox", "playground.html")],
+    steps: &[("Guide", "guide.md"), ("Playground report", "playground.html"), ("Dashboard", "dashboard.html")],
+    files: &[card_file!("sandbox", "guide.md"), card_file!("sandbox", "playground.html"), card_file!("sandbox", "dashboard.html")],
 }];
 
 fn examples_for(scope: &Scope) -> &'static [Example] {
@@ -220,7 +220,7 @@ mod tests {
                     if r.starts_with("https://") || r.starts_with('#') {
                         continue;
                     }
-                    let shared = r.strip_prefix("../_shared/").is_some_and(|f| ["report.css", "report.js"].contains(&f));
+                    let shared = r.strip_prefix("../_shared/").is_some_and(|f| store::SHARED_FILES.iter().any(|(name, _)| *name == f));
                     assert!(shared || has(r), "{}/{path} refers to {r}, which the card does not have", ex.id);
                 }
             }

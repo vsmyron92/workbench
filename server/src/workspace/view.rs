@@ -59,7 +59,10 @@ pub const PRELUDE: &str = concat!(
     "if(!['http:','https:'].includes(u.protocol)||u.origin===location.origin)return;",
     "if(framed){e.preventDefault();parent.postMessage({type:'workbench:open-link',href:u.href},'*')}",
     "else{a.target='_self'}};document.addEventListener('click',route,true);",
-    "document.addEventListener('auxclick',route,true)})();</script>"
+    "document.addEventListener('auxclick',route,true)})();</script>",
+    "<script data-workbench-query>",
+    include_str!("assets/prelude-query.js"),
+    "</script>"
 );
 
 #[derive(Clone)]
@@ -373,6 +376,7 @@ mod tests {
         assert_eq!(check_view_path(f, "2026-09-15_x/report.html"), Ok("2026-09-15_x/report.html".into()));
         assert_eq!(check_view_path(f, "2026-09-15_x//img/./a.png"), Ok("2026-09-15_x/img/a.png".into()));
         assert_eq!(check_view_path(f, "_shared/report.css"), Ok("_shared/report.css".into()));
+        assert_eq!(check_view_path(f, "_shared/chart.umd.js"), Ok("_shared/chart.umd.js".into()));
         assert_eq!(check_view_path(f, "other-card/report.html"), Err(Refusal::NotFound));
         assert_eq!(check_view_path(f, "workspace.json"), Err(Refusal::NotFound));
         assert_eq!(check_view_path(f, "2026-09-15_x"), Err(Refusal::NotFound));
@@ -414,6 +418,21 @@ mod tests {
         // The message web/src/features/workspace/viewers/basic.tsx (HtmlView) listens for.
         assert!(PRELUDE.contains("parent.postMessage({type:'workbench:open-link',href:u.href},'*')"));
         assert!(!PRELUDE.contains("_blank"), "a popup from the report would stay sandboxed");
+    }
+
+    #[test]
+    fn every_report_can_ask_the_framing_page_for_live_data() {
+        // The messages web/src/features/workspace/bridge/ (parseRequest, useReportBridge) speaks.
+        for part in ["window.workbench", "parent.postMessage({ type: 'workbench:query', id, kind: String(kind)", "d.type !== 'workbench:result'", "e.source !== parent"] {
+            assert!(PRELUDE.contains(part), "{part}");
+        }
+        // The kinds it lists are the ones the page answers (KINDS and runQuery in bridge/kinds.ts).
+        for kind in ["sessions", "git.repos", "ci.runs", "data.series", "data.view", "data.stats"] {
+            assert!(PRELUDE.contains(&format!("'{kind}'")), "{kind}");
+        }
+        // A report outside Workbench gets a plain refusal; no network is involved either way.
+        assert!(PRELUDE.contains("framed") && !PRELUDE.contains("fetch(") && !PRELUDE.contains("XMLHttpRequest"));
+        assert_eq!(PRELUDE.matches("<script").count(), PRELUDE.matches("</script>").count());
     }
 
     #[test]

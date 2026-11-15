@@ -37,7 +37,7 @@ export function StepViewer({
   const name = basename(target.path)
   switch (target.kind) {
     case 'html':
-      return <HtmlView key={target.path} url={url} title={target.name} label={target.path} />
+      return <HtmlView key={target.path} url={url} title={target.name} label={target.path} card={card} />
     case 'markdown':
       return <MarkdownView card={card} path={target.path} onOpenPath={onOpenPath} active={active} />
     case 'image':

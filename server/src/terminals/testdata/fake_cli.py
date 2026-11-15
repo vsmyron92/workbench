@@ -189,6 +189,8 @@ def unpaste(line):
 
 # ---------------------------------------------------------------- claude
 
+# What the fake Artifact tool answers with (a page the real tool would publish to claude.ai).
+FAKE_ARTIFACT_URL = "https://claude.ai/artifact/9f2c1d7e-aaaa-4bbb-8ccc-0123456789ab"
 BASH_DIALOG = (
     "\n Bash command\n   {}\n\n Do you want to proceed?\n > 1. Yes\n"
     "   2. Yes, and don't ask again for this command\n"
@@ -310,6 +312,10 @@ def claude(args):
         elif line.startswith("plan:"):
             tool = "ExitPlanMode"
             tool_input = {"plan": line}
+        elif line.startswith("artifact:"):
+            # Claude Code's Artifact tool publishing a page of the project to claude.ai.
+            tool = "Artifact"
+            tool_input = {"file_path": f"{here}/{line[9:].strip() or 'out/dashboard.html'}", "icon": "chart"}
         post({"hook_event_name": "UserPromptSubmit", "prompt": line})
         post({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_use_id": tid, "tool_input": tool_input})
         out((PLAN_DIALOG if tool == "ExitPlanMode" else BASH_DIALOG).format(line))
@@ -352,7 +358,8 @@ def claude(args):
         if answer.endswith("allow"):
             out(f"Running {line}\n")
             time.sleep(secs)
-            post({"hook_event_name": "PostToolUse", "tool_name": tool, "tool_use_id": tid, "tool_input": tool_input, "tool_response": {}})
+            response = {"url": FAKE_ARTIFACT_URL} if tool == "Artifact" else {}
+            post({"hook_event_name": "PostToolUse", "tool_name": tool, "tool_use_id": tid, "tool_input": tool_input, "tool_response": response})
             post({"hook_event_name": "Stop", "last_assistant_message": f"Done: {line}"})
         else:
             out(f"Declined {line}\n")

@@ -638,6 +638,41 @@ async fn a_resumed_session_reports_what_its_next_message_costs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_page_published_to_claude_ai_asks_where_it_goes_and_leaves_its_link_on_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    let log = dir.path().join("claude.log");
+    let (state, addr, pid) = served_state(dir.path(), &fake, &log).await;
+    let t = &state.terminals;
+    let (cookie, key) = sign_in(&state, addr).await;
+    let origin = format!("http://{addr}");
+    let a = t.spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), ..Default::default() }).await.unwrap();
+    wait_long("the session to start", 10, || agent_of(&state, &a.id).state == AgentState::Idle).await;
+    assert!(agent_of(&state, &a.id).artifacts.is_empty());
+
+    t.send_text(&a.id, "artifact: out/ci.html", true).await.unwrap();
+    wait_long("a pending request", 10, || pending(&state, &a.id).is_some()).await;
+    let p = pending(&state, &a.id).unwrap();
+    assert_eq!((p.tool.as_str(), p.summary.as_str()), ("Artifact", "Permission to publish out/ci.html to claude.ai"));
+    assert!(p.detail.contains("Page file: ") && p.detail.contains("sent to claude.ai") && p.complete, "{}", p.detail);
+    let r = reqwest::Client::new()
+        .post(format!("{origin}/api/agents/{}/permission", a.id))
+        .header("cookie", &cookie)
+        .header("origin", &origin)
+        .header(crate::auth::KEY_HEADER, &key)
+        .json(&json!({ "id": p.id, "decision": "allow" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
+    wait_long("the page's link", 10, || !agent_of(&state, &a.id).artifacts.is_empty()).await;
+    let wire = serde_json::to_value(t.info(&a.id).unwrap()).unwrap();
+    assert_eq!(wire["agent"]["artifacts"][0]["url"], "https://claude.ai/artifact/9f2c1d7e-aaaa-4bbb-8ccc-0123456789ab");
+    assert_eq!(wire["agent"]["artifacts"][0]["title"], "ci");
+    t.kill(&a.id).await.ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restricted_session_starts_only_restricted_claude_sessions() {
     let dir = tempfile::tempdir().unwrap();
     let fake = fake_cli(dir.path(), "claude");
