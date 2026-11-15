@@ -74,6 +74,9 @@ pub struct AgentRequest {
     pub remote_control: Option<bool>,
     /// Claude Code's `--restricted` (see `AgentLaunch::restricted`). A request only: never a default.
     pub restricted: Option<bool>,
+    /// Claude Code's ultracode (see `AgentLaunch::ultracode`). A request only: never a default, and never
+    /// asked for by a session that starts another (`workbench_start_session` has no such option).
+    pub ultracode: Option<bool>,
     pub resume: Option<String>,
     pub fork: bool,
     pub add_dirs: Vec<String>,
@@ -226,6 +229,14 @@ pub fn session_settings(hook_url: &str, token: &str, helper: Option<&str>, statu
         s["statusLine"] = json!({ "type": "command", "command": cmd, "padding": 0 });
     }
     s
+}
+
+/// What a session's launch options add to its settings file: ultracode turns on with the key, at whatever
+/// effort level the session runs at (Claude Code 2.1.284 and later; before that it ran the session at `xhigh`).
+pub fn launch_settings(settings: &mut Value, l: &AgentLaunch) {
+    if l.ultracode {
+        settings["ultracode"] = Value::Bool(true);
+    }
 }
 
 pub fn mcp_config(url: &str, token: &str, terminal_id: &str) -> Value {
@@ -397,6 +408,11 @@ pub fn resolve_launch(provider: &Provider, cfg: &AgentsConfig, project: &Project
     if restricted && permission_mode.as_deref() == Some("bypassPermissions") {
         return Err(ApiError::bad_request("restricted mode refuses bypassPermissions: pick another permission mode"));
     }
+    // Ultracode is Claude Code's own too (it needs a model that takes `xhigh`; Claude Code leaves it off otherwise).
+    if req.ultracode == Some(true) && !claude {
+        return Err(ApiError::bad_request(format!("{} has no ultracode mode (only Claude Code does)", provider.label)));
+    }
+    let ultracode = claude && req.ultracode == Some(true);
     let mut add_dirs: Vec<String> = vec![];
     if kind.takes_add_dirs() {
         for d in pa.add_dirs.iter().chain(req.add_dirs.iter()) {
@@ -422,6 +438,7 @@ pub fn resolve_launch(provider: &Provider, cfg: &AgentsConfig, project: &Project
         permission_mode,
         remote_control: claude && provider.local.is_none() && provider.api.is_none() && req.remote_control.unwrap_or(pa.remote_control || cfg.remote_control),
         restricted,
+        ultracode,
         add_dirs,
     })
 }
@@ -757,6 +774,10 @@ impl Terminals {
                 if let Some(p) = &req.spawned_by {
                     m["spawnedBy"] = json!(p);
                 }
+                // Costs far more tokens than a session without it: the tab says so.
+                if launch.ultracode {
+                    m["ultracode"] = json!(true);
+                }
                 m
             },
             lingering: 0,
@@ -1058,6 +1079,7 @@ impl Terminals {
         };
         let base = state.local_base_url();
         let mut settings = session_settings(&format!("{base}/api/hooks/claude/{}", entry.id), &token, helper.as_deref(), statusline, permission_wait(&cfg));
+        launch_settings(&mut settings, &launch);
         if let Some(m) = shared_memory_dir(&provider, &claude_dir, &cwd, &env) {
             settings["autoMemoryDirectory"] = Value::String(m.to_string_lossy().into_owned());
         }
@@ -1165,6 +1187,7 @@ impl Terminals {
         });
         let wait = permission_wait(&state.config.read().agents);
         let mut settings = session_settings(&format!("{base}/api/hooks/claude/{}", entry.id), &token, session_start.as_deref(), false, wait);
+        launch_settings(&mut settings, &launch);
         if session_start.is_none() {
             if let Some(h) = settings.get_mut("hooks").and_then(Value::as_object_mut) {
                 h.remove("SessionStart");
@@ -3053,6 +3076,7 @@ mod tests {
             permission_mode: Some("plan".into()),
             remote_control: true,
             restricted: false,
+            ultracode: false,
             add_dirs: vec!["/tmp/x".into()],
         }
     }
@@ -3161,6 +3185,39 @@ mod tests {
         assert!(resolve_launch(&prov("claude"), &c, &p, &both).unwrap_err().to_string().contains("refuses bypassPermissions"));
         let plan = AgentRequest { restricted: Some(true), permission_mode: Some("plan".into()), ..Default::default() };
         assert!(resolve_launch(&prov("claude"), &c, &p, &plan).is_ok());
+    }
+
+    #[test]
+    fn ultracode_is_a_setting_of_claude_code_that_leaves_the_effort_alone() {
+        let (s, m) = (Path::new("/d/s.json"), Path::new("/d/m.json"));
+        // Not a flag: the effort the user chose stays what `--effort` says, and the settings file carries the switch.
+        let l = AgentLaunch { ultracode: true, effort: Some("max".into()), ..Default::default() };
+        let a = build_argv("claude", &SessionArg::New("u".into()), s, m, &l, None);
+        assert!(a.windows(2).any(|w| w == ["--effort", "max"]) && !a.iter().any(|x| x.contains("ultracode")), "{a:?}");
+        let mut on = session_settings("u", "t", None, false, None);
+        launch_settings(&mut on, &l);
+        assert_eq!(on["ultracode"], true);
+        let mut off = session_settings("u", "t", None, false, None);
+        launch_settings(&mut off, &AgentLaunch::default());
+        assert!(off.get("ultracode").is_none(), "off is the absence of the key, so the user's own setting applies");
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = project(dir.path(), "");
+        let c = cfg("[agents.providers.codex]\nmodel = \"gpt-5.5\"\n");
+        let prov = |id: &str| providers::find(&c, Some(id)).unwrap();
+        let ask = AgentRequest { ultracode: Some(true), ..Default::default() };
+        assert!(resolve_launch(&prov("claude"), &c, &p, &ask).unwrap().ultracode);
+        // Never a default, and `false` is the same as not asking.
+        assert!(!resolve_launch(&prov("claude"), &c, &p, &AgentRequest::default()).unwrap().ultracode);
+        assert!(!resolve_launch(&prov("claude"), &c, &p, &AgentRequest { ultracode: Some(false), ..Default::default() }).unwrap().ultracode);
+        // It combines with any effort and permission mode, and another CLI says it has none.
+        let all = AgentRequest { ultracode: Some(true), effort: Some("low".into()), permission_mode: Some("plan".into()), ..Default::default() };
+        let l = resolve_launch(&prov("claude"), &c, &p, &all).unwrap();
+        assert_eq!((l.ultracode, l.effort.as_deref(), l.permission_mode.as_deref()), (true, Some("low"), Some("plan")));
+        assert!(resolve_launch(&prov("codex"), &c, &p, &ask).unwrap_err().to_string().contains("no ultracode mode"));
+        // A launch from before the option has none.
+        let old: AgentLaunch = serde_json::from_str(r#"{"effort":"high","restricted":false,"addDirs":[]}"#).unwrap();
+        assert!(!old.ultracode);
     }
 
     #[test]

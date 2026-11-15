@@ -95,6 +95,15 @@ restricted Claude Code sessions itself. Workbench's own tools still work for it 
 except `run_start`, which is refused as it is for a sandboxed Codex session: a run's command comes from
 files of the repository. The debugger's tools are not confined for any session, restricted or not.
 
+**Ultracode** (New session › options, Claude Code): Claude plans a workflow of subagents for each
+substantive task instead of waiting to be asked, at whatever effort level the session runs at. It
+uses far more tokens, so a usage limit comes sooner, and it needs dynamic workflows to be on for your
+account and a model that takes `xhigh` effort (Claude Code leaves it off otherwise). Workbench turns
+it on with `"ultracode": true` in the session's own settings, so the Effort choice is untouched, a
+restart or a move to another Claude account keeps it, and the session's tab and card show an
+**Ultracode** badge. A session never starts another one in ultracode: that is your choice for each
+session.
+
 Tools never deploy, never run destructive git operations, never start a language server,
 never query a database, never update or restart Workbench and never answer a permission
 request. Run configurations that deploy or release are refused to agents; you start them.

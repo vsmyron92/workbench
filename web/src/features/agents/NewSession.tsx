@@ -15,6 +15,10 @@ import { ProviderIcon } from './parts'
 import { useAgentsUi, type NewSessionPrefill } from './store'
 
 const CLAUDE_MODELS = ['fable', 'opus', 'sonnet', 'haiku']
+/** Claude Code's ultracode (`"ultracode": true` in the session's settings). */
+export const ULTRACODE_HELP =
+  'Ultracode: Claude plans a workflow of subagents for each substantive task, at the effort level chosen here. It uses far more tokens, so a usage limit comes sooner. Needs dynamic workflows on for your account and a model that takes xhigh effort; otherwise Claude Code leaves it off.'
+
 /** `claude --restricted`, as its own help puts it. */
 const RESTRICTED_HELP =
   'Restricted: for a repository you do not trust. Claude can read and edit files in the project, but runs no commands, fetches no web pages and ignores your own Claude settings files. Not with “bypassPermissions”.'
@@ -167,6 +171,7 @@ export function NewSessionForm({
   const [mode, setMode] = useState('')
   const [remote, setRemote] = useState<boolean | null>(null)
   const [restricted, setRestricted] = useState(false)
+  const [ultracode, setUltracode] = useState(false)
   const [showOptions, setShowOptions] = useState(!compact)
   const [help, setHelp] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -252,6 +257,7 @@ export function NewSessionForm({
       permissionMode: mode || undefined,
       remoteControl: p.supports.remoteControl ? (remote ?? undefined) : undefined,
       restricted: p.supports.restricted && restricted ? true : undefined,
+      ultracode: p.supports.ultracode && ultracode ? true : undefined,
       inContainer: runInside || undefined,
     })
     setBusy(false)
@@ -366,9 +372,17 @@ export function NewSessionForm({
               </Checkbox>
             </span>
           )}
+          {p.supports.ultracode && (
+            <span title={ULTRACODE_HELP}>
+              <Checkbox checked={ultracode} onChange={setUltracode}>
+                Ultracode
+              </Checkbox>
+            </span>
+          )}
         </div>
       )}
       {p?.supports.restricted && restricted && <div className="wb-ag-note">{RESTRICTED_HELP}</div>}
+      {p?.supports.ultracode && ultracode && <div className="wb-ag-note">{ULTRACODE_HELP}</div>}
       {dangerous && preset && (
         <div className="wb-ag-danger">
           <TriangleAlert size={13} />

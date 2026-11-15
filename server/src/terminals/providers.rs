@@ -1360,6 +1360,8 @@ pub fn describe(p: &Provider, available: Option<&PathBuf>) -> Value {
             "remoteControl": k == ProviderKind::Claude,
             // `claude --restricted`: no commands or web fetch, for a repository you do not trust.
             "restricted": k == ProviderKind::Claude,
+            // `ultracode`: Claude plans a workflow of subagents for each substantive task (a lot more tokens).
+            "ultracode": k == ProviderKind::Claude,
             "addDirs": k.takes_add_dirs(),
             "history": k.resumes(),
             // Permission requests answered from Workbench (Claude Code's hooks).

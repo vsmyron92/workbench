@@ -27,6 +27,9 @@ pub struct AgentLaunch {
     /// Claude Code's `--restricted`: no shell or code-running tools, no web fetch, files inside the
     /// working directories, and the user's own settings files ignored. For repositories you do not trust.
     pub restricted: bool,
+    /// Claude Code's ultracode: Claude plans a workflow of subagents for each substantive task, at the
+    /// session's effort level (`"ultracode": true` in the session's settings). Costs far more tokens.
+    pub ultracode: bool,
     pub add_dirs: Vec<String>,
 }
 

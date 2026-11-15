@@ -52,6 +52,9 @@ pub fn carry_request(req: &mut AgentRequest, from: &Provider, to: &Provider) {
     if to.kind != ProviderKind::Claude || to.local.is_some() {
         req.remote_control = None;
     }
+    if to.kind != ProviderKind::Claude {
+        req.ultracode = None;
+    }
 }
 
 /// What the new session is told about the one it continues.
@@ -361,6 +364,8 @@ impl Terminals {
             permission_mode: launch.permission_mode,
             // Never loosened by a move: an account without the mode refuses the session instead of starting it open.
             restricted: launch.restricted.then_some(true),
+            // A preference, unlike `restricted`: a move to another CLI just leaves it behind (`carry_request`).
+            ultracode: launch.ultracode.then_some(true),
             add_dirs: launch.add_dirs.into_iter().chain(carried.add_dirs).collect(),
             resume: carried.resume,
             exact: true,
@@ -544,20 +549,24 @@ mod tests {
             effort: Some("high".into()),
             permission_mode: Some("plan".into()),
             remote_control: Some(true),
+            ultracode: Some(true),
             ..Default::default()
         };
         // Another subscription of the same CLI takes everything.
         let mut r = asked();
         carry_request(&mut r, &claude, &b);
         assert_eq!((r.model.as_deref(), r.effort.as_deref(), r.permission_mode.as_deref(), r.remote_control), (Some("opus"), Some("high"), Some("plan"), Some(true)));
+        assert_eq!(r.ultracode, Some(true));
         // A local model has its own model, and no claude.ai to be remote controlled from.
         let mut r = asked();
         carry_request(&mut r, &claude, &local);
         assert_eq!((r.model, r.effort, r.permission_mode.as_deref(), r.remote_control), (None, None, Some("plan"), None));
+        assert_eq!(r.ultracode, Some(true), "it is still Claude Code");
         // Another CLI takes none of it.
         let mut r = asked();
         carry_request(&mut r, &claude, &codex);
         assert_eq!((r.model, r.effort, r.permission_mode, r.remote_control), (None, None, None, None));
+        assert_eq!(r.ultracode, None, "a move to another CLI leaves a preference behind instead of refusing, unlike restricted");
     }
 
     #[test]

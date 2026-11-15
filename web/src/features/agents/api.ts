@@ -68,6 +68,8 @@ export interface ProviderInfo {
     remoteControl: boolean
     /** `claude --restricted`: no commands or web fetch, for a repository you do not trust. */
     restricted: boolean
+    /** Claude Code's ultracode: a workflow of subagents for each substantive task, at the chosen effort. */
+    ultracode: boolean
     addDirs: boolean
     history: boolean
     /** Its permission requests can be answered from Workbench (Claude Code). */
@@ -131,6 +133,7 @@ export interface NewAgentRequest {
   permissionMode?: string
   remoteControl?: boolean
   restricted?: boolean
+  ultracode?: boolean
   resume?: string
   fork?: boolean
   cwd?: string

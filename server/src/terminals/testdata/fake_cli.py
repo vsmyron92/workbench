@@ -252,7 +252,10 @@ def claude(args):
         else:
             i += 1
     with open(settings, encoding="utf-8") as f:
-        hooks = json.load(f).get("hooks", {})
+        loaded = json.load(f)
+    hooks = loaded.get("hooks", {})
+    # Claude Code's `ultracode` setting, which Workbench writes for a session started with it.
+    log("FAKE_CLAUDE_LOG", "SETTINGS ultracode=" + str(loaded.get("ultracode", "<unset>")))
     # What the session was started with: its command line (a prompt may span lines), and the
     # environment that decides which account or model server it talks to.
     log("FAKE_CLAUDE_LOG", "ARGS " + " ".join(args).replace("\n", " / "))
