@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.21.0 - 2026-11-15
+
+- **Ultracode option.** The new-session composer has an **Ultracode** box for Claude Code: Claude plans a workflow of
+  subagents for each substantive task instead of waiting to be asked, at the effort level you chose. Workbench sets
+  `"ultracode": true` in the session's own settings (checked live with Claude Code 2.1.325), so the Effort choice stays
+  yours, a restart or a move to another Claude account keeps it, and the tab and card show an **Ultracode** badge. It
+  uses far more tokens, so sessions never start each other in ultracode; Claude Code leaves it off when workflows are
+  off for the account or the model cannot take `xhigh` effort.
+
 ## 0.20.0 - 2026-11-15
 
 Dashboards: what Claude can build as an interactive page now has a place inside Workbench, and the one it publishes to

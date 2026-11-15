@@ -673,6 +673,64 @@ async fn a_page_published_to_claude_ai_asks_where_it_goes_and_leaves_its_link_on
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ultracode_session_has_the_setting_keeps_it_when_restarted_and_starts_children_without_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    let log = dir.path().join("claude.log");
+    let (state, _addr, pid) = served_with(dir.path(), &fake, |cfg| {
+        let home = dir.path().join("claude-home");
+        std::fs::create_dir_all(&home).unwrap();
+        cfg.agents.providers.insert(
+            "claude".into(),
+            crate::config::global::ProviderConfig {
+                env: [("CLAUDE_CONFIG_DIR".to_string(), home.display().to_string()), ("FAKE_CLAUDE_LOG".to_string(), log.display().to_string())].into(),
+                ..Default::default()
+            },
+        );
+        cfg.agents.providers.insert("cdx".into(), crate::config::global::ProviderConfig { kind: Some("codex".into()), ..Default::default() });
+    })
+    .await;
+    let t = &state.terminals;
+    let ask = |ultracode: Option<bool>| super::agent::AgentRequest { project_id: pid.clone(), effort: Some("max".into()), ultracode, ..Default::default() };
+
+    // The setting reaches Claude Code in the session's settings file, and the effort the user chose is untouched.
+    let u = t.spawn_agent(&state, ask(Some(true))).await.unwrap();
+    wait_long("the session to start", 10, || agent_of(&state, &u.id).state == AgentState::Idle).await;
+    assert_eq!(t.info(&u.id).unwrap().meta["ultracode"], true, "the tab can say so");
+    let argv = t.info(&u.id).unwrap().argv;
+    assert!(argv.windows(2).any(|w| w == ["--effort", "max"]) && !argv.iter().any(|a| a.contains("ultracode")), "{argv:?}");
+    assert_eq!(log_lines(&log, "SETTINGS"), ["SETTINGS ultracode=True"]);
+
+    // Not asking for it leaves the key out, so the user's own settings decide.
+    let plain = t.spawn_agent(&state, ask(None)).await.unwrap();
+    wait_long("the plain session to start", 10, || agent_of(&state, &plain.id).state == AgentState::Idle).await;
+    assert!(t.info(&plain.id).unwrap().meta.get("ultracode").is_none());
+    assert_eq!(log_lines(&log, "SETTINGS"), ["SETTINGS ultracode=True", "SETTINGS ultracode=<unset>"]);
+
+    // A restart starts it the same way.
+    t.kill(&u.id).await.unwrap();
+    t.restart(&state, &u.id).await.unwrap();
+    wait_long("the restart", 10, || log_lines(&log, "SETTINGS").len() == 3).await;
+    assert_eq!(log_lines(&log, "SETTINGS")[2], "SETTINGS ultracode=True");
+
+    // A session it starts does not inherit it: that is a cost the user chose for this one.
+    wait_long("the restarted session", 10, || agent_of(&state, &u.id).state == AgentState::Idle).await;
+    let out = start_session(&state, &u.id, &pid, json!({ "prompt": "check the parser", "effort": "low" })).await.unwrap();
+    let child = out["terminalId"].as_str().unwrap().to_string();
+    wait_long("the child to start", 10, || log_lines(&log, "SETTINGS").len() == 4).await;
+    assert_eq!(log_lines(&log, "SETTINGS")[3], "SETTINGS ultracode=<unset>");
+    assert!(t.info(&child).unwrap().meta.get("ultracode").is_none());
+
+    // Another CLI has no such mode: it is said, not ignored.
+    let e = t.spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), provider: Some("cdx".into()), ultracode: Some(true), ..Default::default() }).await.unwrap_err();
+    assert_eq!(e.code, "bad_request", "{e}");
+    assert!(e.to_string().contains("no ultracode mode"), "{e}");
+    for id in [&u.id, &plain.id, &child] {
+        let _ = t.kill(id).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restricted_session_starts_only_restricted_claude_sessions() {
     let dir = tempfile::tempdir().unwrap();
     let fake = fake_cli(dir.path(), "claude");

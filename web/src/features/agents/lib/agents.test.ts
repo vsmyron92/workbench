@@ -20,6 +20,7 @@ import {
   resumeNote,
   artifactPages,
   isArtifactUrl,
+  ultracodeNote,
   sortSessions,
   stateLabel,
   tabAfterClose,
@@ -304,5 +305,15 @@ describe('pages published to claude.ai', () => {
     ])
     expect(artifactPages(agent())).toEqual([])
     expect(artifactPages(null)).toEqual([])
+  })
+})
+
+describe('ultracode sessions', () => {
+  it('say so on their tab and card only when the session was started with it', () => {
+    const t = (meta: Record<string, unknown>) => ({ id: 't', meta, agent: agent() }) as unknown as TerminalInfo
+    expect(ultracodeNote(t({ ultracode: true }))?.label).toBe('Ultracode')
+    expect(ultracodeNote(t({ ultracode: true }))?.title).toContain('more tokens')
+    for (const meta of [{}, { ultracode: false }, { ultracode: 'yes' }, { forkedFrom: 'x' }]) expect(ultracodeNote(t(meta))).toBeNull()
+    expect(ultracodeNote(null)).toBeNull()
   })
 })

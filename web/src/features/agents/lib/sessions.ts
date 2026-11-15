@@ -261,6 +261,15 @@ export function formatTokens(n: number): string {
   return String(Math.round(n))
 }
 
+/** A session started with Claude Code's ultracode says so on its tab and card: it spends far more tokens. */
+export function ultracodeNote(t: TerminalInfo | null | undefined): { label: string; title: string } | null {
+  if (t?.meta?.ultracode !== true) return null
+  return {
+    label: 'Ultracode',
+    title: 'Started with ultracode: Claude plans a workflow of subagents for each substantive task, which uses far more tokens. Claude Code leaves it off when the model cannot take xhigh effort or workflows are off for your account.',
+  }
+}
+
 /**
  * A resumed conversation whose prompt cache ran out pays to write it again with its next message:
  * what to tell, or `null` when the cache is still warm or Claude Code did not say.
