@@ -29,6 +29,11 @@ pub struct AgentRt {
     pub open_tools: OpenTools,
     /// Dedupes transcript completions (thinking and text are separate records sharing an id).
     pub last_completed_id: Option<String>,
+    /// Transcript usage records already added up (a message may appear in more than one record).
+    pub usage_ids: std::collections::HashSet<String>,
+    /// The account is priced from its transcript (`usage_cost_usd`), so the CLI's own
+    /// cost estimate — priced for another vendor's models — is ignored.
+    pub cost_managed: bool,
     /// The startup "trust this folder?" dialog is on screen (no hook reports it).
     pub trust_prompt: bool,
     /// Codex: rollout event bookkeeping.
@@ -397,9 +402,11 @@ pub fn apply_status(agent: &mut AgentInfo, v: &Value) -> bool {
         let p = (p.clamp(0.0, 100.0) * 10.0).round() / 10.0;
         set(&mut agent.context_pct, Some(p), &mut ch);
     }
-    if let Some(c) = v.pointer("/cost/total_cost_usd").and_then(Value::as_f64).filter(|c| c.is_finite() && *c >= 0.0) {
-        let c = (c * 1000.0).round() / 1000.0;
-        set(&mut agent.cost_usd, Some(c), &mut ch);
+    if !agent.priced && agent.usage_cost_usd.is_none() {
+        if let Some(c) = v.pointer("/cost/total_cost_usd").and_then(Value::as_f64).filter(|c| c.is_finite() && *c >= 0.0) {
+            let c = (c * 1000.0).round() / 1000.0;
+            set(&mut agent.cost_usd, Some(c), &mut ch);
+        }
     }
     if let Some(e) = effort_of(v) {
         set(&mut agent.effort, Some(e), &mut ch);

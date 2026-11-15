@@ -36,6 +36,12 @@ export interface ApiSettings {
   url: string
   key: string
   context?: number | null
+  /** Claude Code: the model its helper asks (empty: the main model). */
+  helper_model?: string | null
+  /** Claude Code: the model its sub-agents ask (empty: the main model). */
+  subagent_model?: string | null
+  /** Ask the service for the account's balance (`GET /user/balance`). Off by default. */
+  balance?: boolean
 }
 
 /** config/global.rs LocalModelConfig */
@@ -62,6 +68,15 @@ export interface AccountUsage {
   limitedUntil: number | null
   reason: string | null
   updatedAt: number
+  /** A hosted service's balance (`api.balance`), when Workbench asked. */
+  balance?: {
+    available: boolean
+    currency: string
+    total: string
+    granted: string
+    toppedUp: string
+    fetchedAt: number
+  } | null
 }
 
 export type FailoverMode = 'off' | 'new' | 'session'

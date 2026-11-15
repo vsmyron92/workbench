@@ -139,7 +139,7 @@ impl ProviderKind {
     pub fn api_services(self) -> &'static [&'static str] {
         match self {
             Self::Claude => &["deepseek", "openrouter", "zai", "moonshot", "fireworks", "anthropic", "custom"],
-            Self::Codex => &["openai", "custom"],
+            Self::Codex => &["openai", "deepseek", "custom"],
             Self::Aider => &["deepseek", "openrouter", "openai", "anthropic", "custom"],
             Self::Kimi | Self::Gemini | Self::Custom => &[],
         }
@@ -334,6 +334,21 @@ impl Provider {
         self.kind.home_var().and_then(|v| self.env.get(v)).map(|s| s.trim()).filter(|s| !s.is_empty())
     }
 
+    /// The effort levels the session's model actually takes: a hosted service may collapse
+    /// names (`medium` is `high` for DeepSeek), and asking for one it does not have is a
+    /// start that fails, not a quietly different session.
+    pub fn efforts(&self) -> &'static [&'static str] {
+        self.efforts_for(self.model.as_deref())
+    }
+
+    /// `efforts` for the model a session asks for (a request may override the provider's).
+    pub fn efforts_for(&self, model: Option<&str>) -> &'static [&'static str] {
+        self.api
+            .as_ref()
+            .and_then(|a| super::models::caps_for(&a.service, model.or(self.model.as_deref()).unwrap_or("")))
+            .map_or_else(|| self.kind.efforts(), |c| c.efforts)
+    }
+
     /// Whether a session started with `permission_mode` runs its commands inside the
     /// CLI's own sandbox: Codex, unless the `bypass` preset or its `args`
     /// (`--dangerously-bypass-approvals-and-sandbox`, its `--yolo` alias,
@@ -453,8 +468,8 @@ fn check_defaults(p: &mut Provider, c: Option<&ProviderConfig>, warnings: &mut V
         }
     }
     if let Some(e) = p.effort.clone() {
-        if !k.efforts().contains(&e.as_str()) {
-            let why = if k.efforts().is_empty() { format!("{} has no effort setting", p.label) } else { format!("one of {}", k.efforts().join(", ")) };
+        if !p.efforts().contains(&e.as_str()) {
+            let why = if p.efforts().is_empty() { format!("{} has no effort setting", p.label) } else { format!("one of {}", p.efforts().join(", ")) };
             warnings.push(format!("{}: effort {e:?} ignored ({why})", section(own(|c| &c.effort))));
             p.effort = None;
         }
@@ -986,21 +1001,25 @@ pub fn dialog_on_screen(kind: ProviderKind, screen: &str) -> Option<(super::Agen
 /// What Claude Code needs to ask `model` of an endpoint that is not Anthropic's: its helper
 /// model and sub-agents would otherwise ask for a Claude model, and it assumes 200K tokens of
 /// context for a model it does not know.
-fn claude_model_env(model: &str, context: Option<u64>) -> Vec<(String, Option<String>)> {
+fn claude_model_env(model: &str, context: Option<u64>, helper: Option<&str>, subagent: Option<&str>) -> Vec<(String, Option<String>)> {
     let set = |k: &str, v: &str| (k.to_string(), Some(v.to_string()));
-    [
+    let mut out = vec![
         set("ANTHROPIC_MODEL", model),
         set("ANTHROPIC_DEFAULT_OPUS_MODEL", model),
         set("ANTHROPIC_DEFAULT_SONNET_MODEL", model),
-        set("ANTHROPIC_DEFAULT_HAIKU_MODEL", model),
-        set("CLAUDE_CODE_SUBAGENT_MODEL", model),
+        set("ANTHROPIC_DEFAULT_HAIKU_MODEL", helper.unwrap_or(model)),
+        set("CLAUDE_CODE_SUBAGENT_MODEL", subagent.unwrap_or(model)),
         set("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
         // A header that changes with every request would keep the server from reusing its prompt cache.
         set("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
-    ]
-    .into_iter()
-    .chain(context.map(|c| set("CLAUDE_CODE_MAX_CONTEXT_TOKENS", &c.to_string())))
-    .collect()
+    ];
+    if let Some(c) = context {
+        out.push(set("CLAUDE_CODE_MAX_CONTEXT_TOKENS", &c.to_string()));
+        // DeepSeek's own Claude Code guide compacts at 75% of the window; a later compact
+        // leaves the last quarter of a large window unused.
+        out.push(set("CLAUDE_CODE_AUTO_COMPACT_WINDOW", &(c / 4 * 3).to_string()));
+    }
+    out
 }
 
 /// The context windows `context` may name (tokens).
@@ -1126,6 +1145,8 @@ pub fn api_setup(p: &Provider, model: Option<&str>) -> Result<Option<ApiSetup>, 
             // Anthropic's own API is Claude Code's default endpoint: no address to set.
             (ProviderKind::Claude, s) => anthropic_endpoint(s).unwrap_or_default().to_string(),
             (ProviderKind::Codex, "openai") => "https://api.openai.com/v1".to_string(),
+            // DeepSeek serves the Responses API at its root; Codex appends `/responses`.
+            (ProviderKind::Codex, "deepseek") => "https://api.deepseek.com".to_string(),
             _ => String::new(),
         },
     };
@@ -1141,6 +1162,20 @@ pub fn api_setup(p: &Provider, model: Option<&str>) -> Result<Option<ApiSetup>, 
     if model.is_none() && !optional_model {
         return Err(format!("{at}: set `model` to the model the service calls it for {}", p.label));
     }
+    // Claude Code's helper and sub-agent models: a second, usually cheaper model the
+    // service maps (DeepSeek's own guide runs them on Flash while the main agent is Pro).
+    let role = |field: &str, v: Option<&String>| -> Result<Option<String>, String> {
+        let Some(m) = v.map(|s| s.trim()).filter(|m| !m.is_empty()) else { return Ok(None) };
+        if p.kind != ProviderKind::Claude {
+            return Err(format!("{at}.{field}: only Claude Code has a helper or sub-agent model"));
+        }
+        if !valid_model(m) {
+            return Err(format!("{at}.{field}: {m:?} is not a valid model name"));
+        }
+        Ok(Some(m.to_string()))
+    };
+    let helper = role("helper_model", a.helper_model.as_ref())?;
+    let subagent = role("subagent_model", a.subagent_model.as_ref())?;
     let base = url.trim_end_matches('/').to_string();
     let set = |k: &str, v: &str| (k.to_string(), Some(v.to_string()));
     let unset = |k: &str| (k.to_string(), None);
@@ -1154,23 +1189,43 @@ pub fn api_setup(p: &Provider, model: Option<&str>) -> Result<Option<ApiSetup>, 
             if let Some(m) = model {
                 out.env.push(set("ANTHROPIC_MODEL", m));
             }
-            out.env.extend(a.context.map(|c| set("CLAUDE_CODE_MAX_CONTEXT_TOKENS", &c.to_string())));
+            if let Some(m) = helper.as_deref() {
+                out.env.push(set("ANTHROPIC_DEFAULT_HAIKU_MODEL", m));
+            }
+            if let Some(m) = subagent.as_deref() {
+                out.env.push(set("CLAUDE_CODE_SUBAGENT_MODEL", m));
+            }
+            if let Some(c) = a.context {
+                out.env.push(set("CLAUDE_CODE_MAX_CONTEXT_TOKENS", &c.to_string()));
+                out.env.push(set("CLAUDE_CODE_AUTO_COMPACT_WINDOW", &(c / 4 * 3).to_string()));
+            }
         }
         ProviderKind::Claude => {
             // A gateway: the key as a bearer token, `ANTHROPIC_API_KEY` blank (not just unset) so no stored key is used.
             let root = base.strip_suffix("/v1").unwrap_or(&base).to_string();
             out.key_var = "ANTHROPIC_AUTH_TOKEN".into();
             out.env = vec![set("ANTHROPIC_BASE_URL", &root), set("ANTHROPIC_API_KEY", ""), unset("CLAUDE_CODE_OAUTH_TOKEN")];
-            out.env.extend(claude_model_env(model.unwrap_or_default(), a.context));
+            out.env.extend(claude_model_env(model.unwrap_or_default(), a.context, helper.as_deref(), subagent.as_deref()));
             out.url = root;
         }
         ProviderKind::Codex => {
             let c = |k: &str, v: &str| ["-c".to_string(), format!("{k}={}", toml_str(v))];
+            // Codex turns these into TOML values as they are, not as strings.
+            let raw = |k: &str, v: &str| ["-c".to_string(), format!("{k}={v}")];
             out.key_var = CODEX_API_KEY_VAR.into();
             out.args.extend(c("model_provider", CODEX_API_PROVIDER));
             out.args.extend(c(&format!("model_providers.{CODEX_API_PROVIDER}.name"), service_label(&service)));
             out.args.extend(c(&format!("model_providers.{CODEX_API_PROVIDER}.base_url"), &base));
             out.args.extend(c(&format!("model_providers.{CODEX_API_PROVIDER}.env_key"), CODEX_API_KEY_VAR));
+            if service == "deepseek" {
+                // DeepSeek's own Codex setup: the Responses API, the key instead of a
+                // ChatGPT login, and the service's standalone web search (Alpha Search).
+                out.args.extend(c(&format!("model_providers.{CODEX_API_PROVIDER}.wire_api"), "responses"));
+                out.args.extend(raw(&format!("model_providers.{CODEX_API_PROVIDER}.supports_standalone_web_search"), "true"));
+                out.args.extend(raw("features.standalone_web_search", "true"));
+                out.args.extend(c("preferred_auth_method", "apikey"));
+                out.args.extend(c("forced_login_method", "api"));
+            }
             if let Some(n) = a.context {
                 out.args.extend(["-c".to_string(), format!("model_context_window={n}")]);
             }
@@ -1267,7 +1322,7 @@ pub fn local_setup(p: &Provider, model: Option<&str>) -> Result<Option<LocalSetu
             // Claude Code adds `/v1/messages` itself.
             let root = base.strip_suffix("/v1").unwrap_or(base).to_string();
             let mut env = vec![set("ANTHROPIC_BASE_URL", &root), set("ANTHROPIC_AUTH_TOKEN", token), unset("ANTHROPIC_API_KEY"), unset("CLAUDE_CODE_OAUTH_TOKEN")];
-            env.extend(claude_model_env(model, l.context));
+            env.extend(claude_model_env(model, l.context, None, None));
             LocalSetup { env, model: model.to_string(), url: root, args: vec![] }
         }
         ProviderKind::Aider => {
@@ -1316,6 +1371,8 @@ pub fn local_setup(p: &Provider, model: Option<&str>) -> Result<Option<LocalSetu
 /// `GET /api/agents/defaults` → `providers[]`.
 pub fn describe(p: &Provider, available: Option<&PathBuf>) -> Value {
     let k = p.kind;
+    let caps = p.api.as_ref().and_then(|a| super::models::caps_for(&a.service, p.model.as_deref().unwrap_or("")));
+    let efforts = p.efforts();
     let reason = if !p.enabled {
         Some("disabled in config.toml".to_string())
     } else if available.is_none() {
@@ -1342,6 +1399,17 @@ pub fn describe(p: &Provider, available: Option<&PathBuf>) -> Value {
             "url": a.url.trim(),
             "key": a.key.trim(),
             "context": a.context,
+            "helperModel": a.helper_model,
+            "subagentModel": a.subagent_model,
+            "balance": a.balance,
+        })),
+        // What the service says about the configured model: a text-only model silently
+        // drops a pasted image, and effort names collapse (`medium` is `high`).
+        "modelCaps": caps.map(|c| json!({
+            "images": c.images,
+            "context": c.context,
+            "output": c.output,
+            "efforts": c.efforts,
         })),
         "apiError": api_setup(p, p.model.as_deref().or(Some("-"))).err(),
         "apiServices": k.api_services(),
@@ -1367,7 +1435,7 @@ pub fn describe(p: &Provider, available: Option<&PathBuf>) -> Value {
             // Permission requests answered from Workbench (Claude Code's hooks).
             "answerPermissions": k == ProviderKind::Claude,
         },
-        "efforts": k.efforts(),
+        "efforts": efforts,
         "permissionModes": k.permission_modes(),
         "defaults": {
             "model": p.model,
@@ -1915,7 +1983,7 @@ mod tests {
             [agents.providers.claude-ds]
             kind = "claude"
             model = "deepseek-v4-pro"
-            api = { service = "deepseek", key = "deepseek", context = 131072 }
+            api = { service = "deepseek", key = "deepseek", context = 1000000, helper_model = "deepseek-flash", subagent_model = "deepseek-flash", balance = true }
             [agents.providers.claude-or]
             kind = "claude"
             model = "anthropic/claude-sonnet"
@@ -1931,6 +1999,10 @@ mod tests {
             kind = "codex"
             model = "gpt-5.5"
             api = { service = "openai", key = "openai", context = 200000 }
+            [agents.providers.codex-ds]
+            kind = "codex"
+            model = "deepseek-flash"
+            api = { service = "deepseek", key = "deepseek", context = 1048576 }
             [agents.providers.codex-gw]
             kind = "codex"
             model = "m"
@@ -1960,10 +2032,14 @@ mod tests {
         assert_eq!(env(&s, "ANTHROPIC_BASE_URL"), Some(Some("https://api.deepseek.com/anthropic".into())));
         assert_eq!(env(&s, "ANTHROPIC_API_KEY"), Some(Some(String::new())), "blank, not unset");
         assert_eq!(env(&s, "CLAUDE_CODE_OAUTH_TOKEN"), Some(None));
-        for k in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"] {
+        for k in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL"] {
             assert_eq!(env(&s, k), Some(Some("deepseek-v4-pro".into())), "{k}");
         }
-        assert_eq!(env(&s, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some(Some("131072".into())));
+        // The helper and the sub-agents run on the cheaper model DeepSeek's guide names.
+        assert_eq!(env(&s, "ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some(Some("deepseek-flash".into())));
+        assert_eq!(env(&s, "CLAUDE_CODE_SUBAGENT_MODEL"), Some(Some("deepseek-flash".into())));
+        assert_eq!(env(&s, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some(Some("1000000".into())));
+        assert_eq!(env(&s, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), Some(Some("750000".into())));
         // No env entry holds a key: it is read from [secrets] at launch.
         assert!(!s.env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN"));
         assert_eq!(setup("claude-or").url, "https://openrouter.ai/api");
@@ -1988,6 +2064,20 @@ mod tests {
             ]
         );
         assert!(setup("codex-gw").args.iter().any(|a| a == "model_providers.workbench_api.base_url=\"https://llm.example.com/v1\""));
+        // DeepSeek's own Codex setup: the Responses API, a key login, and its web search.
+        let s = setup("codex-ds");
+        assert_eq!(s.url, "https://api.deepseek.com");
+        for a in [
+            "model_providers.workbench_api.base_url=\"https://api.deepseek.com\"",
+            "model_providers.workbench_api.wire_api=\"responses\"",
+            "model_providers.workbench_api.supports_standalone_web_search=true",
+            "features.standalone_web_search=true",
+            "preferred_auth_method=\"apikey\"",
+            "forced_login_method=\"api\"",
+            "model_context_window=1048576",
+        ] {
+            assert!(s.args.iter().any(|x| x == a), "{a}: {:?}", s.args);
+        }
         // Aider: the service's own variable, and a model name LiteLLM understands.
         let s = setup("aider-ds");
         assert_eq!((s.key_var.as_str(), s.model.as_deref()), ("DEEPSEEK_API_KEY", Some("deepseek/deepseek-chat")));
@@ -1998,6 +2088,9 @@ mod tests {
         // What the UI is shown holds the secret's name and nothing more.
         let d = describe(get("claude-ds"), None);
         assert_eq!((d["api"]["service"].as_str(), d["api"]["key"].as_str(), d["api"]["serviceLabel"].as_str()), (Some("deepseek"), Some("deepseek"), Some("DeepSeek")));
+        assert_eq!((d["api"]["helperModel"].as_str(), d["api"]["subagentModel"].as_str(), d["api"]["balance"].as_bool()), (Some("deepseek-flash"), Some("deepseek-flash"), Some(true)));
+        assert_eq!((d["modelCaps"]["images"].as_bool(), d["modelCaps"]["context"].as_u64()), (Some(false), Some(1_048_576)));
+        assert_eq!(d["efforts"], json!(["low", "high", "max"]));
         assert!(d["apiError"].is_null());
     }
 
@@ -2016,7 +2109,7 @@ mod tests {
             [agents.providers.wrong-service]
             kind = "codex"
             model = "m"
-            api = { service = "deepseek", key = "k" }
+            api = { service = "zai", key = "k" }
             [agents.providers.plain-http]
             kind = "claude"
             model = "m"
@@ -2045,22 +2138,32 @@ mod tests {
             kind = "claude"
             model = "m"
             api = { service = "custom", url = "http://localhost:4000", key = "k" }
+            [agents.providers.codex-helper]
+            kind = "codex"
+            model = "m"
+            api = { service = "deepseek", key = "k", helper_model = "deepseek-flash" }
+            [agents.providers.bad-helper]
+            kind = "claude"
+            model = "m"
+            api = { service = "deepseek", key = "k", helper_model = "not a model" }
             "#,
         );
         let get = |id: &str| list.iter().find(|p| p.id == id).unwrap();
         let err = |id: &str, model: Option<&str>| api_setup(get(id), model).unwrap_err();
         assert!(err("no-key", Some("m")).contains("names the [secrets] entry"));
         assert!(err("key-pasted", Some("m")).contains("not the key itself"));
-        assert!(err("wrong-service", Some("m")).contains("service must be one of openai, custom"));
+        assert!(err("wrong-service", Some("m")).contains("service must be one of openai, deepseek, custom"));
         assert!(err("plain-http", Some("m")).contains("https://"));
         assert!(err("userinfo", Some("m")).contains("no user name or password"));
         assert!(err("custom-no-url", Some("m")).contains("`url` is needed"));
         assert!(err("no-model", None).contains("set `model`"));
         assert!(err("kimi-api", Some("m")).contains("cannot use a hosted API"));
         assert!(err("both", Some("m")).contains("cannot both be set"));
+        assert!(err("codex-helper", Some("m")).contains("only Claude Code has a helper"));
+        assert!(err("bad-helper", Some("m")).contains("not a valid model name"));
         // This computer may be reached in the clear.
         assert!(api_setup(get("loopback-ok"), Some("m")).unwrap().is_some());
-        assert_eq!(w.iter().filter(|x| x.contains("does not start")).count(), 9, "{w:?}");
+        assert_eq!(w.iter().filter(|x| x.contains("does not start")).count(), 11, "{w:?}");
         assert!(!valid_api_url("http://example.com") && valid_api_url("https://example.com/v1") && valid_api_url("http://127.0.0.1:8080") && valid_api_url("http://[::1]:1/x"));
         assert!(valid_secret_name("deepseek-key_2.prod") && !valid_secret_name("") && !valid_secret_name("a b") && !valid_secret_name(&"x".repeat(65)));
     }

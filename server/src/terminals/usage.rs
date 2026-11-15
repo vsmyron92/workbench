@@ -55,6 +55,9 @@ pub struct AccountUsage {
     pub limited_until: Option<i64>,
     pub reason: Option<String>,
     pub updated_at: i64,
+    /// A hosted service's answer (`api.balance = true`), when one was asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance: Option<super::balance::Balance>,
 }
 
 /// Why and until when an account cannot start a session.
@@ -166,6 +169,31 @@ impl Usage {
         changed
     }
 
+    /// A hosted service's balance answer. An account whose balance is gone is out of use
+    /// for half an hour; a topped-up one is usable again. Returns whether anything a
+    /// person sees changed.
+    pub fn record_balance(&self, id: &str, balance: super::balance::Balance, now: i64) -> bool {
+        let changed = {
+            let mut map = self.map.lock();
+            let u = map.entry(id.to_string()).or_default();
+            let was = (u.balance.clone(), u.limited_until, u.reason.clone());
+            if !balance.available {
+                u.limited_until = Some(now + UNKNOWN_RESET_MS);
+                u.reason = Some("the balance is empty; top up the account".into());
+            } else if u.reason.as_deref().is_some_and(|r| r.starts_with("the balance is empty")) {
+                u.limited_until = None;
+                u.reason = None;
+            }
+            u.balance = Some(balance);
+            u.updated_at = now;
+            was != (u.balance.clone(), u.limited_until, u.reason.clone())
+        };
+        if changed {
+            self.save();
+        }
+        changed
+    }
+
     /// `GET /api/agents/usage`: the live part of what is known, by provider name.
     pub fn snapshot(&self, now: i64) -> Value {
         let map = self.map.lock();
@@ -196,6 +224,7 @@ fn describe(u: &AccountUsage, now: i64) -> Value {
         "limitedUntil": limit.as_ref().map(|(t, _)| *t),
         "reason": limit.map(|(_, r)| r),
         "updatedAt": u.updated_at,
+        "balance": u.balance.clone(),
     })
 }
 
@@ -518,6 +547,26 @@ mod tests {
         let s = u.snapshot(now + 60);
         assert_eq!(s[id]["limited"], false);
         assert!(s["b"]["limited"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn a_balance_that_is_gone_limits_the_account_until_it_is_topped_up() {
+        let now = 1_800_000_000_000;
+        let u = Usage::default();
+        let balance = |available: bool| super::super::balance::Balance {
+            available,
+            currency: "USD".into(),
+            total: "0.00".into(),
+            granted: String::new(),
+            topped_up: String::new(),
+            fetched_at: now,
+        };
+        assert!(u.record_balance("deepseek", balance(false), now));
+        assert_eq!(u.limited("deepseek", now).unwrap().until, now + UNKNOWN_RESET_MS);
+        assert!(u.snapshot(now)["deepseek"]["balance"]["available"].as_bool().is_some_and(|a| !a));
+        assert!(u.record_balance("deepseek", balance(true), now + 1));
+        assert!(u.limited("deepseek", now + 1).is_none());
+        assert!(!u.record_balance("deepseek", balance(true), now + 1));
     }
 
     #[test]

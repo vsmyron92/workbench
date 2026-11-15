@@ -205,7 +205,9 @@ export const TerminalView = forwardRef<TerminalViewHandle, Props>(function Termi
           continue
         }
         try {
-          paths.push((await terminalsApi.attach(terminalId, f)).path)
+          const a = await terminalsApi.attach(terminalId, f)
+          paths.push(a.path)
+          if (a.warning) toast('warning', a.warning)
         } catch (e) {
           toastError(e, 'Could not attach the image')
         }

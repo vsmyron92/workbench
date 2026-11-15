@@ -51,8 +51,22 @@ export interface ProviderInfo {
   local?: { server: string; url: string } | null
   localError?: string | null
   /** Uses a hosted API with a key from `[secrets]` (the name only: the key never leaves the server). */
-  api?: { service: string; serviceLabel: string; url: string; key: string; context?: number | null } | null
+  api?: {
+    service: string
+    serviceLabel: string
+    url: string
+    key: string
+    context?: number | null
+    /** Claude Code: the model its helper asks (empty: the main model). */
+    helperModel?: string | null
+    /** Claude Code: the model its sub-agents ask (empty: the main model). */
+    subagentModel?: string | null
+    /** The account asks its service for its balance. */
+    balance?: boolean
+  } | null
   apiError?: string | null
+  /** What the service says about the configured model (DeepSeek): image input, windows. */
+  modelCaps?: { images: boolean; context: number; output: number; efforts: string[] } | null
   /** The accounts to use, in order, when this one is at its usage limit. */
   fallback?: string[]
   /** What the CLI reported about the account's usage; `limited` until `limitedUntil` (ms). */
@@ -214,7 +228,7 @@ export const terminalsApi = {
   input: (id: string, text: string, submit = true, paste = true) => api.post(`/api/terminals/${id}/input`, { text, submit, paste }),
   keys: (id: string, keys: string[]) => api.post(`/api/terminals/${id}/keys`, { keys }),
   text: (id: string, lines = 200) => api.get<{ text: string }>(`/api/terminals/${id}/text`, { lines }),
-  attach: (id: string, file: Blob) => api.post<{ path: string; quoted: string }>(`/api/terminals/${id}/attachment`, file),
+  attach: (id: string, file: Blob) => api.post<{ path: string; quoted: string; warning?: string | null }>(`/api/terminals/${id}/attachment`, file),
   remoteControl: (body: { projectId: string; spawn: string; name?: string; permissionMode?: string }) =>
     api.post<TerminalInfo>('/api/agents/remote-control', body),
   /** Answer a pending permission request (devices only; 409 once it is settled elsewhere). */

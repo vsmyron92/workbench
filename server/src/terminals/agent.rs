@@ -18,14 +18,15 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use super::activity::Activity;
 use super::hooks::{self, AgentRt};
 use super::memory;
+use super::models;
 use super::permission;
 use super::providers::{self, Continue, LaunchArgs, Provider, ProviderKind};
 use super::store::AgentLaunch;
 use super::transcript::{self, HistoryEntry, LineBuffer, Record};
 use super::usage;
 use super::{
-    AGENT_SCROLLBACK, AgentInfo, AgentState, Entry, TerminalInfo, TerminalKind, TerminalStatus, Terminals, base_env, codex, gemini,
-    kimi, new_id, pty, resolve_cwd, store,
+    AGENT_SCROLLBACK, AgentInfo, AgentState, Entry, TerminalInfo, TerminalKind, TerminalStatus, Terminals, TokenUsage, base_env, codex,
+    gemini, kimi, new_id, pty, resolve_cwd, store,
 };
 use crate::app::AppState;
 use crate::config::global::AgentsConfig;
@@ -382,7 +383,7 @@ pub fn resolve_launch(provider: &Provider, cfg: &AgentsConfig, project: &Project
         }
     }
     if let Some(e) = &effort {
-        let efforts = kind.efforts();
+        let efforts = provider.efforts_for(model.as_deref());
         if efforts.is_empty() {
             return Err(ApiError::bad_request(format!("{} has no effort setting", provider.label)));
         }
@@ -754,6 +755,9 @@ impl Terminals {
                 attention: None,
                 context_pct: None,
                 cost_usd: None,
+                usage: None,
+                usage_cost_usd: None,
+                priced: provider.api.as_ref().is_some_and(|a| models::is_priced_service(&a.service)),
                 last_event_at: now,
                 pending_permission: None,
                 resume_cost: None,
@@ -1643,10 +1647,28 @@ impl Terminals {
         });
     }
 
-    fn apply_codex(&self, entry: &Entry, events: Vec<codex::Event>) {
+    fn apply_codex(&self, state: &AppState, entry: &Entry, events: Vec<codex::Event>) {
         if events.is_empty() {
             return;
         }
+        let (service, default_model) = {
+            let (pid, model) = {
+                let r = entry.rec.lock();
+                (r.info.agent.as_ref().and_then(|a| a.provider_id.clone()), r.info.agent.as_ref().and_then(|a| a.model.clone()))
+            };
+            let cfg = state.config.read();
+            match providers::find(&cfg.agents, pid.as_deref()) {
+                Some(p) => (p.api.as_ref().map(|a| a.service.trim().to_lowercase()), p.model.clone().or(model)),
+                None => (None, model),
+            }
+        };
+        let usages: Vec<(TokenUsage, Option<i64>)> = events
+            .iter()
+            .filter_map(|e| match e {
+                codex::Event::Usage { usage, at } => Some((*usage, *at)),
+                _ => None,
+            })
+            .collect();
         let now = util::now_ms();
         let mut rec = entry.rec.lock();
         let title_locked = rec.title_locked;
@@ -1665,7 +1687,15 @@ impl Terminals {
                 }
             }
             let mut rt = entry.rt.lock();
-            let out = codex::apply(agent, &mut rt.codex, events, now);
+            rt.cost_managed = service.as_deref().is_some_and(models::is_priced_service);
+            if rt.cost_managed {
+                agent.priced = true;
+            }
+            let mut out = codex::apply(agent, &mut rt.codex, events, now);
+            for (usage, at) in usages {
+                let model = agent.model.clone().unwrap_or_default();
+                out.changed |= self.apply_usage(agent, &mut rt, service.as_deref(), default_model.as_deref(), String::new(), model, at, usage);
+            }
             if out.turn_ended {
                 rt.turn_done = true;
             }
@@ -2042,7 +2072,46 @@ impl Terminals {
         Ok(())
     }
 
-    fn apply_records(&self, entry: &Entry, records: Vec<Record>) {
+    /// Add one transcript usage record to the session: once per message id, and priced at
+    /// the service's own rates when it publishes them.
+    fn apply_usage(
+        &self,
+        agent: &mut AgentInfo,
+        rt: &mut AgentRt,
+        service: Option<&str>,
+        default_model: Option<&str>,
+        id: String,
+        model: String,
+        at: Option<i64>,
+        usage: TokenUsage,
+    ) -> bool {
+        if !id.is_empty() && !rt.usage_ids.insert(id) {
+            return false;
+        }
+        agent.usage.get_or_insert_with(Default::default).add(usage);
+        let model = if model.is_empty() { default_model.unwrap_or("") } else { model.as_str() };
+        if let Some(price) = service.and_then(|s| models::price_for(s, model)) {
+            let total = agent.usage_cost_usd.unwrap_or(0.0) + models::estimate(price, usage, at);
+            agent.usage_cost_usd = Some(total);
+            agent.cost_usd = Some((total * 1_000_000.0).round() / 1_000_000.0);
+        }
+        true
+    }
+
+    fn apply_records(&self, state: &AppState, entry: &Entry, records: Vec<Record>) {
+        // A hosted account whose service publishes prices: its tokens are priced here, and
+        // the CLI's own estimate (priced for another vendor) is not shown.
+        let (service, default_model) = {
+            let (pid, model) = {
+                let r = entry.rec.lock();
+                (r.info.agent.as_ref().and_then(|a| a.provider_id.clone()), r.info.agent.as_ref().and_then(|a| a.model.clone()))
+            };
+            let cfg = state.config.read();
+            match providers::find(&cfg.agents, pid.as_deref()) {
+                Some(p) => (p.api.as_ref().map(|a| a.service.trim().to_lowercase()), p.model.clone().or(model)),
+                None => (None, model),
+            }
+        };
         let mut rec = entry.rec.lock();
         let title_locked = rec.title_locked;
         let mut new_title: Option<String> = None;
@@ -2051,6 +2120,10 @@ impl Terminals {
         {
             let Some(agent) = rec.info.agent.as_mut() else { return };
             let mut rt = entry.rt.lock();
+            rt.cost_managed = service.as_deref().is_some_and(models::is_priced_service);
+            if rt.cost_managed {
+                agent.priced = true;
+            }
             let set_state = |agent: &mut AgentInfo, s: AgentState, changed: &mut bool| {
                 if agent.state != s {
                     agent.state = s;
@@ -2085,11 +2158,16 @@ impl Terminals {
                         }
                     }
                     Record::Cost(c) => {
-                        let c = (c * 1000.0).round() / 1000.0;
-                        if agent.cost_usd.is_none_or(|old| c > old) {
-                            agent.cost_usd = Some(c);
-                            changed = true;
+                        if !rt.cost_managed && !agent.priced {
+                            let c = (c * 1000.0).round() / 1000.0;
+                            if agent.cost_usd.is_none_or(|old| c > old) {
+                                agent.cost_usd = Some(c);
+                                changed = true;
+                            }
                         }
+                    }
+                    Record::Usage { id, model, at, usage } => {
+                        changed |= self.apply_usage(agent, &mut rt, service.as_deref(), default_model.as_deref(), id, model, at, usage);
                     }
                     Record::ApiError { message, final_attempt } => {
                         if final_attempt {
@@ -2701,7 +2779,7 @@ async fn tail_loop(state: AppState, entry: Arc<Entry>, pty: Arc<pty::Pty>, mut p
         }
         let records: Vec<Record> = read_new_lines(&path, &mut offset, &mut lines).await.iter().flat_map(|l| transcript::parse_line(l)).collect();
         if !records.is_empty() {
-            state.terminals.apply_records(&entry, records);
+            state.terminals.apply_records(&state, &entry, records);
         }
         tick = tick.wrapping_add(1);
         if tick % 10 == 1 {
@@ -2831,7 +2909,7 @@ async fn codex_loop(state: AppState, entry: Arc<Entry>, pty: Arc<pty::Pty>, mut 
                 .flat_map(|l| codex::parse_line(l))
                 .collect();
             let usage = codex_usage_of(&events);
-            state.terminals.apply_codex(&entry, events);
+            state.terminals.apply_codex(&state, &entry, events);
             if usage.is_some() {
                 let (windows, limit) = usage.unwrap_or_default();
                 state.terminals.note_codex_usage(&state, &entry, windows, limit).await;
@@ -3098,6 +3176,34 @@ mod tests {
         assert_eq!(shared_memory_dir(&work, acct.path(), proj.path(), &env), None);
         std::fs::write(acct.path().join("settings.json"), r#"{"autoMemoryDirectory":"~/mem"}"#).unwrap();
         assert_eq!(shared_memory_dir(&work, acct.path(), proj.path(), &[]), None);
+    }
+
+    #[test]
+    fn transcript_usage_is_priced_once_at_the_services_rates() {
+        use chrono::TimeZone;
+        let t = Terminals::default();
+        let mut a = crate::terminals::test_agent();
+        let mut rt = AgentRt::default();
+        let peak = chrono::Utc.with_ymd_and_hms(2026, 11, 18, 8, 0, 0).unwrap().timestamp_millis();
+        let weekend = chrono::Utc.with_ymd_and_hms(2026, 11, 21, 8, 0, 0).unwrap().timestamp_millis();
+        let miss = TokenUsage { input: 1_000_000, cache_read: 0, cache_creation: 0, output: 0 };
+        assert!(t.apply_usage(&mut a, &mut rt, Some("deepseek"), Some("deepseek-flash"), "m1".into(), "deepseek-flash".into(), Some(peak), miss));
+        assert_eq!(a.usage.unwrap().input, 1_000_000);
+        assert!((a.cost_usd.unwrap() - 0.30).abs() < 1e-9, "{:?}", a.cost_usd);
+        // The same message in a split record is not billed twice.
+        assert!(!t.apply_usage(&mut a, &mut rt, Some("deepseek"), Some("deepseek-flash"), "m1".into(), "deepseek-flash".into(), Some(peak), miss));
+        // A status line priced for Anthropic's models does not replace the service's price.
+        hooks::apply_status(&mut a, &json!({"cost": {"total_cost_usd": 9.0}}));
+        assert!((a.cost_usd.unwrap() - 0.30).abs() < 1e-9, "{:?}", a.cost_usd);
+        // A weekend token is half price.
+        assert!(t.apply_usage(&mut a, &mut rt, Some("deepseek"), Some("deepseek-flash"), "m2".into(), "deepseek-flash".into(), Some(weekend), miss));
+        assert!((a.cost_usd.unwrap() - 0.45).abs() < 1e-9, "{:?}", a.cost_usd);
+        // An unpriced service keeps the tokens and the CLI's own cost.
+        let mut b = crate::terminals::test_agent();
+        let mut rt2 = AgentRt::default();
+        assert!(t.apply_usage(&mut b, &mut rt2, None, None, "m3".into(), "m".into(), None, miss));
+        assert_eq!(b.usage.unwrap().input, 1_000_000);
+        assert!(b.cost_usd.is_none() && b.usage_cost_usd.is_none());
     }
 
     #[test]

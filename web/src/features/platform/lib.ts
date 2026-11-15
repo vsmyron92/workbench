@@ -534,9 +534,24 @@ export function parseContext(text: string): number | null {
 
 // ---------------------------------------------------------------- hosted APIs
 
+export interface ApiService {
+  label: string
+  /** The address the CLI's own endpoint uses; a kind may need another one. */
+  url: string
+  urls?: Partial<Record<AccountKind, string>>
+  hint: string
+  hints?: Partial<Record<AccountKind, string>>
+}
+
 /** The hosted services an agent CLI can use with an API key (the server's `ProviderKind::api_services`). */
-export const API_SERVICES: Record<string, { label: string; url: string; hint: string }> = {
-  deepseek: { label: 'DeepSeek', url: 'https://api.deepseek.com/anthropic', hint: 'DeepSeek’s models through its own Anthropic-compatible endpoint.' },
+export const API_SERVICES: Record<string, ApiService> = {
+  deepseek: {
+    label: 'DeepSeek',
+    url: 'https://api.deepseek.com/anthropic',
+    urls: { codex: 'https://api.deepseek.com/' },
+    hint: 'DeepSeek’s models through its own Anthropic-compatible endpoint. V4 models have a 1M-token window: deepseek-flash[1m] is DeepSeek’s own Claude Code name for it.',
+    hints: { codex: 'DeepSeek’s Responses API with an API key. Its standalone web search (Alpha Search) is on.' },
+  },
   openrouter: { label: 'OpenRouter', url: 'https://openrouter.ai/api', hint: 'Many providers’ models behind one key. The model is named as OpenRouter names it.' },
   zai: { label: 'Z.ai', url: 'https://api.z.ai/api/anthropic', hint: 'GLM models.' },
   moonshot: { label: 'Moonshot', url: 'https://api.moonshot.ai/anthropic', hint: 'Kimi models.' },
@@ -546,18 +561,47 @@ export const API_SERVICES: Record<string, { label: string; url: string; hint: st
   custom: { label: 'Other', url: '', hint: 'Any service with the right API: Anthropic Messages for Claude Code, Responses for Codex, OpenAI-compatible for Aider.' },
 }
 
+/** The address a service's usual endpoint has for `kind` (empty: none, or `custom`). */
+export function apiServiceUrl(kind: AccountKind, service: string): string {
+  const s = API_SERVICES[service]
+  return s?.urls?.[kind] ?? s?.url ?? ''
+}
+
+/** What the service does for `kind` (its kind-specific hint, else its own). */
+export function apiServiceHint(kind: AccountKind, service: string): string {
+  const s = API_SERVICES[service]
+  return s?.hints?.[kind] ?? s?.hint ?? ''
+}
+
 export const API_BY_KIND: Record<AccountKind, string[]> = {
   claude: ['deepseek', 'openrouter', 'zai', 'moonshot', 'fireworks', 'anthropic', 'custom'],
-  codex: ['openai', 'custom'],
+  codex: ['openai', 'deepseek', 'custom'],
   aider: ['deepseek', 'openrouter', 'openai', 'anthropic', 'custom'],
   kimi: [],
   gemini: [],
 }
 
+/** What Workbench knows about a service's models: the window, image input and what they are for. */
+export interface ApiModel {
+  id: string
+  context?: number
+  images?: boolean
+  note: string
+}
+
+export function apiModels(kind: AccountKind, service: string): ApiModel[] {
+  if (service !== 'deepseek') return []
+  const flash: ApiModel = { id: 'deepseek-flash', context: 1_048_576, images: true, note: 'Fast and cheap; 1M-token window; takes images.' }
+  const pro: ApiModel = { id: 'deepseek-v4-pro', context: 1_048_576, images: false, note: 'Most capable; 1M-token window; text only (a pasted image is replaced with “Unsupported Image”).' }
+  if (kind === 'claude') return [{ ...flash, id: 'deepseek-flash[1m]', note: 'Fast and cheap; 1M-token window (DeepSeek’s name for it in Claude Code); takes images.' }, pro, flash]
+  if (kind === 'codex') return [flash, pro]
+  return []
+}
+
 /** Why `url` cannot be a hosted API's address (`null`: it can; empty is the service's usual one where it has one). */
 export function apiUrlError(kind: AccountKind, service: string, url: string): string | null {
   const u = url.trim()
-  const usual = kind === 'claude' ? (API_SERVICES[service]?.url ?? '') : kind === 'codex' && service === 'openai' ? 'x' : ''
+  const usual = apiServiceUrl(kind, service) || (kind === 'codex' && service === 'openai' ? 'x' : '')
   if (!u) return service === 'custom' || (kind === 'codex' && !usual) ? 'Enter the address of the API' : null
   const m = /^(https?):\/\/([^\s/?#@]+)(?:[/?#]\S*)?$/i.exec(u)
   if (!m) return 'https:// and an address, without a user name or password'

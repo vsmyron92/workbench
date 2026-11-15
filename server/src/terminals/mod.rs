@@ -40,6 +40,7 @@
 mod activity;
 mod agent;
 mod artifact;
+mod balance;
 mod codex;
 mod conversation;
 mod failover;
@@ -49,6 +50,7 @@ mod input;
 mod kimi;
 mod local;
 mod memory;
+mod models;
 mod permission;
 mod providers;
 mod pty;
@@ -200,6 +202,29 @@ pub enum AgentState {
     Exited,
 }
 
+/// The tokens a session's transcript recorded, added up. `input` excludes cache hits, as
+/// the Anthropic (and DeepSeek's Anthropic-compatible) usage objects report them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+    pub output: u64,
+}
+
+impl TokenUsage {
+    pub fn add(&mut self, other: TokenUsage) {
+        self.input = self.input.saturating_add(other.input);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_creation = self.cache_creation.saturating_add(other.cache_creation);
+        self.output = self.output.saturating_add(other.output);
+    }
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentInfo {
@@ -231,6 +256,17 @@ pub struct AgentInfo {
     pub attention: Option<String>,
     pub context_pct: Option<f64>,
     pub cost_usd: Option<f64>,
+    /// The tokens the transcript recorded (Claude Code; its usage objects). `None`: none read.
+    #[serde(default)]
+    pub usage: Option<TokenUsage>,
+    /// The cost priced from `usage` at a hosted service's own prices (DeepSeek). It replaces
+    /// the CLI's own cost estimate, which is priced for another vendor's models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_cost_usd: Option<f64>,
+    /// The session runs on a service whose prices Workbench knows: the CLI's own estimates
+    /// (its status line's cost, a resume's cache write) are for another vendor and are hidden.
+    #[serde(default)]
+    pub priced: bool,
     pub last_event_at: i64,
     /// The Claude Code permission request the session waits on, when Workbench can
     /// answer it (`POST /api/agents/{id}/permission`); `null` otherwise.
@@ -504,6 +540,8 @@ pub struct Terminals {
     codex_features: Mutex<HashMap<PathBuf, (std::time::SystemTime, providers::CodexFeatures)>>,
     /// Which agent accounts are at their usage limit, and how full their windows are.
     pub(crate) usage: usage::Usage,
+    /// Hosted-API accounts' balances, for the ones that asked (`api.balance`).
+    pub(crate) balances: balance::Cache,
     /// Whether each agent account is signed in, as its CLI last said.
     pub(crate) signins: signin::Cache,
 }
@@ -1702,6 +1740,9 @@ pub(crate) fn test_agent() -> AgentInfo {
         attention: None,
         context_pct: None,
         cost_usd: None,
+        usage: None,
+        usage_cost_usd: None,
+        priced: false,
         last_event_at: 0,
         pending_permission: None,
         resume_cost: None,

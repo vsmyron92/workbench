@@ -271,7 +271,8 @@ local = { server = "ollama" }                     # url defaults to http://local
 
 Workbench shows how full each account is and, when one is at its limit, can use the next. It learns
 the usage from what the CLIs report about themselves (Claude Code's status line, Codex's session log,
-and the message a CLI prints when it refuses a turn); it asks no vendor and reads no login. Give an
+and the message a CLI prints when it refuses a turn); it asks no vendor and reads no login, except
+for a hosted DeepSeek account that asked for its balance (`api.balance`, see "Hosted APIs"). Give an
 account a `fallback` list, in Settings (**Edit**, or the built-in Claude Code row) or in `config.toml`:
 
 ```toml
@@ -298,7 +299,7 @@ service names it, and the **secret** that holds the key.
 | CLI | Services |
 |---|---|
 | Claude Code | DeepSeek, OpenRouter, Z.ai, Moonshot, Fireworks (all through their Anthropic-compatible endpoints), the Anthropic API, or any other service with the Anthropic Messages API |
-| Codex | the OpenAI API, or any service with the Responses API (`/v1/responses`) |
+| Codex | DeepSeek, the OpenAI API, or any service with the Responses API (`/v1/responses`) |
 | Aider | DeepSeek, OpenRouter, the OpenAI API, the Anthropic API, or any OpenAI-compatible service |
 
 The key is never in `config.toml`: `key` names an entry of `[secrets]`, which says where the key lives
@@ -315,15 +316,44 @@ deepseek = { file = "~/.deepseek-key" }          # keep it private: chmod 600
 
 [agents.providers.claude-deepseek]
 kind = "claude"
-model = "deepseek-v4-pro"                         # as DeepSeek's documentation names it
+model = "deepseek-flash[1m]"                      # as DeepSeek's documentation names it
 env = { CLAUDE_CONFIG_DIR = "~/.claude-deepseek" }
-api = { service = "deepseek", key = "deepseek", context = 131072 }
+api = { service = "deepseek", key = "deepseek", context = 1000000,
+        helper_model = "deepseek-flash", subagent_model = "deepseek-flash",
+        balance = true }
 ```
 
 Service addresses are those the services document for Claude Code; change `url` if a service moves
 them, and check the service's own page for its model names. An address must be `https://` (plain
 `http://` only for this computer). With the Anthropic API Claude Code may ask once, in the terminal,
 whether to use the key: answer Yes.
+
+**DeepSeek.** Its V4 models take a 1M-token window (`deepseek-flash[1m]` in Claude Code; `deepseek-flash`
+or `deepseek-v4-pro` in Codex). Set `context = 1000000`, and Workbench also tells Claude Code to
+compact at 75% of it (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`), as DeepSeek's own guide does. `helper_model`
+and `subagent_model` let Claude Code's cheap helper and its sub-agents ask another model (DeepSeek's
+guide runs them on Flash while the main agent may be Pro); without them every role asks `model`.
+Claude Code's own names still work too: DeepSeek maps `opus` to Pro and `sonnet`/`haiku` to Flash.
+Its Anthropic-compatible endpoint ignores `cache_control`, `budget_tokens` and
+`disable_parallel_tool_use`, and refuses a named `tool_choice` in thinking mode; its automatic prefix
+cache is on regardless, which is what the cache share below measures. `deepseek-v4-pro` takes no
+images (`deepseek-flash` does); attaching one to a Pro session says the service will replace it with
+"Unsupported Image" instead of failing quietly. Codex on DeepSeek gets its
+Responses API, the key instead of a ChatGPT login, and DeepSeek's
+standalone web search. Codex 0.164 or newer is needed; Workbench passes the provider, key, web
+search and window, and leaves DeepSeek's model catalog (its long Codex instructions) to DeepSeek's
+own setup script if you want it. This path is not run against the real service in Workbench's tests.
+`balance = true` asks DeepSeek's read-only `GET /user/balance` once a minute
+while Settings → Agents → Accounts is open: the account's balance is shown, and new sessions stop
+while it is empty. That is the only vendor request Workbench makes; without it, usage comes only
+from what the CLIs report.
+
+A Claude Code session's transcript (and a Codex session's rollout) records its token usage, so
+Workbench shows how much of the input came from the service's cache. For DeepSeek the cost is
+estimated from those tokens at DeepSeek's own prices
+(peak and off-peak, cache hit and miss — cache hits are about 2% of a miss), and Claude Code's own
+cost estimate, priced for Anthropic's models, is not shown. The estimate ignores Chinese public
+holidays, so a holiday is priced at the peak rate.
 
 ## Moving a conversation to another account
 

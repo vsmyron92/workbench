@@ -493,11 +493,11 @@ async fn a_hosted_api_key_comes_from_secrets_reaches_only_the_environment_and_is
     std::fs::set_permissions(&key_file, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
     let (ds, c) = account(dir.path(), &fake, "claude-ds", |c| {
         c.model = Some("deepseek-v4-pro".into());
-        c.api = Some(ApiConfig { service: "deepseek".into(), url: String::new(), key: "deepseek".into(), context: Some(131072) });
+        c.api = Some(ApiConfig { service: "deepseek".into(), url: String::new(), key: "deepseek".into(), context: Some(131072), ..Default::default() });
     });
     let (missing, cm) = account(dir.path(), &fake, "claude-nokey", |c| {
         c.model = Some("m".into());
-        c.api = Some(ApiConfig { service: "deepseek".into(), url: String::new(), key: "not-defined".into(), context: None });
+        c.api = Some(ApiConfig { service: "deepseek".into(), url: String::new(), key: "not-defined".into(), context: None, ..Default::default() });
     });
     let _ = &missing;
     let (state, addr, pid) = served_with(dir.path(), &fake, |cfg| {

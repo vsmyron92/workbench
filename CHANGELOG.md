@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.22.0 - 2026-11-15
+
+DeepSeek support grows up: Codex can use it, its 1M-token window is used, its cache savings and cost
+are visible, and an account's balance can be checked without opening the DeepSeek console.
+
+- **DeepSeek in Codex.** A hosted API can now name DeepSeek for Codex as well as for Claude Code and
+  Aider: Workbench points Codex at DeepSeek's Responses API (`https://api.deepseek.com`), puts the key
+  in a provider of its own, and turns on DeepSeek's standalone web search (Alpha Search). The Codex
+  login and its ChatGPT account are not used. The settings page knows the service's address for both
+  CLIs.
+- **The 1M window.** DeepSeek's V4 models take 1M tokens, but Workbench's example capped them at
+  131072 and Claude Code knew only its 200K default. The service's own model names fill the window when
+  picked (`deepseek-flash[1m]` for Claude Code, `deepseek-flash`/`deepseek-v4-pro` for Codex), and a
+  configured context also sets Claude Code's auto-compact window at 75% of it, as DeepSeek's guide does.
+- **A cheaper helper and cheaper sub-agents.** A hosted Claude Code account can name a `helper_model`
+  (its Haiku default) and a `subagent_model`, so the main agent can run on Pro while the helper and
+  sub-agents run on Flash. Without them every role asks the main model, as before.
+- **What the cache saved.** A session's token usage (Claude Code's transcript, Codex's rollout) is
+  added up: its tab and card show how much of the input came from the service's prompt cache. For
+  DeepSeek the cost is estimated at
+  DeepSeek's own prices (peak and off-peak, cache hit and miss) instead of Claude Code's Anthropic
+  prices, so a cheap session is not shown with an expensive estimate.
+- **Text-only models say so.** DeepSeek's Pro models take no images: attaching one now answers with a
+  warning that the service will replace it with "Unsupported Image". The new-session effort choices
+  are the levels the model actually has (`low`, `high`, `max`), not five names that collapse to three.
+- **A balance, if you ask.** A DeepSeek account can ask Workbench to read its balance
+  (`GET /user/balance`, read-only, with the account's key) while Settings → Agents → Accounts is open,
+  once a minute; an empty account stops new sessions until it is topped up. It is off by default:
+  Workbench otherwise asks no vendor anything.
+
 ## 0.21.0 - 2026-11-15
 
 - **Ultracode option.** The new-session composer has an **Ultracode** box for Claude Code: Claude plans a workflow of

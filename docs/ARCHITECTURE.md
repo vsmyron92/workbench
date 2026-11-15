@@ -943,8 +943,12 @@ always for custom CLIs.
   `https://openrouter.ai/api`, `zai`, `moonshot`, `fireworks`, `anthropic` = Claude Code's own default
   endpoint with the key as `x-api-key` in `ANTHROPIC_API_KEY`, `custom` + `url`), as a bearer token in
   `ANTHROPIC_AUTH_TOKEN` with `ANTHROPIC_API_KEY` set *blank* and the model envs of a local model
-  (`claude_model_env`); Codex needs the Responses API (`openai`, `custom` + `url`): a provider defined with
-  `-c model_providers.workbench_api.{name,base_url,env_key}` and the key in `WORKBENCH_API_KEY`; Aider
+  (`claude_model_env`, with `helper_model` for the Haiku default and `subagent_model` for sub-agents, and
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` at 75% of a configured `context`); Codex needs the Responses API
+  (`openai`, `deepseek`, `custom` + `url`): a provider defined with
+  `-c model_providers.workbench_api.{name,base_url,env_key}` and the key in `WORKBENCH_API_KEY`; DeepSeek
+  also gets `wire_api = "responses"`, `supports_standalone_web_search`, `features.standalone_web_search`
+  and the key-login settings its own Codex guide names; Aider
   (LiteLLM) uses the service's own variable (`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`,
   `ANTHROPIC_API_KEY`) and model prefix, `custom` = `OPENAI_API_BASE` + `openai/<model>`. `key` is the
   **name of a `[secrets]` entry** (never the key: `valid_secret_name`); `prepare_launch` reads it with
@@ -958,7 +962,8 @@ always for custom CLIs.
   `Authorization: Bearer <key>` with these arguments; Claude Code through Workbench sent the gateway key as
   a bearer token and, in print mode, the Anthropic key as `x-api-key`. Not checked: Claude Code's
   interactive approval of an environment API key (the sandbox's host-managed Claude Code supplies its own
-  login), Aider, and the services themselves.
+  login), Aider, DeepSeek's Responses endpoint and Codex's standalone web search with it (those
+  arguments follow DeepSeek's own Codex guide), and the services themselves.
 - **Usage and failover** (`usage`, `failover`). `usage::Usage` keeps, per provider name, the usage
   windows an account reports and a `limited_until` (`usage.json` of the data folder, 0600). Sources:
   Claude Code's status line `rate_limits.five_hour` / `seven_day` (`used_percentage`, `resets_at`;
@@ -979,6 +984,20 @@ always for custom CLIs.
   `POST /api/agents/{id}/switch {provider?, transfer?}` (idempotent per target). Accounts are managed
   only by devices (`PUT /api/agents/usage/{provider} {limitedUntil|null}` marks one limited or usable).
   `GET /api/agents/defaults` gives each provider `usage`, `fallback`, `local`, `localError`.
+  An `api.balance = true` account is the one exception to "no vendor": while `GET /api/agents/usage`
+  is being served, `terminals::balance` makes one bounded, read-only, redirect-free `GET` of DeepSeek's
+  `/user/balance` with the account's key, caches the figures for a minute, shows them in Accounts and
+  marks an empty account limited for 30 minutes. A failure keeps the last answer. Only the figures
+  (`available`, currency, total) leave the module; the key and the raw body never do.
+- **Tokens and cost.** Claude Code's transcript `message.usage` objects (and Codex's
+  `token_count.info.last_token_usage`) are added up per session (`AgentInfo.usage`: input, cache read,
+  cache creation, output; a sub-agent's sidechain tokens count, since the account pays for them, but
+  its text stays out of titles and answers). `models` prices
+  DeepSeek's V4 family from those tokens (peak 01:00–04:00 and 06:00–10:00 UTC on weekdays, off-peak
+  half; cache hits at DeepSeek's own rates), stores the total in `usage_cost_usd` and replaces the CLI's
+  own `cost_usd`, which is priced for Anthropic's models. `models::caps_for` also says what a service's
+  model takes (image input, 1M context, 384K output, the effort names that do not collapse): it filters
+  the composer's efforts and makes an image attachment answer with a warning for a text-only model.
 - **Conversation transfer** (`conversation`, `failover::switch_account`). Moving a session to another
   account (automatically with `failover = "session"`, from the toast, or from the session menu's
   "Continue on another account…") starts a new session in the same folder and carries the

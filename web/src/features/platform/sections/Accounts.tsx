@@ -16,6 +16,9 @@ import {
   API_BY_KIND,
   API_SERVICES,
   apiKeyError,
+  apiModels,
+  apiServiceHint,
+  apiServiceUrl,
   apiUrlError,
   contextError,
   fallbackCandidates,
@@ -186,6 +189,9 @@ function AccountEditor({
   const [apiService, setApiService] = useState(initial?.api?.service ?? API_BY_KIND[(accountKind(initial?.kind ?? editId)?.kind ?? 'claude') as AccountKind][0] ?? 'custom')
   const [apiUrl, setApiUrl] = useState(initial?.api?.url ?? '')
   const [apiKey, setApiKey] = useState(initial?.api?.key ?? '')
+  const [helperModel, setHelperModel] = useState(initial?.api?.helper_model ?? '')
+  const [subagentModel, setSubagentModel] = useState(initial?.api?.subagent_model ?? '')
+  const [balance, setBalance] = useState(initial?.api?.balance ?? false)
   const [found, setFound] = useState<{ models: string[]; error?: string } | null>(null)
   const [detecting, setDetecting] = useState(false)
   const [label, setLabel] = useState(initial?.label ?? '')
@@ -259,7 +265,17 @@ function AccountEditor({
           memory_dir: hasMemory ? memoryDir.trim() || null : null,
           model: local || api ? model.trim() : (initial?.model ?? null),
           local: local ? { server, url: url.trim(), context: takesContext ? parseContext(context) : null } : null,
-          api: api ? { service: apiService, url: apiUrl.trim(), key: apiKey, context: takesContext ? parseContext(context) : null } : null,
+          api: api
+            ? {
+                service: apiService,
+                url: apiUrl.trim(),
+                key: apiKey,
+                context: takesContext ? parseContext(context) : null,
+                helper_model: kind === 'claude' ? helperModel.trim() || null : null,
+                subagent_model: kind === 'claude' ? subagentModel.trim() || null : null,
+                balance: apiService === 'deepseek' ? balance : false,
+              }
+            : null,
         }
       }
       await onSave(builtIn ? editId : effectiveId, tidy(config))
@@ -388,16 +404,67 @@ function AccountEditor({
                   </option>
                 ))}
               </Select>
-              <div className="wb-small wb-muted">{API_SERVICES[apiService]?.hint}</div>
+              <div className="wb-small wb-muted">{apiServiceHint(kind, apiService)}</div>
               <label className="wb-small wb-muted">Address{apiService === 'custom' ? '' : ' (optional)'}</label>
               <Input
                 className="mono"
                 value={apiUrl}
                 onChange={(e) => setApiUrl(e.target.value)}
-                placeholder={(kind === 'claude' ? API_SERVICES[apiService]?.url : '') || (kind === 'codex' && apiService === 'openai' ? 'https://api.openai.com/v1' : 'https://host/v1')}
+                placeholder={apiServiceUrl(kind, apiService) || (kind === 'codex' && apiService === 'openai' ? 'https://api.openai.com/v1' : 'https://host/v1')}
               />
               <label className="wb-small wb-muted">Model{kind === 'claude' && apiService === 'anthropic' ? ' (optional)' : ''}</label>
-              <Input className="mono" value={model} onChange={(e) => setModel(e.target.value)} placeholder="the model, as the service names it" />
+              <Input
+                className="mono"
+                value={model}
+                onChange={(e) => {
+                  const v = e.target.value
+                  setModel(v)
+                  // A known model fills its window: DeepSeek's V4 models have 1M, and the
+                  // CLI would otherwise assume 200K for a name it does not know.
+                  const known = apiModels(kind, apiService).find((m) => m.id === v)
+                  if (known?.context) setContext(String(known.context))
+                }}
+                placeholder="the model, as the service names it"
+                list="wb-api-models"
+              />
+              {apiModels(kind, apiService).length > 0 && (
+                <>
+                  <datalist id="wb-api-models">
+                    {apiModels(kind, apiService).map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.note}
+                      </option>
+                    ))}
+                  </datalist>
+                  <div className="wb-small wb-muted">
+                    {apiModels(kind, apiService).find((m) => m.id === model)?.note ??
+                      `Known models: ${apiModels(kind, apiService)
+                        .map((m) => m.id)
+                        .join(', ')}. Pick one to fill its window.`}
+                  </div>
+                </>
+              )}
+              {kind === 'claude' && (
+                <>
+                  <label className="wb-small wb-muted">Helper model (optional)</label>
+                  <Input className="mono" value={helperModel} onChange={(e) => setHelperModel(e.target.value)} placeholder="the same model" />
+                  <div className="wb-small wb-muted">Claude Code’s cheap helper (its Haiku default). DeepSeek’s own guide runs it on Flash, also when the main agent is Pro.</div>
+                  <label className="wb-small wb-muted">Sub-agent model (optional)</label>
+                  <Input className="mono" value={subagentModel} onChange={(e) => setSubagentModel(e.target.value)} placeholder="the same model" />
+                  <div className="wb-small wb-muted">The model the sub-agents Claude Code starts ask. DeepSeek’s guide runs them on Flash.</div>
+                </>
+              )}
+              {apiService === 'deepseek' && (
+                <>
+                  <Checkbox checked={balance} onChange={setBalance}>
+                    Check this account’s balance
+                  </Checkbox>
+                  <div className="wb-small wb-muted">
+                    While the accounts page is open, Workbench asks DeepSeek for the balance once a minute with the account’s key (a read-only request) and stops
+                    new sessions while it is empty. Nothing else is asked of any service.
+                  </div>
+                </>
+              )}
               {takesContext && (
                 <>
                   <label className="wb-small wb-muted">Context window (optional)</label>
@@ -630,6 +697,7 @@ export function AccountsGroup({ onGoto }: { onGoto: (section: string) => void })
               const name = accountName(r.id, providers)
               const l = r.config.local
               const ap = r.config.api
+              const bal = usageOf(r.id)?.balance
               const si = signIns.data?.accounts[r.id]
               const siText = signInText(si)
               const siExpiry = signInExpiry(si)
@@ -687,6 +755,15 @@ export function AccountsGroup({ onGoto }: { onGoto: (section: string) => void })
                   )}
                   {!l && !ap && <UsageCell usage={usageOf(r.id)} />}
                   {ap && <UsageCell usage={usageOf(r.id)} none="Billed to the key: no subscription limits. Running out of credit moves on." />}
+                  {ap && bal && (
+                    <div className="wb-small wb-acct-line">
+                      <span className="wb-subtle">Balance: </span>
+                      <span className="mono">
+                        {bal.currency} {bal.total}
+                      </span>{' '}
+                      {!bal.available && <Badge tone="danger">empty: top up</Badge>}
+                    </div>
+                  )}
                   {r.config.fallback?.length ? (
                     <div className="wb-small wb-acct-line">
                       <span className="wb-subtle">At its limit, use </span>
@@ -701,7 +778,7 @@ export function AccountsGroup({ onGoto }: { onGoto: (section: string) => void })
       </Group>
       <Group
         title="When an account is at its limit"
-        description="Usage comes from what each CLI reports about itself: Claude Code’s status line and Codex’s session log. Workbench asks no vendor and reads no login."
+        description="Usage comes from what each CLI reports about itself: Claude Code’s status line and Codex’s session log. Workbench asks no vendor and reads no login, except for a hosted account that asked for its balance: that one read-only request is made while this page is open."
       >
         <Row label="When an account is at its limit" hint={FAILOVER.find((f) => f.value === mode)?.hint}>
           <Select value={mode} onChange={(e) => void setMode(e.target.value as FailoverMode)}>

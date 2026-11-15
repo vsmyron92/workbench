@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
 use super::agent::{self, AgentRequest, AskRequest, RemoteControlRequest};
+use super::models;
 use super::providers;
 use super::{Entry, TerminalInfo, TerminalKind, input, transcript, valid_id};
 use crate::app::AppState;
@@ -262,7 +263,7 @@ async fn text(State(state): State<AppState>, Path(id): Path<String>, Query(q): Q
 /// Save a pasted image and return its absolute path (the UI inserts it, quoted).
 async fn attachment(State(state): State<AppState>, Path(id): Path<String>, body: Bytes) -> ApiResult<Json<Value>> {
     check_id(&id)?;
-    state.terminals.require(&id)?;
+    let entry = state.terminals.require(&id)?;
     if body.len() > MAX_ATTACHMENT {
         return Err(ApiError::bad_request("attachments are limited to 25 MB"));
     }
@@ -280,8 +281,25 @@ async fn attachment(State(state): State<AppState>, Path(id): Path<String>, body:
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
+    // A model that takes no images would replace the path's contents with "Unsupported
+    // Image" without saying so (DeepSeek's Pro models are text-only).
+    let warning = {
+        let (pid, model) = {
+            let r = entry.rec.lock();
+            (
+                r.info.agent.as_ref().and_then(|a| a.provider_id.clone()),
+                r.info.agent.as_ref().and_then(|a| a.model.clone()).or_else(|| r.launch.as_ref().and_then(|l| l.model.clone())),
+            )
+        };
+        let cfg = state.config.read();
+        providers::find(&cfg.agents, pid.as_deref()).and_then(|p| {
+            let api = p.api.as_ref()?;
+            let m = model.as_deref().or(p.model.as_deref()).unwrap_or("");
+            models::caps_for(&api.service, m).filter(|c| !c.images).map(|_| format!("{m} takes no images: the service will replace it with “Unsupported Image”"))
+        })
+    };
     let s = path.display().to_string();
-    Ok(Json(json!({ "path": s, "quoted": input::quote_path(&s), "mime": mime })))
+    Ok(Json(json!({ "path": s, "quoted": input::quote_path(&s), "mime": mime, "warning": warning })))
 }
 
 // ---------------------------------------------------------------- websocket
@@ -485,14 +503,41 @@ fn require_device(caller: &Option<axum::extract::Extension<crate::auth::Caller>>
     }
 }
 
-/// `GET /api/agents/usage` → `{usage: {<provider>: {windows, limited, limitedUntil, reason}}, failover}`.
+/// `GET /api/agents/usage` → `{usage: {<provider>: {windows, limited, limitedUntil, reason,
+/// balance}}, failover}`. Accounts that asked for their balance (`api.balance`) are asked
+/// once a minute, here: Workbench otherwise queries no vendor.
 async fn usage_snapshot(State(state): State<AppState>) -> Json<Value> {
     let failover = match providers::Failover::of(&state.config.read().agents) {
         providers::Failover::Off => "off",
         providers::Failover::New => "new",
         providers::Failover::Session => "session",
     };
+    refresh_balances(&state).await;
     Json(json!({ "usage": state.terminals.usage.snapshot(util::now_ms()), "failover": failover }))
+}
+
+/// Read the opt-in balances whose answer is old. A failure keeps the last one.
+async fn refresh_balances(state: &AppState) {
+    let providers = super::providers::list(&state.config.read().agents).0;
+    let now = util::now_ms();
+    for p in providers {
+        let Some(a) = p.api.as_ref().filter(|a| a.balance) else { continue };
+        // The same checks a session's start makes: no key goes to an address `api_setup`
+        // would refuse, and the key is the validated secret's name.
+        let Ok(Some(setup)) = providers::api_setup(&p, p.model.as_deref()) else { continue };
+        let Some(endpoint) = super::balance::endpoint(&a.service, &setup.url) else { continue };
+        if state.terminals.balances.get(&p.id).is_some_and(|b| !b.stale(now)) {
+            continue;
+        }
+        let Ok(key) = state.secret(None, &setup.key_secret) else { continue };
+        match super::balance::fetch(&endpoint, &key).await {
+            Ok(b) => {
+                state.terminals.balances.put(&p.id, b.clone());
+                state.terminals.usage.record_balance(&p.id, b, now);
+            }
+            Err(e) => tracing::debug!(provider = %p.id, "balance not read: {e}"),
+        }
+    }
 }
 
 #[derive(Deserialize)]
