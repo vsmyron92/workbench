@@ -25,7 +25,7 @@ import type { MenuEntry } from '@/ui'
 import { openTerminal, terminalsApi } from './api'
 import { resumes } from './lib/providers'
 import { useAgentsUi } from './store'
-import { canKill, isRunning, lingering, restartMode, TAB_COLORS, terminalPanelId } from './lib/sessions'
+import { artifactPages, canKill, isArtifactUrl, isRunning, lingering, restartMode, TAB_COLORS, terminalPanelId } from './lib/sessions'
 
 export async function renameTerminal(t: TerminalInfo) {
   const title = await promptDialog({ title: t.kind === 'agent' ? 'Rename session' : 'Rename terminal', initial: t.title, confirmLabel: 'Rename' })
@@ -203,6 +203,11 @@ export function openRemote(url: string) {
   if (url.startsWith('https://')) window.open(url, '_blank', 'noopener,noreferrer')
 }
 
+/** A page the session published to claude.ai: only claude.ai artifact addresses open. */
+export function openPage(url: string) {
+  if (isArtifactUrl(url)) window.open(url, '_blank', 'noopener,noreferrer')
+}
+
 export function colorMenu(t: TerminalInfo): MenuEntry[] {
   return [
     ...TAB_COLORS.map<MenuEntry>((c) => ({ label: `${t.color === c.id ? '✓ ' : ''}${c.label}`, icon: Palette, run: () => void setColor(t, c.id) })),
@@ -248,7 +253,9 @@ export function terminalMenu(t: TerminalInfo, opts: { open?: boolean; onReplaced
     })),
   )
   const url = t.agent?.remoteUrl
-  if (url || t.agent?.sessionId) items.push('separator')
+  const pages = artifactPages(t.agent)
+  if (url || pages.length || t.agent?.sessionId) items.push('separator')
+  for (const p of pages.slice(0, 4)) items.push({ label: `Open page “${p.label}” on claude.ai`, icon: ExternalLink, run: () => openPage(p.url) })
   if (url) {
     items.push({ label: 'Copy Remote Control link', icon: Copy, run: () => void copyText(url, 'Remote Control link copied') })
     items.push({ label: 'Open on claude.ai', icon: ExternalLink, run: () => openRemote(url) })

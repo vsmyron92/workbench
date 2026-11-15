@@ -276,6 +276,18 @@ export function resumeNote(a: AgentInfo | null | undefined): { label: string; ti
   }
 }
 
+/** A page Claude Code's Artifact tool published: only an address on claude.ai is ever offered as a link. */
+const ARTIFACT_URL = /^https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9][A-Za-z0-9_-]{5,80}$/
+
+export function isArtifactUrl(url: unknown): url is string {
+  return typeof url === 'string' && ARTIFACT_URL.test(url)
+}
+
+/** The session's published pages, newest first, with what to call each. */
+export function artifactPages(a: AgentInfo | null | undefined): { url: string; label: string }[] {
+  return (a?.artifacts ?? []).filter((p) => isArtifactUrl(p.url)).map((p) => ({ url: p.url, label: p.title?.trim() || 'Page' }))
+}
+
 /** "Haiku 4.5 · low · 18% ctx · $0.03" pieces. */
 export function agentMeta(a: AgentInfo | null | undefined): string[] {
   if (!a) return []

@@ -10,6 +10,7 @@
 
 use serde_json::Value;
 
+use super::artifact;
 use super::permission::{self, OpenTools, Queue};
 use super::transcript::{clean_line, is_uuid, tail_chars};
 use super::{AgentInfo, AgentState, ResumeCost};
@@ -125,6 +126,8 @@ pub fn describe_permission(tool: Option<&str>, input: Option<&Value>, cwd: Optio
         }
         "WebFetch" => field("url").map(|u| format!("fetch {}", clean_line(&u, 160))),
         "WebSearch" => field("query").map(|q| format!("search the web for “{}”", clean_line(&q, 80))),
+        // A page that leaves this computer: say where it goes.
+        "Artifact" => artifact::summary(input, cwd),
         _ => None,
     };
     match what {
@@ -205,6 +208,14 @@ pub fn apply_hook(agent: &mut AgentInfo, rt: &mut AgentRt, v: &Value, now: i64) 
             }
         }
         "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => {
+            // A page the session published to claude.ai: keep its link where the user can open it.
+            if event == "PostToolUse" {
+                if let Some(link) = artifact::published(v, now) {
+                    if artifact::remember(&mut agent.artifacts, link) {
+                        ch = true;
+                    }
+                }
+            }
             if let Some(id) = tool_use_id {
                 rt.open_tools.finished(id);
                 // Its permission was answered, wherever that happened.
@@ -522,6 +533,31 @@ mod tests {
         apply_hook(&mut c, &mut rt, &json!({"hook_event_name":"SessionStart","source":"fork","context_tokens":900,"estimated_cache_write_usd":-3.0}), 2);
         let r = c.resume_cost.clone().unwrap();
         assert_eq!((r.cache_expired, r.estimated_cache_write_usd, r.seconds_since_last_response), (false, None, None));
+    }
+
+    #[test]
+    fn a_page_published_to_claude_ai_is_kept_on_the_session_and_its_request_says_where_it_goes() {
+        let (mut a, mut rt) = (agent(), AgentRt::default());
+        let url = "https://claude.ai/artifact/9f2c1d7e-aaaa-4bbb-8ccc-0123456789ab";
+        let input = json!({"file_path": "/w/p/out/ci.html", "icon": "chart"});
+        // The permission prompt and its attention text name the file and claude.ai.
+        let o = apply_hook(&mut a, &mut rt, &json!({"hook_event_name":"PermissionRequest","tool_name":"Artifact","tool_input":input,"cwd":"/w/p"}), 1);
+        assert!(o.changed && o.attention);
+        assert_eq!(a.attention.as_deref(), Some("Permission to publish out/ci.html to claude.ai"));
+        // A failed call leaves nothing; the one that worked leaves the link, once.
+        let done = json!({"hook_event_name":"PostToolUse","tool_name":"Artifact","tool_use_id":"t1","tool_input":input,"tool_response":{"url":url}});
+        apply_hook(&mut a, &mut rt, &json!({"hook_event_name":"PostToolUseFailure","tool_name":"Artifact","tool_input":input,"tool_response":url}), 2);
+        assert!(a.artifacts.is_empty());
+        assert!(apply_hook(&mut a, &mut rt, &done, 3).changed);
+        assert_eq!(a.artifacts.len(), 1);
+        assert_eq!((a.artifacts[0].url.as_str(), a.artifacts[0].title.as_deref(), a.artifacts[0].at), (url, Some("ci"), 3));
+        // Reading or listing pages is no publish; another tool's answer naming a page is none either.
+        apply_hook(&mut a, &mut rt, &json!({"hook_event_name":"PostToolUse","tool_name":"Artifact","tool_input":{"action":"list"},"tool_response":url}), 4);
+        apply_hook(&mut a, &mut rt, &json!({"hook_event_name":"PostToolUse","tool_name":"WebFetch","tool_input":{"url":"x"},"tool_response":url}), 5);
+        assert_eq!(a.artifacts.len(), 1);
+        // A fresh session (a new conversation under the same terminal) keeps what it published: they are links, not state.
+        apply_hook(&mut a, &mut rt, &json!({"hook_event_name":"SessionStart","source":"clear"}), 6);
+        assert_eq!(a.artifacts.len(), 1);
     }
 
     #[test]

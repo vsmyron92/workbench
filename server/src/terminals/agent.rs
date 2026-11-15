@@ -740,6 +740,7 @@ impl Terminals {
                 last_event_at: now,
                 pending_permission: None,
                 resume_cost: None,
+                artifacts: vec![],
             }),
             meta: {
                 let mut m = match &cont {

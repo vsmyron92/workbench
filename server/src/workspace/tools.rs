@@ -31,7 +31,14 @@ loading=\"lazy\"; keep wide tables scrollable. Markdown uses relative image path
 (viewer gallery). A 3D comparison is a JSON manifest step with viewer compare3d: {\"title\"?, \"tests\": [{\"id\", \"name\", \
 \"kind\": \"lowpoly\"|\"highpoly\", \"defaultMode\"?: wire|solid|normals|pbr|albedo|normalMap|rough|metal, \"note\"?, \
 \"input\"?: reference image, \"models\": [{\"file\": \"models/a.glb\", \"label\", \"note\"?, \"accent\"?, \"rotationY\"?, \
-\"alias\"?}]}]} with paths relative to the manifest; a single .glb step also opens in the 3D viewer.";
+\"alias\"?}]}]} with paths relative to the manifest; a single .glb step also opens in the 3D viewer. \
+Charts: load ../_shared/chart.umd.js (Chart.js 4) then ../_shared/report-charts.js (the report's dark look and a palette, \
+wbPalette) and put each <canvas> in <div class=\"wb-chart\">; datasets that name no colour get the palette. \
+Live data: in a card of a project, `await workbench.query(kind, params)` reads sessions, git.repos, ci.runs {limit?, \
+provider?, branch?}, data.series, data.view {series, from?, to?, buckets?}, data.stats {series, from?, to?} (read-only, only \
+this project). The user is asked once to Allow it per card; the promise waits for the answer and rejects with err.code \
+denied | unavailable | busy | too_large | bad_request | failed | timeout, so always catch it and draw something useful anyway. \
+Poll no faster than every 5 s. It does not exist in Home, the Sandbox or repository cards.";
 
 fn scope_for(ctx: &McpCtx, requested: Option<&str>) -> ApiResult<String> {
     match requested.map(str::trim).filter(|s| !s.is_empty()) {
@@ -135,7 +142,7 @@ pub fn tools() -> Vec<McpTool> {
                     "cardId": c.id,
                     "scope": c.scope,
                     "folder": c.folder_path,
-                    "sharedAssets": "../_shared/report.css and ../_shared/report.js (relative to the folder)",
+                    "sharedAssets": "../_shared/report.css and ../_shared/report.js (relative to the folder); for charts ../_shared/chart.umd.js then ../_shared/report-charts.js",
                     "next": "Write files into folder, then call workspace_add_step for each tab, then workspace_open_card.",
                 })))
             },

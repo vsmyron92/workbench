@@ -3,7 +3,7 @@ name: workbench-report-card
 description: >-
   Hands findings, reports, comparisons, image galleries and plans to the user as a Workspace card (tabs next to the code) in a Workbench session, instead of terminal scrollback: reuse a fitting card, write a sandbox-safe HTML or Markdown report, register steps, open the card. Use in a Workbench session when the user asks for a write-up, report, comparison, analysis, gallery, plan or anything they will come back to, or says to put it in a card. Not for short answers.
 license: MIT
-compatibility: "Needs Workbench's MCP tools (a Claude Code or Codex session started from Workbench, version 0.16 or later). Without them, ignore this skill."
+compatibility: "Needs Workbench's MCP tools (a Claude Code or Codex session started from Workbench, version 0.16 or later; charts and live data need 0.20). Without them, ignore this skill."
 ---
 
 # Handing work over as a Workspace card
@@ -50,7 +50,8 @@ A report is untrusted HTML that runs scripts, so Workbench shows it in a frame w
 - Predefined classes: `card`, `grid-2`, `grid-3`, `grid-4`, `gallery`, `kpis` with `kpi`, `good`, `warn` and `bad` (text colour), `meta`, and the elements `main`, `h1` to `h3`, `table`, `pre`, `figure`. Nothing else exists (no badges, callouts or buttons): add a small `<style>` that uses the `--wbr-*` variables. The authority is `../_shared/report.css`, next to your card folder: read it when unsure.
 - Images are files in the card folder, with alt text and `loading="lazy"`. `report.js` opens every `<img>` that is not inside a link in a lightbox (arrow keys, 100% toggle, download) and uses its `alt` as the caption: write alt text that works as a caption, and use inline SVG, not `<img>`, for decoration.
 - Tables and `pre` blocks scroll sideways by themselves under `report.css`; wrap other wide content in an `overflow-x: auto` box.
-- Charts: render PNG or SVG files with your own tools into the card folder, or draw inline SVG. A charting library must be a local file (not under `node_modules`) that does not use `eval`.
+- Charts: Chart.js 4 is bundled: load `../_shared/chart.umd.js`, then `../_shared/report-charts.js` (dark look and palette), and put each `<canvas>` in `<div class="wb-chart">`. Or render PNG or SVG files with your own tools, or draw inline SVG. Any other charting library must be a local file (not under `node_modules`) that does not use `eval`. See [references/charts-and-live-data.md](references/charts-and-live-data.md).
+- A dashboard that should stay current can read the project's sessions, git state, CI runs and data-viewer series with `workbench.query(kind, params)`; the user allows it once per card. Needs a card of a project. Read the reference before using it.
 - Lead with the key figure: the card's thumbnail is taken from the first local image of its report (or from an image step).
 
 ## Other step types
@@ -65,7 +66,9 @@ A report is untrusted HTML that runs scripts, so Workbench shows it in a frame w
 
 ## Mistakes to avoid
 
-- CDN scripts, web fonts and remote images, or Tailwind, Bootstrap or a chart library from a CDN: they are blocked and the page renders without them. Save what you need into the card folder.
+- CDN scripts, web fonts and remote images, or Tailwind, Bootstrap or a chart library from a CDN: they are blocked and the page renders without them. Use the bundled Chart.js, or save what you need into the card folder.
+- Live data without a `catch`: if the user says no, or the card is in Home or the Sandbox, the report must still show something.
+- Publishing a dashboard with Claude Code's Artifact tool when the user wants it in Workbench: that sends the page to claude.ai. A card is the Workbench way; use the Artifact tool only when they ask for a page they can share from claude.ai.
 - Absolute or root-relative paths in HTML or Markdown.
 - A card per iteration instead of a step per iteration.
 - Writing files and stopping: unregistered files are not tabs, and an unopened card is easy to miss. Register each step, then open the card once.
@@ -78,4 +81,5 @@ A report is untrusted HTML that runs scripts, so Workbench shows it in a frame w
 ## Reading more
 
 - [references/html-skeleton.md](references/html-skeleton.md): a complete working report to copy, extras (a custom style, an inline SVG chart) and what each class is for. Read before writing a report.
+- [references/charts-and-live-data.md](references/charts-and-live-data.md): a Chart.js example in the report's look, the palette, and every kind `workbench.query` answers with its parameters, answer shape and error codes. Read before drawing a chart or a live dashboard.
 - [references/step-types.md](references/step-types.md): viewer by extension, what each viewer does, the 3D manifest schema with an example, and the size and name limits. Read before adding anything other than a report or Markdown, and when a tool refuses a name or a size.

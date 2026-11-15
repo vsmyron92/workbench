@@ -18,6 +18,8 @@ import {
   removeTerminal,
   restartMode,
   resumeNote,
+  artifactPages,
+  isArtifactUrl,
   sortSessions,
   stateLabel,
   tabAfterClose,
@@ -46,6 +48,7 @@ function agent(over: Partial<AgentInfo> = {}): AgentInfo {
     lastEventAt: 0,
     pendingPermission: null,
     resumeCost: null,
+    artifacts: [],
     ...over,
   }
 }
@@ -281,5 +284,25 @@ describe('socket protocol', () => {
     expect(wheelLines(120, 0, 20, 30)).toBe(6)
     expect(wheelLines(3, 1, 20, 30)).toBe(3)
     expect(wheelLines(1, 2, 20, 30)).toBe(30)
+  })
+})
+
+describe('pages published to claude.ai', () => {
+  const ok = 'https://claude.ai/artifact/9f2c1d7e-aaaa-4bbb-8ccc-0123456789ab'
+  it('only claude.ai artifact addresses are links', () => {
+    expect(isArtifactUrl(ok)).toBe(true)
+    expect(isArtifactUrl('https://claude.ai/code/artifact/9f2c1d7e-aaaa-4bbb-8ccc-0123456789ab')).toBe(true)
+    for (const bad of ['http://claude.ai/artifact/9f2c1d7e-aaaa', 'https://claude.ai.evil.example/artifact/9f2c1d7e-aaaa', 'javascript:alert(1)', 'https://claude.ai/artifact/x', `${ok}?a=b`, null, 5]) {
+      expect(isArtifactUrl(bad)).toBe(false)
+    }
+  })
+  it('lists the session’s pages newest first and drops what is not a claude.ai page', () => {
+    const a = agent({ artifacts: [{ url: ok, title: 'CI health', at: 2 }, { url: 'https://evil.example/x', title: 'x', at: 1 }, { url: ok.replace('9f2c', 'aaaa'), title: null, at: 0 }] })
+    expect(artifactPages(a)).toEqual([
+      { url: ok, label: 'CI health' },
+      { url: ok.replace('9f2c', 'aaaa'), label: 'Page' },
+    ])
+    expect(artifactPages(agent())).toEqual([])
+    expect(artifactPages(null)).toEqual([])
   })
 })

@@ -127,6 +127,23 @@ example in Home has prompts to try and a report template that uses all of it. A
 repository with a `workspace/workspace.json` in Mr. Mak Workspace's format shows those
 cards too.
 
+**Charts and live dashboards.** Reports can draw charts with Chart.js, which Workbench serves
+to them (`../_shared/chart.umd.js`, then `../_shared/report-charts.js` for the dark look and
+a palette), so an agent needs no CDN. In a card of a project a report can also read live
+data with `workbench.query`: the project's agent sessions, git branches and changes, recent
+CI runs and data-viewer series. The first time a report asks, a strip above it says what it
+wants to read and waits for **Allow**. It can only read, only this project, and never in
+Home, the Sandbox or a card that comes from a repository; the pulse button in the toolbar
+turns it off again. A report you allowed can send what it reads to other sites, so allow only
+reports you trust. The Sandbox's **Dashboard** tab is a working example that shows sample
+data until it is in a project.
+
+**Pages on claude.ai.** Claude Code's own `Artifact` tool publishes a page to claude.ai,
+private to your account until you share it. The permission request says so ("Permission to
+publish out/ci.html to claude.ai"), and the session's tab and card show the link afterwards.
+A Workspace card keeps the page inside Workbench; ask for a claude.ai page only when you
+want to share it from there.
+
 ## Other agent CLIs
 
 Codex, Kimi Code, Gemini CLI and Aider are presets: install one and it appears in the

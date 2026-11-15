@@ -57,8 +57,14 @@ const MAX_IMPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Markdown backups kept per card.
 const MAX_BACKUPS: usize = 20;
 
-const REPORT_CSS: &str = include_str!("assets/report.css");
-const REPORT_JS: &str = include_str!("assets/report.js");
+/// The files of `_shared/`: what a report links as `../_shared/<name>`. `chart.umd.js` is Chart.js (MIT,
+/// `assets/chart.LICENSE.md`, `THIRD_PARTY_NOTICES.md`), `report-charts.js` gives it the report's look.
+pub const SHARED_FILES: &[(&str, &str)] = &[
+    ("report.css", include_str!("assets/report.css")),
+    ("report.js", include_str!("assets/report.js")),
+    ("chart.umd.js", include_str!("assets/chart.umd.js")),
+    ("report-charts.js", include_str!("assets/report-charts.js")),
+];
 
 // ---------------------------------------------------------------- scopes
 
@@ -170,7 +176,28 @@ pub fn ensure_scope_dir(scope: &Scope) -> ApiResult<()> {
     util::fs::set_mode(&scope.dir, 0o700);
     let shared = scope.dir.join(SHARED_DIR);
     std::fs::create_dir_all(&shared)?;
-    for (name, body) in [("report.css", REPORT_CSS), ("report.js", REPORT_JS)] {
+    top_up_shared(&shared)
+}
+
+/// Give every scope that already has shared files the ones added since (at start).
+pub fn top_up_all(state: &AppState) -> usize {
+    let mut n = 0;
+    for scope in all_scopes(state) {
+        let shared = scope.dir.join(SHARED_DIR);
+        if shared.is_dir() {
+            match top_up_shared(&shared) {
+                Ok(()) => n += 1,
+                Err(e) => tracing::warn!("workspace: cannot update the shared report files of {}: {}", scope.id, e.message),
+            }
+        }
+    }
+    n
+}
+
+/// Write the shared files a scope lacks. A scope from an earlier release gets the files added since
+/// (the charts) without its edited `report.css` or `report.js` being replaced.
+pub fn top_up_shared(shared: &Path) -> ApiResult<()> {
+    for (name, body) in SHARED_FILES {
         let p = shared.join(name);
         if !p.exists() {
             util::fs::write_atomic(&p, body.as_bytes(), 0o644)?;
@@ -1642,6 +1669,28 @@ mod tests {
         assert_eq!(c.steps.len(), 2);
         let text = std::fs::read_to_string(dir.path().join("workspace.json")).unwrap();
         assert!(text.contains("\"mine\""));
+    }
+
+    #[test]
+    fn shared_report_files_are_added_to_old_scopes_without_replacing_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = Scope { id: "p".into(), name: "P".into(), dir: dir.path().join("p"), project: None };
+        ensure_scope_dir(&scope).unwrap();
+        let shared = scope.dir.join(SHARED_DIR);
+        for (name, body) in SHARED_FILES {
+            assert_eq!(std::fs::read_to_string(shared.join(name)).unwrap(), *body, "{name}");
+        }
+        // A scope from before the charts: no chart files, and a report.css the user edited.
+        std::fs::remove_file(shared.join("chart.umd.js")).unwrap();
+        std::fs::remove_file(shared.join("report-charts.js")).unwrap();
+        std::fs::write(shared.join("report.css"), "/* mine */").unwrap();
+        top_up_shared(&shared).unwrap();
+        assert!(std::fs::read_to_string(shared.join("chart.umd.js")).unwrap().contains("Chart.js v"));
+        assert!(shared.join("report-charts.js").is_file());
+        assert_eq!(std::fs::read_to_string(shared.join("report.css")).unwrap(), "/* mine */");
+        // Chart.js stays what the licence notice names.
+        let chart = SHARED_FILES.iter().find(|(n, _)| *n == "chart.umd.js").unwrap().1;
+        assert!(chart.starts_with("/*!\n * Chart.js v4.6.1") && chart.contains("Released under the MIT License"));
     }
 
     #[test]

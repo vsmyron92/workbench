@@ -2,11 +2,13 @@
 // anything else (download).
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Download, ExternalLink, FileQuestion, FileWarning, Maximize, RefreshCw, Scan } from 'lucide-react'
-import { EmptyState, ErrorBox, formatBytes, IconButton, Loading, Spinner, Toolbar } from '@/ui'
+import { Activity, Database, Download, ExternalLink, FileQuestion, FileWarning, Maximize, RefreshCw, Scan } from 'lucide-react'
+import { Button, EmptyState, ErrorBox, formatBytes, IconButton, Loading, Spinner, Toolbar } from '@/ui'
 import { useCardText, type WorkspaceCard } from '../api'
 import { basename, externalLinkTarget } from '../logic'
 import { Lightbox } from './Lightbox'
+import { KINDS } from '../bridge/kinds'
+import { useReportBridge } from '../bridge/useReportBridge'
 
 /** The sandbox for untrusted report HTML: scripts run, but in an opaque origin
  *  (no allow-same-origin), so they never reach Workbench's cookies, API or DOM.
@@ -34,12 +36,14 @@ export function OpenButtons({ url, name }: { url: string; name: string }) {
  * A report in a sandboxed iframe, kept hidden until it has loaded and painted
  * (two animation frames), so there is no white flash (a Mr. Mak lesson).
  */
-export function HtmlView({ url, title, label, reloadKey }: { url: string; title: string; label: string; reloadKey?: number }) {
+export function HtmlView({ url, title, label, reloadKey, card }: { url: string; title: string; label: string; reloadKey?: number; card?: WorkspaceCard }) {
   const [loaded, setLoaded] = useState(false)
   const [nonce, setNonce] = useState(0)
   const raf = useRef(0)
   const frameRef = useRef<HTMLIFrameElement>(null)
   const src = nonce ? `${url}${url.includes('?') ? '&' : '?'}r=${nonce}` : url
+  // What the report asks of Workbench (live project data), once the user allowed this card.
+  const bridge = useReportBridge(frameRef, card, `${src}#${reloadKey ?? 0}`)
   useEffect(() => {
     setLoaded(false)
     return () => cancelAnimationFrame(raf.current)
@@ -65,9 +69,28 @@ export function HtmlView({ url, title, label, reloadKey }: { url: string; title:
           {label}
         </span>
         <span className="spacer" />
+        {bridge.state === 'allowed' && (
+          <IconButton icon={Activity} size="small" active label="This report may read live project data: click to stop" onClick={bridge.revoke} />
+        )}
         <IconButton icon={RefreshCw} size="small" label="Reload" onClick={() => setNonce((n) => n + 1)} />
         <OpenButtons url={url} name={basename(url.split('?')[0])} />
       </Toolbar>
+      {bridge.state === 'asking' && (
+        <div className="ws-bridge-ask" role="alert">
+          <Database size={15} aria-hidden />
+          <span>
+            This report asks to read live data of {card?.scopeName ?? 'this project'}: {KINDS.map((k) => k.label).join(', ')}. It can only read. A report can send what it reads
+            to other sites, so allow it only if you trust who made it.
+          </span>
+          <span className="spacer" />
+          <Button size="small" variant="primary" onClick={bridge.allow}>
+            Allow
+          </Button>
+          <Button size="small" onClick={bridge.decline}>
+            Not now
+          </Button>
+        </div>
+      )}
       <div className="ws-html">
         <iframe
           key={`${src}#${reloadKey ?? 0}`}

@@ -559,6 +559,7 @@ pub fn describe_detail(tool: &str, input: Option<&Value>) -> (String, bool) {
         "Bash" => s("command").map(str::to_string),
         "WebFetch" => s("url").map(str::to_string),
         "WebSearch" => s("query").map(str::to_string),
+        "Artifact" => Some(super::artifact::detail(Some(input))),
         "Read" => s("file_path").map(|p| format!("File: {p}")),
         "Write" => match (s("file_path"), s("content")) {
             (Some(p), Some(c)) => Some(format!("File: {p}\nContent:\n{c}")),

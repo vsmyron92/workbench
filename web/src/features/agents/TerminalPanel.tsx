@@ -14,7 +14,7 @@ import { openTerminal, terminalsApi } from './api'
 import { pendingOf } from './lib/permission'
 import { dialogSeenOnScreen, resumes, SEEN_ON_SCREEN } from './lib/providers'
 import { agentMeta, colorCss, isRunning, lingering, restartMode, resumeNote } from './lib/sessions'
-import { ContainerBadge, ProviderBadge, RemoteLink, StateChip, StateDot } from './parts'
+import { ArtifactPageLink, ContainerBadge, ProviderBadge, RemoteLink, StateChip, StateDot } from './parts'
 import { PermissionActions, PermissionDetail, PermissionRule, PermissionSummary } from './Permission'
 import { dismissPermissionToasts } from './permissionToasts'
 import { TerminalView, type TerminalViewHandle } from './TerminalView'
@@ -127,6 +127,7 @@ function AgentHeader({ t, view }: { t: TerminalInfo; view: React.RefObject<Termi
       )}
       {a.permissionMode && a.permissionMode !== 'default' && <span className="wb-badge">{a.permissionMode}</span>}
       <span style={{ flex: 1 }} />
+      <ArtifactPageLink a={a} />
       {a.remoteUrl && <RemoteLink url={a.remoteUrl} />}
       {running && (
         <IconButton

@@ -51,6 +51,7 @@ function term(over: Partial<TerminalInfo> = {}, agent: Partial<AgentInfo> = {}):
       lastEventAt: 1,
       pendingPermission: pending,
       resumeCost: null,
+      artifacts: [],
       ...agent,
     },
     ...over,
