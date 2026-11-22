@@ -35,12 +35,13 @@ import { Face, MoreFaces } from './Face'
 import { FACE_PX, FIGURE_PX, FIGURE_PX_PHONE, FIGURE_RING_PX, FigureButton, drawnLook, keepFocus, ringFor, stateWords, type Ring } from './Figure'
 import { lineKey, type ArbiterState } from './lib/arbiter'
 import { EMPTY, HOVER_DWELL_MS, NO_DRAFT, armGuard, askChanged, askedToHear, clicksThrough, closeByUser, edited, guardStep, guardWake, holding, noteEdited, noteStep, noteWake, noted, openByUser, planChoice, planSend, questionChanged, replyNoted, replyShown, sentNote, settle, voiceForm, whyDisabled, type Draft, type Facts, type Guard, type LastLine, type Noted, type ReplyBody, type Scene } from './lib/bubble'
-import type { FigureHandle } from './lib/engine'
+import type { FigureHandle, WalkInputs } from './lib/engine'
 import { EDGE_PX, SIDE_EDGE_PX, bubbleShift, corner, defaultAnchor, dragStarts, dragged, layoutMode, panelPlace, panelTop, phoneFace, place, smallFigures, storedAnchor, toStored, type Anchor, type Corner, type Placement } from './lib/layout'
-import { attend, claimOf, feetBounds, gazeToward, newWorld, placePost, postFor, samplePoints, step, type Box, type Cue, type Obstacle, type Point, type Post, type Walker, type World } from './lib/roam'
+import { drivesOn } from './lib/look'
+import { attend, claimOf, feetBounds, gazeToward, newWorld, placePost, postFor, samplePoints, step, walkFeel, type Box, type Cue, type Obstacle, type Point, type Post, type Walker, type World } from './lib/roam'
 import type { SpeakPrefs } from './lib/speech'
 import { DESIGNING_MS, figures, front, isDesigning, mostUrgent, presented, seenAfter, transcript, unseen, type Candidate, type Staged } from './lib/stage'
-import { avatarState, type Ask, type AvatarInfo, type AvatarState, type Line } from './lib/types'
+import { avatarState, type Ask, type AvatarInfo, type AvatarState, type DriveInput, type Line } from './lib/types'
 import { inside, useAttention, useGeometry, useMedia, usePointer, useSize, type PointerAt } from './measure'
 import { avatarMenu } from './menu'
 import { createRig, type Rig } from './rig'
@@ -566,6 +567,8 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
   const [draggedId, setDraggedId] = useState<string | null>(null)
   /** Where a figure looks when it looks at another one. */
   const roamLooks = useRef(new Map<string, readonly [number, number]>())
+  /** What each figure's last step tells the drives of its look: how fast it walks, which way it faces, whether it is dragged. */
+  const walkInputs = useRef(new Map<string, WalkInputs>())
   /** The figures that play a walk of their own design now, and until when one that just played another gesture does not start it. */
   const ownWalk = useRef(new Set<string>())
   const gestured = useRef(new Map<string, number>())
@@ -1119,6 +1122,13 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     const animation = drawn.own && Object.hasOwn(drawn.look.animations, name) ? drawn.look.animations[name] : undefined
     return animation ? { loop: animation.loop === true } : null
   }
+  /** Whether the avatar's own design has a drive on this input: it moves the figure itself, in place of the app's hop or lean. */
+  const drivenBy = (id: string, input: DriveInput): boolean => {
+    const m = castByIdRef.current.get(id)
+    if (!m) return false
+    const drawn = drawnLook(m.record.look, m.id)
+    return drawn.own && drivesOn(drawn.look, input)
+  }
   /** Every figure put where the walk has it, with what follows from the walk: its hop and lean, where it looks, a walk of its own design. */
   const showWalk = () => {
     const bodies = world.current.bodies
@@ -1135,16 +1145,18 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
       } else if (!b.walking && ownWalk.current.delete(id)) {
         handle?.stop('walk')
       }
-      const hop = ownWalk.current.has(id) ? 0 : -b.hop * HOP_PX
+      // A walk of its own, or a drive on its pace, replaces the hop; a drive on which way it faces replaces the lean.
+      const hop = ownWalk.current.has(id) || drivenBy(id, 'pace') ? 0 : -b.hop * HOP_PX
+      const lean = drivenBy(id, 'turn') ? 0 : b.lean * LEAN_DEG
       // Whole pixels while it stands, so that the text of its bubble is sharp; fractions while it walks, so that it glides.
       const [x, y] = b.walking ? [b.x.toFixed(1), b.y.toFixed(1)] : [String(Math.round(b.x)), String(Math.round(b.y))]
-      const now = `${x} ${y} ${hop.toFixed(1)} ${(b.lean * LEAN_DEG).toFixed(1)}`
+      const now = `${x} ${y} ${hop.toFixed(1)} ${lean.toFixed(1)}`
       if (written.current.get(id) !== now || el.style.transform === '') {
         written.current.set(id, now)
         el.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -100%)`
         // The hop and the lean are the figure's own: written on its button, so that nothing else is styled anew every frame.
         const button = el.querySelector<HTMLElement>('.wb-av-figure-btn')
-        if (button) button.style.transform = hop === 0 && b.lean === 0 ? '' : `translateY(${hop.toFixed(1)}px) rotate(${(b.lean * LEAN_DEG).toFixed(1)}deg)`
+        if (button) button.style.transform = hop === 0 && lean === 0 ? '' : `translateY(${hop.toFixed(1)}px) rotate(${lean.toFixed(1)}deg)`
       }
       const other = b.looks ? bodies.get(b.looks) : undefined
       if (other) roamLooks.current.set(id, gazeToward({ x: b.x, y: b.y - half }, { x: other.x, y: other.y - half }, GAZE_FULL_PX / 2))
@@ -1192,6 +1204,8 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     if (!roaming || !area) return
     const drag = roamDrag.current
     const at = pointer.current
+    const before = new Map<string, Point>()
+    for (const [id, b] of world.current.bodies) before.set(id, { x: b.x, y: b.y })
     step(world.current, {
       now,
       dt,
@@ -1207,6 +1221,9 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
       random: Math.random,
       quiet: quietAt,
     })
+    // What the step tells each look's drives: how far it really went, the side it walks to or faces, a drag.
+    walkInputs.current.clear()
+    for (const [id, b] of world.current.bodies) walkInputs.current.set(id, walkFeel(b, before.get(id) ?? null, dt, world.current.bodies, drag?.id === id))
     showWalk()
     for (const cue of world.current.cues.splice(0)) playCue(cue)
     // One that reached the place its bubble has room at: the bubble is measured again where it stands now.
@@ -1247,7 +1264,7 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     if (roaming) return
     for (const id of ownWalk.current) handles.current.get(id)?.stop('walk')
     world.current = newWorld()
-    for (const kept of [posts, written, roamLooks]) kept.current.clear()
+    for (const kept of [posts, written, roamLooks, walkInputs]) kept.current.clear()
     ownWalk.current.clear()
     posted.current.clear()
     roamDrag.current = null
@@ -1342,7 +1359,7 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
 
   // ---- stable readers for the engine (a new function would bind the figure again)
 
-  const readers = useRef(new Map<string, { mouth: () => number; gaze: () => readonly [number, number] | null; handle: (h: FigureHandle | null) => void }>())
+  const readers = useRef(new Map<string, { mouth: () => number; gaze: () => readonly [number, number] | null; inputs: () => WalkInputs | null; handle: (h: FigureHandle | null) => void }>())
   const readersFor = (id: string) => {
     let r = readers.current.get(id)
     if (!r) {
@@ -1354,6 +1371,8 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
           // Its bubble while a question is open; else the avatar it meets or the one that speaks.
           return atBubble.current.get(id) ?? roamLooks.current.get(id) ?? null
         },
+        // Only a walking figure has a walk to tell: standing in the column, as a face or in the panel all three are at rest.
+        inputs: () => walkInputs.current.get(id) ?? null,
         handle: (h) => {
           if (h) handles.current.set(id, h)
           else handles.current.delete(id)
@@ -1440,6 +1459,7 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
         reducedMotion={reducedMotion}
         mouth={r.mouth}
         gaze={r.gaze}
+        inputs={r.inputs}
         held={m.record.held}
         onHandle={r.handle}
         ring={ringOf(m, state)}

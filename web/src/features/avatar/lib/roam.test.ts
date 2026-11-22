@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { APART_PX, AUDIENCE_PX, BUSY_REACH_PX, HELD_BACK_MS, HOME_PX, HURRY_PX_S, MEET_GAP_PX, POST_GAP_PX, STROLL_PX_S, VISIT_PX_S, attend, claimOf, feetBounds, gazeToward, into, newWorld, placePost, postFor, samplePoints, step } from './roam'
-import type { Box, Cue, Point, Post, StepInput, Walker, World } from './roam'
+import { APART_PX, AUDIENCE_PX, BUSY_REACH_PX, HELD_BACK_MS, HOME_PX, HURRY_PX_S, MAX_STEP_MS, MEET_GAP_PX, POST_GAP_PX, STROLL_PX_S, VISIT_PX_S, attend, claimOf, feetBounds, gazeToward, into, newWorld, placePost, postFor, samplePoints, step, walkFeel } from './roam'
+import type { Body, Box, Cue, Point, Post, StepInput, Walker, World } from './roam'
 
 /** A generator with a seed: the same walk every time. */
 function seeded(seed: number): () => number {
@@ -784,5 +784,106 @@ describe('small things', () => {
     expect(gazeToward({ x: 0, y: 0 }, { x: 260, y: 0 }, 260)).toEqual([1, 0])
     expect(gazeToward({ x: 0, y: 0 }, { x: 0, y: 130 }, 260)).toEqual([0, 0.5])
     expect(gazeToward({ x: 5, y: 5 }, { x: 5, y: 5 }, 260)).toEqual([0, 0])
+  })
+})
+
+describe('what a walk tells the look', () => {
+  /** A body standing at (x, y): every field as a fresh one has it. */
+  const standing = (id: string, x: number, y: number, over: Partial<Body> = {}): Body => ({
+    id,
+    x,
+    y,
+    mode: 'rest',
+    home: { x, y },
+    dropped: false,
+    to: null,
+    best: Number.POSITIVE_INFINITY,
+    bestAt: 0,
+    until: 0,
+    partner: null,
+    guest: false,
+    cueAt: null,
+    cueKind: null,
+    looks: null,
+    walking: false,
+    heldBack: 0,
+    walked: 0,
+    hop: 0,
+    lean: 0,
+    visitAfter: 0,
+    stayed: false,
+    ...over,
+  })
+  const none = new Map<string, Body>()
+
+  it('says how fast it really went, over the stroll speed and at most 1, and the side it walks to', () => {
+    // A stroll to the right: 34 px a second is 1.
+    const right = standing('a', 100 + (STROLL_PX_S * 16) / 1000, 300, { mode: 'walk', walking: true, to: { x: 400, y: 320 } })
+    const strolling = walkFeel(right, { x: 100, y: 300 }, 16, none, false)
+    expect(strolling.pace).toBeCloseTo(1, 9)
+    expect(strolling).toMatchObject({ turn: 1, held: 0 })
+    const slow = standing('a', 100 - (STROLL_PX_S * 8) / 1000, 300, { mode: 'walk', walking: true, to: { x: 0, y: 300 } })
+    const half = walkFeel(slow, { x: 100, y: 300 }, 16, none, false)
+    expect(half.pace).toBeCloseTo(0.5, 9)
+    expect(half.turn).toBe(-1)
+    // A visit, faster than a stroll, is still 1; a step longer than the walk takes counts as the walk's longest.
+    expect(walkFeel(standing('a', 103, 300, { mode: 'visit', walking: true, to: { x: 400, y: 300 } }), { x: 100, y: 300 }, 16, none, false).pace).toBe(1)
+    expect(walkFeel(standing('a', 101.7, 300, { walking: true, to: { x: 400, y: 300 } }), { x: 100, y: 300 }, 5000, none, false).pace).toBeCloseTo(1.7 / ((STROLL_PX_S * MAX_STEP_MS) / 1000), 9)
+    // Mostly up or down: it faces the viewer.
+    expect(walkFeel(standing('a', 100.1, 300.5, { walking: true, to: { x: 110, y: 500 } }), { x: 100, y: 300 }, 16, none, false).turn).toBe(0)
+    // Held back on its way: it walks, but goes nowhere.
+    expect(walkFeel(standing('a', 100, 300, { walking: true, to: { x: 400, y: 300 } }), { x: 100, y: 300 }, 16, none, false)).toEqual({ pace: 0, turn: 1, held: 0 })
+    // Without a place it goes to, the way it went; with no step at all, no pace.
+    expect(walkFeel(standing('a', 99, 300, { walking: true }), { x: 100, y: 300 }, 16, none, false).turn).toBe(-1)
+    expect(walkFeel(standing('a', 101, 300, { walking: true }), null, 16, none, false)).toEqual({ pace: 0, turn: 0, held: 0 })
+    expect(walkFeel(standing('a', 101, 300, { walking: true }), { x: 100, y: 300 }, 0, none, false).pace).toBe(0)
+  })
+
+  it('faces the avatar it meets or visits, or the guest coming to it, and nobody else', () => {
+    const host = standing('h', 300, 300, { mode: 'meet', partner: 'g' })
+    const guest = standing('g', 238, 300, { mode: 'meet', partner: 'h' })
+    const bodies = new Map([
+      ['h', host],
+      ['g', guest],
+    ])
+    expect(walkFeel(host, { x: 300, y: 300 }, 16, bodies, false)).toEqual({ pace: 0, turn: -1, held: 0 })
+    expect(walkFeel(guest, { x: 238, y: 300 }, 16, bodies, false)).toEqual({ pace: 0, turn: 1, held: 0 })
+    // A host that waits for its guest looks at it; one that only looks at a speaker does not turn.
+    const waiting = standing('h', 300, 300, { looks: 'g' })
+    const coming = standing('g', 420, 300, { mode: 'visit', partner: 'h', walking: true, to: { x: 362, y: 300 } })
+    expect(walkFeel(waiting, null, 16, new Map([['h', waiting], ['g', coming]]), false).turn).toBe(1)
+    expect(walkFeel(coming, { x: 421, y: 300 }, 16, new Map([['h', waiting], ['g', coming]]), false).turn).toBe(-1)
+    const listener = standing('l', 300, 300, { looks: 's' })
+    expect(walkFeel(listener, null, 16, new Map([['l', listener], ['s', standing('s', 100, 300)]]), false).turn).toBe(0)
+    // A partner straight above or below: no side.
+    expect(walkFeel(standing('h', 300, 300, { mode: 'meet', partner: 'g' }), null, 16, new Map([['g', standing('g', 300, 200)]]), false).turn).toBe(0)
+  })
+
+  it('says it is held while the user drags it, and nothing else then', () => {
+    expect(walkFeel(standing('a', 500, 300, { walking: true, to: { x: 900, y: 300 } }), { x: 100, y: 300 }, 16, none, true)).toEqual({ pace: 0, turn: 0, held: 1 })
+  })
+
+  it('follows a real stroll: a pace near 1 while it walks, 0 when it stands, the side it walks to', () => {
+    const r = run([walker('a')], 3)
+    r.go(16)
+    let walkedRight = false
+    let walkedLeft = false
+    let stood = false
+    for (let i = 0; i < 3000; i++) {
+      const was = { x: body(r, 'a').x, y: body(r, 'a').y }
+      r.go(16)
+      const b = body(r, 'a')
+      const feel = walkFeel(b, was, 16, r.world.bodies, false)
+      expect(feel.pace).toBeGreaterThanOrEqual(0)
+      expect(feel.pace).toBeLessThanOrEqual(1)
+      if (!b.walking) {
+        expect(feel.pace).toBe(0)
+        stood = true
+      }
+      if (b.walking && feel.pace > 0.9 && feel.turn === 1) walkedRight = true
+      if (b.walking && feel.pace > 0.9 && feel.turn === -1) walkedLeft = true
+    }
+    expect(stood).toBe(true)
+    expect(walkedRight || walkedLeft).toBe(true)
   })
 })

@@ -7,13 +7,17 @@
 //! Only that tree is stored and sent; the browser rebuilds it once more from literal tables.
 //!
 //! Besides the artwork a look holds what moves it: pivots, roles (so Workbench's built-in motion
-//! can drive any character), the agent's own animations, the state map, mouth drives and gaze.
-//! All of it is checked against the artwork in one pass, and a call is refused whole: the
-//! problems come back grouped by kind, each with a count, the first place and what is accepted.
+//! can drive any character), the agent's own animations, the state map, mouth drives, gaze,
+//! parents (a part that moves with another part it is not drawn inside) and drives (the live
+//! inputs, where the figure looks, how fast it walks, moving parts). All of it is checked against
+//! the artwork in one pass, and a call is refused whole: the problems come back grouped by kind,
+//! each with a count, the first place and what is accepted.
 //!
-//! Three classes of input: **kept** (the tables below), **dropped with a warning** that names and
-//! counts it (`filter`, SMIL, `font-family`, `class`…), and **refused** (scripts, links, anything
-//! that reaches outside the document, anything not named here, any limit exceeded).
+//! Three classes of input: **kept** (the tables below: shapes, groups, text, `use` of an element
+//! of the same artwork, gradients, clip paths, masks and filters of a closed set of primitives),
+//! **dropped with a warning** that names and counts it (SMIL, `font-family`, `class`…), and
+//! **refused** (scripts, links, images, anything that reaches outside the document, anything not
+//! named here, any limit exceeded).
 //!
 //! Everything here is a pure function of its arguments: no state, no I/O, no clock. No input
 //! makes it panic, recursion never follows the input (the tree is walked with explicit stacks and
@@ -48,6 +52,14 @@
 //!   artwork than a call may send.
 //! - A prefixed attribute refuses also on a `tspan` and behind a name that would be dropped
 //!   (`data-x:onload`).
+//! - A `use` that repeats what comes after it makes the artwork be read twice: the first reading
+//!   learns what the element is, the second counts and places it where the `use` stands.
+//! - A mask holds `g` and shapes in all its depth: no `text`, `use` or `defs`, at any level.
+//! - The `values` of a colour matrix are as many as its `type` takes; a `result` is never named
+//!   after an input SVG gives by name; an input of another filter is no input.
+//! - A circle of `parents` may run through what a part is drawn inside, and refuses as one.
+//! - A drive keeps the paint rule of a track: no `step` on fill, stroke and the opacities. Its
+//!   `d` keyframes count toward [`MAX_D_KEYFRAMES_TOTAL`] with those of tracks and the mouth.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
@@ -109,6 +121,16 @@ pub const MAX_D_KEYFRAMES_TOTAL: usize = 6000;
 pub const MAX_STATE_NAMES: usize = 6;
 /// Mouth drives of one look.
 pub const MAX_MOUTH_DRIVES: usize = 4;
+/// `filter` elements in the artwork.
+pub const MAX_FILTERS: usize = 8;
+/// Primitives of one `filter`, its `feMergeNode` elements not counted.
+pub const MAX_FILTER_PRIMITIVES: usize = 8;
+/// Numbers of one `stroke-dasharray`.
+pub const MAX_DASHES: usize = 8;
+/// Entries of `parents`.
+pub const MAX_PARENTS: usize = 64;
+/// Drives of one look.
+pub const MAX_DRIVES: usize = 16;
 /// Fragments in `voice.prefer`.
 pub const MAX_VOICE_PREFER: usize = 5;
 /// Characters of one `voice.prefer` fragment.
@@ -178,6 +200,21 @@ const TEXT_ASCENT: f64 = 0.8;
 const DEFAULT_FONT_SIZE: f64 = 16.0;
 /// Names listed in one phrase of a problem, a warning, `kept` or `cleared`.
 const LISTED: usize = 12;
+/// `feMergeNode` elements of one `feMerge`.
+const MAX_MERGE_NODES: usize = 8;
+/// Numbers of a `feColorMatrix`'s `values`: a matrix of four rows of five.
+const MATRIX_VALUES: usize = 20;
+/// The links of one chain of `parents`, from a part to the part at its top.
+const MAX_CHAIN: usize = 8;
+/// `k1` to `k4` of `feComposite`, in magnitude.
+const MAX_FACTOR: f64 = 100.0;
+/// The `seed` of `feTurbulence`, in magnitude.
+const MAX_SEED: f64 = 100_000.0;
+/// `numOctaves` of `feTurbulence`.
+const OCTAVES: (f64, f64) = (1.0, 4.0);
+/// The x and y bezier control points of an ease.
+const BEZIER_X: (f64, f64) = (0.0, 1.0);
+const BEZIER_Y: (f64, f64) = (-2.0, 3.0);
 
 /// Never an id and never an animation name: the browser looks parts and animations up by name,
 /// and these are names every JavaScript object answers to.
@@ -239,6 +276,19 @@ pub struct Look {
     pub mouth: Vec<MouthDrive>,
     /// Pupil travel in viewBox units; `None`: 3% of the viewBox width.
     pub gaze: Option<Num>,
+    /// Child part id to parent part id: the child moves with everything that moves the parent,
+    /// as if it were drawn inside it, and keeps its place in the drawing order. Written only
+    /// when it holds an entry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty", deserialize_with = "or_default")]
+    pub parents: BTreeMap<String, String>,
+    /// 0 to [`MAX_DRIVES`]: the live inputs moving parts. Written only when there is one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "or_default")]
+    pub drives: Vec<Drive>,
+}
+
+/// A field that may also be `null`, which is its default.
+fn or_default<'de, D: Deserializer<'de>, T: Default + Deserialize<'de>>(d: D) -> Result<T, D::Error> {
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 /// One element of the artwork.
@@ -249,7 +299,8 @@ pub struct LookNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// Keys from the closed table only, under their React SVG prop names. References are bare ids
-    /// under `fillRef`, `strokeRef` and `clipPathRef`.
+    /// under `fillRef`, `strokeRef`, `clipPathRef`, `maskRef`, `filterRef` and, on a `use`,
+    /// `useRef`. Number lists are strings of numbers separated by single spaces.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attrs: BTreeMap<String, AttrValue>,
     /// Every node with an id: its rest-pose box `[x, y, w, h]` in the coordinates its own geometry
@@ -276,15 +327,34 @@ pub enum Tag {
     Polyline,
     Polygon,
     Text,
+    Use,
     Defs,
     LinearGradient,
     RadialGradient,
     Stop,
     ClipPath,
+    Mask,
+    Filter,
+    FeGaussianBlur,
+    FeDropShadow,
+    FeOffset,
+    FeFlood,
+    FeColorMatrix,
+    FeComposite,
+    FeBlend,
+    FeMerge,
+    FeMergeNode,
+    FeMorphology,
+    FeTurbulence,
+    FeDisplacementMap,
 }
 
 impl Tag {
-    pub const ALL: [Tag; 14] = [Tag::G, Tag::Path, Tag::Circle, Tag::Ellipse, Tag::Rect, Tag::Line, Tag::Polyline, Tag::Polygon, Tag::Text, Tag::Defs, Tag::LinearGradient, Tag::RadialGradient, Tag::Stop, Tag::ClipPath];
+    pub const ALL: [Tag; 29] = [
+        Tag::G, Tag::Path, Tag::Circle, Tag::Ellipse, Tag::Rect, Tag::Line, Tag::Polyline, Tag::Polygon, Tag::Text, Tag::Use, Tag::Defs, Tag::LinearGradient, Tag::RadialGradient, Tag::Stop,
+        Tag::ClipPath, Tag::Mask, Tag::Filter, Tag::FeGaussianBlur, Tag::FeDropShadow, Tag::FeOffset, Tag::FeFlood, Tag::FeColorMatrix, Tag::FeComposite, Tag::FeBlend, Tag::FeMerge,
+        Tag::FeMergeNode, Tag::FeMorphology, Tag::FeTurbulence, Tag::FeDisplacementMap,
+    ];
 
     /// The element name, as written in SVG and as stored.
     pub fn name(self) -> &'static str {
@@ -298,11 +368,26 @@ impl Tag {
             Tag::Polyline => "polyline",
             Tag::Polygon => "polygon",
             Tag::Text => "text",
+            Tag::Use => "use",
             Tag::Defs => "defs",
             Tag::LinearGradient => "linearGradient",
             Tag::RadialGradient => "radialGradient",
             Tag::Stop => "stop",
             Tag::ClipPath => "clipPath",
+            Tag::Mask => "mask",
+            Tag::Filter => "filter",
+            Tag::FeGaussianBlur => "feGaussianBlur",
+            Tag::FeDropShadow => "feDropShadow",
+            Tag::FeOffset => "feOffset",
+            Tag::FeFlood => "feFlood",
+            Tag::FeColorMatrix => "feColorMatrix",
+            Tag::FeComposite => "feComposite",
+            Tag::FeBlend => "feBlend",
+            Tag::FeMerge => "feMerge",
+            Tag::FeMergeNode => "feMergeNode",
+            Tag::FeMorphology => "feMorphology",
+            Tag::FeTurbulence => "feTurbulence",
+            Tag::FeDisplacementMap => "feDisplacementMap",
         }
     }
 
@@ -314,13 +399,26 @@ impl Tag {
         matches!(self, Tag::Path | Tag::Circle | Tag::Ellipse | Tag::Rect | Tag::Line | Tag::Polyline | Tag::Polygon)
     }
 
-    /// What can be drawn, moved and named by a pivot, a role, a track or a mouth drive.
+    /// What can be drawn, moved and named by a pivot, a role, a parent, a track or a drive.
     fn is_part(self) -> bool {
-        self == Tag::G || self == Tag::Text || self.is_shape()
+        matches!(self, Tag::G | Tag::Text | Tag::Use) || self.is_shape()
+    }
+
+    /// What a `use` may repeat.
+    fn is_repeatable(self) -> bool {
+        matches!(self, Tag::G | Tag::Text) || self.is_shape()
     }
 
     fn is_gradient(self) -> bool {
         matches!(self, Tag::LinearGradient | Tag::RadialGradient)
+    }
+
+    /// The children of a `filter`: every primitive, `feMerge` among them, but not `feMergeNode`.
+    fn is_primitive(self) -> bool {
+        matches!(
+            self,
+            Tag::FeGaussianBlur | Tag::FeDropShadow | Tag::FeOffset | Tag::FeFlood | Tag::FeColorMatrix | Tag::FeComposite | Tag::FeBlend | Tag::FeMerge | Tag::FeMorphology | Tag::FeTurbulence | Tag::FeDisplacementMap
+        )
     }
 }
 
@@ -468,11 +566,22 @@ pub enum Key {
     Str(String),
 }
 
+/// One curve for every segment, or one per segment. A list of four numbers is one bezier, so a
+/// list of curves is never four numbers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Eases {
-    One(Ease),
-    Each(Vec<Ease>),
+    One(Curve),
+    Each(Vec<Curve>),
+}
+
+/// How one segment runs from one keyframe to the next: a named curve, or a cubic bezier
+/// `[x1, y1, x2, y2]` from (0, 0) to (1, 1) with x in 0 … 1 and y in -2 … 3.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Curve {
+    Named(Ease),
+    Bezier([Num; 4]),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,11 +592,15 @@ pub enum Ease {
     Out,
     InOut,
     OutBack,
+    InBack,
+    InOutBack,
+    OutElastic,
+    OutBounce,
     Step,
 }
 
 impl Ease {
-    const ALL: [Ease; 6] = [Ease::Linear, Ease::In, Ease::Out, Ease::InOut, Ease::OutBack, Ease::Step];
+    const ALL: [Ease; 10] = [Ease::Linear, Ease::In, Ease::Out, Ease::InOut, Ease::OutBack, Ease::InBack, Ease::InOutBack, Ease::OutElastic, Ease::OutBounce, Ease::Step];
 
     fn name(self) -> &'static str {
         match self {
@@ -496,25 +609,74 @@ impl Ease {
             Ease::Out => "out",
             Ease::InOut => "inOut",
             Ease::OutBack => "outBack",
+            Ease::InBack => "inBack",
+            Ease::InOutBack => "inOutBack",
+            Ease::OutElastic => "outElastic",
+            Ease::OutBounce => "outBounce",
             Ease::Step => "step",
         }
     }
 }
 
-/// What a track animates. Translate, rotate and scale are relative to rest; the others are absolute.
+impl Curve {
+    /// Whether a segment eased with it swings back and forth or leaves the way between its two
+    /// values far behind: elastic and bounce do, and a bezier whose handles lie outside 0 … 1.
+    /// (A bezier inside rises steadily; the back eases overshoot once, by a tenth.)
+    fn swings(&self) -> bool {
+        match self {
+            Curve::Named(ease) => matches!(ease, Ease::OutElastic | Ease::OutBounce),
+            Curve::Bezier(p) => !(0.0..=1.0).contains(&p[1].get()) || !(0.0..=1.0).contains(&p[3].get()),
+        }
+    }
+}
+
+impl Eases {
+    fn any(&self, is: impl Fn(&Curve) -> bool) -> bool {
+        match self {
+            Eases::One(curve) => is(curve),
+            Eases::Each(each) => each.iter().any(is),
+        }
+    }
+
+    /// Whether a segment jumps: the paint rule refuses that.
+    fn steps(&self) -> bool {
+        self.any(|curve| *curve == Curve::Named(Ease::Step))
+    }
+
+    /// Whether a segment swings: the paint rule refuses that too.
+    fn swings(&self) -> bool {
+        self.any(Curve::swings)
+    }
+
+    /// How many segments it names, `None` for one curve for all.
+    fn count(&self) -> Option<usize> {
+        match self {
+            Eases::One(_) => None,
+            Eases::Each(each) => Some(each.len()),
+        }
+    }
+}
+
+/// What a track or a drive moves. Translate, rotate, skew and scale are relative to rest; the
+/// others are absolute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Prop {
     TranslateX,
     TranslateY,
     Rotate,
+    SkewX,
+    SkewY,
     Scale,
     ScaleX,
     ScaleY,
     Opacity,
+    FillOpacity,
+    StrokeOpacity,
     Fill,
     Stroke,
     StrokeWidth,
+    StrokeDashoffset,
     D,
     Cx,
     Cy,
@@ -532,9 +694,10 @@ pub enum Prop {
 }
 
 impl Prop {
-    const ALL: [Prop; 24] = [
-        Prop::TranslateX, Prop::TranslateY, Prop::Rotate, Prop::Scale, Prop::ScaleX, Prop::ScaleY, Prop::Opacity, Prop::Fill, Prop::Stroke, Prop::StrokeWidth, Prop::D, Prop::Cx,
-        Prop::Cy, Prop::R, Prop::Rx, Prop::Ry, Prop::X, Prop::Y, Prop::Width, Prop::Height, Prop::X1, Prop::Y1, Prop::X2, Prop::Y2,
+    const ALL: [Prop; 29] = [
+        Prop::TranslateX, Prop::TranslateY, Prop::Rotate, Prop::SkewX, Prop::SkewY, Prop::Scale, Prop::ScaleX, Prop::ScaleY, Prop::Opacity, Prop::FillOpacity, Prop::StrokeOpacity, Prop::Fill,
+        Prop::Stroke, Prop::StrokeWidth, Prop::StrokeDashoffset, Prop::D, Prop::Cx, Prop::Cy, Prop::R, Prop::Rx, Prop::Ry, Prop::X, Prop::Y, Prop::Width, Prop::Height, Prop::X1, Prop::Y1,
+        Prop::X2, Prop::Y2,
     ];
 
     /// The name on the wire, which is also the key of the attribute in a node's `attrs`.
@@ -543,13 +706,18 @@ impl Prop {
             Prop::TranslateX => "translateX",
             Prop::TranslateY => "translateY",
             Prop::Rotate => "rotate",
+            Prop::SkewX => "skewX",
+            Prop::SkewY => "skewY",
             Prop::Scale => "scale",
             Prop::ScaleX => "scaleX",
             Prop::ScaleY => "scaleY",
             Prop::Opacity => "opacity",
+            Prop::FillOpacity => "fillOpacity",
+            Prop::StrokeOpacity => "strokeOpacity",
             Prop::Fill => "fill",
             Prop::Stroke => "stroke",
             Prop::StrokeWidth => "strokeWidth",
+            Prop::StrokeDashoffset => "strokeDashoffset",
             Prop::D => "d",
             Prop::Cx => "cx",
             Prop::Cy => "cy",
@@ -575,23 +743,36 @@ impl Prop {
         matches!(self, Prop::Scale | Prop::ScaleX | Prop::ScaleY)
     }
 
+    fn is_skew(self) -> bool {
+        matches!(self, Prop::SkewX | Prop::SkewY)
+    }
+
     /// Relative to rest, composed with other animations. Every other prop is absolute.
     fn is_relative(self) -> bool {
-        self.is_translate() || self.is_scale() || self == Prop::Rotate
+        self.is_translate() || self.is_scale() || self.is_skew() || self == Prop::Rotate
+    }
+
+    /// What turns about the pivot.
+    fn pivots(self) -> bool {
+        self == Prop::Rotate || self.is_skew() || self.is_scale()
     }
 
     /// The props the flash rule is about.
     fn is_paint(self) -> bool {
-        matches!(self, Prop::Fill | Prop::Stroke | Prop::Opacity)
+        self.is_colour() || self.is_opacity()
     }
 
     fn is_colour(self) -> bool {
         matches!(self, Prop::Fill | Prop::Stroke)
     }
 
+    fn is_opacity(self) -> bool {
+        matches!(self, Prop::Opacity | Prop::FillOpacity | Prop::StrokeOpacity)
+    }
+
     /// A geometry attribute of a shape (or `x`, `y` of a text).
     fn is_geometry(self) -> bool {
-        !self.is_relative() && !matches!(self, Prop::Opacity | Prop::Fill | Prop::Stroke | Prop::StrokeWidth | Prop::D)
+        matches!(self, Prop::Cx | Prop::Cy | Prop::R | Prop::Rx | Prop::Ry | Prop::X | Prop::Y | Prop::Width | Prop::Height | Prop::X1 | Prop::Y1 | Prop::X2 | Prop::Y2)
     }
 
     /// A length: never negative.
@@ -626,7 +807,7 @@ impl Prop {
             Prop::X | Prop::Y => "rect and text",
             Prop::Width | Prop::Height => "rect",
             Prop::X1 | Prop::Y1 | Prop::X2 | Prop::Y2 => "line",
-            _ => "g, shapes and text",
+            _ => "g, shapes, text and use",
         }
     }
 }
@@ -677,6 +858,83 @@ impl MouthProp {
             MouthProp::R => Prop::R,
             MouthProp::Height => Prop::Height,
         }
+    }
+}
+
+/// A live input the browser feeds a look's drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Input {
+    /// Where it looks, -1 … 1: x to the right, y down.
+    LookX,
+    LookY,
+    /// 0 … 1 while it speaks.
+    Mouth,
+    /// 0 standing … 1 walking fast.
+    Pace,
+    /// -1 walking or facing left … 1 right, 0 facing the viewer.
+    Turn,
+    /// 0 … 1 while the user drags it.
+    Held,
+}
+
+impl Input {
+    const ALL: [Input; 6] = [Input::LookX, Input::LookY, Input::Mouth, Input::Pace, Input::Turn, Input::Held];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Input::LookX => "lookX",
+            Input::LookY => "lookY",
+            Input::Mouth => "mouth",
+            Input::Pace => "pace",
+            Input::Turn => "turn",
+            Input::Held => "held",
+        }
+    }
+
+    /// The inputs the browser moves slowly (a full swing takes at least 0.25 s): the only ones
+    /// paint may follow.
+    fn slow(self) -> bool {
+        matches!(self, Input::Pace | Input::Turn | Input::Held)
+    }
+
+    /// How far the input runs from one end of its range to the other.
+    fn span(self) -> f64 {
+        match self {
+            Input::LookX | Input::LookY | Input::Turn => 2.0,
+            Input::Mouth | Input::Pace | Input::Held => 1.0,
+        }
+    }
+}
+
+/// How far apart two paint values of a drive stand along a slow input, in the input's own units:
+/// the browser moves such an input at most 4 units a second, so this is [`MIN_PAINT_STEP`] in time.
+const PAINT_PLACE_STEP: f64 = MIN_PAINT_STEP * 4.0;
+
+/// One live input moving a prop of one or several parts: `values` sit along the input's range at
+/// `at` (evenly without it), as a track's keyframes sit along its time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Drive {
+    pub input: Input,
+    pub target: Targets,
+    pub prop: Prop,
+    /// `None`: the artwork's own value (absolute props only).
+    pub values: Vec<Option<Key>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<Vec<Num>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ease: Option<Eases>,
+}
+
+impl fmt::Display for Drive {
+    /// "lookX moves head rotate", a line of the design answer.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let targets = match &self.target {
+            Targets::One(id) => id.clone(),
+            Targets::Many(ids) => listed(ids),
+        };
+        write!(f, "{} moves {targets} {}", self.input.name(), self.prop.name())
     }
 }
 
@@ -741,16 +999,21 @@ pub struct Part {
     pub pivot: [f64; 2],
     /// False: no pivot was given, `pivot` is the centre of the box (the bottom centre for the body).
     pub pivot_given: bool,
+    /// The part it moves with, from `parents`.
+    pub parent: Option<String>,
 }
 
 impl fmt::Display for Part {
-    /// `id tag x y w h pivot px py`, the line of the design answer.
+    /// `id tag x y w h pivot px py`, then `parent id` when it has one: the line of the design answer.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let [x, y, w, h] = self.bbox.map(fmt_num);
         let [px, py] = self.pivot.map(fmt_num);
         write!(f, "{} {} {x} {y} {w} {h} pivot {px} {py}", self.id, self.tag.name())?;
         if !self.pivot_given {
             f.write_str(" (default)")?;
+        }
+        if let Some(parent) = &self.parent {
+            write!(f, " parent {parent}")?;
         }
         Ok(())
     }
@@ -761,23 +1024,27 @@ impl fmt::Display for Part {
 pub struct Usage {
     /// The artwork as SVG text: what the call sent, or what [`to_svg`] writes for a call without `svg`.
     pub svg_bytes: usize,
+    /// Elements, each `use` with what it repeats.
     pub elements: usize,
     pub animations: usize,
+    pub parents: usize,
+    pub drives: usize,
     /// The stored look as JSON.
     pub look_bytes: usize,
 }
 
 /// The keys of a design call.
-const KEYS: [&str; 10] = ["name", "svg", "pivots", "roles", "animations", "states", "mouth", "gaze", "voice", "keep"];
+const KEYS: [&str; 12] = ["name", "svg", "pivots", "parents", "roles", "animations", "states", "mouth", "gaze", "drives", "voice", "keep"];
 /// Those that belong to the look and need artwork.
-const LOOK_KEYS: [&str; 6] = ["pivots", "roles", "animations", "states", "mouth", "gaze"];
+const LOOK_KEYS: [&str; 8] = ["pivots", "parents", "roles", "animations", "states", "mouth", "gaze", "drives"];
 
 /// Applies one design call to the current design, by the rules of the contract's section 4.1.
 ///
-/// A call that carries `svg` is a new look: pivots, roles, animations, states, mouth and gaze not
-/// given in the same call are cleared, unless `keep` is true, which keeps those whose targets
-/// still exist. A call without `svg` merges: `animations` and `pivots` by key and `roles` and
-/// `states` per entry (`null` removes one), while `mouth`, `gaze`, `voice` and `name` replace.
+/// A call that carries `svg` is a new look: pivots, parents, roles, animations, states, mouth,
+/// gaze and drives not given in the same call are cleared, unless `keep` is true, which keeps
+/// those whose targets still exist. A call without `svg` merges: `animations`, `pivots` and
+/// `parents` by key and `roles` and `states` per entry (`null` removes one), while `mouth`,
+/// `gaze`, `drives`, `voice` and `name` replace.
 ///
 /// Everything is validated before anything changes: the result is either the whole new design
 /// or the problems, at most [`MAX_PROBLEM_KINDS`] kinds and then "and N more kinds".
@@ -859,6 +1126,8 @@ pub fn check_stored(stored: Value) -> Option<Design> {
             request.insert("states".into(), serde_json::to_value(&look.states).ok()?);
             request.insert("mouth".into(), serde_json::to_value(&look.mouth).ok()?);
             request.insert("gaze".into(), serde_json::to_value(look.gaze).ok()?);
+            request.insert("parents".into(), serde_json::to_value(&look.parents).ok()?);
+            request.insert("drives".into(), serde_json::to_value(&look.drives).ok()?);
         }
         Some(_) => return None,
     }
@@ -869,7 +1138,8 @@ pub fn check_stored(stored: Value) -> Option<Design> {
 }
 
 /// The artwork of a look written back as SVG text, attribute values in single quotes. Applying it
-/// again (with the look's pivots, roles, animations, states, mouth and gaze) gives the same look:
+/// again (with the look's pivots, parents, roles, animations, states, mouth, gaze and drives)
+/// gives the same look:
 /// for a look this file accepted the text is never longer than [`MAX_SVG_BYTES`].
 pub fn to_svg(look: &Look) -> String {
     svg_text(look, false).unwrap_or_default()
@@ -890,7 +1160,8 @@ fn parts_of(look: &Look, ix: &Index<'_>) -> Vec<Part> {
             let given = look.pivots.get(*id).map(|p| (p[0].get(), p[1].get()));
             let (px, py) = given.unwrap_or_else(|| default_pivot(own, body == Some(*id)));
             let (rx, ry) = point(&entry.to_root, px, py);
-            Some(Part { id: id.to_string(), tag: entry.node.tag, bbox: entry.root_box().array().map(round3), pivot: [round3(rx), round3(ry)], pivot_given: given.is_some() })
+            let parent = look.parents.get(*id).cloned();
+            Some(Part { id: id.to_string(), tag: entry.node.tag, bbox: entry.root_box().array().map(round3), pivot: [round3(rx), round3(ry)], pivot_given: given.is_some(), parent })
         })
         .collect()
 }
@@ -954,7 +1225,7 @@ fn builtin_missing(name: &str, roles: &BTreeMap<Role, String>) -> Option<&'stati
 // ---------------------------------------------------------------- problems and warnings
 
 /// Problems (or warnings) grouped by kind: what was found, how often, where first, what is accepted.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Notes {
     /// The first [`MAX_PROBLEM_KINDS`] kinds, in the order they were met.
     kinds: Vec<Note>,
@@ -964,6 +1235,7 @@ struct Notes {
     more: usize,
 }
 
+#[derive(Clone)]
 struct Note {
     what: String,
     accepted: String,
@@ -1043,7 +1315,7 @@ impl Notes {
 }
 
 /// What was dropped from the artwork, by name, in the order it was first met.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Drops {
     names: Vec<(&'static str, usize)>,
 }
@@ -2091,6 +2363,11 @@ enum Kind {
     Miter,
     Choice(&'static [&'static str]),
     ClipRef,
+    /// `mask` and `filter`: `url(#id)` of an element of that kind, or `none`.
+    MaskRef,
+    FilterRef,
+    /// The `href` of a `use`: `#id`.
+    Href,
     PathData,
     Points,
     FontSize,
@@ -2100,7 +2377,33 @@ enum Kind {
     GradX,
     GradY,
     GradR,
+    /// The region of a mask or a filter: x, y, width, height, a number or a percentage.
+    RegionX,
+    RegionY,
+    RegionW,
+    RegionH,
     Offset,
+    /// A distance either way: `dx`, `dy`, `stroke-dashoffset`.
+    Distance,
+    /// Up to [`MAX_DASHES`] lengths, or `none`.
+    Dashes,
+    /// The input of a filter primitive: `SourceGraphic`, `SourceAlpha` or an earlier result.
+    In,
+    /// The name of a primitive's result.
+    Result,
+    /// One or two numbers: `stdDeviation` (up to a quarter of the viewBox width), `radius` (a
+    /// tenth), `baseFrequency` (0 to 1).
+    Blur,
+    Radius,
+    Frequency,
+    /// The numbers of a colour matrix.
+    MatrixValues,
+    /// `k1` to `k4`.
+    Factor,
+    Octaves,
+    Seed,
+    /// The `scale` of a displacement: up to a quarter of the viewBox width either way.
+    Displace,
 }
 
 /// One attribute of the closed table.
@@ -2119,8 +2422,8 @@ const fn spec(name: &'static str, prop: &'static str, kind: Kind, css: bool) -> 
     Spec { name, prop, kind, css }
 }
 
-/// `g`, shapes and `text`.
-static PRESENTATION: [Spec; 14] = [
+/// `g`, shapes, `text` and `use`.
+static PRESENTATION: [Spec; 18] = [
     spec("id", "id", Kind::Id, false),
     spec("transform", "transform", Kind::Transform, false),
     spec("fill", "fill", Kind::Paint, true),
@@ -2129,12 +2432,16 @@ static PRESENTATION: [Spec; 14] = [
     spec("stroke-linecap", "strokeLinecap", Kind::Choice(&["butt", "round", "square"]), true),
     spec("stroke-linejoin", "strokeLinejoin", Kind::Choice(&["miter", "round", "bevel"]), true),
     spec("stroke-miterlimit", "strokeMiterlimit", Kind::Miter, true),
+    spec("stroke-dasharray", "strokeDasharray", Kind::Dashes, true),
+    spec("stroke-dashoffset", "strokeDashoffset", Kind::Distance, true),
     spec("fill-opacity", "fillOpacity", Kind::Opacity, true),
     spec("stroke-opacity", "strokeOpacity", Kind::Opacity, true),
     spec("opacity", "opacity", Kind::Opacity, true),
     spec("fill-rule", "fillRule", Kind::Choice(&["nonzero", "evenodd"]), true),
     spec("clip-rule", "clipRule", Kind::Choice(&["nonzero", "evenodd"]), true),
     spec("clip-path", "clipPath", Kind::ClipRef, true),
+    spec("mask", "mask", Kind::MaskRef, true),
+    spec("filter", "filter", Kind::FilterRef, true),
 ];
 static PATH: [Spec; 1] = [spec("d", "d", Kind::PathData, false)];
 static CIRCLE: [Spec; 3] = [spec("cx", "cx", Kind::Coord, false), spec("cy", "cy", Kind::Coord, false), spec("r", "r", Kind::Length, false)];
@@ -2173,9 +2480,88 @@ static RADIAL: [Spec; 5] = [
     spec("fy", "fy", Kind::GradY, false),
 ];
 static STOP: [Spec; 3] = [spec("offset", "offset", Kind::Offset, false), spec("stop-color", "stopColor", Kind::StopColour, true), spec("stop-opacity", "stopOpacity", Kind::Opacity, true)];
-static CLIP: [Spec; 2] = [spec("id", "id", Kind::Id, false), spec("clipPathUnits", "clipPathUnits", Kind::Choice(&["userSpaceOnUse", "objectBoundingBox"]), false)];
+static CLIP: [Spec; 2] = [spec("id", "id", Kind::Id, false), spec("clipPathUnits", "clipPathUnits", Kind::Choice(&UNITS), false)];
 static ROOT: [Spec; 1] = [spec("viewBox", "viewBox", Kind::ViewBox, false)];
 static NONE: [Spec; 0] = [];
+/// The coordinate systems of gradients, clip paths, masks and filters.
+const UNITS: [&str; 2] = ["userSpaceOnUse", "objectBoundingBox"];
+/// `href` stands first: what a `use` repeats is what it is about.
+static USE: [Spec; 3] = [spec("href", "href", Kind::Href, false), spec("x", "x", Kind::Coord, false), spec("y", "y", Kind::Coord, false)];
+static MASK: [Spec; 8] = [
+    spec("id", "id", Kind::Id, false),
+    spec("maskUnits", "maskUnits", Kind::Choice(&UNITS), false),
+    spec("maskContentUnits", "maskContentUnits", Kind::Choice(&UNITS), false),
+    spec("x", "x", Kind::RegionX, false),
+    spec("y", "y", Kind::RegionY, false),
+    spec("width", "width", Kind::RegionW, false),
+    spec("height", "height", Kind::RegionH, false),
+    spec("mask-type", "maskType", Kind::Choice(&["luminance", "alpha"]), true),
+];
+static FILTER: [Spec; 8] = [
+    spec("id", "id", Kind::Id, false),
+    spec("x", "x", Kind::RegionX, false),
+    spec("y", "y", Kind::RegionY, false),
+    spec("width", "width", Kind::RegionW, false),
+    spec("height", "height", Kind::RegionH, false),
+    spec("filterUnits", "filterUnits", Kind::Choice(&UNITS), false),
+    spec("primitiveUnits", "primitiveUnits", Kind::Choice(&UNITS), false),
+    spec("color-interpolation-filters", "colorInterpolationFilters", Kind::Choice(&["sRGB", "linearRGB"]), true),
+];
+// The filter primitives. Their names are local to their filter: `result` names what a primitive
+// gives, `in` and `in2` take it up again, and nothing else refers to them.
+const IN: Spec = spec("in", "in", Kind::In, false);
+const IN2: Spec = spec("in2", "in2", Kind::In, false);
+const RESULT: Spec = spec("result", "result", Kind::Result, false);
+const DX: Spec = spec("dx", "dx", Kind::Distance, false);
+const DY: Spec = spec("dy", "dy", Kind::Distance, false);
+const STD_DEVIATION: Spec = spec("stdDeviation", "stdDeviation", Kind::Blur, false);
+const FLOOD_COLOR: Spec = spec("flood-color", "floodColor", Kind::StopColour, true);
+const FLOOD_OPACITY: Spec = spec("flood-opacity", "floodOpacity", Kind::Opacity, true);
+const CHANNELS: [&str; 4] = ["R", "G", "B", "A"];
+static BLUR: [Spec; 3] = [IN, STD_DEVIATION, RESULT];
+static DROP_SHADOW: [Spec; 7] = [IN, DX, DY, STD_DEVIATION, FLOOD_COLOR, FLOOD_OPACITY, RESULT];
+static OFFSET: [Spec; 4] = [IN, DX, DY, RESULT];
+static FLOOD: [Spec; 3] = [FLOOD_COLOR, FLOOD_OPACITY, RESULT];
+static COLOR_MATRIX: [Spec; 4] = [IN, spec("type", "type", Kind::Choice(&["matrix", "saturate", "hueRotate", "luminanceToAlpha"]), false), spec("values", "values", Kind::MatrixValues, false), RESULT];
+static COMPOSITE: [Spec; 8] = [
+    IN,
+    IN2,
+    spec("operator", "operator", Kind::Choice(&["over", "in", "out", "atop", "xor", "arithmetic"]), false),
+    spec("k1", "k1", Kind::Factor, false),
+    spec("k2", "k2", Kind::Factor, false),
+    spec("k3", "k3", Kind::Factor, false),
+    spec("k4", "k4", Kind::Factor, false),
+    RESULT,
+];
+static BLEND: [Spec; 4] = [
+    IN,
+    IN2,
+    spec(
+        "mode",
+        "mode",
+        Kind::Choice(&["normal", "multiply", "screen", "overlay", "darken", "lighten", "color-dodge", "color-burn", "hard-light", "soft-light", "difference", "exclusion"]),
+        false,
+    ),
+    RESULT,
+];
+static MERGE: [Spec; 1] = [RESULT];
+static MERGE_NODE: [Spec; 1] = [IN];
+static MORPHOLOGY: [Spec; 4] = [IN, spec("operator", "operator", Kind::Choice(&["erode", "dilate"]), false), spec("radius", "radius", Kind::Radius, false), RESULT];
+static TURBULENCE: [Spec; 5] = [
+    spec("type", "type", Kind::Choice(&["fractalNoise", "turbulence"]), false),
+    spec("baseFrequency", "baseFrequency", Kind::Frequency, false),
+    spec("numOctaves", "numOctaves", Kind::Octaves, false),
+    spec("seed", "seed", Kind::Seed, false),
+    RESULT,
+];
+static DISPLACEMENT: [Spec; 6] = [
+    IN,
+    IN2,
+    spec("scale", "scale", Kind::Displace, false),
+    spec("xChannelSelector", "xChannelSelector", Kind::Choice(&CHANNELS), false),
+    spec("yChannelSelector", "yChannelSelector", Kind::Choice(&CHANNELS), false),
+    RESULT,
+];
 
 /// Where an attribute sits: on the `svg` root or on an element of the tree.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2204,11 +2590,26 @@ impl Scope {
             Scope::Tag(Tag::Line) => (&PRESENTATION, &LINE),
             Scope::Tag(Tag::Polyline | Tag::Polygon) => (&PRESENTATION, &POLY),
             Scope::Tag(Tag::Text) => (&PRESENTATION, &TEXT),
+            Scope::Tag(Tag::Use) => (&PRESENTATION, &USE),
             Scope::Tag(Tag::Defs) => (&NONE, &NONE),
             Scope::Tag(Tag::LinearGradient) => (&GRADIENT, &LINEAR),
             Scope::Tag(Tag::RadialGradient) => (&GRADIENT, &RADIAL),
             Scope::Tag(Tag::Stop) => (&STOP, &NONE),
             Scope::Tag(Tag::ClipPath) => (&CLIP, &NONE),
+            Scope::Tag(Tag::Mask) => (&MASK, &NONE),
+            Scope::Tag(Tag::Filter) => (&FILTER, &NONE),
+            Scope::Tag(Tag::FeGaussianBlur) => (&BLUR, &NONE),
+            Scope::Tag(Tag::FeDropShadow) => (&DROP_SHADOW, &NONE),
+            Scope::Tag(Tag::FeOffset) => (&OFFSET, &NONE),
+            Scope::Tag(Tag::FeFlood) => (&FLOOD, &NONE),
+            Scope::Tag(Tag::FeColorMatrix) => (&COLOR_MATRIX, &NONE),
+            Scope::Tag(Tag::FeComposite) => (&COMPOSITE, &NONE),
+            Scope::Tag(Tag::FeBlend) => (&BLEND, &NONE),
+            Scope::Tag(Tag::FeMerge) => (&MERGE, &NONE),
+            Scope::Tag(Tag::FeMergeNode) => (&MERGE_NODE, &NONE),
+            Scope::Tag(Tag::FeMorphology) => (&MORPHOLOGY, &NONE),
+            Scope::Tag(Tag::FeTurbulence) => (&TURBULENCE, &NONE),
+            Scope::Tag(Tag::FeDisplacementMap) => (&DISPLACEMENT, &NONE),
         };
         // The root takes the presentation attributes for the group that wraps its content, not an
         // id (ignored there) and not a transform.
@@ -2237,7 +2638,10 @@ fn attr_name(tag: Tag, key: &str) -> Option<&'static str> {
         "fillRef" => scope.find("fill", false).map(|s| s.name),
         "strokeRef" => scope.find("stroke", false).map(|s| s.name),
         "clipPathRef" => scope.find("clip-path", false).map(|s| s.name),
-        _ => scope.specs().find(|s| s.prop == key && !matches!(s.kind, Kind::Id | Kind::ClipRef)).map(|s| s.name),
+        "maskRef" => scope.find("mask", false).map(|s| s.name),
+        "filterRef" => scope.find("filter", false).map(|s| s.name),
+        "useRef" => scope.find("href", false).map(|s| s.name),
+        _ => scope.specs().find(|s| s.prop == key && !matches!(s.kind, Kind::Id | Kind::ClipRef | Kind::MaskRef | Kind::FilterRef | Kind::Href)).map(|s| s.name),
     }
 }
 
@@ -2245,8 +2649,7 @@ fn attr_name(tag: Tag, key: &str) -> Option<&'static str> {
 const ROOT_IGNORED: [&str; 7] = ["xmlns", "width", "height", "version", "id", "class", "preserveAspectRatio"];
 
 /// Attributes that are dropped with a warning, with their camelCase spellings.
-const DROPPED_ATTRS: [(&str, &str); 16] = [
-    ("filter", "filter"),
+const DROPPED_ATTRS: [(&str, &str); 13] = [
     ("font-family", "fontFamily"),
     ("font-style", "fontStyle"),
     ("text-decoration", "textDecoration"),
@@ -2257,8 +2660,6 @@ const DROPPED_ATTRS: [(&str, &str); 16] = [
     ("pointer-events", "pointerEvents"),
     ("cursor", "cursor"),
     ("transform-origin", "transformOrigin"),
-    ("stroke-dasharray", "strokeDasharray"),
-    ("stroke-dashoffset", "strokeDashoffset"),
     ("class", "className"),
     ("role", "role"),
     ("tabindex", "tabIndex"),
@@ -2281,41 +2682,105 @@ fn dropped_attr(name: &str) -> Option<&'static str> {
 }
 
 /// Elements that are dropped with a warning, with everything inside them.
-const DROPPED_ELEMENTS: [&str; 8] = ["filter", "animate", "animateTransform", "animateMotion", "set", "title", "desc", "metadata"];
+const DROPPED_ELEMENTS: [&str; 7] = ["animate", "animateTransform", "animateMotion", "set", "title", "desc", "metadata"];
+
+/// The filter primitives there are, for one that is not.
+const PRIMITIVES_HINT: &str = "use blur, shadow, colour matrix, composite, blend, morphology, turbulence or displacement";
 
 /// Elements that refuse the call, each with what to do instead.
-const REFUSED_ELEMENTS: [(&str, &str); 14] = [
+const REFUSED_ELEMENTS: [(&str, &str); 18] = [
     ("script", "scripts are never accepted"),
     ("style", "style sheets are not accepted, put attributes on the elements"),
     ("foreignObject", "HTML is not accepted inside the artwork"),
     ("iframe", "frames are not accepted"),
     ("image", "images are not accepted, draw with shapes"),
     ("a", "links are not accepted, use a g"),
-    ("use", "repeat the shape"),
-    ("mask", "use a clipPath"),
     ("pattern", "use a flat colour or a gradient"),
-    ("symbol", "repeat the shapes in a g"),
+    ("symbol", "put a g in defs and use it"),
     ("marker", "draw the arrow head as a shape"),
     ("switch", "keep one branch in a g"),
     ("svg", "a nested svg is not supported, use a g"),
     ("tspan", "a tspan belongs inside a text"),
+    ("feImage", "images are not accepted"),
+    ("feTile", PRIMITIVES_HINT),
+    ("feDiffuseLighting", PRIMITIVES_HINT),
+    ("feSpecularLighting", PRIMITIVES_HINT),
+    ("feComponentTransfer", PRIMITIVES_HINT),
+    ("feConvolveMatrix", PRIMITIVES_HINT),
 ];
 
-const ELEMENTS_ACCEPTED: &str = "draw with g, path, circle, ellipse, rect, line, polyline, polygon and text";
+const ELEMENTS_ACCEPTED: &str = "draw with g, path, circle, ellipse, rect, line, polyline, polygon, text and use";
+/// What a filter holds, for an element it does not.
+const PRIMITIVES_ACCEPTED: &str = "the primitives are feGaussianBlur, feDropShadow, feOffset, feFlood, feColorMatrix, feComposite, feBlend, feMerge, feMorphology, feTurbulence, feDisplacementMap";
 
-/// Whether `child` may sit directly inside `parent` (`None`: the root), and if not, the rule.
-fn placement(parent: Option<Tag>, child: Tag) -> Result<(), &'static str> {
+/// Where an element stands: drawn, or inert inside `defs`, a `clipPath`, a `mask` or a `filter`.
+/// An element takes the zone of its parent, unless it opens one of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Zone {
+    Drawn,
+    Defs,
+    Clip,
+    Mask,
+    Filter,
+}
+
+impl Zone {
+    /// The zone of an element of kind `tag` inside this one.
+    fn of(self, tag: Tag) -> Zone {
+        match tag {
+            Tag::ClipPath => Zone::Clip,
+            Tag::Mask => Zone::Mask,
+            Tag::Filter => Zone::Filter,
+            Tag::Defs if self == Zone::Drawn => Zone::Defs,
+            _ => self,
+        }
+    }
+
+    /// The element that opens it, for a message.
+    fn name(self) -> &'static str {
+        match self {
+            Zone::Drawn => "svg",
+            Zone::Defs => "defs",
+            Zone::Clip => "clipPath",
+            Zone::Mask => "mask",
+            Zone::Filter => "filter",
+        }
+    }
+
+    /// Inside a clip path or a mask, where nothing is clipped, masked or filtered itself.
+    fn shapes_only(self) -> bool {
+        matches!(self, Zone::Clip | Zone::Mask)
+    }
+}
+
+/// Whether `child` may sit directly inside `parent` (`None`: the root), which stands in `zone`,
+/// and if not, the rule.
+fn placement(parent: Option<Tag>, zone: Zone, child: Tag) -> Result<(), &'static str> {
     match child {
         Tag::Stop if parent.is_some_and(Tag::is_gradient) => Ok(()),
         Tag::Stop => Err("a stop belongs inside a gradient"),
         Tag::LinearGradient | Tag::RadialGradient | Tag::ClipPath if parent == Some(Tag::Defs) => Ok(()),
         Tag::LinearGradient | Tag::RadialGradient | Tag::ClipPath => Err("gradients and clip paths belong inside defs"),
+        Tag::Mask | Tag::Filter if parent == Some(Tag::Defs) => Ok(()),
+        Tag::Mask | Tag::Filter => Err("masks and filters belong inside defs"),
+        Tag::FeMergeNode if parent == Some(Tag::FeMerge) => Ok(()),
+        Tag::FeMergeNode => Err("a feMergeNode belongs inside a feMerge"),
+        t if t.is_primitive() && parent == Some(Tag::Filter) => Ok(()),
+        t if t.is_primitive() => Err("a filter primitive belongs inside a filter"),
+        // g, shapes, text, use and defs.
+        _ if zone == Zone::Mask && !(child == Tag::G || child.is_shape()) => Err("a mask holds g and shapes only"),
         _ => match parent {
             None | Some(Tag::G) => Ok(()),
-            Some(Tag::Defs) => Err("defs holds gradients and clip paths only"),
+            Some(Tag::Defs) if child.is_repeatable() => Ok(()),
+            Some(Tag::Defs) => Err("defs holds gradients, clip paths, masks, filters, and g, shapes and text to use"),
             Some(Tag::ClipPath) if child.is_shape() => Ok(()),
             Some(Tag::ClipPath) => Err("a clipPath holds shapes only"),
+            Some(Tag::Mask) => Ok(()),
+            Some(Tag::Filter) => Err("a filter holds filter primitives only"),
+            Some(Tag::FeMerge) => Err("a feMerge holds feMergeNode elements only"),
             Some(p) if p.is_gradient() => Err("a gradient holds stops only"),
+            Some(Tag::Use) => Err("a use has no element children"),
+            Some(p) if p.is_primitive() || p == Tag::FeMergeNode => Err("a filter primitive has no element children"),
             Some(_) => Err("shapes, text and stops have no element children"),
         },
     }
@@ -2324,7 +2789,7 @@ fn placement(parent: Option<Tag>, child: Tag) -> Result<(), &'static str> {
 // ---------------------------------------------------------------- the artwork: reading SVG
 
 /// Where checks report: problems refuse the call, warnings go into the answer.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Out {
     problems: Notes,
     warnings: Notes,
@@ -2378,15 +2843,45 @@ struct Open {
     bbox: Option<Bx>,
     /// The pieces of a `text` element.
     text: String,
-    /// A `clipPath` or inside one.
-    in_clip: bool,
+    /// Where it stands.
+    zone: Zone,
+    /// The elements it draws: itself, what is inside it, and what each `use` among them repeats.
+    size: usize,
+    /// A `use` stands inside it.
+    holds_use: bool,
+}
+
+/// An element with an id, once it is complete: what a `use` that repeats it needs to know.
+#[derive(Clone, Copy)]
+struct Done {
+    tag: Tag,
+    zone: Zone,
+    /// Its box through its own transform, in the coordinates of what it stands in.
+    placed: Option<Bx>,
+    size: usize,
+    holds_use: bool,
+}
+
+/// What a `url(#id)` must name.
+#[derive(Clone, Copy, PartialEq)]
+enum Wants {
+    Gradient,
+    Clip,
+    Mask,
+    Filter,
 }
 
 /// A `url(#id)` to resolve once every id is known.
 struct Reference {
     attr: &'static str,
     id: String,
-    clip: bool,
+    wants: Wants,
+    place: String,
+}
+
+/// A `use` whose target was not complete when the `use` was: it comes later, or not at all.
+struct Later {
+    id: String,
     place: String,
 }
 
@@ -2411,11 +2906,28 @@ struct Svg<'a, 'c, 'm> {
     /// The presentation attributes of the root: they move to a `g` that wraps the content.
     wrapper: Option<LookNode>,
     ids: HashMap<String, Tag>,
+    /// The elements with an id that are complete.
+    done: HashMap<String, Done>,
     references: Vec<Reference>,
+    later: Vec<Later>,
     elements: usize,
     texts: usize,
+    filters: usize,
+    /// The results of the earlier primitives of the filter being read, for the `in` of the next.
+    earlier: Vec<String>,
+    /// What a first reading learnt of the elements with an id, for a `use` that repeats one that
+    /// comes after it. Empty in a first reading.
+    ahead: HashMap<String, Done>,
     /// A problem after which reading on would only add noise.
     stop: bool,
+}
+
+/// How one reading of the artwork ended.
+enum Read {
+    Done(Option<Artwork>),
+    /// A `use` repeats an element that comes after it: what the reading learnt of every element
+    /// with an id, to read the artwork again with.
+    Again(HashMap<String, Done>),
 }
 
 /// Reads the artwork by the reader rules of the contract. `None`: it could not be read to the
@@ -2426,8 +2938,47 @@ fn read_svg(src: &str, limit: usize, cx: &mut Ctx<'_>) -> Option<Artwork> {
         cx.out.problems.add("svg-size", "", format!("svg is {} KiB", kib(src.len())), &format!("at most {} KiB", limit / 1024));
         return None;
     }
+    // A use may repeat an element that comes after it. The first reading then learns what every
+    // element with an id is, and the artwork is read once more, from what was noted before it.
+    // What the use repeats holds no use itself, so what was learnt of it is final.
+    let (out, drops) = (cx.out.clone(), cx.drops.clone());
+    match read_once(src, cx, HashMap::new()) {
+        Read::Done(artwork) => artwork,
+        Read::Again(ahead) => {
+            (cx.out, cx.drops) = (out, drops);
+            match read_once(src, cx, ahead) {
+                Read::Done(artwork) => artwork,
+                Read::Again(_) => None,
+            }
+        }
+    }
+}
+
+/// One reading of the artwork, with what an earlier one learnt of its elements.
+fn read_once(src: &str, cx: &mut Ctx<'_>, ahead: HashMap<String, Done>) -> Read {
     let before = cx.out.problems.len();
-    let mut svg = Svg { cx, src, seen: 0, line: 1, col: 1, view: DEFAULT_VIEW, doc: Doc::Before, stack: Vec::new(), top: Vec::new(), wrapper: None, ids: HashMap::new(), references: Vec::new(), elements: 0, texts: 0, stop: false };
+    let mut svg = Svg {
+        cx,
+        src,
+        seen: 0,
+        line: 1,
+        col: 1,
+        view: DEFAULT_VIEW,
+        doc: Doc::Before,
+        stack: Vec::new(),
+        top: Vec::new(),
+        wrapper: None,
+        ids: HashMap::new(),
+        done: HashMap::new(),
+        references: Vec::new(),
+        later: Vec::new(),
+        elements: 0,
+        texts: 0,
+        filters: 0,
+        earlier: Vec::new(),
+        ahead,
+        stop: false,
+    };
     let mut reader = Reader::from_str(src);
     reader.config_mut().trim_text(false);
     loop {
@@ -2436,7 +2987,7 @@ fn read_svg(src: &str, limit: usize, cx: &mut Ctx<'_>) -> Option<Artwork> {
             Ok(event) => event,
             Err(err) => {
                 svg.broken(&err, reader.error_position() as usize);
-                return None;
+                return Read::Done(None);
             }
         };
         match event {
@@ -2452,7 +3003,7 @@ fn read_svg(src: &str, limit: usize, cx: &mut Ctx<'_>) -> Option<Artwork> {
             Event::Eof => break,
         }
         if svg.stop {
-            return None;
+            return Read::Done(None);
         }
     }
     svg.end(before)
@@ -2640,10 +3191,10 @@ impl Svg<'_, '_, '_> {
             Some(Frame::Tspan) => self.inside_text(e, name, &place),
             Some(Frame::Node(open)) if open.node.tag == Tag::Text => self.inside_text(e, name, &place),
             Some(Frame::Node(open)) => {
-                let (parent, in_clip) = (open.node.tag, open.in_clip);
-                self.element(e, name, at, &place, Some(parent), in_clip)
+                let (parent, zone) = (open.node.tag, open.zone);
+                self.element(e, name, at, &place, Some(parent), zone)
             }
-            None => self.element(e, name, at, &place, None, false),
+            None => self.element(e, name, at, &place, None, Zone::Drawn),
         };
         match frame {
             Frame::Node(open) if empty => self.finish(*open),
@@ -2673,7 +3224,7 @@ impl Svg<'_, '_, '_> {
                 if key.to_ascii_lowercase().starts_with("on") {
                     self.bad("attr-on", place, format!("svg: the event attribute {}", self.q(key)), "an avatar's artwork has no scripts");
                 } else if key == "href" || key == "xlink:href" {
-                    self.bad("attr-href", place, format!("svg: {key} on <tspan>"), "the artwork links to nothing, inside or outside itself");
+                    self.bad("attr-href", place, format!("svg: {key} on <tspan>"), HREF_ONLY_USE);
                 } else if key.contains(':') {
                     self.bad(&format!("attr-prefix {}", cut(key, MAX_QUOTE_CHARS)), place, format!("svg: the prefixed attribute {}", self.q(key)), "names are written without a prefix");
                 }
@@ -2689,22 +3240,30 @@ impl Svg<'_, '_, '_> {
         Frame::Skip
     }
 
-    /// An element inside the root, a `g`, `defs`, a gradient or a `clipPath`.
-    fn element(&mut self, e: &BytesStart<'_>, name: &str, at: (usize, usize), place: &str, parent: Option<Tag>, in_clip: bool) -> Frame {
+    /// An element inside the root, a `g`, `defs`, a gradient, a `clipPath`, a `mask`, a `filter`
+    /// or a `feMerge`. `zone` is where the parent stands.
+    fn element(&mut self, e: &BytesStart<'_>, name: &str, at: (usize, usize), place: &str, parent: Option<Tag>, zone: Zone) -> Frame {
         if let Some(tag) = Tag::from_name(name) {
-            if let Err(rule) = placement(parent, tag) {
+            if let Err(rule) = placement(parent, zone, tag) {
                 self.bad(&format!("placement {name} {}", parent.map_or("svg", Tag::name)), place, format!("svg: <{name}> inside <{}>", parent.map_or("svg", Tag::name)), rule);
                 return Frame::Skip;
             }
-            if tag == Tag::Stop {
-                let stops = match self.stack.last() {
-                    Some(Frame::Node(open)) => open.node.children.len(),
-                    _ => 0,
-                };
-                if stops >= MAX_STOPS {
-                    self.bad("stops", place, format!("svg: more than {MAX_STOPS} stops in a gradient"), "a few stops make a gradient");
-                    return Frame::Skip;
-                }
+            // How many children the parent has so far: stops, primitives, merge nodes.
+            let siblings = match self.stack.last() {
+                Some(Frame::Node(open)) => open.node.children.len(),
+                _ => 0,
+            };
+            if tag == Tag::Stop && siblings >= MAX_STOPS {
+                self.bad("stops", place, format!("svg: more than {MAX_STOPS} stops in a gradient"), "a few stops make a gradient");
+                return Frame::Skip;
+            }
+            if tag.is_primitive() && siblings >= MAX_FILTER_PRIMITIVES {
+                self.bad("primitives", place, format!("svg: more than {MAX_FILTER_PRIMITIVES} primitives in a filter"), "a few primitives make an effect");
+                return Frame::Skip;
+            }
+            if tag == Tag::FeMergeNode && siblings >= MAX_MERGE_NODES {
+                self.bad("merge-nodes", place, format!("svg: more than {MAX_MERGE_NODES} feMergeNode elements in a feMerge"), "a merge lays a few results over one another");
+                return Frame::Skip;
             }
             if tag == Tag::Text {
                 self.texts += 1;
@@ -2713,7 +3272,14 @@ impl Svg<'_, '_, '_> {
                     return Frame::Skip;
                 }
             }
-            return Frame::Node(Box::new(self.build(e, tag, at, in_clip || tag == Tag::ClipPath)));
+            if tag == Tag::Filter {
+                self.filters += 1;
+                if self.filters > MAX_FILTERS {
+                    self.bad("filters", place, format!("svg: more than {MAX_FILTERS} filters"), "a few effects, each used by the parts that need it");
+                    return Frame::Skip;
+                }
+            }
+            return Frame::Node(Box::new(self.build(e, tag, at, zone.of(tag))));
         }
         if let Some(dropped) = DROPPED_ELEMENTS.iter().find(|d| **d == name) {
             self.cx.drops.count(dropped);
@@ -2722,7 +3288,8 @@ impl Svg<'_, '_, '_> {
         } else if name.contains(':') {
             self.bad(&format!("element {}", cut(name, MAX_QUOTE_CHARS)), place, format!("svg: the prefixed element {}", self.q(name)), "names are written without a prefix");
         } else {
-            self.bad(&format!("element {}", cut(name, MAX_QUOTE_CHARS)), place, format!("svg: the element {} is not supported", self.q(name)), ELEMENTS_ACCEPTED);
+            let accepted = if matches!(parent, Some(Tag::Filter | Tag::FeMerge)) { PRIMITIVES_ACCEPTED } else { ELEMENTS_ACCEPTED };
+            self.bad(&format!("element {}", cut(name, MAX_QUOTE_CHARS)), place, format!("svg: the element {} is not supported", self.q(name)), accepted);
         }
         Frame::Skip
     }
@@ -2756,7 +3323,7 @@ impl Svg<'_, '_, '_> {
                     break;
                 }
             };
-            let key = attr.key.into_inner();
+            let mut key = attr.key.into_inner();
             if ignored_prefixed(key) || (scope == Scope::Root && ROOT_IGNORED.contains(&key)) {
                 continue;
             }
@@ -2765,9 +3332,14 @@ impl Svg<'_, '_, '_> {
                 self.bad("attr-on", place, format!("svg: the event attribute {}", self.q(key)), "an avatar's artwork has no scripts");
                 continue;
             }
+            let using = scope == Scope::Tag(Tag::Use);
             if key == "href" || key == "xlink:href" {
-                self.bad("attr-href", place, format!("svg: {key} on <{on}>"), "the artwork links to nothing, inside or outside itself");
-                continue;
+                if !using {
+                    self.bad("attr-href", place, format!("svg: {key} on <{on}>"), HREF_ONLY_USE);
+                    continue;
+                }
+                // Both spellings are the one href of a use, and its value says where it points.
+                key = "href";
             }
             // A prefix refuses whatever follows it, a name that would be dropped as well.
             if key.contains(':') {
@@ -2778,8 +3350,8 @@ impl Svg<'_, '_, '_> {
                 self.dropped(dropped, place);
                 continue;
             }
-            if key == "mask" {
-                self.bad("attr-mask", place, "svg: mask is not supported".to_string(), "use clip-path with a clipPath");
+            if using && matches!(key, "width" | "height") {
+                self.cx.out.warnings.add("use-size", place, "width and height of a use are left out".to_string(), "a use draws what it repeats at its own size, scale it with transform");
                 continue;
             }
             // The five XML entities and numeric references; any other reference refuses.
@@ -2862,7 +3434,7 @@ impl Svg<'_, '_, '_> {
     }
 
     /// Reads one attribute value into the node. Returns the box a `d` or `points` spans.
-    fn set(&mut self, node: &mut LookNode, matrix: &mut Affine, spec: &Spec, raw: &str, place: &str, in_clip: bool, user_space: bool) -> Option<Bx> {
+    fn set(&mut self, node: &mut LookNode, matrix: &mut Affine, spec: &Spec, raw: &str, place: &str, zone: Zone, user_space: bool) -> Option<Bx> {
         let name = spec.name;
         let key = format!("value {name} {}", cut(raw, MAX_QUOTE_CHARS));
         let lead = format!("svg: {name} ");
@@ -2894,7 +3466,7 @@ impl Svg<'_, '_, '_> {
                     put(node, AttrValue::Str(hex(c)));
                 } else if let Some(id) = url_id(value).filter(|_| paint) {
                     node.attrs.insert(format!("{}Ref", spec.prop), AttrValue::Str(id.to_string()));
-                    self.references.push(Reference { attr: name, id: id.to_string(), clip: false, place: place.to_string() });
+                    self.references.push(Reference { attr: name, id: id.to_string(), wants: Wants::Gradient, place: place.to_string() });
                 } else if value.get(..4).is_some_and(|head| head.eq_ignore_ascii_case("url(")) {
                     let local = value.find(')').and_then(|end| value.get(..=end)).is_some_and(|head| url_id(head).is_some());
                     if local && paint {
@@ -2908,16 +3480,87 @@ impl Svg<'_, '_, '_> {
             }
             Kind::ClipRef => {
                 let value = raw.trim();
-                if in_clip {
-                    self.bad("clip-in-clip", place, "svg: clip-path inside a clipPath".to_string(), "a clipPath and its shapes are not clipped themselves");
+                if zone.shapes_only() {
+                    let what = if zone == Zone::Clip { "a clipPath and its shapes are not clipped themselves" } else { "a mask and its shapes are not clipped themselves" };
+                    self.bad("clip-in-clip", place, format!("svg: clip-path inside a {}", zone.name()), what);
                 } else if let Some(id) = url_id(value) {
                     node.attrs.insert("clipPathRef".to_string(), AttrValue::Str(id.to_string()));
-                    self.references.push(Reference { attr: name, id: id.to_string(), clip: true, place: place.to_string() });
+                    self.references.push(Reference { attr: name, id: id.to_string(), wants: Wants::Clip, place: place.to_string() });
                 } else if !value.eq_ignore_ascii_case("none") {
                     self.bad(&key, place, format!("{lead}{}", self.q(value)), "url(#id) of a clipPath in this svg");
                 }
             }
-            Kind::Coord | Kind::Length | Kind::FontSize | Kind::Miter | Kind::LetterSpacing => {
+            Kind::MaskRef | Kind::FilterRef => {
+                let value = raw.trim();
+                let (wants, stored, of) = if spec.kind == Kind::MaskRef { (Wants::Mask, "maskRef", "a mask") } else { (Wants::Filter, "filterRef", "a filter") };
+                if zone.shapes_only() {
+                    self.bad(&format!("{name}-in-{}", zone.name()), place, format!("svg: {name} inside a {}", zone.name()), &format!("a {} and its shapes are not masked or filtered themselves", zone.name()));
+                } else if let Some(id) = url_id(value) {
+                    node.attrs.insert(stored.to_string(), AttrValue::Str(id.to_string()));
+                    self.references.push(Reference { attr: name, id: id.to_string(), wants, place: place.to_string() });
+                } else if value.eq_ignore_ascii_case("none") {
+                } else if wants == Wants::Filter && value.contains('(') && !value.get(..4).is_some_and(|head| head.eq_ignore_ascii_case("url(")) {
+                    self.bad(&key, place, format!("{lead}{} is a CSS filter", self.q(value)), "write a filter element in defs and refer to it with url(#id)");
+                } else {
+                    self.bad(&key, place, format!("{lead}{}", self.q(value)), &format!("url(#id) of {of} in this svg, or none"));
+                }
+            }
+            Kind::Href => match raw.trim().strip_prefix('#').filter(|id| valid_id(id)) {
+                Some(id) => {
+                    node.attrs.insert("useRef".to_string(), AttrValue::Str(id.to_string()));
+                }
+                None => self.bad(&key, place, format!("{lead}{} reaches outside the artwork", self.q(raw.trim())), "#id of a g, a shape or a text in this svg"),
+            },
+            Kind::Dashes => {
+                let value = raw.trim();
+                const FORM: &str = "up to 8 lengths, dash and gap in turn, separated by spaces, or none";
+                if value.eq_ignore_ascii_case("none") {
+                    put(node, AttrValue::Str("none".to_string()));
+                } else {
+                    match number_list(value, MAX_DASHES + 1) {
+                        Some(list) if list.is_empty() || list.len() > MAX_DASHES => self.bad(&key, place, format!("{lead}holds {} numbers", list.len()), FORM),
+                        Some(list) if list.iter().all(|n| view.length(*n)) => put(node, AttrValue::Str(list.iter().map(|n| fmt_num(*n)).collect::<Vec<_>>().join(" "))),
+                        Some(_) => self.bad(&key, place, format!("{lead}{} is out of range", self.q(value)), &format!("lengths from 0 to {}", fmt_num(view.reach()))),
+                        None => self.bad(&key, place, format!("{lead}{}", self.q(value)), FORM),
+                    }
+                }
+            }
+            Kind::In => {
+                let value = raw.trim();
+                if matches!(value, "SourceGraphic" | "SourceAlpha") || self.earlier.iter().any(|r| r == value) {
+                    put(node, AttrValue::Str(value.to_string()));
+                } else if STANDARD_INPUTS.contains(&value) {
+                    self.bad(&key, place, format!("{lead}{} is not given to an avatar's filters", self.q(value)), INPUT_FORM);
+                } else {
+                    self.bad(&key, place, format!("{lead}{} is not the result of an earlier primitive", self.q(value)), INPUT_FORM);
+                }
+            }
+            Kind::Result => {
+                let value = raw.trim();
+                if let Some(fault) = name_fault(value) {
+                    self.bad(&key, place, format!("{lead}{}", self.q(value)), fault);
+                } else if STANDARD_INPUTS.contains(&value) {
+                    self.bad(&key, place, format!("{lead}{value} would hide the input of that name"), "name a result in your own words, such as blur or glow");
+                } else {
+                    put(node, AttrValue::Str(value.to_string()));
+                }
+            }
+            Kind::Blur | Kind::Radius | Kind::Frequency | Kind::MatrixValues => {
+                let (most, least, at_most, form): (f64, f64, usize, &str) = match spec.kind {
+                    Kind::Blur => (round3(view.w / 4.0), 0.0, 2, "one or two numbers, x and y"),
+                    Kind::Radius => (round3(view.w / 10.0), 0.0, 2, "one or two numbers, x and y"),
+                    Kind::Frequency => (1.0, 0.0, 2, "one or two numbers, x and y"),
+                    _ => (MAX_ROTATE, -MAX_ROTATE, MATRIX_VALUES, "1 to 20 numbers separated by spaces"),
+                };
+                let range = if least < 0.0 { format!("each within {} either way", fmt_num(most)) } else { format!("each from 0 to {}", fmt_num(most)) };
+                let accepted = format!("{form}, {range}");
+                match number_list(raw, at_most + 1) {
+                    Some(list) if !list.is_empty() && list.len() <= at_most && list.iter().all(|n| (least..=most).contains(n)) => put(node, AttrValue::Str(list.iter().map(|n| fmt_num(*n)).collect::<Vec<_>>().join(" "))),
+                    Some(list) if !list.is_empty() && list.len() <= at_most => self.bad(&key, place, format!("{lead}{} is out of range", self.q(raw.trim())), &accepted),
+                    _ => self.bad(&key, place, format!("{lead}{}", self.q(raw.trim())), &accepted),
+                }
+            }
+            Kind::Coord | Kind::Length | Kind::FontSize | Kind::Miter | Kind::LetterSpacing | Kind::Distance | Kind::Factor | Kind::Octaves | Kind::Seed | Kind::Displace => {
                 if spec.kind == Kind::LetterSpacing && raw.trim().eq_ignore_ascii_case("normal") {
                     return None;
                 }
@@ -2927,6 +3570,10 @@ impl Svg<'_, '_, '_> {
                     // Above 0 as it is stored: what rounds to 0 would not read back.
                     Kind::FontSize => (|v, n| round3(n) > 0.0 && v.length(n), format!("above 0, up to {}", fmt_num(view.reach()))),
                     Kind::Miter => (|_, n| n >= MITER.0 && n <= MITER.1, format!("{} to {}", MITER.0, MITER.1)),
+                    Kind::Factor => (|_, n| n.abs() <= MAX_FACTOR, format!("within {MAX_FACTOR} either way")),
+                    Kind::Octaves => (|_, n| n.fract() == 0.0 && n >= OCTAVES.0 && n <= OCTAVES.1, format!("a whole number from {} to {}", OCTAVES.0, OCTAVES.1)),
+                    Kind::Seed => (|_, n| n.abs() <= MAX_SEED, format!("within {} either way", fmt_num(MAX_SEED))),
+                    Kind::Displace => (|v, n| n.abs() <= round3(v.w / 4.0), format!("within {} either way, a quarter of the viewBox width", fmt_num(round3(view.w / 4.0)))),
                     _ => (|v, n| v.offset(n), format!("within {}", fmt_num(view.reach()))),
                 };
                 match plain_number(raw) {
@@ -2941,12 +3588,12 @@ impl Svg<'_, '_, '_> {
                 Some(Scalar::Percent(n)) if n.is_finite() => put(node, AttrValue::Num(Num::new((n / 100.0).clamp(0.0, 1.0)))),
                 _ => self.bad(&key, place, format!("{lead}{} is not a number", self.q(raw.trim())), "a number from 0 to 1, or a percentage"),
             },
-            Kind::GradX | Kind::GradY | Kind::GradR => {
+            Kind::GradX | Kind::GradY | Kind::GradR | Kind::RegionX | Kind::RegionY | Kind::RegionW | Kind::RegionH => {
                 // A percentage is a share of the box (objectBoundingBox) or of the viewBox.
                 let whole = match (user_space, spec.kind) {
                     (false, _) => 1.0,
-                    (true, Kind::GradX) => view.w,
-                    (true, Kind::GradY) => view.h,
+                    (true, Kind::GradX | Kind::RegionX | Kind::RegionW) => view.w,
+                    (true, Kind::GradY | Kind::RegionY | Kind::RegionH) => view.h,
                     (true, _) => ((view.w * view.w + view.h * view.h) / 2.0).sqrt(),
                 };
                 let n = match scalar(raw) {
@@ -2954,7 +3601,8 @@ impl Svg<'_, '_, '_> {
                     Some(Scalar::Percent(n)) => Some(n / 100.0 * whole),
                     None => None,
                 };
-                let radius = spec.kind == Kind::GradR;
+                // A radius, a width and a height are lengths, never negative.
+                let radius = matches!(spec.kind, Kind::GradR | Kind::RegionW | Kind::RegionH);
                 let fits = |n: f64| match (user_space, radius) {
                     (true, true) => view.length(n),
                     (true, false) => view.coord(n),
@@ -3016,7 +3664,7 @@ impl Svg<'_, '_, '_> {
         let mut wrapper = LookNode { tag: Tag::G, id: None, attrs: BTreeMap::new(), bbox: None, children: Vec::new(), text: None };
         let mut matrix = IDENTITY;
         for (spec, raw) in &given {
-            self.set(&mut wrapper, &mut matrix, spec, raw, &place, false, false);
+            self.set(&mut wrapper, &mut matrix, spec, raw, &place, Zone::Drawn, false);
         }
         if !wrapper.attrs.is_empty() {
             self.wrapper = Some(wrapper);
@@ -3025,7 +3673,7 @@ impl Svg<'_, '_, '_> {
     }
 
     /// A kept element from its start tag.
-    fn build(&mut self, e: &BytesStart<'_>, tag: Tag, at: (usize, usize), in_clip: bool) -> Open {
+    fn build(&mut self, e: &BytesStart<'_>, tag: Tag, at: (usize, usize), zone: Zone) -> Open {
         // A look ahead for the id: it names the place of everything on this element. An id that
         // would not pass is left out of the place, as nothing escapes it yet.
         let named = e.try_get_attribute("id").ok().flatten().map(|a| a.value.into_owned()).filter(|id| valid_id(id));
@@ -3042,13 +3690,22 @@ impl Svg<'_, '_, '_> {
                 node.id = Some(id.clone());
             }
         }
-        let user_space = given.iter().any(|(s, v)| s.name == "gradientUnits" && v.trim().eq_ignore_ascii_case("userSpaceOnUse"));
+        let user_space = given.iter().any(|(s, v)| matches!(s.name, "gradientUnits" | "maskUnits" | "filterUnits") && v.trim().eq_ignore_ascii_case("userSpaceOnUse"));
+        if tag.is_primitive() || tag == Tag::FeMergeNode {
+            self.earlier = self.results();
+        }
+        if tag == Tag::Use && !given.iter().any(|(s, _)| s.kind == Kind::Href) {
+            self.bad("use-href", &place, "svg: a use without href".to_string(), "href='#id' of a g, a shape or a text in this svg");
+        }
         let mut matrix = IDENTITY;
         let mut drawn: Option<Bx> = None;
         for (spec, raw) in &given {
-            if let Some(b) = self.set(&mut node, &mut matrix, spec, raw, &place, in_clip, user_space) {
+            if let Some(b) = self.set(&mut node, &mut matrix, spec, raw, &place, zone, user_space) {
                 drawn = Some(b);
             }
+        }
+        if tag == Tag::FeColorMatrix {
+            self.colour_matrix(&node, &place);
         }
         let n = |key: &str| node.attrs.get(key).and_then(AttrValue::num).unwrap_or(0.0);
         let bbox = match tag {
@@ -3063,7 +3720,32 @@ impl Svg<'_, '_, '_> {
             Tag::Path | Tag::Polyline | Tag::Polygon => drawn,
             _ => None,
         };
-        Open { node, at, matrix, bbox, text: String::new(), in_clip }
+        Open { node, at, matrix, bbox, text: String::new(), zone, size: 1, holds_use: false }
+    }
+
+    /// The results of the primitives of the filter being read, so far.
+    fn results(&self) -> Vec<String> {
+        let filter = self.stack.iter().rev().find_map(|f| match f {
+            Frame::Node(open) if open.node.tag == Tag::Filter => Some(open),
+            _ => None,
+        });
+        filter.into_iter().flat_map(|open| &open.node.children).filter_map(|p| p.attrs.get("result").and_then(AttrValue::str)).map(str::to_string).collect()
+    }
+
+    /// The `values` of a colour matrix are as many as its `type` takes: 20 for a matrix, one for
+    /// saturate and hueRotate, none for luminanceToAlpha. Without values it is the identity.
+    fn colour_matrix(&mut self, node: &LookNode, place: &str) {
+        let kind = node.attrs.get("type").and_then(AttrValue::str).unwrap_or("matrix");
+        let Some(count) = node.attrs.get("values").and_then(AttrValue::str).map(|v| v.split(' ').count()) else { return };
+        let (wanted, form) = match kind {
+            "matrix" => (MATRIX_VALUES, "20 numbers, four rows of five"),
+            "saturate" => (1, "one number, 0 for grey and 1 for the colours as they are"),
+            "hueRotate" => (1, "one number, the degrees the hues turn"),
+            _ => (0, "no values"),
+        };
+        if count != wanted {
+            self.bad(&format!("matrix-values {kind}"), place, format!("svg: a feColorMatrix of type {kind} with {count} values"), form);
+        }
     }
 
     fn close(&mut self) {
@@ -3090,6 +3772,9 @@ impl Svg<'_, '_, '_> {
                 }
             }
         }
+        if tag == Tag::Use {
+            self.repeat(&mut open);
+        }
         if let Some(id) = &open.node.id {
             let own = open.bbox.unwrap_or(Bx::ZERO);
             if let Some(what) = too_far(id, &own) {
@@ -3097,15 +3782,19 @@ impl Svg<'_, '_, '_> {
                 self.bad("span", &place, what, &span_accepted());
             }
             open.node.bbox = Some(own.nums());
+            let placed = open.bbox.map(|b| b.map(&open.matrix));
+            self.done.insert(id.clone(), Done { tag, zone: open.zone, placed, size: open.size, holds_use: open.holds_use });
         }
         match self.stack.last_mut() {
             Some(Frame::Node(parent)) => {
-                // A group spans its children through their transforms; so does a clipPath.
-                if tag.is_part() && matches!(parent.node.tag, Tag::G | Tag::ClipPath) {
+                // A group spans its children through their transforms; so do a clipPath and a mask.
+                if tag.is_part() && matches!(parent.node.tag, Tag::G | Tag::ClipPath | Tag::Mask) {
                     if let Some(b) = open.bbox {
                         grow(&mut parent.bbox, b.map(&open.matrix));
                     }
                 }
+                parent.size += open.size;
+                parent.holds_use |= open.holds_use || tag == Tag::Use;
                 parent.node.children.push(open.node);
             }
             None => self.top.push(open.node),
@@ -3113,12 +3802,53 @@ impl Svg<'_, '_, '_> {
         }
     }
 
+    /// A `use` is complete. What it repeats: its box, moved by `x` and `y`, is the box of the
+    /// `use`, and its elements count again. A target that is not complete yet holds the `use`
+    /// (it is open), or comes after it: a first reading notes that, and the second knows it.
+    fn repeat(&mut self, open: &mut Open) {
+        let Some(target) = open.node.attrs.get("useRef").and_then(AttrValue::str).map(str::to_string) else { return };
+        let place = self.place(open.at, open.node.id.as_deref().map(|id| (Tag::Use, id)));
+        let n = |key: &str| open.node.attrs.get(key).and_then(AttrValue::num).unwrap_or(0.0);
+        let (x, y) = (n("x"), n("y"));
+        let known = match self.done.get(&target) {
+            Some(done) => Some(*done),
+            None if open.node.id.as_deref() == Some(target.as_str()) || self.ids.contains_key(&target) => None,
+            None => self.ahead.get(&target).copied(),
+        };
+        let fault = match known {
+            None if open.node.id.as_deref() == Some(target.as_str()) => Some(("use-self", "svg: a use refers to itself".to_string(), "a use repeats another element of the artwork")),
+            None if self.ids.contains_key(&target) => Some(("use-holds", format!("svg: href refers to #{target}, which holds this use"), "a use repeats an element outside itself")),
+            None => {
+                self.later.push(Later { id: target, place });
+                return;
+            }
+            Some(done) if done.tag == Tag::Use => Some(("use-use", format!("svg: href refers to #{target}, a use"), "a use repeats a g, a shape or a text, not another use")),
+            Some(done) if !done.tag.is_repeatable() => Some(("use-kind", format!("svg: href refers to #{target}, a {}", done.tag.name()), "#id of a g, a shape or a text in this svg")),
+            Some(done) if matches!(done.zone, Zone::Clip | Zone::Mask | Zone::Filter) => {
+                Some(("use-zone", format!("svg: href refers to #{target}, which is inside a {}", done.zone.name()), "what a use repeats stands outside clip paths, masks and filters"))
+            }
+            Some(done) if done.holds_use => Some(("use-nested", format!("svg: href refers to #{target}, which holds a use"), "what a use repeats holds no use itself")),
+            Some(done) => {
+                open.bbox = done.placed.map(|b| b.shifted(x, y));
+                open.size += done.size;
+                self.elements += done.size;
+                None
+            }
+        };
+        if let Some((key, what, accepted)) = fault {
+            self.bad(&format!("{key} {target}"), &place, what, accepted);
+        }
+        if self.elements > MAX_ELEMENTS {
+            self.fatal("elements-use", &place, format!("svg: more than {MAX_ELEMENTS} elements, with what each use repeats"), "draw with fewer, larger shapes, or repeat smaller parts");
+        }
+    }
+
     /// The document has been read to its end.
-    fn end(mut self, problems_before: usize) -> Option<Artwork> {
+    fn end(mut self, problems_before: usize) -> Read {
         let end = self.locate(self.src.len());
         if self.doc == Doc::Before {
             self.bad("root", "", "svg: no svg element".to_string(), "the artwork is one svg element, such as <svg viewBox='0 0 200 200'>…</svg>");
-            return None;
+            return Read::Done(None);
         }
         if self.doc == Doc::In || !self.stack.is_empty() {
             let open = self.stack.iter().rev().find_map(|f| match f {
@@ -3127,16 +3857,29 @@ impl Svg<'_, '_, '_> {
             });
             let place = self.place(end, None);
             self.bad("unclosed", &place, format!("svg ends inside <{}>", open.unwrap_or("svg")), "every element is closed, the svg element last");
-            return None;
+            return Read::Done(None);
+        }
+        // A use repeats an element that comes after it: read again, knowing what it is.
+        if self.ahead.is_empty() && self.later.iter().any(|later| self.done.contains_key(&later.id)) {
+            return Read::Again(std::mem::take(&mut self.done));
         }
         for reference in std::mem::take(&mut self.references) {
-            let wanted = if reference.clip { "a clipPath" } else { "a gradient" };
+            let (wanted, fits): (&str, fn(Tag) -> bool) = match reference.wants {
+                Wants::Gradient => ("a gradient", Tag::is_gradient),
+                Wants::Clip => ("a clipPath", |tag| tag == Tag::ClipPath),
+                Wants::Mask => ("a mask", |tag| tag == Tag::Mask),
+                Wants::Filter => ("a filter", |tag| tag == Tag::Filter),
+            };
             let accepted = format!("url(#id) of {wanted} in this svg");
             match self.ids.get(&reference.id).copied() {
-                Some(tag) if (if reference.clip { tag == Tag::ClipPath } else { tag.is_gradient() }) => {}
+                Some(tag) if fits(tag) => {}
                 Some(tag) => self.bad(&format!("ref-kind {} {}", reference.attr, reference.id), &reference.place, format!("svg: {} refers to #{}, a {}", reference.attr, reference.id, tag.name()), &accepted),
                 None => self.bad(&format!("ref-none {} {}", reference.attr, reference.id), &reference.place, format!("svg: {} refers to #{}, which is not in this svg", reference.attr, reference.id), &accepted),
             }
+        }
+        // A use whose target is in no reading: one that is not in the artwork.
+        for later in std::mem::take(&mut self.later) {
+            self.bad(&format!("use-none {}", later.id), &later.place, format!("svg: href refers to #{}, which is not in this svg", later.id), "#id of a g, a shape or a text in this svg");
         }
         let mut nodes = std::mem::take(&mut self.top);
         if !nodes.iter().any(|n| n.tag.is_part()) && self.cx.out.problems.len() == problems_before {
@@ -3146,11 +3889,18 @@ impl Svg<'_, '_, '_> {
             wrapper.children = nodes;
             nodes = vec![wrapper];
         }
-        Some(Artwork { view: self.view, nodes })
+        Read::Done(Some(Artwork { view: self.view, nodes }))
     }
 }
 
 const ENTITIES: &str = "only &amp; &lt; &gt; &quot; &apos; and numeric character references";
+/// The inputs SVG gives a filter primitive by name. Only the first two are drawn for an avatar;
+/// none may be the name of a result.
+const STANDARD_INPUTS: [&str; 6] = ["SourceGraphic", "SourceAlpha", "BackgroundImage", "BackgroundAlpha", "FillPaint", "StrokePaint"];
+const INPUT_FORM: &str = "SourceGraphic, SourceAlpha or an earlier result";
+
+/// For an `href` anywhere but on a `use`.
+const HREF_ONLY_USE: &str = "the artwork links to nothing; only a use refers to an element of it, with href='#id'";
 
 /// Whether every `url(` of a style value is `url(#id)`.
 fn style_urls_ok(value: &str) -> bool {
@@ -3214,15 +3964,17 @@ struct Index<'n> {
     by_id: HashMap<&'n str, Entry<'n>>,
     /// The ids of the parts, in document order.
     order: Vec<&'n str>,
-    /// Every element of the tree.
+    /// Every element of the tree, each `use` with the elements it repeats.
     elements: usize,
 }
 
 struct Entry<'n> {
     node: &'n LookNode,
-    /// A `g`, a shape or a `text` that is drawn (not inside `defs`): what a pivot, a role, a track
-    /// or a mouth drive may name.
+    /// A `g`, a shape, a `text` or a `use` that is drawn (not inside `defs`): what a pivot, a
+    /// role, a parent, a track or a drive may name.
     part: bool,
+    /// The ids of the elements it stands inside, outermost first.
+    above: Vec<&'n str>,
     /// From the coordinates its geometry is written in to root coordinates.
     to_root: Affine,
     /// The structure of its own `d`, when it is a path that has one: read once, asked for by
@@ -3259,23 +4011,37 @@ impl<'n> Index<'n> {
     /// Walks the tree with a stack of its own: the depth of the input never becomes call depth.
     fn of(nodes: &'n [LookNode]) -> Index<'n> {
         let mut ix = Index { by_id: HashMap::new(), order: Vec::new(), elements: 0 };
-        let mut stack: Vec<(&'n LookNode, Affine, bool, Stroke)> = nodes.iter().rev().map(|n| (n, IDENTITY, false, Stroke::NONE)).collect();
-        while let Some((node, above, hidden, inherited)) = stack.pop() {
+        let mut stack: Vec<(&'n LookNode, Affine, bool, Stroke, Vec<&'n str>)> = nodes.iter().rev().map(|n| (n, IDENTITY, false, Stroke::NONE, Vec::new())).collect();
+        let mut repeated: Vec<&'n str> = Vec::new();
+        while let Some((node, matrix, hidden, inherited, above)) = stack.pop() {
             ix.elements += 1;
-            let to_root = compose(&above, &matrix_of(node));
+            let to_root = compose(&matrix, &matrix_of(node));
             let hidden = hidden || !node.tag.is_part();
             let stroke = Stroke::of(node, inherited);
+            if let Some(target) = node.attrs.get("useRef").and_then(AttrValue::str) {
+                repeated.push(target);
+            }
+            let mut inside = above.clone();
             if let Some(id) = &node.id {
+                inside.push(id);
                 if !ix.by_id.contains_key(id.as_str()) {
                     if !hidden {
                         ix.order.push(id);
                     }
                     let structure = node.attrs.get("d").and_then(AttrValue::str).and_then(|d| path_data(d, &WIDE, MAX_D_CHARS, &unmasked).ok()).map(|p| p.structure);
-                    ix.by_id.insert(id, Entry { node, part: !hidden, to_root, structure, stroke });
+                    ix.by_id.insert(id, Entry { node, part: !hidden, above, to_root, structure, stroke });
                 }
             }
             for child in node.children.iter().rev() {
-                stack.push((child, to_root, hidden, stroke));
+                stack.push((child, to_root, hidden, stroke, inside.clone()));
+            }
+        }
+        // What each use repeats counts again, as it counted when the artwork was read.
+        for target in repeated {
+            let mut count: Vec<&LookNode> = ix.by_id.get(target).map(|entry| vec![entry.node]).unwrap_or_default();
+            while let Some(node) = count.pop() {
+                ix.elements += 1;
+                count.extend(&node.children);
             }
         }
         ix
@@ -3323,7 +4089,8 @@ impl Entry<'_> {
     fn own(&self, prop: Prop) -> Own<'_> {
         match prop {
             Prop::Opacity => Own::Num(self.num("opacity").unwrap_or(1.0)),
-            Prop::StrokeWidth => self.num("strokeWidth").map_or(Own::Unknown, Own::Num),
+            // These are inherited: an element that does not set one has none of its own.
+            Prop::StrokeWidth | Prop::FillOpacity | Prop::StrokeOpacity | Prop::StrokeDashoffset => self.num(prop.name()).map_or(Own::Unknown, Own::Num),
             Prop::Fill | Prop::Stroke => self.str(prop.name()).filter(|c| c.starts_with('#')).map_or(Own::Unknown, Own::Text),
             Prop::D => self.str("d").map_or(Own::Unknown, Own::Text),
             p if p.is_geometry() => Own::Num(self.num(p.name()).unwrap_or(0.0)),
@@ -3386,7 +4153,13 @@ fn seg(key: &str, mask: &dyn Fn(&str) -> String) -> String {
 fn keys(o: &Map<String, Value>, known: &[&str], at: &str, out: &mut Out, mask: &dyn Fn(&str) -> String) -> bool {
     let mut ok = true;
     for key in o.keys().filter(|k| !known.contains(&k.as_str())).take(MAX_PROBLEM_KINDS) {
-        let accepted = if key == "origin" { "there is no origin here, give the part a pivot in pivots".to_string() } else { format!("keys are {}", known.join(", ")) };
+        let accepted = if key == "origin" {
+            "there is no origin here, give the part a pivot in pivots".to_string()
+        } else if known == DRIVE_KEYS && matches!(key.as_str(), "times" | "phase" | "delay") {
+            "a drive follows its input, not time: at places each value along the input".to_string()
+        } else {
+            format!("keys are {}", known.join(", "))
+        };
         out.problems.add(&format!("key {} {}", known.first().copied().unwrap_or_default(), cut(key, MAX_QUOTE_CHARS)), at, format!("{} is not a key here", q(mask, key)), &accepted);
         ok = false;
     }
@@ -3396,10 +4169,12 @@ fn keys(o: &Map<String, Value>, known: &[&str], at: &str, out: &mut Out, mask: &
 const ANIMATION_KEYS: [&str; 6] = ["duration", "loop", "every", "times", "ease", "tracks"];
 const TRACK_KEYS: [&str; 7] = ["target", "prop", "values", "times", "ease", "phase", "delay"];
 const MOUTH_KEYS: [&str; 4] = ["target", "open", "closed", "prop"];
+const DRIVE_KEYS: [&str; 6] = ["input", "target", "prop", "values", "at", "ease"];
 const VOICE_KEYS: [&str; 4] = ["lang", "prefer", "pitch", "rate"];
-const PROPS: &str = "props are translateX, translateY, rotate, scale, scaleX, scaleY, opacity, fill, stroke, strokeWidth, d, cx, cy, r, rx, ry, x, y, width, height, x1, y1, x2, y2";
+const PROPS: &str = "props are translateX, translateY, rotate, skewX, skewY, scale, scaleX, scaleY, opacity, fillOpacity, strokeOpacity, fill, stroke, strokeWidth, strokeDashoffset, d, cx, cy, r, rx, ry, x, y, width, height, x1, y1, x2, y2";
 const TIMES_FORM: &str = "numbers rising from 0 to 1, one per keyframe";
-const EASES: &str = "linear, in, out, inOut, outBack or step, one for all segments or a list with one per segment";
+const EASES: &str = "linear, in, out, inOut, inBack, outBack, inOutBack, outElastic, outBounce, step or a bezier [x1, y1, x2, y2]";
+const INPUTS: &str = "inputs are lookX, lookY, mouth, pace, turn, held";
 
 /// `[a, b]` as two numbers.
 fn pair(v: &Value) -> Option<[f64; 2]> {
@@ -3418,16 +4193,18 @@ fn even(n: usize) -> Vec<f64> {
     (0..n).map(|i| if n > 1 { i as f64 / (n - 1) as f64 } else { 0.0 }).collect()
 }
 
-fn check_times(v: &Value, at: &str, out: &mut Out) -> Option<Vec<f64>> {
+/// `times` of an animation or a track, `at` of a drive (`what` names which).
+fn check_times(v: &Value, what: &str, at: &str, out: &mut Out) -> Option<Vec<f64>> {
     let list: Option<Vec<f64>> = v.as_array().filter(|l| (2..=MAX_KEYFRAMES).contains(&l.len())).and_then(|l| l.iter().map(|t| t.as_f64().map(round3)).collect());
     match list {
         Some(t) if t.first() == Some(&0.0) && t.last() == Some(&1.0) && t.windows(2).all(|w| w[1] - w[0] >= MIN_TIME_STEP - 1e-9) => Some(t),
         Some(_) => {
-            out.problems.add("times-order", at, "times do not rise from 0 to 1".to_string(), TIMES_FORM);
+            let verb = if what == "times" { "do" } else { "does" };
+            out.problems.add(&format!("{what}-order"), at, format!("{what} {verb} not rise from 0 to 1"), TIMES_FORM);
             None
         }
         None => {
-            out.problems.add("times-form", at, format!("times is {}", match v {
+            out.problems.add(&format!("{what}-form"), at, format!("{what} is {}", match v {
                 Value::Array(l) => format!("a list of {}", l.len()),
                 other => kind_of(other).to_string(),
             }), &format!("2 to {MAX_KEYFRAMES} {TIMES_FORM}"));
@@ -3436,14 +4213,38 @@ fn check_times(v: &Value, at: &str, out: &mut Out) -> Option<Vec<f64>> {
     }
 }
 
+/// Four numbers, as a bezier is written: `None` when it is not four numbers at all.
+fn four(v: &Value) -> Option<[f64; 4]> {
+    match v.as_array()?.as_slice() {
+        [a, b, c, d] => Some([a.as_f64()?, b.as_f64()?, c.as_f64()?, d.as_f64()?]),
+        _ => None,
+    }
+}
+
+/// A bezier whose control points keep to their ranges.
+fn bezier(p: [f64; 4]) -> Option<Curve> {
+    let x = |v: f64| (BEZIER_X.0..=BEZIER_X.1).contains(&v);
+    let y = |v: f64| (BEZIER_Y.0..=BEZIER_Y.1).contains(&v);
+    (x(p[0]) && y(p[1]) && x(p[2]) && y(p[3])).then(|| Curve::Bezier(p.map(Num::new)))
+}
+
 fn check_eases(v: &Value, at: &str, out: &mut Out, mask: &dyn Fn(&str) -> String) -> Option<Eases> {
-    let one = |v: &Value| v.as_str().and_then(|name| Ease::ALL.into_iter().find(|e| e.name() == name));
+    let named = |v: &Value| v.as_str().and_then(|name| Ease::ALL.into_iter().find(|e| e.name() == name)).map(Curve::Named);
+    let one = |v: &Value| named(v).or_else(|| four(v).and_then(bezier));
+    // Four numbers out of range: said as that, not as an unknown name.
+    let wild = |v: &Value| four(v).is_some_and(|p| bezier(p).is_none());
     let eases = match v {
-        Value::String(_) => one(v).map(Eases::One),
-        Value::Array(list) if (1..MAX_KEYFRAMES).contains(&list.len()) => list.iter().map(one).collect::<Option<Vec<Ease>>>().map(Eases::Each),
+        Value::String(_) => named(v).map(Eases::One),
+        Value::Array(_) if four(v).is_some() => four(v).and_then(bezier).map(Eases::One),
+        Value::Array(list) if (1..MAX_KEYFRAMES).contains(&list.len()) => list.iter().map(one).collect::<Option<Vec<Curve>>>().map(Eases::Each),
         _ => None,
     };
     if eases.is_none() {
+        if wild(v) || matches!(v, Value::Array(list) if list.iter().any(wild)) {
+            let range = format!("x1 and x2 from {} to {}, y1 and y2 from {} to {}", BEZIER_X.0, BEZIER_X.1, BEZIER_Y.0, BEZIER_Y.1);
+            out.problems.add("ease-bezier", at, "an ease [x1, y1, x2, y2] out of range".to_string(), &range);
+            return None;
+        }
         let found = match v {
             Value::String(s) => q(mask, s),
             Value::Array(list) => list.iter().find(|e| one(e).is_none()).and_then(Value::as_str).map_or_else(|| format!("a list of {}", list.len()), |s| q(mask, s)),
@@ -3460,6 +4261,18 @@ struct Shared<'s> {
     looping: bool,
     times: Option<&'s [f64]>,
     ease: Option<&'s Eases>,
+}
+
+/// What a track and a drive share, read: the parts they name, the prop, the values.
+struct Keyed<'v, 'a> {
+    names: Vec<&'v str>,
+    targets: Vec<(&'v str, &'a Entry<'a>)>,
+    prop: Prop,
+    /// The values that could be read.
+    values: Vec<Option<Key>>,
+    /// How many values were written.
+    n: usize,
+    ok: bool,
 }
 
 /// The pivots and roles of the look being put together, for the warnings that need them.
@@ -3482,7 +4295,7 @@ impl<'a> Check<'a> {
         match self.ix.by_id.get(id) {
             Some(entry) if entry.part => Some(entry),
             Some(entry) => {
-                out.problems.add(&format!("not-part {id}"), at, format!("{id} is a {}, or inside defs", entry.node.tag.name()), "what moves is a g, a shape or a text that is drawn");
+                out.problems.add(&format!("not-part {id}"), at, format!("{id} is a {}, or inside defs", entry.node.tag.name()), "what moves is a g, a shape, a text or a use that is drawn");
                 None
             }
             None => {
@@ -3535,18 +4348,20 @@ impl<'a> Check<'a> {
         let (ok, range) = match prop {
             Prop::TranslateX | Prop::TranslateY => (self.view.offset(n), format!("within {} either way", fmt_num(self.view.reach()))),
             Prop::Rotate => (n.abs() <= MAX_ROTATE, format!("degrees, within {MAX_ROTATE} either way")),
+            Prop::SkewX | Prop::SkewY => (n.abs() <= MAX_SKEW, format!("degrees, within {MAX_SKEW} either way")),
             Prop::Scale | Prop::ScaleX | Prop::ScaleY => (n.abs() <= MAX_TRACK_SCALE, format!("-{MAX_TRACK_SCALE} to {MAX_TRACK_SCALE}")),
-            Prop::Opacity => ((0.0..=1.0).contains(&n), "0 to 1".to_string()),
+            p if p.is_opacity() => ((0.0..=1.0).contains(&n), "0 to 1".to_string()),
+            Prop::StrokeDashoffset => (self.view.offset(n), format!("within {} either way", fmt_num(self.view.reach()))),
             p if p.is_length() => (self.view.length(n), format!("0 to {}", fmt_num(self.view.reach()))),
             _ => (self.view.coord(n), self.view.coord_range()),
         };
         if ok { Ok(()) } else { Err(range) }
     }
 
-    /// A rotate or scale on a `g` or a `path` without a pivot is accepted, with a warning that
-    /// names the point it will use.
+    /// A rotate, skew or scale on a `g` or a `path` without a pivot is accepted, with a warning
+    /// that names the point it will use.
     fn pivot_warning(&self, id: &str, entry: &Entry<'_>, at: &str, rig: &Rig<'_>, out: &mut Out) {
-        if !matches!(entry.node.tag, Tag::G | Tag::Path) || rig.pivots.contains_key(id) {
+        if !matches!(entry.node.tag, Tag::G | Tag::Path | Tag::Use) || rig.pivots.contains_key(id) {
             return;
         }
         let body = rig.roles.get(&Role::Body).is_some_and(|b| b == id);
@@ -3611,7 +4426,7 @@ impl<'a> Check<'a> {
         let times = match o.get("times") {
             None | Some(Value::Null) => None,
             Some(t) => {
-                let times = check_times(t, &format!("{at}.times"), out);
+                let times = check_times(t, "times", &format!("{at}.times"), out);
                 ok &= times.is_some();
                 times
             }
@@ -3651,14 +4466,11 @@ impl<'a> Check<'a> {
         ok.then(|| Animation { duration: Num::new(duration), looping, every, times: times.map(nums), ease, tracks })
     }
 
-    fn track(&self, v: &Value, at: &str, shared: &Shared<'_>, rig: &Rig<'_>, out: &mut Out) -> Option<Track> {
-        let Some(o) = v.as_object() else {
-            out.problems.add("track-form", at, format!("a track is {}", kind_of(v)), "an object with target, prop and values");
-            return None;
-        };
-        let mut ok = keys(o, &TRACK_KEYS, at, out, self.mask);
-
-        let names: Vec<&str> = match o.get("target") {
+    /// The target, the prop and the values of a track or a drive (`what` names which), with every
+    /// problem of each. `None`: there is no prop, or no list of values, to read the rest against.
+    fn keyed<'v>(&self, o: &'v Map<String, Value>, at: &str, what: &str, out: &mut Out) -> Option<Keyed<'v, 'a>> {
+        let mut ok = true;
+        let names: Vec<&'v str> = match o.get("target") {
             Some(Value::String(id)) => vec![id.as_str()],
             Some(Value::Array(list)) if (1..=MAX_TARGETS).contains(&list.len()) && list.iter().all(Value::is_string) => list.iter().filter_map(Value::as_str).collect(),
             Some(other) => {
@@ -3671,12 +4483,12 @@ impl<'a> Check<'a> {
                 Vec::new()
             }
             None => {
-                out.problems.add("target-none", at, "a track without a target".to_string(), "target names a g, a shape or a text by its id");
+                out.problems.add("target-none", at, format!("a {what} without a target"), "target names a g, a shape, a text or a use by its id");
                 ok = false;
                 Vec::new()
             }
         };
-        let mut targets: Vec<(&str, &Entry<'_>)> = Vec::new();
+        let mut targets: Vec<(&'v str, &'a Entry<'a>)> = Vec::new();
         for (i, id) in names.iter().enumerate() {
             if names.iter().take(i).any(|earlier| earlier == id) {
                 out.problems.add("target-twice", at, format!("target names {} twice", seg(id, self.mask)), "each part once");
@@ -3703,7 +4515,7 @@ impl<'a> Check<'a> {
                 None
             }
             None => {
-                out.problems.add("prop-none", at, "a track without a prop".to_string(), PROPS);
+                out.problems.add("prop-none", at, format!("a {what} without a prop"), PROPS);
                 None
             }
         };
@@ -3728,7 +4540,7 @@ impl<'a> Check<'a> {
                 return None;
             }
             None => {
-                out.problems.add("values-none", at, "a track without values".to_string(), &format!("a list of 2 to {MAX_KEYFRAMES} keyframes"));
+                out.problems.add("values-none", at, format!("a {what} without values"), &format!("a list of 2 to {MAX_KEYFRAMES} keyframes"));
                 return None;
             }
         };
@@ -3742,7 +4554,7 @@ impl<'a> Check<'a> {
             let name = prop.name();
             match value {
                 Value::Null if prop.is_relative() => {
-                    out.problems.add(&format!("null-relative {name}"), &here, format!("null in a {name} track"), "null is the artwork's own value; translate, rotate and scale are relative to rest, so write 0, or 1 for a scale");
+                    out.problems.add(&format!("null-relative {name}"), &here, format!("null in a {name} {what}"), "null is the artwork's own value; translate, rotate, skew and scale are relative to rest, so write 0, or 1 for a scale");
                     ok = false;
                 }
                 Value::Null => {
@@ -3807,6 +4619,9 @@ impl<'a> Check<'a> {
                 let missing = match prop {
                     Prop::Fill | Prop::Stroke => matches!(entry.own(prop), Own::Unknown).then_some("no plain colour"),
                     Prop::StrokeWidth => matches!(entry.own(prop), Own::Unknown).then_some("no stroke-width"),
+                    Prop::FillOpacity => matches!(entry.own(prop), Own::Unknown).then_some("no fill-opacity"),
+                    Prop::StrokeOpacity => matches!(entry.own(prop), Own::Unknown).then_some("no stroke-opacity"),
+                    Prop::StrokeDashoffset => matches!(entry.own(prop), Own::Unknown).then_some("no stroke-dashoffset"),
                     Prop::D => entry.str("d").is_none().then_some("no d"),
                     _ => None,
                 };
@@ -3827,6 +4642,69 @@ impl<'a> Check<'a> {
             }
         }
 
+        Some(Keyed { names, targets, prop, values, n, ok })
+    }
+
+    /// One ease for all segments or one per segment, and none that jumps on paint. False when
+    /// that is not so.
+    fn segments(&self, ease: Option<&Eases>, n: usize, prop: Prop, at: &str, out: &mut Out) -> bool {
+        let mut ok = true;
+        if let Some(count) = ease.and_then(Eases::count).filter(|c| *c != n - 1) {
+            out.problems.add("ease-count", at, format!("{count} eases for {} segments", n - 1), "one ease for all segments, or one per segment, which is one fewer than values");
+            ok = false;
+        }
+        if prop.is_paint() && ease.is_some_and(Eases::steps) {
+            out.problems.add("ease-step", at, format!("ease step on {}", prop.name()), "fill, stroke and opacity change smoothly so that nothing flashes, use linear, in, out or inOut");
+            ok = false;
+        }
+        if prop.is_paint() && ease.is_some_and(Eases::swings) {
+            out.problems.add("ease-swing", at, format!("an ease that swings on {}", prop.name()), "no outElastic or outBounce on fill, stroke or an opacity, and a bezier with y1 and y2 from 0 to 1");
+            ok = false;
+        }
+        ok
+    }
+
+    /// A rotate, skew or scale of a part without a pivot warns, a translate that takes a part out
+    /// of the viewBox warns.
+    fn motion_warnings(&self, targets: &[(&str, &Entry<'_>)], prop: Prop, values: &[Option<Key>], at: &str, rig: &Rig<'_>, out: &mut Out) {
+        if prop.pivots() {
+            for (id, entry) in targets {
+                self.pivot_warning(id, entry, at, rig, out);
+            }
+        }
+        if prop.is_translate() {
+            let (low, high) = values.iter().flatten().fold((0.0_f64, 0.0_f64), |(low, high), key| match key {
+                Key::Num(n) => (low.min(n.get()), high.max(n.get())),
+                Key::Str(_) => (low, high),
+            });
+            for (id, entry) in targets {
+                let rest = entry.root_box();
+                // A part that is outside at rest is reported once, as that.
+                if !self.view.holds(&rest) {
+                    continue;
+                }
+                for t in [low, high] {
+                    let (dx, dy) = if prop == Prop::TranslateX { vector(&entry.to_root, t, 0.0) } else { vector(&entry.to_root, 0.0, t) };
+                    let moved = rest.shifted(dx, dy);
+                    if !self.view.holds(&moved) {
+                        let what = format!("{} {} moves {id} out of the viewBox, to x {} to {}, y {} to {}", prop.name(), fmt_num(t), fmt_num(moved.x0), fmt_num(moved.x1), fmt_num(moved.y0), fmt_num(moved.y1));
+                        out.warnings.add(&format!("leaves {at} {id}"), at, what, "what leaves the viewBox is cut off");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn track(&self, v: &Value, at: &str, shared: &Shared<'_>, rig: &Rig<'_>, out: &mut Out) -> Option<Track> {
+        let Some(o) = v.as_object() else {
+            out.problems.add("track-form", at, format!("a track is {}", kind_of(v)), "an object with target, prop and values");
+            return None;
+        };
+        let known = keys(o, &TRACK_KEYS, at, out, self.mask);
+        let Keyed { names, targets, prop, values, n, ok: read } = self.keyed(o, at, "track", out)?;
+        let mut ok = known && read;
+
         // Where a loop starts again its last keyframe meets its first with no time between them:
         // a paint that ends on another value jumps there, once a cycle, which is the flash the
         // spacing below keeps out of everything else.
@@ -3844,7 +4722,7 @@ impl<'a> Check<'a> {
         let times = match o.get("times") {
             None | Some(Value::Null) => None,
             Some(t) => {
-                let times = check_times(t, &format!("{at}.times"), out);
+                let times = check_times(t, "times", &format!("{at}.times"), out);
                 ok &= times.is_some();
                 times
             }
@@ -3872,20 +4750,8 @@ impl<'a> Check<'a> {
                 ease
             }
         };
-        let (stepped, count) = match ease.as_ref().or(shared.ease) {
-            Some(Eases::One(e)) => (*e == Ease::Step, None),
-            Some(Eases::Each(each)) => (each.contains(&Ease::Step), Some(each.len())),
-            None => (false, None),
-        };
-        if count.is_some_and(|c| c != n - 1) {
-            out.problems.add("ease-count", at, format!("{} eases for {} segments", count.unwrap_or_default(), n - 1), "one ease for all segments, or one per segment, which is one fewer than values");
-            ok = false;
-        }
+        ok &= self.segments(ease.as_ref().or(shared.ease), n, prop, at, out);
         let paint = prop.is_paint();
-        if paint && stepped {
-            out.problems.add("ease-step", at, format!("ease step on {}", prop.name()), "fill, stroke and opacity change smoothly so that nothing flashes, use linear, in, out or inOut");
-            ok = false;
-        }
         let least = if paint { MIN_PAINT_STEP } else { MIN_STEP };
         let close = effective.windows(2).enumerate().map(|(i, w)| (i, (w[1] - w[0]) * shared.duration)).find(|(_, gap)| *gap < least - 1e-9);
         if let Some((i, gap)) = close {
@@ -3933,33 +4799,7 @@ impl<'a> Check<'a> {
         }
 
         // Accepted. What follows only warns.
-        if prop == Prop::Rotate || prop.is_scale() {
-            for (id, entry) in &targets {
-                self.pivot_warning(id, entry, at, rig, out);
-            }
-        }
-        if prop.is_translate() {
-            let (low, high) = values.iter().flatten().fold((0.0_f64, 0.0_f64), |(low, high), key| match key {
-                Key::Num(n) => (low.min(n.get()), high.max(n.get())),
-                Key::Str(_) => (low, high),
-            });
-            for (id, entry) in &targets {
-                let rest = entry.root_box();
-                // A part that is outside at rest is reported once, as that.
-                if !self.view.holds(&rest) {
-                    continue;
-                }
-                for t in [low, high] {
-                    let (dx, dy) = if prop == Prop::TranslateX { vector(&entry.to_root, t, 0.0) } else { vector(&entry.to_root, 0.0, t) };
-                    let moved = rest.shifted(dx, dy);
-                    if !self.view.holds(&moved) {
-                        let what = format!("{} {} moves {id} out of the viewBox, to x {} to {}, y {} to {}", prop.name(), fmt_num(t), fmt_num(moved.x0), fmt_num(moved.x1), fmt_num(moved.y0), fmt_num(moved.y1));
-                        out.warnings.add(&format!("leaves {at} {id}"), at, what, "what leaves the viewBox is cut off");
-                        break;
-                    }
-                }
-            }
-        }
+        self.motion_warnings(&targets, prop, &values, at, rig, out);
         if !shared.looping && !prop.is_relative() {
             for (id, entry) in &targets {
                 let own = entry.own(prop);
@@ -3974,6 +4814,108 @@ impl<'a> Check<'a> {
             many => Targets::Many(many.iter().map(|id| id.to_string()).collect()),
         };
         Some(Track { target, prop, values, times: times.map(nums), ease, phase, delay })
+    }
+
+    fn drive(&self, v: &Value, at: &str, rig: &Rig<'_>, out: &mut Out) -> Option<Drive> {
+        let Some(o) = v.as_object() else {
+            out.problems.add("drive-form", at, format!("a drive is {}", kind_of(v)), "an object with input, target, prop and values");
+            return None;
+        };
+        let known = keys(o, &DRIVE_KEYS, at, out, self.mask);
+        let input = match o.get("input") {
+            Some(Value::String(name)) => {
+                let input = Input::ALL.into_iter().find(|i| i.name() == name);
+                if input.is_none() {
+                    out.problems.add(&format!("input {}", cut(name, MAX_QUOTE_CHARS)), at, format!("input {}", q(self.mask, name)), INPUTS);
+                }
+                input
+            }
+            Some(other) => {
+                out.problems.add("input-form", at, format!("input is {}", kind_of(other)), INPUTS);
+                None
+            }
+            None => {
+                out.problems.add("input-none", at, "a drive without an input".to_string(), INPUTS);
+                None
+            }
+        };
+        let Keyed { names, targets, prop, values, n, ok: read } = self.keyed(o, at, "drive", out)?;
+        let mut ok = known && read;
+        // Paint follows only what the browser moves slowly: a full swing takes a quarter second.
+        if let Some(input) = input.filter(|input| prop.is_paint() && !input.slow()) {
+            out.problems.add(&format!("drive-paint {}", input.name()), at, format!("{} follows {}", prop.name(), input.name()), "fill, stroke and the opacities follow only pace, turn and held, which change slowly, so nothing flashes");
+            ok = false;
+        }
+        let places = match o.get("at") {
+            None | Some(Value::Null) => None,
+            Some(t) => {
+                let places = check_times(t, "at", &format!("{at}.at"), out);
+                ok &= places.is_some();
+                places
+            }
+        };
+        if let Some(places) = places.as_ref().filter(|places| places.len() != n) {
+            out.problems.add("at-count", at, format!("{} places for {n} values", places.len()), "one place per value");
+            ok = false;
+        }
+        // Even a slow input crosses its range in a quarter second (half a second for turn, which
+        // runs from -1 to 1): paint values along it keep the distance paint keyframes keep in time.
+        if let Some(input) = input.filter(|input| prop.is_paint() && input.slow() && n >= 2) {
+            let least = PAINT_PLACE_STEP / input.span();
+            let gaps_ok = match places.as_ref().filter(|places| places.len() == n) {
+                Some(places) => places.windows(2).all(|pair| pair[1] - pair[0] >= least - MIN_TIME_STEP),
+                None => 1.0 / (n - 1) as f64 >= least - MIN_TIME_STEP,
+            };
+            if !gaps_ok {
+                out.problems.add(&format!("drive-paint-places {}", input.name()), at, format!("{n} values of {} along {} stand too close", prop.name(), input.name()), "2 values along pace or held, up to 3 along turn, at least 0.34 apart in at");
+                ok = false;
+            }
+        }
+        let ease = match o.get("ease") {
+            None | Some(Value::Null) => None,
+            Some(e) => {
+                let ease = check_eases(e, &format!("{at}.ease"), out, self.mask);
+                ok &= ease.is_some();
+                ease
+            }
+        };
+        ok &= self.segments(ease.as_ref(), n, prop, at, out);
+        let input = input?;
+        if !ok {
+            return None;
+        }
+        self.motion_warnings(&targets, prop, &values, at, rig, out);
+        let target = match names.as_slice() {
+            [one] => Targets::One(one.to_string()),
+            many => Targets::Many(many.iter().map(|id| id.to_string()).collect()),
+        };
+        Some(Drive { input, target, prop, values, at: places.map(nums), ease })
+    }
+
+    /// One entry of `parents`: `child` moves with the part `v` names, which neither holds it nor
+    /// stands inside it.
+    fn parent(&self, child: &str, v: &Value, out: &mut Out) -> Option<String> {
+        let at = format!("parents.{}", seg(child, self.mask));
+        let entry = self.part(child, &at, out);
+        let Some(parent) = v.as_str() else {
+            out.problems.add("parent-form", &at, format!("a parent is {}", kind_of(v)), "the id of the part it moves with");
+            return None;
+        };
+        let other = self.part(parent, &at, out);
+        let (entry, other) = (entry?, other?);
+        if child == parent {
+            out.problems.add("parent-self", &at, format!("{child} moves with itself"), "a part moves with another part");
+            return None;
+        }
+        if entry.above.contains(&parent) {
+            out.problems.add(&format!("parent-inside {child}"), &at, format!("{child} is inside {parent} and moves with it already"), "parents are for parts apart in the drawing order");
+            return None;
+        }
+        if other.above.contains(&child) {
+            out.problems.add(&format!("parent-holds {child}"), &at, format!("{parent} is inside {child}"), "a part cannot move with what it holds");
+            return None;
+        }
+        Some(parent.to_string())
     }
 
     fn state(&self, key: &str, v: &Value, animations: &BTreeMap<String, Animation>, rig: &Rig<'_>, out: &mut Out) -> Option<(LookState, Vec<String>)> {
@@ -4223,6 +5165,15 @@ struct Moving {
     states: BTreeMap<LookState, Vec<String>>,
     mouth: Vec<MouthDrive>,
     gaze: Option<Num>,
+    parents: BTreeMap<String, String>,
+    drives: Vec<Drive>,
+}
+
+impl Moving {
+    /// The look of this artwork that these move.
+    fn look(self, view_box: [Num; 4], nodes: Vec<LookNode>) -> Look {
+        Look { view_box, nodes, pivots: self.pivots, roles: self.roles, animations: self.animations, states: self.states, mouth: self.mouth, gaze: self.gaze, parents: self.parents, drives: self.drives }
+    }
 }
 
 /// What became of the earlier look's moving parts under new artwork, as phrases for the answer.
@@ -4270,6 +5221,74 @@ fn phrase(into: &mut Vec<String>, label: &str, names: &[String]) {
     }
 }
 
+/// A circle among the parts that move one another, or `None`: the parts of the first one found,
+/// in order. A part moves with its parent in `parents` and with every part it is drawn inside,
+/// so a circle may run through both: with `b` drawn inside `a`, `{a: c, c: b}` is one, although
+/// no chain of `parents` comes back to where it starts. Walked with a stack of its own.
+fn circle<'a>(parents: &'a BTreeMap<String, String>, ix: &'a Index<'a>) -> Option<Vec<&'a str>> {
+    let next = |id: &'a str| -> Vec<&'a str> { parents.get(id).map(String::as_str).into_iter().chain(ix.by_id.get(id).into_iter().flat_map(|entry| entry.above.iter().copied())).collect() };
+    // On the path being walked, or done with.
+    let mut seen: HashMap<&'a str, bool> = HashMap::new();
+    for start in parents.keys() {
+        if seen.contains_key(start.as_str()) {
+            continue;
+        }
+        seen.insert(start, true);
+        let mut path: Vec<(&'a str, Vec<&'a str>, usize)> = vec![(start, next(start), 0)];
+        loop {
+            let Some(top) = path.last_mut() else { break };
+            let step = top.1.get(top.2).copied();
+            top.2 += 1;
+            match step {
+                None => {
+                    if let Some((done, _, _)) = path.pop() {
+                        seen.insert(done, false);
+                    }
+                }
+                Some(id) => match seen.get(id) {
+                    Some(true) => {
+                        let from = path.iter().position(|(on, _, _)| *on == id).unwrap_or(0);
+                        return Some(path.get(from..).unwrap_or_default().iter().map(|(on, _, _)| *on).collect());
+                    }
+                    Some(false) => {}
+                    None => {
+                        seen.insert(id, true);
+                        path.push((id, next(id), 0));
+                    }
+                },
+            }
+        }
+    }
+    None
+}
+
+/// The first part whose chain of `parents` has more than [`MAX_CHAIN`] links, or `None`. Asked
+/// once no circle is left, so every chain ends.
+fn too_long(parents: &BTreeMap<String, String>) -> Option<&str> {
+    parents.keys().map(String::as_str).find(|child| {
+        let (mut at, mut links) = (*child, 0);
+        while let Some(next) = parents.get(at) {
+            links += 1;
+            if links > MAX_CHAIN {
+                return true;
+            }
+            at = next;
+        }
+        false
+    })
+}
+
+/// What `parents` holds as a whole: no circle, no chain longer than [`MAX_CHAIN`]. Every id in it
+/// is one of a part, checked before.
+fn chains(parents: &BTreeMap<String, String>, ix: &Index<'_>, out: &mut Out) {
+    if let Some(parts) = circle(parents, ix) {
+        let at = parts.iter().find(|id| parents.contains_key(**id)).map_or_else(|| "parents".to_string(), |id| format!("parents.{id}"));
+        out.problems.add("parents-circle", &at, format!("the parents of {} go round in a circle", listed(&parts)), "a part moves with no part that moves with it, through parents or what it is drawn inside");
+    } else if let Some(child) = too_long(parents) {
+        out.problems.add("parents-chain", &format!("parents.{child}"), format!("the chain of parents above {child} is longer than {MAX_CHAIN}"), &format!("at most {MAX_CHAIN} parts above one another"));
+    }
+}
+
 /// Puts together what moves the artwork `nodes`: what is carried over from `base` (the current
 /// look in a merge, the earlier look under `keep`), then what the call gives.
 ///
@@ -4302,6 +5321,39 @@ fn assemble(view: View, nodes: &[LookNode], base: Option<&Look>, keeping: bool, 
     }
     phrase(&mut carried.kept, "pivots", &kept);
     phrase(&mut carried.cleared, "pivots", &cleared);
+    (kept, cleared) = (Vec::new(), Vec::new());
+
+    // Parents, merged like pivots.
+    let asked = Asked::of(req, "parents", "an object of part ids with the id of the part each moves with, null to remove one", &mut cx.out);
+    for (child, parent) in base.filter(|_| !asked.clear).into_iter().flat_map(|b| &b.parents).filter(|(child, _)| !asked.names(child)) {
+        let mut probe = Out::default();
+        match check.parent(child, &json!(parent), if keeping { &mut probe } else { &mut cx.out }) {
+            Some(parent) => {
+                moving.parents.insert(child.clone(), parent);
+                // Under new artwork an entry that fits alone may close a circle with the others.
+                if keeping && (circle(&moving.parents, &ix).is_some() || too_long(&moving.parents).is_some()) {
+                    moving.parents.remove(child);
+                    cleared.push(child.clone());
+                } else {
+                    kept.push(child.clone());
+                }
+            }
+            None => cleared.push(child.clone()),
+        }
+    }
+    let count = moving.parents.len() + asked.given().filter(|(child, _)| !moving.parents.contains_key(*child)).count();
+    if count > MAX_PARENTS {
+        cx.out.problems.add("parents-count", "parents", format!("{count} parents"), &format!("at most {MAX_PARENTS} in one look; null removes one"));
+    } else {
+        for (child, v) in asked.given() {
+            if let Some(parent) = check.parent(child, v, &mut cx.out) {
+                moving.parents.insert(child.clone(), parent);
+            }
+        }
+        chains(&moving.parents, &ix, &mut cx.out);
+    }
+    phrase(&mut carried.kept, "parents", &kept);
+    phrase(&mut carried.cleared, "parents", &cleared);
     (kept, cleared) = (Vec::new(), Vec::new());
 
     // Roles.
@@ -4422,6 +5474,44 @@ fn assemble(view: View, nodes: &[LookNode], base: Option<&Look>, keeping: bool, 
         }
     }
 
+    // Drives replace, as the mouth does.
+    match req.get("drives") {
+        None => {
+            let (mut stays, mut goes) = (false, false);
+            for (i, drive) in base.into_iter().flat_map(|b| b.drives.iter().enumerate()) {
+                let Ok(v) = serde_json::to_value(drive) else { continue };
+                let at = format!("drives[{i}]");
+                if keeping && check.drive(&v, &at, &rig, &mut Out::default()).is_none() {
+                    goes = true;
+                    continue;
+                }
+                if let Some(drive) = check.drive(&v, &at, &rig, &mut cx.out) {
+                    moving.drives.push(drive);
+                    stays = true;
+                }
+            }
+            if stays {
+                carried.kept.push("drives".to_string());
+            }
+            if goes {
+                carried.cleared.push("drives".to_string());
+            }
+        }
+        Some(Value::Null) => {}
+        Some(Value::Array(list)) if list.len() <= MAX_DRIVES => {
+            for (i, drive) in list.iter().enumerate() {
+                moving.drives.extend(check.drive(drive, &format!("drives[{i}]"), &rig, &mut cx.out));
+            }
+        }
+        Some(other) => {
+            let found = match other {
+                Value::Array(list) => format!("a list of {}", list.len()),
+                other => kind_of(other).to_string(),
+            };
+            cx.out.problems.add("drives-field", "drives", format!("drives is {found}"), &format!("a list of up to {MAX_DRIVES} drives, [] or null for none"));
+        }
+    }
+
     // Gaze replaces.
     match req.get("gaze") {
         None => {
@@ -4449,6 +5539,7 @@ fn assemble(view: View, nodes: &[LookNode], base: Option<&Look>, keeping: bool, 
 fn cleared_by(old: &Look, new: &Look) -> Vec<String> {
     let mut out = Vec::new();
     phrase(&mut out, "pivots", &old.pivots.keys().filter(|k| !new.pivots.contains_key(*k)).cloned().collect::<Vec<_>>());
+    phrase(&mut out, "parents", &old.parents.keys().filter(|k| !new.parents.contains_key(*k)).cloned().collect::<Vec<_>>());
     phrase(&mut out, "roles", &old.roles.keys().filter(|r| !new.roles.contains_key(*r)).map(|r| r.name().to_string()).collect::<Vec<_>>());
     phrase(&mut out, "animations", &old.animations.keys().filter(|k| !new.animations.contains_key(*k)).cloned().collect::<Vec<_>>());
     phrase(&mut out, "states", &old.states.keys().filter(|s| !new.states.contains_key(*s)).map(|s| s.name().to_string()).collect::<Vec<_>>());
@@ -4458,12 +5549,17 @@ fn cleared_by(old: &Look, new: &Look) -> Vec<String> {
     if old.gaze.is_some() && new.gaze.is_none() {
         out.push("gaze".to_string());
     }
+    if !old.drives.is_empty() && new.drives.is_empty() {
+        out.push("drives".to_string());
+    }
     out
 }
 
-/// The characters of every `d` keyframe a look holds: tracks and mouth drives.
+/// The characters of every `d` keyframe a look holds: tracks, drives and mouth drives.
 fn d_keyframe_chars(look: &Look) -> usize {
-    let tracks = look.animations.values().flat_map(|a| &a.tracks).filter(|t| t.prop == Prop::D).flat_map(|t| &t.values).map(|v| match v {
+    let tracks = look.animations.values().flat_map(|a| &a.tracks).filter(|t| t.prop == Prop::D).flat_map(|t| &t.values);
+    let drives = look.drives.iter().filter(|d| d.prop == Prop::D).flat_map(|d| &d.values);
+    let keyframes = tracks.chain(drives).map(|v| match v {
         Some(Key::Str(d)) => d.chars().count(),
         _ => 0,
     });
@@ -4471,7 +5567,7 @@ fn d_keyframe_chars(look: &Look) -> usize {
         MouthDrive::Path { open, closed, .. } => open.chars().count() + closed.as_ref().map_or(0, |c| c.chars().count()),
         MouthDrive::Prop { .. } => 0,
     });
-    tracks.chain(mouth).sum()
+    keyframes.chain(mouth).sum()
 }
 
 /// The lint of the rest pose: parts that reach outside the viewBox, parts too small to see.
@@ -4516,7 +5612,7 @@ fn run(current: Option<&Design>, request: &Value, mask: &dyn Fn(&str) -> String,
     let mut cx = Ctx::new(mask);
     let known = keys(req, &KEYS, "", &mut cx.out, mask);
     if known && !req.keys().any(|k| k != "keep") {
-        cx.out.problems.add("empty", "", "an empty design".to_string(), "send at least one of name, svg, pivots, roles, animations, states, mouth, gaze, voice");
+        cx.out.problems.add("empty", "", "an empty design".to_string(), "send at least one of name, svg, pivots, parents, roles, animations, states, mouth, gaze, drives, voice");
     }
     let keep = match req.get("keep") {
         None | Some(Value::Null) => false,
@@ -4550,7 +5646,7 @@ fn run(current: Option<&Design>, request: &Value, mask: &dyn Fn(&str) -> String,
                 let (moving, moved) = assemble(artwork.view, &artwork.nodes, old.filter(|_| keep), true, req, &mut cx);
                 carried = moved;
                 let view = artwork.view;
-                let look = Look { view_box: [view.x, view.y, view.w, view.h].map(Num::new), nodes: artwork.nodes, pivots: moving.pivots, roles: moving.roles, animations: moving.animations, states: moving.states, mouth: moving.mouth, gaze: moving.gaze };
+                let look = moving.look([view.x, view.y, view.w, view.h].map(Num::new), artwork.nodes);
                 if let Some(old) = old.filter(|_| !keep) {
                     carried.cleared = cleared_by(old, &look);
                 }
@@ -4565,7 +5661,7 @@ fn run(current: Option<&Design>, request: &Value, mask: &dyn Fn(&str) -> String,
             // The look stays as it is unless the call touches it.
             Some(old) if touches_look => {
                 let (moving, _) = assemble(View::of(old), &old.nodes, Some(old), false, req, &mut cx);
-                Some(Look { view_box: old.view_box, nodes: old.nodes.clone(), pivots: moving.pivots, roles: moving.roles, animations: moving.animations, states: moving.states, mouth: moving.mouth, gaze: moving.gaze })
+                Some(moving.look(old.view_box, old.nodes.clone()))
             }
             Some(_) => None,
             None => {
@@ -4631,7 +5727,14 @@ fn run(current: Option<&Design>, request: &Value, mask: &dyn Fn(&str) -> String,
         }
         parts = parts_of(look, &ix);
         animations = look.animations.keys().cloned().collect();
-        usage = Usage { svg_bytes: svg_bytes.unwrap_or_else(|| to_svg(look).len()), elements: ix.elements, animations: look.animations.len(), look_bytes: if usage.look_bytes > 0 { usage.look_bytes } else { json_len(look) } };
+        usage = Usage {
+            svg_bytes: svg_bytes.unwrap_or_else(|| to_svg(look).len()),
+            elements: ix.elements,
+            animations: look.animations.len(),
+            parents: look.parents.len(),
+            drives: look.drives.len(),
+            look_bytes: if usage.look_bytes > 0 { usage.look_bytes } else { json_len(look) },
+        };
     }
     let mut warnings: Vec<String> = cx.drops.line().into_iter().collect();
     let (lines, more) = cx.out.warnings.lines();
@@ -4686,6 +5789,7 @@ fn svg_text(look: &Look, strict: bool) -> Option<String> {
                 continue;
             };
             let text = match value {
+                AttrValue::Str(id) if key == "useRef" => format!("#{id}"),
                 AttrValue::Str(id) if key.ends_with("Ref") => format!("url(#{id})"),
                 AttrValue::Str(s) => s.clone(),
                 AttrValue::Num(n) => fmt_num(n.get()),
@@ -4846,9 +5950,15 @@ mod tests {
             ("MAX_TEXT_CHARS", MAX_TEXT_CHARS),
             ("MAX_STOPS", MAX_STOPS),
             ("MAX_ATTRS", MAX_ATTRS),
+            ("MAX_FILTERS", MAX_FILTERS),
+            ("MAX_FILTER_PRIMITIVES", MAX_FILTER_PRIMITIVES),
+            ("MAX_DASHES", MAX_DASHES),
+            ("MAX_PARENTS", MAX_PARENTS),
+            ("MAX_DRIVES", MAX_DRIVES),
         ] {
             has(source, &format!("pub const {name}: usize = {value};"));
         }
+        assert_eq!((MAX_FILTERS, MAX_FILTER_PRIMITIVES, MAX_DASHES, MAX_PARENTS, MAX_DRIVES), (8, 8, 8, 64, 16));
         assert_eq!((MAX_SVG_BYTES, MAX_LOOK_BYTES, MAX_DESIGN_BYTES), (32 * 1024, 128 * 1024, 256 * 1024));
     }
 
@@ -5124,25 +6234,24 @@ mod tests {
             None,
             json!({ "svg": svg(
                 "<title>Pip</title><desc>A frog</desc><metadata><rdf:RDF xmlns:rdf='x'><cc:Work rdf:about=''>text</cc:Work></rdf:RDF></metadata>\
-                 <defs><filter id='blur'><feGaussianBlur stdDeviation='2'/></filter></defs>\
-                 <circle id='c' cx='50' cy='50' r='5' filter='url(#blur)' font-family='Arial' font-style='italic' text-decoration='underline' paint-order='stroke' vector-effect='non-scaling-stroke' \
-                   shape-rendering='crispEdges' text-rendering='auto' pointer-events='none' cursor='pointer' stroke-dasharray='4 2' stroke-dashoffset='1' class='a b' data-name='x' data-n='1' \
+                 <circle id='c' cx='50' cy='50' r='5' font-family='Arial' font-style='italic' text-decoration='underline' paint-order='stroke' vector-effect='non-scaling-stroke' \
+                   shape-rendering='crispEdges' text-rendering='auto' pointer-events='none' cursor='pointer' class='a b' data-name='x' data-n='1' \
                    aria-label='frog' role='img' tabindex='0'><animate attributeName='r' to='9' dur='1s' xlink:href='#c'/><title>inner</title></circle>\
-                 <g filter='url(#blur)' className='x' fontFamily='Arial'><animateTransform attributeName='transform' type='rotate'/><animateMotion path='M0 0'><mpath href='#p'/></animateMotion><set attributeName='x' to='1'/><rect width='5' height='5'/></g>"
+                 <g className='x' fontFamily='Arial'><animateTransform attributeName='transform' type='rotate'/><animateMotion path='M0 0'><mpath href='#p'/></animateMotion><set attributeName='x' to='1'/><rect width='5' height='5'/></g>"
             ) }),
         );
         let look = applied.design.look.unwrap();
         assert_eq!(attrs(node(&look, "c")), json!({ "cx": 50, "cy": 50, "r": 5 }));
         assert!(node(&look, "c").children.is_empty());
-        // Nothing of a dropped element is kept, its content included; the defs it left empty stay.
+        // Nothing of a dropped element is kept, its content included.
         let stored = serde_json::to_string(&look).unwrap();
-        for gone in ["filter", "feGaussianBlur", "blur", "Arial", "animate", "title", "Pip", "frog", "pointer", "dash", "class", "data-", "aria", "img", "tabindex", "mpath"] {
+        for gone in ["Arial", "animate", "title", "Pip", "frog", "pointer", "class", "data-", "aria", "img", "tabindex", "mpath"] {
             assert!(!stored.contains(gone), "{gone} is still in {stored}");
         }
         assert_eq!(applied.warnings.len(), 1, "{:#?}", applied.warnings);
         let first = &applied.warnings[0];
-        // 24 things were dropped; the line names as many as fit and counts the rest.
-        assert_eq!(first, "Not drawn: title (2), desc (1), metadata (1), filter (3), font-family (2), font-style (1), text-decoration (1), paint-order (1), vector-effect (1) and 15 more");
+        // 21 things were dropped; the line names as many as fit and counts the rest.
+        assert_eq!(first, "Not drawn: title (2), desc (1), metadata (1), font-family (2), font-style (1), text-decoration (1), paint-order (1), vector-effect (1) and 13 more");
         assert!(first.chars().count() <= MAX_PROBLEM_CHARS);
     }
 
@@ -5333,8 +6442,10 @@ mod tests {
             ("<circle r='5' onbegin='x'/>", "svg: the event attribute \"onbegin\""),
             ("<a href='javascript:alert(1)'><circle r='5'/></a>", "svg: <a> is not supported"),
             ("<circle r='5' href='javascript:alert(1)'/>", "svg: href on <circle>"),
-            ("<use href='#a'/>", "svg: <use> is not supported"),
-            ("<use xlink:href='http://x/y.svg#a'/>", "repeat the shape"),
+            ("<use href='#a'/>", "svg: href refers to #a, which is not in this svg"),
+            ("<use xlink:href='http://x/y.svg#a'/>", "svg: href \"http://x/y.svg#a\" reaches outside the artwork"),
+            ("<use href='data:image/svg+xml,x'/>", "reaches outside the artwork"),
+            ("<use href='javascript:alert(1)'/>", "reaches outside the artwork"),
             ("<image href='http://x/a.png' width='5' height='5'/>", "svg: <image> is not supported"),
             ("<style>* { fill: red } @import url(http://x);</style>", "svg: <style> is not supported"),
             ("<circle r='5' style='fill:url(http://x/a.svg#b)'/>", "style holds a url()"),
@@ -5343,14 +6454,17 @@ mod tests {
             ("<circle r='5' style='f\\69ll:red'/>", "style holds an escape"),
             ("<foreignObject><div xmlns='http://www.w3.org/1999/xhtml'><img src='x' onerror='alert(1)'/></div></foreignObject>", "svg: <foreignObject> is not supported"),
             ("<iframe src='http://x'/>", "svg: <iframe> is not supported"),
-            ("<mask id='m'><circle r='5'/></mask>", "svg: <mask> is not supported"),
-            ("<circle r='5' mask='url(#m)'/>", "svg: mask is not supported"),
+            ("<mask id='m'><circle r='5'/></mask>", "svg: <mask> inside <svg>: masks and filters belong inside defs"),
+            ("<circle r='5' mask='url(#m)'/>", "svg: mask refers to #m, which is not in this svg"),
+            ("<circle r='5' mask='url(http://x/m.svg#m)'/>", "svg: mask \"url(http://x/m.svg#m)\""),
+            ("<circle r='5' filter='url(http://x/f.svg#f)'/>", "svg: filter \"url(http://x/f.svg#f)\""),
+            ("<defs><filter id='f'><feImage href='http://x/a.png'/></filter></defs><circle r='5' filter='url(#f)'/>", "svg: <feImage> is not supported: images are not accepted"),
             ("<pattern id='p'/>", "svg: <pattern> is not supported"),
             ("<symbol id='s'/>", "svg: <symbol> is not supported"),
             ("<marker id='m'/>", "svg: <marker> is not supported"),
             ("<switch><circle r='5'/></switch>", "svg: <switch> is not supported"),
             ("<svg><circle r='5'/></svg>", "a nested svg is not supported"),
-            ("<feImage href='http://x'/>", "svg: the element \"feImage\" is not supported"),
+            ("<feImage href='http://x'/>", "svg: <feImage> is not supported: images are not accepted"),
             ("<video src='x'/>", "svg: the element \"video\" is not supported"),
             ("<animateColor/>", "svg: the element \"animateColor\" is not supported"),
             (deep.as_str(), "svg: elements nested deeper than 10"),
@@ -5400,8 +6514,7 @@ mod tests {
             ("<g><stop offset='0'/></g>", "svg: <stop> inside <g>"),
             ("<linearGradient id='a'/>", "svg: <linearGradient> inside <svg>: gradients and clip paths belong inside defs"),
             ("<g><clipPath id='a'/></g>", "svg: <clipPath> inside <g>"),
-            ("<defs><g><circle r='5'/></g></defs>", "svg: <g> inside <defs>: defs holds gradients and clip paths only"),
-            ("<defs><circle r='5'/></defs>", "svg: <circle> inside <defs>"),
+            ("<defs><use href='#a'/></defs><circle id='a' r='5'/>", "svg: <use> inside <defs>: defs holds gradients, clip paths, masks, filters, and g, shapes and text to use"),
             ("<defs><clipPath id='a'><g><circle r='5'/></g></clipPath></defs>", "svg: <g> inside <clipPath>: a clipPath holds shapes only"),
             ("<defs><clipPath id='a'><text>a</text></clipPath></defs>", "svg: <text> inside <clipPath>"),
             ("<defs><linearGradient id='a'><circle r='5'/></linearGradient></defs>", "svg: <circle> inside <linearGradient>: a gradient holds stops only"),
@@ -5414,6 +6527,8 @@ mod tests {
         }
         // defs may stand inside a group, and a gradient may be empty.
         drawn("<g><defs><radialGradient id='a'/></defs><circle r='5' fill='url(#a)'/></g>");
+        // defs holds what a use repeats, which stays inert there.
+        drawn("<defs><g id='a'><circle r='5'/></g><circle id='b' r='5'/><text id='c'>a</text></defs><use href='#a'/>");
     }
 
     // ------------------------------------------------------------ every limit
@@ -5581,7 +6696,7 @@ mod tests {
         assert_eq!(moved.parts[0].pivot, [60.0, 50.0]);
 
         has(&refused(None, figure(json!({ "pivots": { "elbow": [1, 2] } }))), "target \"elbow\" not found (at pivots.elbow): ids are body, belly, head, face, eyes, pupil, mouth, arm, cane, label");
-        has(&refused(None, figure(json!({ "pivots": { "sky": [1, 2] } }))), "sky is a linearGradient, or inside defs (at pivots.sky): what moves is a g, a shape or a text that is drawn");
+        has(&refused(None, figure(json!({ "pivots": { "sky": [1, 2] } }))), "sky is a linearGradient, or inside defs (at pivots.sky): what moves is a g, a shape, a text or a use that is drawn");
         has(&refused(None, figure(json!({ "pivots": { "pane": [1, 2] } }))), "pane is a circle, or inside defs");
         has(&refused(None, figure(json!({ "pivots": { "arm": [1] } }))), "a pivot is a list: [x, y], in the coordinates the part is drawn in");
         has(&refused(None, figure(json!({ "pivots": { "arm": "top" } }))), "a pivot is a string");
@@ -5669,7 +6784,7 @@ mod tests {
     fn a_track_names_parts_that_exist_and_a_prop_they_have() {
         let bad = |track: Value| refused(None, tracks(json!([track])));
         has(&bad(json!({ "target": "arm_r", "prop": "rotate", "values": [0, 1] })), "target \"arm_r\" not found (at animations.a.tracks[0]): ids are body, belly, head, face, eyes, pupil, mouth, arm, cane, label");
-        has(&bad(json!({ "target": "sky", "prop": "opacity", "values": [0, 1] })), "sky is a linearGradient, or inside defs: what moves is a g, a shape or a text that is drawn");
+        has(&bad(json!({ "target": "sky", "prop": "opacity", "values": [0, 1] })), "sky is a linearGradient, or inside defs: what moves is a g, a shape, a text or a use that is drawn");
         has(&bad(json!({ "target": "pane", "prop": "opacity", "values": [0, 1] })), "pane is a circle, or inside defs");
         has(&bad(json!({ "target": "window", "prop": "opacity", "values": [0, 1] })), "window is a clipPath, or inside defs");
         has(&bad(json!({ "target": "arm", "prop": "d", "values": ["M0 0L1 1", "M0 0L2 2"] })), "arm is a rect and has no d: d is a prop of path");
@@ -5679,10 +6794,10 @@ mod tests {
         has(&bad(json!({ "target": "head", "prop": "cx", "values": [1, 2] })), "head is a g and has no cx: cx is a prop of circle and ellipse");
         has(&bad(json!({ "target": "cane", "prop": "rx", "values": [1, 2] })), "cane is a line and has no rx: rx is a prop of ellipse and rect");
         has(&bad(json!({ "target": "arm", "prop": "points", "values": [1, 2] })), "prop \"points\": points cannot be animated, draw a path and animate its d");
-        has(&bad(json!({ "target": "arm", "prop": "transform", "values": [1, 2] })), "prop \"transform\" (at animations.a.tracks[0]): props are translateX, translateY, rotate, scale, scaleX, scaleY, opacity, fill, stroke, strokeWidth");
+        has(&bad(json!({ "target": "arm", "prop": "transform", "values": [1, 2] })), "prop \"transform\" (at animations.a.tracks[0]): props are translateX, translateY, rotate, skewX, skewY, scale, scaleX, scaleY, opacity, fillOpacity");
         has(&bad(json!({ "target": "arm", "prop": 5, "values": [1, 2] })), "prop is a number");
         has(&bad(json!({ "target": "arm", "values": [1, 2] })), "a track without a prop");
-        has(&bad(json!({ "prop": "rotate", "values": [1, 2] })), "a track without a target: target names a g, a shape or a text by its id");
+        has(&bad(json!({ "prop": "rotate", "values": [1, 2] })), "a track without a target: target names a g, a shape, a text or a use by its id");
         has(&bad(json!({ "target": 5, "prop": "rotate", "values": [1, 2] })), "target is a number: an id, or a list of 1 to 16 ids");
         has(&bad(json!("arm")), "a track is a string: an object with target, prop and values");
         // Geometry on the shapes that have it; x and y also on a text.
@@ -5812,6 +6927,14 @@ mod tests {
         // Taken from the animation, it is refused all the same.
         has(&refused(None, figure(json!({ "animations": { "a": { "duration": 1, "ease": "step", "tracks": [{ "target": "face", "prop": "opacity", "values": [0.9, 0.2, 0.9] }] } } }))), "ease step on opacity");
         // Elsewhere a step is fine.
+        // Nor may paint swing: elastic, bounce and a bezier that leaves 0 … 1 cross a value more than once.
+        for swing in [json!("outElastic"), json!("outBounce"), json!([0, 3, 1, -2]), json!(["linear", [0.3, -0.5, 0.7, 1]])] {
+            has(&refused(None, with(swing.clone(), "opacity", json!([0.9, 0.2, 0.9]))), "an ease that swings on opacity (at animations.a.tracks[0])");
+            accepted(None, with(swing, "scale", json!([1, 1.1, 1])));
+        }
+        for steady in [json!("outBack"), json!("inBack"), json!("inOutBack"), json!([0, 0, 0, 1]), json!([0.25, 0.1, 0.25, 1])] {
+            accepted(None, with(steady, "opacity", json!([0.9, 0.2, 0.9])));
+        }
         accepted(None, with(json!("step"), "scale", json!([1, 1.1, 1])));
         accepted(None, with(json!("step"), "strokeWidth", json!([2, 4, 2])));
     }
@@ -5821,13 +6944,13 @@ mod tests {
         let with = |ease: Value| tracks(json!([{ "target": "arm", "prop": "rotate", "values": [0, 10, 0], "ease": ease }]));
         for ease in Ease::ALL {
             let look = accepted(None, with(json!(ease.name()))).design.look.unwrap();
-            assert_eq!(look.animations["a"].tracks[0].ease, Some(Eases::One(ease)));
+            assert_eq!(look.animations["a"].tracks[0].ease, Some(Eases::One(Curve::Named(ease))));
         }
         let look = accepted(None, with(json!(["out", "inOut"]))).design.look.unwrap();
-        assert_eq!(look.animations["a"].tracks[0].ease, Some(Eases::Each(vec![Ease::Out, Ease::InOut])));
+        assert_eq!(look.animations["a"].tracks[0].ease, Some(Eases::Each(vec![Curve::Named(Ease::Out), Curve::Named(Ease::InOut)])));
         has(&refused(None, with(json!(["out"]))), "1 eases for 2 segments: one ease for all segments, or one per segment, which is one fewer than values");
         has(&refused(None, with(json!(["out", "in", "out"]))), "3 eases for 2 segments");
-        has(&refused(None, with(json!("bounce"))), "ease \"bounce\" (at animations.a.tracks[0].ease): linear, in, out, inOut, outBack or step, one for all segments or a list with one per segment");
+        has(&refused(None, with(json!("bounce"))), "ease \"bounce\" (at animations.a.tracks[0].ease): linear, in, out, inOut, inBack, outBack, inOutBack, outElastic, outBounce, step or a bezier [x1, y1, x2, y2]");
         has(&refused(None, with(json!(["out", "ease-in"]))), "ease \"ease-in\"");
         has(&refused(None, with(json!("InOut"))), "ease \"InOut\"");
         has(&refused(None, with(json!(5))), "ease a number");
@@ -6254,10 +7377,12 @@ mod tests {
         // What moves a look needs artwork.
         has(&refused(None, json!({ "animations": { "wave": rotate("arm") } })), "animations without artwork (at animations): this session has no design yet, send svg in the same call");
         has(&refused(None, json!({ "gaze": 3 })), "gaze without artwork");
-        has(&refused(None, json!({})), "an empty design: send at least one of name, svg, pivots, roles, animations, states, mouth, gaze, voice");
+        has(&refused(None, json!({ "parents": { "arm": "body" } })), "parents without artwork");
+        has(&refused(None, json!({ "drives": [] })), "drives without artwork");
+        has(&refused(None, json!({})), "an empty design: send at least one of name, svg, pivots, parents, roles, animations, states, mouth, gaze, drives, voice");
         has(&refused(None, json!({ "keep": true })), "an empty design");
-        has(&refused(None, json!({ "name": "Pip", "colour": "green" })), "\"colour\" is not a key here: keys are name, svg, pivots, roles, animations, states, mouth, gaze, voice, keep");
-        has(&refused(None, json!("<svg/>")), "a design is a string: an object with any of name, svg, pivots, roles, animations, states, mouth, gaze, voice, keep");
+        has(&refused(None, json!({ "name": "Pip", "colour": "green" })), "\"colour\" is not a key here: keys are name, svg, pivots, parents, roles, animations, states, mouth, gaze, drives, voice, keep");
+        has(&refused(None, json!("<svg/>")), "a design is a string: an object with any of name, svg, pivots, parents, roles, animations, states, mouth, gaze, drives, voice, keep");
         has(&refused(None, json!({ "svg": 5 })), "svg is a number: the artwork as a string of SVG markup");
         has(&refused(None, json!({ "svg": null })), "svg is null");
         has(&refused(None, json!({ "svg": FIGURE, "keep": "yes" })), "keep is a string: true or false");
@@ -6446,14 +7571,14 @@ mod tests {
 
     #[test]
     fn problems_are_grouped_by_kind_with_a_count_and_the_first_place() {
-        let art = "<svg viewBox='0 0 200 200'><g id='armL'><use href='#a'/><use href='#b'/><use href='#c'/><use href='#d'/></g></svg>";
-        assert_eq!(art.find("<use"), Some(40));
-        assert_eq!(refused(None, json!({ "svg": art })), "svg: <use> is not supported (4 times, first at line 1 column 41, in g#armL): repeat the shape");
+        let art = "<svg viewBox='0 0 200 200'><g id='armL'><pattern id='a'/><pattern id='b'/><pattern id='c'/><pattern id='d'/></g></svg>";
+        assert_eq!(art.find("<pattern"), Some(40));
+        assert_eq!(refused(None, json!({ "svg": art })), "svg: <pattern> is not supported (4 times, first at line 1 column 41, in g#armL): use a flat colour or a gradient");
         // Lines are counted, and columns in characters.
         let lines = "<svg viewBox='0 0 200 200'>\n  <g id='é'>\n  </g>\n  <g id='body'>\n    <text>é</text><blink/>\n  </g>\n</svg>";
         let why = refused(None, json!({ "svg": lines }));
         has(&why, "svg: the id \"é\" (at line 2 column 3): a letter, then letters, digits, _ or -, at most 32 characters");
-        has(&why, "svg: the element \"blink\" is not supported (at line 5 column 19, in g#body): draw with g, path, circle, ellipse, rect, line, polyline, polygon and text");
+        has(&why, "svg: the element \"blink\" is not supported (at line 5 column 19, in g#body): draw with g, path, circle, ellipse, rect, line, polyline, polygon, text and use");
         // The place of a problem with a value is its element, by its own id.
         has(&undrawn("<g id='arm'><path id='hand' d='M0 0 L5'/></g>"), "svg: the command L has too few numbers (at line 1 column 40, in path#hand)");
         has(&undrawn("<g id='arm'><path d='M0 0 L5'/></g>"), "(at line 1 column 40, in g#arm)");
@@ -6477,7 +7602,7 @@ mod tests {
         let things = |n: usize| (0..n).map(|i| format!("<thing{i}/>")).collect::<String>();
         let problems = apply(None, &json!({ "svg": svg(&things(20)) })).unwrap_err();
         assert_eq!(problems.len(), MAX_PROBLEM_KINDS + 1);
-        assert_eq!(problems[0], "svg: the element \"thing0\" is not supported (at line 1 column 28): draw with g, path, circle, ellipse, rect, line, polyline, polygon and text");
+        assert_eq!(problems[0], "svg: the element \"thing0\" is not supported (at line 1 column 28): draw with g, path, circle, ellipse, rect, line, polyline, polygon, text and use");
         assert_eq!(problems[12], "and 8 more kinds");
         assert_eq!(apply(None, &json!({ "svg": svg(&things(13)) })).unwrap_err()[12], "and 1 more kind");
         assert_eq!(apply(None, &json!({ "svg": svg(&things(12)) })).unwrap_err().len(), 12);
@@ -6485,17 +7610,17 @@ mod tests {
         let why = refused(
             None,
             json!({
-                "svg": svg("<g id='body'><use href='#a'/><circle id='head' cx='50' cy='50' r='5'/></g>"),
+                "svg": svg("<g id='body'><pattern id='a'/><circle id='head' cx='50' cy='50' r='5'/></g>"),
                 "animations": { "nod": { "duration": 300, "tracks": [{ "target": "hed", "prop": "rotate", "values": [0, 1] }] } },
                 "voice": { "pitch": 9 },
                 "name": 5
             }),
         );
-        for part in ["<use> is not supported", "duration 300", "target \"hed\" not found (at animations.nod.tracks[0]): ids are body, head", "pitch is not a number in range", "name is a number"] {
+        for part in ["<pattern> is not supported", "duration 300", "target \"hed\" not found (at animations.nod.tracks[0]): ids are body, head", "pitch is not a number in range", "name is a number"] {
             has(&why, part);
         }
         // The artwork first, then what moves it, then the name and the voice: what a cut list keeps is what decides the picture.
-        let order: Vec<usize> = ["<use>", "duration 300", "name is", "pitch is"].iter().map(|part| why.find(part).unwrap()).collect();
+        let order: Vec<usize> = ["<pattern>", "duration 300", "name is", "pitch is"].iter().map(|part| why.find(part).unwrap()).collect();
         assert!(order.is_sorted(), "{why}");
     }
 
@@ -6643,7 +7768,7 @@ mod tests {
     /// The look that the look's own artwork and moving parts apply to.
     #[track_caller]
     fn round_trip(look: &Look) -> Look {
-        let request = json!({ "svg": to_svg(look), "pivots": look.pivots, "roles": look.roles, "animations": look.animations, "states": look.states, "mouth": look.mouth, "gaze": look.gaze });
+        let request = json!({ "svg": to_svg(look), "pivots": look.pivots, "parents": look.parents, "roles": look.roles, "animations": look.animations, "states": look.states, "mouth": look.mouth, "gaze": look.gaze, "drives": look.drives });
         accepted(None, request).design.look.unwrap()
     }
 
@@ -6763,17 +7888,19 @@ mod tests {
         assert_eq!(tamper(&|v| v["look"]["nodes"] = json!([deep.clone()])), None);
     }
 
-    /// The two example designs and the looks `apply` makes of them.
+    /// The example designs and the looks `apply` makes of them. `hoot` draws with what the
+    /// others do not: a use, a mask, a filter, dashes, parents and drives.
     ///
     /// `examples/*.look.json` are golden files: they are compared as typed values, never as text.
     /// After a deliberate change to the normal form, write them again with
-    /// `WORKBENCH_UPDATE_GOLDEN=1 cargo test --locked avatar::look::tests::both_example` and review
-    /// the difference. The web's tests load the same files.
+    /// `WORKBENCH_UPDATE_GOLDEN=1 cargo test --locked avatar::look::tests::the_example_designs` and
+    /// review the difference. The web's tests load the same files.
     #[test]
-    fn both_example_designs_validate_without_warnings_and_equal_their_golden_looks() {
+    fn the_example_designs_validate_without_warnings_and_equal_their_golden_looks() {
         let examples = [
             ("pip", include_str!("examples/pip.json"), include_str!("examples/pip.look.json")),
             ("tock", include_str!("examples/tock.json"), include_str!("examples/tock.look.json")),
+            ("hoot", include_str!("examples/hoot.json"), include_str!("examples/hoot.look.json")),
         ];
         for (name, design, golden) in examples {
             let request: Value = serde_json::from_str(design).unwrap_or_else(|e| panic!("{name}.json is not JSON: {e}"));
@@ -6790,11 +7917,34 @@ mod tests {
             // The normal form is a fixed point, through SVG text and through a stored file.
             assert_eq!(round_trip(&look), look, "{name}");
             assert_eq!(check_stored(serde_json::to_value(&applied.design).unwrap()), Some(applied.design.clone()), "{name}");
-            // Every built-in applies to both: they name all six roles.
+            // Every built-in applies to each: they name all six roles.
             assert_eq!(builtins(&look), BUILTIN, "{name}");
             assert!(applied.usage.svg_bytes < MAX_SVG_BYTES / 2 && applied.usage.elements < MAX_ELEMENTS / 2 && applied.usage.look_bytes < MAX_LOOK_BYTES / 2, "{name}: {:?}", applied.usage);
             assert!(applied.parts.iter().all(|p| p.bbox[0] >= 0.0 && p.bbox[1] >= 0.0 && p.bbox[0] + p.bbox[2] <= 200.0 && p.bbox[1] + p.bbox[3] <= 200.0), "{name}");
         }
+        // What hoot holds of this round's artwork and rig, so the browser's golden test meets all of it.
+        let hoot: Look = serde_json::from_str(include_str!("examples/hoot.look.json")).unwrap();
+        let mut tags = std::collections::BTreeSet::new();
+        let mut keys = std::collections::BTreeSet::new();
+        let mut stack: Vec<&LookNode> = hoot.nodes.iter().collect();
+        while let Some(n) = stack.pop() {
+            tags.insert(n.tag.name());
+            keys.extend(n.attrs.keys().map(String::as_str));
+            stack.extend(&n.children);
+        }
+        for tag in ["use", "mask", "filter", "feGaussianBlur", "feOffset", "feFlood", "feComposite", "feMerge", "feMergeNode"] {
+            assert!(tags.contains(tag), "hoot has no {tag}");
+        }
+        for key in ["useRef", "maskRef", "filterRef", "strokeDasharray", "in", "in2", "result", "stdDeviation", "floodColor", "floodOpacity", "operator"] {
+            assert!(keys.contains(key), "hoot has no {key}");
+        }
+        assert_eq!(hoot.parents.len(), 3);
+        let inputs: std::collections::BTreeSet<&str> = hoot.drives.iter().map(|d| d.input.name()).collect();
+        assert_eq!(inputs, ["held", "lookX", "pace", "turn"].into());
+        assert!(hoot.drives.iter().any(|d| d.input == Input::Turn && d.prop == Prop::Opacity) && hoot.drives.iter().any(|d| d.input == Input::LookX && d.prop == Prop::Rotate));
+        let eases: Vec<&Eases> = hoot.animations.values().flat_map(|a| a.ease.iter().chain(a.tracks.iter().flat_map(|t| &t.ease))).chain(hoot.drives.iter().flat_map(|d| &d.ease)).collect();
+        assert!(eases.iter().any(|e| matches!(e, Eases::One(Curve::Bezier(_)) | Eases::Each(_))) && eases.iter().any(|e| matches!(e, Eases::One(Curve::Named(Ease::InOutBack | Ease::OutBounce | Ease::OutBack)))));
+        assert!(hoot.animations.values().flat_map(|a| &a.tracks).any(|t| t.prop == Prop::SkewX) && hoot.animations.contains_key("walk"));
     }
 
     #[test]
@@ -6889,6 +8039,9 @@ mod tests {
                 json!({ "pivots": { "frog": kind }, "roles": { "body": kind }, "states": { "idle": kind } }),
                 json!({ "states": { "idle": [kind] }, "voice": { "lang": kind, "prefer": kind, "pitch": kind, "rate": kind } }),
                 json!({ "voice": { "prefer": [kind] } }),
+                json!({ "parents": { "frog": kind, kind.as_str().unwrap_or("eyes"): "frog" } }),
+                json!({ "drives": [kind, { "input": kind, "target": kind, "prop": kind, "values": kind, "at": kind, "ease": kind }] }),
+                json!({ "drives": [{ "input": "lookX", "target": "frog", "prop": "rotate", "values": [kind, kind], "at": [kind, kind], "ease": [kind, [kind, 0, 1, 1]] }] }),
             ];
             for more in nested {
                 let mut request = pip.clone();
@@ -6947,14 +8100,14 @@ mod tests {
 
     #[test]
     fn whatever_is_accepted_is_a_fixed_point_and_whatever_is_refused_says_so_within_bounds() {
-        let designs: Vec<Value> = [include_str!("examples/pip.json"), include_str!("examples/tock.json")].iter().map(|d| serde_json::from_str(d).unwrap()).collect();
+        let designs: Vec<Value> = [include_str!("examples/pip.json"), include_str!("examples/tock.json"), include_str!("examples/hoot.json")].iter().map(|d| serde_json::from_str(d).unwrap()).collect();
         let mut pick = sequence(0x9E37_79B9_7F4A_7C15);
         let mut accepted_count = 0;
 
         // Artwork with a few characters put in, taken out or doubled.
         let pieces = ["<", ">", "/", "=", "'", "&", ";", "#", "(", ")", " ", "-", ".", ",", "%", "e", "0", "9", "url(", "M", "A", "z", "g", "text", "style", "id", "d", "fill", "<!--", "-->", "&#x", "&amp;", "\u{202E}", "é", "1e999", "''", " on", "none", "px"];
         for round in 0..1200 {
-            let mut request = designs[round % 2].clone();
+            let mut request = designs[round % designs.len()].clone();
             let mut art = request["svg"].as_str().unwrap().to_string();
             for _ in 0..1 + pick(3) {
                 let cut = |art: &str, at: usize| (0..=at.min(art.len())).rev().find(|i| art.is_char_boundary(*i)).unwrap_or(0);
@@ -6980,7 +8133,7 @@ mod tests {
             json!([]), json!([0, 1]), json!([0, 0.5, 1]), json!([null, null]), json!(["frog", "eyes"]), json!(["in", "out"]), json!({}), json!({ "target": "frog", "prop": "rotate", "values": [0, 1] }),
         ];
         for round in 0..500 {
-            let mut request = designs[round % 2].clone();
+            let mut request = designs[round % designs.len()].clone();
             for _ in 0..1 + pick(2) {
                 // Every place of a value below the top, as a JSON pointer; the artwork stays.
                 let mut places: Vec<String> = Vec::new();
@@ -7340,7 +8493,7 @@ mod tests {
             ("<defs><clipPath id='a'><clipPath id='b'><circle r='5'/></clipPath></clipPath></defs><circle r='5'/>", "svg: <clipPath> inside <clipPath>"),
             ("<defs><clipPath id='a'><defs/></clipPath></defs><circle r='5'/>", "svg: <defs> inside <clipPath>: a clipPath holds shapes only"),
             ("<defs><clipPath id='a'><linearGradient id='b'/></clipPath></defs><circle r='5'/>", "svg: <linearGradient> inside <clipPath>"),
-            ("<defs><clipPath id='a'><use href='#c'/></clipPath></defs><circle id='c' r='5'/>", "svg: <use> is not supported"),
+            ("<defs><clipPath id='a'><use href='#c'/></clipPath></defs><circle id='c' r='5'/>", "svg: <use> inside <clipPath>: a clipPath holds shapes only"),
             ("<defs><clipPath id='a'><circle r='5' style='clip-path:url(#a)'/></clipPath></defs><circle r='5'/>", "svg: clip-path inside a clipPath"),
             ("<defs><clipPath id='a'><circle r='5' clipPath='none'/></clipPath></defs><circle r='5'/>", "svg: clip-path inside a clipPath"),
             ("<defs><clipPath id='a' clipPathUnits='pixels'><circle r='5'/></clipPath></defs><circle r='5'/>", "one of userSpaceOnUse, objectBoundingBox"),
@@ -7822,7 +8975,7 @@ mod tests {
     // ------------------------------------------------------------ the adversary: what moves the artwork
 
     /// A part of every kind that can be one, each with the attributes its props animate.
-    const KINDS: &str = "<svg viewBox='0 0 200 200'><g id='g'><circle cx='20' cy='20' r='5'/></g><path id='path' d='M10 10 L20 20' stroke='#333333' stroke-width='2' fill='#ff0000'/><circle id='circle' cx='20' cy='20' r='5'/><ellipse id='ellipse' cx='20' cy='20' rx='5' ry='5'/><rect id='rect' x='10' y='10' width='10' height='10'/><line id='line' x1='10' y1='10' x2='20' y2='20'/><polyline id='polyline' points='10,10 20,20 30,10'/><polygon id='polygon' points='10,10 20,20 30,10'/><text id='text' x='10' y='50'>a</text></svg>";
+    const KINDS: &str = "<svg viewBox='0 0 200 200'><g id='g'><circle cx='20' cy='20' r='5'/></g><path id='path' d='M10 10 L20 20' stroke='#333333' stroke-width='2' fill='#ff0000'/><circle id='circle' cx='20' cy='20' r='5'/><ellipse id='ellipse' cx='20' cy='20' rx='5' ry='5'/><rect id='rect' x='10' y='10' width='10' height='10'/><line id='line' x1='10' y1='10' x2='20' y2='20'/><polyline id='polyline' points='10,10 20,20 30,10'/><polygon id='polygon' points='10,10 20,20 30,10'/><text id='text' x='10' y='50'>a</text><use id='use' href='#circle' x='40'/></svg>";
 
     #[test]
     fn every_prop_fits_exactly_the_elements_that_have_it() {
@@ -7835,7 +8988,7 @@ mod tests {
             Prop::X | Prop::Y => matches!(tag, Tag::Rect | Tag::Text),
             Prop::Width | Prop::Height => tag == Tag::Rect,
             Prop::X1 | Prop::Y1 | Prop::X2 | Prop::Y2 => tag == Tag::Line,
-            _ => tag == Tag::G || tag == Tag::Text || shapes.contains(&tag),
+            _ => matches!(tag, Tag::G | Tag::Text | Tag::Use) || shapes.contains(&tag),
         };
         for tag in Tag::ALL {
             for prop in Prop::ALL {
@@ -7843,7 +8996,7 @@ mod tests {
             }
         }
         // And through a design call, on a part of every kind.
-        let parts = [Tag::G, Tag::Path, Tag::Circle, Tag::Ellipse, Tag::Rect, Tag::Line, Tag::Polyline, Tag::Polygon, Tag::Text];
+        let parts = [Tag::G, Tag::Path, Tag::Circle, Tag::Ellipse, Tag::Rect, Tag::Line, Tag::Polyline, Tag::Polygon, Tag::Text, Tag::Use];
         for tag in parts {
             for prop in Prop::ALL {
                 let values = match prop {
@@ -8446,7 +9599,7 @@ mod tests {
         let empty = json_len(&json!({ "name": "Pip", "junk": "" }));
         let call = |bytes: usize| json!({ "name": "Pip", "junk": "x".repeat(bytes - empty) });
         assert_eq!(json_len(&call(MAX_DESIGN_BYTES)), MAX_DESIGN_BYTES);
-        assert_eq!(refused(None, call(MAX_DESIGN_BYTES)), "\"junk\" is not a key here: keys are name, svg, pivots, roles, animations, states, mouth, gaze, voice, keep");
+        assert_eq!(refused(None, call(MAX_DESIGN_BYTES)), "\"junk\" is not a key here: keys are name, svg, pivots, parents, roles, animations, states, mouth, gaze, drives, voice, keep");
         assert_eq!(refused(None, call(MAX_DESIGN_BYTES + 1)), "the design is 256.0 KiB of JSON: at most 256 KiB");
         // What JSON escapes counts as it is written.
         assert_eq!(refused(None, json!({ "name": "\u{1}".repeat(MAX_DESIGN_BYTES / 6) })), "the design is 256.0 KiB of JSON: at most 256 KiB");
@@ -8524,7 +9677,7 @@ mod tests {
         let applied = timed("16 x 16 short d keyframes", || accepted(None, small));
         assert_eq!(d_keyframe_chars(applied.design.look.as_ref().unwrap()), 16 * 16 * 23);
         // Tens of thousands of entries in each keyed field.
-        for key in ["pivots", "roles", "states", "animations"] {
+        for key in ["pivots", "parents", "roles", "states", "animations"] {
             let many: Map<String, Value> = (0..15_000).map(|i| (format!("k{i}"), json!([1, 2]))).collect();
             let mut request = json!({ "svg": FIGURE });
             request[key] = Value::Object(many);
@@ -8532,6 +9685,14 @@ mod tests {
             let why = timed(key, || refused(None, request));
             assert!(why.lines().count() <= MAX_PROBLEM_KINDS + 1, "{why}");
         }
+        // As many drives, and a chain of parents as long as the look may hold, in a circle.
+        let mut request = json!({ "svg": FIGURE });
+        request["drives"] = json!(vec![json!({ "input": "lookX", "target": "arm", "prop": "rotate", "values": [0, 1] }); 3_000]);
+        assert!(json_len(&request) < MAX_DESIGN_BYTES);
+        has(&timed("3000 drives", || refused(None, request)), "drives is a list of 3000");
+        let circles: String = (0..MAX_PARENTS + 1).map(|i| format!("<circle id='c{i}' cx='100' cy='100' r='5'/>")).collect();
+        let ring: Map<String, Value> = (0..MAX_PARENTS).map(|i| (format!("c{i}"), json!(format!("c{}", (i + 1) % MAX_PARENTS)))).collect();
+        has(&timed("a ring of parents", || refused(None, json!({ "svg": svg(&circles), "parents": ring }))), "go round in a circle");
         // A text made of references, a document made of comments, a value made of references.
         has(&timed("references", || undrawn(&format!("<text>{}</text>", "&amp;".repeat(6000)))), "svg: a text has 6000 characters: at most 40");
         timed("comments", || drawn(&format!("{}<circle id='c' cx='9' cy='9' r='5'/>", "<!---->".repeat(4000))));
@@ -8556,6 +9717,7 @@ mod tests {
         const SIZES: [&str; 6] = ["0", "0.5", "4", "12.25", "40", "120"];
         const PAINTS: [&str; 10] = ["red", "#abc", "#11223344", "rgb(10 20 30)", "hsl(200 50% 50%)", "none", "currentColor", "transparent", "url(#lg)", "url(#rg)"];
         const TRANSFORMS: [&str; 8] = ["translate(10 20)", "rotate(30)", "rotate(-45 100 100)", "scale(1.5 0.5)", "scale(-1 1)", "matrix(0.5 0.2 -0.2 0.5 10 10)", "skewX(20) translate(5)", "translate(100 100) rotate(90) scale(2) translate(-100 -100)"];
+        const EASES: [&str; 9] = ["linear", "in", "out", "inOut", "outBack", "inBack", "inOutBack", "outElastic", "outBounce"];
         const PATHS: [[&str; 2]; 6] = [
             ["M10 10 L50 30 Q80 0 60 60 Z", "M12 8 L55 35 Q70 10 60 70 Z"],
             ["M40 100 A60 60 0 1 1 160 100 A60 60 0 1 1 40 100 Z", "M40 100 A60 50 0 1 1 160 100 A60 50 0 1 1 40 100 Z"],
@@ -8567,20 +9729,55 @@ mod tests {
         fn one(pick: &mut dyn FnMut(usize) -> usize, from: &[&'static str]) -> &'static str {
             from[pick(from.len())]
         }
-        let mut parts: Vec<(String, Tag, usize)> = Vec::new();
-        let mut art = String::from("<svg viewBox='0 0 200 200'><defs><linearGradient id='lg' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='gold'/><stop offset='100%' stop-color='#00f' stop-opacity='0.5'/></linearGradient><radialGradient id='rg' gradientUnits='userSpaceOnUse' cx='50%' cy='40' r='120'><stop offset='0.5' stop-color='white'/></radialGradient><clipPath id='cp'><circle cx='100' cy='100' r='90'/></clipPath></defs>");
+        /// Values of a prop: within its range, and null only where it means the element's own value.
+        fn values(pick: &mut dyn FnMut(usize) -> usize, prop: Prop, path: usize, count: usize) -> Vec<Value> {
+            let mut values: Vec<Value> = (0..count)
+                .map(|i| match prop {
+                    Prop::D => json!(PATHS[path][i % 2]),
+                    Prop::Fill | Prop::Stroke => json!(["#ff0000", "gold", "rgb(0 0 255 / 50%)", "transparent"][pick(4)]),
+                    p if p.is_opacity() => json!([0.0, 0.3, 1.0][pick(3)]),
+                    Prop::Rotate => json!([-90.0, 0.0, 12.5, 360.0][pick(4)]),
+                    p if p.is_skew() => json!([-30.0, 0.0, 8.5, 80.0][pick(4)]),
+                    p if p.is_scale() => json!([-1.0, 0.0, 0.9, 1.0, 1.25][pick(5)]),
+                    p if p.is_length() => json!([0.0, 2.0, 7.5, 30.0][pick(4)]),
+                    _ => json!([-12.0, 0.0, 4.0, 60.0][pick(4)]),
+                })
+                .collect();
+            // The inherited props have no value of their own on an element that does not set them.
+            if !prop.is_relative() && !matches!(prop, Prop::FillOpacity | Prop::StrokeOpacity | Prop::StrokeDashoffset) && pick(4) == 0 {
+                values[0] = Value::Null;
+            }
+            values
+        }
+        /// An ease; `steady`: one a colour or an opacity may have (no jump, no swing).
+        fn ease(pick: &mut dyn FnMut(usize) -> usize, steady: bool) -> Value {
+            if steady {
+                return if pick(4) == 0 { json!([[0.25, 0.1, 0.25, 1.0], [0.0, 0.0, 1.0, 1.0]][pick(2)]) } else { json!(["linear", "in", "out", "inOut", "outBack", "inBack"][pick(6)]) };
+            }
+            if pick(4) == 0 { json!([[0.25, 0.1, 0.25, 1.0], [0.68, -0.6, 0.32, 1.6], [0.0, 0.0, 1.0, 1.0]][pick(3)]) } else { json!(EASES[pick(EASES.len())]) }
+        }
+        // Each part: its id, its kind, the path data it takes, the ids of the groups it stands in.
+        let mut parts: Vec<(String, Tag, usize, Vec<String>)> = Vec::new();
+        let mut art = String::from(
+            "<svg viewBox='0 0 200 200'><defs><linearGradient id='lg' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='gold'/><stop offset='100%' stop-color='#00f' stop-opacity='0.5'/></linearGradient><radialGradient id='rg' gradientUnits='userSpaceOnUse' cx='50%' cy='40' r='120'><stop offset='0.5' stop-color='white'/></radialGradient><clipPath id='cp'><circle cx='100' cy='100' r='90'/></clipPath>\
+             <mask id='mk' maskUnits='userSpaceOnUse' x='0' y='0' width='100%' height='100%'><rect x='0' y='0' width='200' height='200' fill='url(#lg)'/></mask>\
+             <filter id='fx' x='-10%' y='-10%' width='120%' height='120%'><feGaussianBlur in='SourceAlpha' stdDeviation='2 1' result='b'/><feOffset in='b' dx='1' dy='2' result='o'/><feMerge><feMergeNode in='o'/><feMergeNode in='SourceGraphic'/></feMerge></filter>\
+             <g id='stamp'><circle cx='10' cy='10' r='4'/><path d='M0 0 L5 5'/></g></defs>",
+        );
         // Elements in document order; a group is closed when its count of children runs out.
-        let mut open: Vec<usize> = Vec::new();
+        let mut open: Vec<(usize, Option<String>)> = Vec::new();
         let total = 3 + pick(14);
         for n in 0..total {
-            let tag = [Tag::G, Tag::Path, Tag::Circle, Tag::Ellipse, Tag::Rect, Tag::Line, Tag::Polyline, Tag::Polygon, Tag::Text][if open.len() < 4 { pick(9) } else { 1 + pick(8) }];
+            let tag = [Tag::G, Tag::Path, Tag::Circle, Tag::Ellipse, Tag::Rect, Tag::Line, Tag::Polyline, Tag::Polygon, Tag::Text, Tag::Use][if open.len() < 4 { pick(10) } else { 1 + pick(9) }];
             let _ = write!(art, "<{}", tag.name());
             let mut path = 0;
+            let mut named = None;
             if pick(3) > 0 {
                 let id = format!("e{n}");
                 let _ = write!(art, " id='{id}'");
                 path = pick(PATHS.len());
-                parts.push((id, tag, path));
+                parts.push((id.clone(), tag, path, open.iter().filter_map(|(_, id)| id.clone()).collect()));
+                named = Some(id);
             }
             match tag {
                 Tag::Path => {
@@ -8604,6 +9801,9 @@ mod tests {
                 Tag::Text => {
                     let _ = write!(art, " x='{}' y='{}' font-size='{}' text-anchor='{}'", one(pick, &NUMBERS), one(pick, &NUMBERS), one(pick, &["8", "12.5", "30"]), one(pick, &["start", "middle", "end"]));
                 }
+                Tag::Use => {
+                    let _ = write!(art, " {}='#stamp' x='{}' y='{}'", one(pick, &["href", "xlink:href"]), one(pick, &NUMBERS), one(pick, &NUMBERS));
+                }
                 _ => {}
             }
             if pick(2) == 0 {
@@ -8611,6 +9811,9 @@ mod tests {
             }
             if pick(2) == 0 {
                 let _ = write!(art, " stroke='{}' stroke-width='{}'", one(pick, &PAINTS), one(pick, &SIZES));
+            }
+            if pick(4) == 0 {
+                let _ = write!(art, " stroke-dasharray='{}' stroke-dashoffset='{}'", one(pick, &["4 2", "1,3,5", "none", "0.5 0.5 12"]), one(pick, &["0", "-3", "2.5"]));
             }
             if pick(3) == 0 {
                 let _ = write!(art, " opacity='{}'", one(pick, &["0", "0.25", "50%", "1"]));
@@ -8621,13 +9824,19 @@ mod tests {
             if pick(6) == 0 {
                 art.push_str(" clip-path='url(#cp)'");
             }
+            if pick(7) == 0 {
+                art.push_str(" mask='url(#mk)'");
+            }
+            if pick(7) == 0 {
+                art.push_str(" filter='url(#fx)'");
+            }
             if pick(8) == 0 {
                 art.push_str(" style='fill: teal; stroke-linecap: round; mix-blend-mode: multiply'");
             }
             match tag {
                 Tag::G => {
                     art.push('>');
-                    open.push(1 + pick(4));
+                    open.push((1 + pick(4), named));
                     continue;
                 }
                 Tag::Text => {
@@ -8635,7 +9844,7 @@ mod tests {
                 }
                 _ => art.push_str("/>"),
             }
-            while let Some(left) = open.last_mut() {
+            while let Some((left, _)) = open.last_mut() {
                 *left -= 1;
                 if *left > 0 {
                     break;
@@ -8671,24 +9880,11 @@ mod tests {
             let duration = [0.5, 1.0, 2.4, 6.0][pick(4)];
             let mut list = Vec::new();
             for _ in 0..1 + pick(4) {
-                let (id, tag, path) = part(pick);
+                let (id, tag, path, _) = part(pick);
                 let fitting: Vec<Prop> = Prop::ALL.into_iter().filter(|p| p.fits(tag)).collect();
                 let prop = fitting[pick(fitting.len())];
                 let count = 2 + pick(3);
-                let mut values: Vec<Value> = (0..count)
-                    .map(|i| match prop {
-                        Prop::D => json!(PATHS[path][i % 2]),
-                        Prop::Fill | Prop::Stroke => json!(["#ff0000", "gold", "rgb(0 0 255 / 50%)", "transparent"][pick(4)]),
-                        Prop::Opacity => json!([0.0, 0.3, 1.0][pick(3)]),
-                        Prop::Rotate => json!([-90.0, 0.0, 12.5, 360.0][pick(4)]),
-                        p if p.is_scale() => json!([-1.0, 0.0, 0.9, 1.0, 1.25][pick(5)]),
-                        p if p.is_length() => json!([0.0, 2.0, 7.5, 30.0][pick(4)]),
-                        _ => json!([-12.0, 0.0, 4.0, 60.0][pick(4)]),
-                    })
-                    .collect();
-                if !prop.is_relative() && pick(4) == 0 {
-                    values[0] = Value::Null;
-                }
+                let mut values = values(pick, prop, path, count);
                 if looping && prop.is_paint() {
                     // A loop's paint ends as it begins.
                     values[count - 1] = values[0].clone();
@@ -8698,7 +9894,7 @@ mod tests {
                     track["target"] = json!([track["target"], part(pick).0]);
                 }
                 if pick(4) == 0 {
-                    track["ease"] = json!(["linear", "in", "out", "inOut", "outBack"][pick(5)]);
+                    track["ease"] = ease(pick, prop.is_paint());
                 }
                 if pick(5) == 0 {
                     track["times"] = json!(match count {
@@ -8733,7 +9929,7 @@ mod tests {
         request["animations"] = Value::Object(animations);
         request["states"] = Value::Object(states);
         if pick(3) == 0 {
-            let (id, tag, path) = part(pick);
+            let (id, tag, path, _) = part(pick);
             request["mouth"] = match tag {
                 Tag::Path if pick(2) == 0 => json!({ "target": id, "open": PATHS[path][1] }),
                 Tag::Circle => json!([{ "target": id, "prop": "r", "open": 9 }, { "target": id, "prop": "scaleY", "open": 1.4, "closed": 0.9 }]),
@@ -8742,6 +9938,45 @@ mod tests {
         }
         if pick(3) == 0 {
             request["gaze"] = json!([0.0, 2.5, 10.0][pick(3)]);
+        }
+        // A part moves with one drawn earlier that neither holds it nor stands inside it: no circle.
+        if pick(3) == 0 {
+            let mut parents = Map::new();
+            for _ in 0..1 + pick(2) {
+                let (i, j) = (pick(parts.len()), pick(parts.len()));
+                let ((child, _, _, above), (parent, _, _, over)) = (&parts[i.max(j)], &parts[i.min(j)]);
+                if i != j && !above.contains(parent) && !over.contains(child) {
+                    parents.insert(child.clone(), json!(parent));
+                }
+            }
+            request["parents"] = Value::Object(parents);
+        }
+        if pick(3) == 0 {
+            let mut drives = Vec::new();
+            for _ in 0..1 + pick(2) {
+                let (id, tag, path, _) = part(pick);
+                let fitting: Vec<Prop> = Prop::ALL.into_iter().filter(|p| p.fits(tag)).collect();
+                let prop = fitting[pick(fitting.len())];
+                // Paint follows only the inputs that change slowly.
+                let inputs: &[&str] = if prop.is_paint() { &["pace", "turn", "held"] } else { &["lookX", "lookY", "mouth", "pace", "turn", "held"] };
+                let input = inputs[pick(inputs.len())];
+                // Paint values stand far apart along their input: two, or three along turn.
+                let count = if prop.is_paint() { 2 + usize::from(input == "turn" && pick(2) == 0) } else { 2 + pick(3) };
+                let mut drive = json!({ "input": input, "target": id, "prop": prop.name(), "values": values(pick, prop, path, count) });
+                if pick(3) == 0 {
+                    drive["at"] = json!(match count {
+                        2 => vec![0.0, 1.0],
+                        3 if prop.is_paint() => vec![0.0, 0.4, 1.0],
+                        3 => vec![0.0, 0.25, 1.0],
+                        _ => vec![0.0, 0.3, 0.7, 1.0],
+                    });
+                }
+                if pick(3) == 0 {
+                    drive["ease"] = ease(pick, prop.is_paint());
+                }
+                drives.push(drive);
+            }
+            request["drives"] = json!(drives);
         }
         request
     }
@@ -8969,5 +10204,674 @@ mod tests {
         assert_eq!((look.animations["full"].tracks.len(), look.animations["full"].tracks[0].values.len()), (MAX_TRACKS, MAX_KEYFRAMES));
         assert_eq!(round_trip(look), *look);
         assert_eq!(check_stored(serde_json::to_value(&applied.design).unwrap()).as_ref(), Some(&applied.design));
+    }
+
+    // ------------------------------------------------------------ use, masks, filters, dashes
+
+    #[test]
+    fn a_use_repeats_an_element_before_it_and_its_box_is_that_elements_moved_by_x_and_y() {
+        let applied = accepted(
+            None,
+            json!({ "svg": svg(
+                "<defs><g id='eye' transform='translate(5 5)'><circle cx='10' cy='10' r='5' fill='#ffffff'/><circle id='iris' cx='10' cy='10' r='2'/></g></defs>\
+                 <use id='l' href='#eye' x='50' y='60'/><use id='r' xlink:href=' #eye ' x='100' y='60' fill='red' transform='rotate(10 110 75)' opacity='0.5'/>"
+            ) }),
+        );
+        let look = applied.design.look.as_ref().unwrap();
+        assert_eq!(attrs(node(look, "l")), json!({ "useRef": "eye", "x": 50, "y": 60 }));
+        assert_eq!(attrs(node(look, "r")), json!({ "useRef": "eye", "x": 100, "y": 60, "fill": "#ff0000", "transform": "rotate(10 110 75)", "opacity": 0.5 }));
+        // The box of what it repeats, through that element's own transform, moved by x and y; its own transform is not in it.
+        assert_eq!((bbox(look, "eye"), bbox(look, "l"), bbox(look, "r")), ([5.0, 5.0, 10.0, 10.0], [60.0, 70.0, 10.0, 10.0], [110.0, 70.0, 10.0, 10.0]));
+        // A use is a part; what it repeats in defs is not.
+        assert_eq!(applied.parts.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["l", "r"]);
+        assert_eq!(applied.parts[0].to_string(), "l use 60 70 10 10 pivot 65 75 (default)");
+        // Each use counts with what it repeats: defs, g, two circles, and twice 1 + 3.
+        assert_eq!(applied.usage.elements, 12);
+        assert_eq!(applied.warnings, [""; 0]);
+        has(&to_svg(look), "<use id='l' href='#eye' x='50' y='60'/>");
+        assert_eq!(&round_trip(look), look);
+        // It moves like any part, and what it repeats may be a part as well.
+        let moved = accepted(None, json!({
+            "svg": svg("<g id='arm'><rect x='10' y='10' width='10' height='40'/></g><use id='twin' href='#arm' x='100'/>"),
+            "pivots": { "twin": [115, 10] }, "roles": { "armL": "arm", "armR": "twin" },
+            "animations": { "wave": { "duration": 1, "tracks": [{ "target": "twin", "prop": "rotate", "values": [0, -40, 0] }, { "target": "twin", "prop": "opacity", "values": [null, 0.5, null] }] } }
+        }));
+        assert_eq!(bbox(moved.design.look.as_ref().unwrap(), "twin"), [110.0, 10.0, 10.0, 40.0]);
+        assert_eq!(moved.warnings, [""; 0]);
+        // width and height of a use size nothing here.
+        assert_eq!(accepted(None, json!({ "svg": svg("<circle id='c' cx='50' cy='50' r='5'/><use href='#c' x='10' width='20' height='20'/>") })).warnings, ["width and height of a use are left out (2 times, first at line 1 column 66): a use draws what it repeats at its own size, scale it with transform"]);
+        // A g in defs may hold a use, and is then not one to repeat.
+        drawn("<circle id='c' cx='50' cy='50' r='5'/><defs><g id='two'><use href='#c'/></g></defs>");
+
+        for (inner, why) in [
+            ("<use/>", "svg: a use without href (at line 1 column 28): href='#id' of a g, a shape or a text in this svg"),
+            ("<use href='#nope'/>", "svg: href refers to #nope, which is not in this svg: #id of a g, a shape or a text in this svg"),
+            ("<use href='a.svg#b'/>", "svg: href \"a.svg#b\" reaches outside the artwork: #id of a g, a shape or a text in this svg"),
+            ("<use href='#'/>", "svg: href \"#\" reaches outside the artwork"),
+            ("<use href='#1a'/>", "svg: href \"#1a\" reaches outside the artwork"),
+            ("<use href='url(#a)'/>", "reaches outside the artwork"),
+            ("<defs><linearGradient id='lg'/></defs><use href='#lg'/>", "svg: href refers to #lg, a linearGradient: #id of a g, a shape or a text in this svg"),
+            ("<circle id='c' r='5'/><use id='u' href='#c'/><use href='#u'/>", "svg: href refers to #u, a use: a use repeats a g, a shape or a text, not another use"),
+            ("<defs><clipPath id='cp'><circle id='pane' r='5'/></clipPath></defs><use href='#pane'/>", "svg: href refers to #pane, which is inside a clipPath: what a use repeats stands outside clip paths, masks and filters"),
+            ("<defs><mask id='m'><g id='spot'><circle r='5'/></g></mask></defs><use href='#spot'/>", "svg: href refers to #spot, which is inside a mask"),
+            ("<defs><mask id='m'><circle r='5'/></mask></defs><use href='#m'/>", "svg: href refers to #m, a mask"),
+            ("<defs><filter id='f'><feOffset/></filter></defs><use href='#f'/>", "svg: href refers to #f, a filter"),
+            ("<g id='a'><use href='#a'/></g>", "svg: href refers to #a, which holds this use (at line 1 column 38, in g#a): a use repeats an element outside itself"),
+            ("<use id='u' href='#u'/>", "svg: a use refers to itself (at line 1 column 28, in use#u): a use repeats another element of the artwork"),
+            ("<circle id='c' r='5'/><g id='two'><use href='#c'/></g><use href='#two'/>", "svg: href refers to #two, which holds a use: what a use repeats holds no use itself"),
+            ("<use href='#later'/><g id='later'><use href='#x'/></g><circle id='x' r='5'/>", "svg: href refers to #later, which holds a use"),
+            ("<use href='#later'/><defs><linearGradient id='later'/></defs>", "svg: href refers to #later, a linearGradient"),
+            ("<use href='#nope'/><circle id='later' r='5'/>", "svg: href refers to #nope, which is not in this svg"),
+            ("<circle id='c' r='5'/><use href='#c'><circle r='1'/></use>", "svg: <circle> inside <use>: a use has no element children"),
+            ("<circle id='c' r='5'/><use href='#c' xlink:href='#c'/>", "svg: href is given twice on <use>"),
+            ("<circle id='c' r='5'/><use href='#c' xlink:role='x'/>", "svg: the prefixed attribute \"xlink:role\""),
+            ("<circle id='c' r='5'/><use href='#c' onload='x'/>", "svg: the event attribute \"onload\""),
+            ("<circle id='c' r='5'/><use href='#c' d='M0 0L1 1'/>", "\"d\" is not an attribute of <use>"),
+            ("<circle r='5' href='#a'/>", "svg: href on <circle> (at line 1 column 28): the artwork links to nothing; only a use refers to an element of it, with href='#id'"),
+            ("<g xlink:href='#a'><circle r='5'/></g>", "svg: xlink:href on <g>"),
+        ] {
+            has(&undrawn(inner), why);
+        }
+        // What it repeats may come after it, also in defs at the end; the box is the same.
+        let ahead = accepted(None, json!({ "svg": svg("<use id='u' href='#dot' x='10'/><g id='g'><use id='v' href='#dot' y='20'/></g><defs><circle id='dot' cx='5' cy='5' r='5'/></defs>") }));
+        let look = ahead.design.look.as_ref().unwrap();
+        assert_eq!((bbox(look, "u"), bbox(look, "v"), bbox(look, "g")), ([10.0, 0.0, 10.0, 10.0], [0.0, 20.0, 10.0, 10.0], [0.0, 20.0, 10.0, 10.0]));
+        assert_eq!((ahead.usage.elements, ahead.warnings.len()), (7, 0));
+        assert_eq!(&round_trip(look), look);
+        // A second reading says what the first would have, once: the problems of the artwork count once.
+        let twice = undrawn("<use href='#dot'/><circle r='5' onclick='x'/><defs><circle id='dot' r='5'/></defs>");
+        assert_eq!(twice, "svg: the event attribute \"onclick\" (at line 1 column 46): an avatar's artwork has no scripts");
+        // What a use repeats counts again for the elements, to the limit: a target of ten elements.
+        let target = format!("<defs><g id='t'>{}</g></defs>", "<circle cx='50' cy='50' r='5'/>".repeat(9));
+        let uses = |n: usize| format!("{target}{}", "<use href='#t'/>".repeat(n));
+        assert_eq!(accepted(None, json!({ "svg": svg(&uses(26)) })).usage.elements, 297);
+        has(&undrawn(&uses(27)), "svg: more than 300 elements, with what each use repeats: draw with fewer, larger shapes, or repeat smaller parts");
+        // Also when what they repeat comes after them.
+        let after = |n: usize| format!("{}{target}", "<use href='#t'/>".repeat(n));
+        assert_eq!(accepted(None, json!({ "svg": svg(&after(26)) })).usage.elements, 297);
+        has(&undrawn(&after(27)), "svg: more than 300 elements");
+    }
+
+    #[test]
+    fn a_mask_in_defs_masks_what_refers_to_it_and_holds_g_and_shapes() {
+        let look = drawn(
+            "<defs><linearGradient id='fade'><stop offset='0' stop-color='#ffffff'/><stop offset='1' stop-color='#000000'/></linearGradient>\
+             <mask id='m' maskUnits='userSpaceOnUse' maskContentUnits='userSpaceOnUse' x='0' y='0' width='50%' height='100%' mask-type='alpha'><g transform='translate(1 1)'><rect id='window' x='0' y='0' width='100' height='199' fill='url(#fade)'/></g><circle cx='50' cy='50' r='20' fill='white'/></mask>\
+             <mask id='m2' x='-10%' y='-10%' width='120%' height='1.2' style='mask-type: luminance'><circle cx='0.5' cy='0.5' r='0.5' fill='#ffffff'/></mask></defs>\
+             <g id='body' mask='url(#m)'><circle id='c' cx='100' cy='100' r='50'/></g><text id='t' x='10' y='20' mask=\"url('#m2')\">a</text><use id='u' href='#c' x='5' style='mask:url(#m)'/><circle id='plain' r='5' mask='none'/>",
+        );
+        assert_eq!(attrs(node(&look, "m")), json!({ "maskUnits": "userSpaceOnUse", "maskContentUnits": "userSpaceOnUse", "x": 0, "y": 0, "width": 100, "height": 200, "maskType": "alpha" }));
+        assert_eq!(attrs(node(&look, "m2")), json!({ "x": -0.1, "y": -0.1, "width": 1.2, "height": 1.2, "maskType": "luminance" }));
+        assert_eq!((attrs(node(&look, "body")), attrs(node(&look, "t"))["maskRef"].clone(), attrs(node(&look, "u"))["maskRef"].clone()), (json!({ "maskRef": "m" }), json!("m2"), json!("m")));
+        assert_eq!(attrs(node(&look, "plain")), json!({ "r": 5 }));
+        // A masked part keeps the box of its geometry; a mask spans its shapes as a clip path does.
+        assert_eq!((bbox(&look, "body"), bbox(&look, "m")), ([50.0, 50.0, 100.0, 100.0], [1.0, 1.0, 100.0, 199.0]));
+        assert_eq!(round_trip(&look), look);
+        // What a mask holds is not a part.
+        has(&refused(None, json!({ "svg": to_svg(&look), "pivots": { "window": [1, 1] } })), "window is a rect, or inside defs");
+
+        for (inner, why) in [
+            ("<mask id='m'><circle r='5'/></mask><circle r='5'/>", "svg: <mask> inside <svg>: masks and filters belong inside defs"),
+            ("<g><mask id='m'/></g><circle r='5'/>", "svg: <mask> inside <g>"),
+            ("<defs><mask id='m'><text>a</text></mask></defs><circle r='5'/>", "svg: <text> inside <mask>: a mask holds g and shapes only"),
+            ("<defs><mask id='m'><g><text>a</text></g></mask></defs><circle r='5'/>", "svg: <text> inside <g>: a mask holds g and shapes only"),
+            ("<defs><mask id='m'><defs/></mask></defs><circle r='5'/>", "svg: <defs> inside <mask>"),
+            ("<circle id='c' r='5'/><defs><mask id='m'><use href='#c'/></mask></defs>", "svg: <use> inside <mask>: a mask holds g and shapes only"),
+            ("<defs><mask id='m'><mask id='n'/></mask></defs><circle r='5'/>", "svg: <mask> inside <mask>"),
+            ("<defs><clipPath id='cp'><circle r='5'/></clipPath><mask id='m'><circle r='5' clip-path='url(#cp)'/></mask></defs><circle r='5'/>", "svg: clip-path inside a mask: a mask and its shapes are not clipped themselves"),
+            ("<defs><mask id='m'><g mask='url(#m)'><circle r='5'/></g></mask></defs><circle r='5'/>", "svg: mask inside a mask: a mask and its shapes are not masked or filtered themselves"),
+            ("<defs><filter id='f'><feOffset/></filter><mask id='m'><circle r='5' filter='url(#f)'/></mask></defs><circle r='5'/>", "svg: filter inside a mask"),
+            ("<defs><mask id='m'><circle r='5'/></mask><clipPath id='cp'><circle r='5' mask='url(#m)'/></clipPath></defs><circle r='5'/>", "svg: mask inside a clipPath: a clipPath and its shapes are not masked or filtered themselves"),
+            ("<circle id='c' r='1'/><circle r='5' mask='url(#c)'/>", "svg: mask refers to #c, a circle: url(#id) of a mask in this svg"),
+            ("<circle r='5' mask='url(#nope)'/>", "svg: mask refers to #nope, which is not in this svg"),
+            ("<circle r='5' mask='circle(5px)'/>", "svg: mask \"circle(5px)\": url(#id) of a mask in this svg, or none"),
+            ("<circle r='5' mask='url(#m) red'/>", "svg: mask \"url(#m) red\""),
+            ("<defs><mask id='m' mask-type='colour'/></defs><circle r='5'/>", "one of luminance, alpha"),
+            ("<defs><mask id='m' maskUnits='pixels'/></defs><circle r='5'/>", "one of userSpaceOnUse, objectBoundingBox"),
+            ("<defs><mask id='m' width='-5%'/></defs><circle r='5'/>", "svg: width \"-5%\" is out of range: a share of the painted box, such as 0.5 or 50%"),
+            ("<defs><mask id='m' maskUnits='userSpaceOnUse' x='99999'/></defs><circle r='5'/>", "svg: x \"99999\" is out of range: a coordinate near the viewBox"),
+            ("<defs><mask id='m' fill='red'/></defs><circle r='5'/>", "\"fill\" is not an attribute of <mask>"),
+            ("<defs><mask id='m' transform='scale(2)'/></defs><circle r='5'/>", "\"transform\" is not an attribute of <mask>"),
+        ] {
+            has(&undrawn(inner), why);
+        }
+    }
+
+    #[test]
+    fn a_filter_of_the_listed_primitives_is_kept_number_for_number() {
+        let look = drawn(
+            "<defs><filter id='every' x='-20%' y='-20%' width='140%' height='140%' filterUnits='objectBoundingBox' primitiveUnits='userSpaceOnUse' color-interpolation-filters='linearRGB'>\
+               <feGaussianBlur in='SourceAlpha' stdDeviation='2,3' result='blur'/><feOffset in='blur' dx='1' dy='-2' result='moved'/>\
+               <feFlood flood-color='rgba(0,0,0,0.5)' flood-opacity='50%' result='ink'/>\
+               <feComposite in='ink' in2='moved' operator='arithmetic' k1='0' k2='1' k3='-0.5' k4='0.25' result='shade'/>\
+               <feColorMatrix in='shade' type='saturate' values='0.4' result='grey'/><feBlend in='SourceGraphic' in2='grey' mode='multiply' result='mixed'/>\
+               <feMorphology in='mixed' operator='dilate' radius='1 2' result='fat'/><feMerge result='merged'><feMergeNode in='fat'/><feMergeNode in='SourceGraphic'/></feMerge>\
+             </filter>\
+             <filter id='more' style='color-interpolation-filters: sRGB'><feDropShadow dx='0' dy='3' stdDeviation='2' floodColor='currentColor' floodOpacity='0.3'/>\
+               <feTurbulence type='fractalNoise' baseFrequency='0.02 0.5' numOctaves='3' seed='7' result='noise'/>\
+               <feDisplacementMap in='SourceGraphic' in2='noise' scale='-12' xChannelSelector='r' yChannelSelector='G'/>\
+               <feColorMatrix type='matrix' values='1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0'/><feColorMatrix type='hueRotate' values='90'/><feColorMatrix type='luminanceToAlpha'/>\
+             </filter></defs>\
+             <g id='body' filter='url(#every)'><circle id='c' cx='100' cy='100' r='50'/></g><circle id='d' cx='20' cy='20' r='5' style='filter: url(#more)'/><circle id='e' cx='20' cy='20' r='5' filter='none'/>",
+        );
+        let all = node(&look, "every");
+        assert_eq!(attrs(all), json!({ "x": -0.2, "y": -0.2, "width": 1.4, "height": 1.4, "filterUnits": "objectBoundingBox", "primitiveUnits": "userSpaceOnUse", "colorInterpolationFilters": "linearRGB" }));
+        let kept: Vec<(Tag, Value)> = all.children.iter().map(|n| (n.tag, attrs(n))).collect();
+        assert_eq!(kept, [
+            (Tag::FeGaussianBlur, json!({ "in": "SourceAlpha", "stdDeviation": "2 3", "result": "blur" })),
+            (Tag::FeOffset, json!({ "in": "blur", "dx": 1, "dy": -2, "result": "moved" })),
+            (Tag::FeFlood, json!({ "floodColor": "#00000080", "floodOpacity": 0.5, "result": "ink" })),
+            (Tag::FeComposite, json!({ "in": "ink", "in2": "moved", "operator": "arithmetic", "k1": 0, "k2": 1, "k3": -0.5, "k4": 0.25, "result": "shade" })),
+            (Tag::FeColorMatrix, json!({ "in": "shade", "type": "saturate", "values": "0.4", "result": "grey" })),
+            (Tag::FeBlend, json!({ "in": "SourceGraphic", "in2": "grey", "mode": "multiply", "result": "mixed" })),
+            (Tag::FeMorphology, json!({ "in": "mixed", "operator": "dilate", "radius": "1 2", "result": "fat" })),
+            (Tag::FeMerge, json!({ "result": "merged" })),
+        ]);
+        assert_eq!(all.children[7].children.iter().map(|n| (n.tag, attrs(n))).collect::<Vec<_>>(), [(Tag::FeMergeNode, json!({ "in": "fat" })), (Tag::FeMergeNode, json!({ "in": "SourceGraphic" }))]);
+        let more = node(&look, "more");
+        assert_eq!(attrs(more), json!({ "colorInterpolationFilters": "sRGB" }));
+        assert_eq!(more.children.iter().map(attrs).collect::<Vec<_>>(), [
+            json!({ "dx": 0, "dy": 3, "stdDeviation": "2", "floodColor": "currentColor", "floodOpacity": 0.3 }),
+            json!({ "type": "fractalNoise", "baseFrequency": "0.02 0.5", "numOctaves": 3, "seed": 7, "result": "noise" }),
+            json!({ "in": "SourceGraphic", "in2": "noise", "scale": -12, "xChannelSelector": "R", "yChannelSelector": "G" }),
+            json!({ "type": "matrix", "values": "1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0" }),
+            json!({ "type": "hueRotate", "values": "90" }),
+            json!({ "type": "luminanceToAlpha" }),
+        ]);
+        assert_eq!((attrs(node(&look, "body")), attrs(node(&look, "d"))["filterRef"].clone(), attrs(node(&look, "e"))), (json!({ "filterRef": "every" }), json!("more"), json!({ "cx": 20, "cy": 20, "r": 5 })));
+        // A filtered part keeps the box of its geometry; a filter has none of its own.
+        assert_eq!((bbox(&look, "body"), bbox(&look, "every")), ([50.0, 50.0, 100.0, 100.0], [0.0, 0.0, 0.0, 0.0]));
+        assert_eq!(round_trip(&look), look);
+        has(&to_svg(&look), "<feGaussianBlur in='SourceAlpha' result='blur' stdDeviation='2 3'/>");
+
+        let filter = |primitives: &str| undrawn(&format!("<defs><filter id='f'>{primitives}</filter></defs><circle r='5' filter='url(#f)'/>"));
+        for (primitives, why) in [
+            ("<feOffset in='later'/><feFlood result='later'/>", "svg: in \"later\" is not the result of an earlier primitive (at line 1 column 49, in filter#f): SourceGraphic, SourceAlpha or an earlier result"),
+            ("<feOffset in='BackgroundImage'/>", "svg: in \"BackgroundImage\" is not given to an avatar's filters"),
+            ("<feOffset in='sourceGraphic'/>", "svg: in \"sourceGraphic\" is not the result of an earlier primitive"),
+            ("<feComposite in='SourceGraphic' in2='nope'/>", "svg: in2 \"nope\" is not the result of an earlier primitive"),
+            ("<feMerge><feMergeNode in='nope'/></feMerge>", "svg: in \"nope\" is not the result of an earlier primitive"),
+            ("<feMerge result='m'><feMergeNode in='m'/></feMerge>", "svg: in \"m\" is not the result of an earlier primitive"),
+            ("<feFlood result='SourceGraphic'/>", "svg: result SourceGraphic would hide the input of that name: name a result in your own words, such as blur or glow"),
+            ("<feFlood result='1x'/>", "svg: result \"1x\": a letter, then letters, digits, _ or -, at most 32 characters"),
+            ("<feFlood result='constructor'/>", "this name is reserved"),
+            ("<feGaussianBlur stdDeviation='50.001'/>", "svg: stdDeviation \"50.001\" is out of range: one or two numbers, x and y, each from 0 to 50"),
+            ("<feGaussianBlur stdDeviation='-1'/>", "svg: stdDeviation \"-1\" is out of range"),
+            ("<feGaussianBlur stdDeviation='1 2 3'/>", "svg: stdDeviation \"1 2 3\": one or two numbers, x and y, each from 0 to 50"),
+            ("<feGaussianBlur stdDeviation='2px'/>", "svg: stdDeviation \"2px\""),
+            ("<feGaussianBlur stdDeviation=''/>", "svg: stdDeviation \"\""),
+            ("<feMorphology radius='20.5'/>", "svg: radius \"20.5\" is out of range: one or two numbers, x and y, each from 0 to 20"),
+            ("<feTurbulence baseFrequency='1.5'/>", "svg: baseFrequency \"1.5\" is out of range"),
+            ("<feTurbulence numOctaves='5'/>", "svg: numOctaves 5 is out of range: a whole number from 1 to 4"),
+            ("<feTurbulence numOctaves='2.5'/>", "svg: numOctaves 2.5 is out of range"),
+            ("<feTurbulence numOctaves='0'/>", "svg: numOctaves 0 is out of range"),
+            ("<feTurbulence seed='100001'/>", "svg: seed 100001 is out of range: within 100000 either way"),
+            ("<feTurbulence type='noise'/>", "one of fractalNoise, turbulence"),
+            ("<feDisplacementMap in2='SourceAlpha' scale='51'/>", "svg: scale 51 is out of range: within 50 either way, a quarter of the viewBox width"),
+            ("<feDisplacementMap xChannelSelector='X'/>", "one of R, G, B, A"),
+            ("<feComposite operator='erode'/>", "one of over, in, out, atop, xor, arithmetic"),
+            ("<feComposite k1='101'/>", "svg: k1 101 is out of range: within 100 either way"),
+            ("<feMorphology operator='over'/>", "one of erode, dilate"),
+            ("<feBlend mode='plus'/>", "one of normal, multiply, screen, overlay"),
+            ("<feColorMatrix values='1 2 3'/>", "svg: a feColorMatrix of type matrix with 3 values: 20 numbers, four rows of five"),
+            ("<feColorMatrix type='saturate' values='1 1'/>", "svg: a feColorMatrix of type saturate with 2 values"),
+            ("<feColorMatrix type='luminanceToAlpha' values='1'/>", "svg: a feColorMatrix of type luminanceToAlpha with 1 values: no values"),
+            ("<feColorMatrix type='hueRotate' values='3601'/>", "svg: values \"3601\" is out of range"),
+            ("<feColorMatrix type='hueRotate' values='a'/>", "svg: values \"a\""),
+            ("<feDropShadow flood-color='url(#f)'/>", "svg: flood-color \"url(#f)\" reaches outside the artwork: a plain colour"),
+            ("<feDropShadow dx='99999'/>", "svg: dx 99999 is out of range: within 800"),
+            ("<feFlood x='0'/>", "\"x\" is not an attribute of <feFlood>"),
+            ("<feGaussianBlur edgeMode='none'/>", "\"edgeMode\" is not an attribute of <feGaussianBlur>"),
+            ("<feOffset id='o'/>", "\"id\" is not an attribute of <feOffset>"),
+            ("<feOffset href='#x'/>", "svg: href on <feOffset>"),
+            ("<feImage href='http://x/a.png'/>", "svg: <feImage> is not supported (at line 1 column 49, in filter#f): images are not accepted"),
+            ("<feTile/>", "svg: <feTile> is not supported (at line 1 column 49, in filter#f): use blur, shadow, colour matrix, composite, blend, morphology, turbulence or displacement"),
+            ("<feComponentTransfer><feFuncR type='identity'/></feComponentTransfer>", "svg: <feComponentTransfer> is not supported"),
+            ("<feConvolveMatrix kernelMatrix='1'/>", "svg: <feConvolveMatrix> is not supported"),
+            ("<feDiffuseLighting><feDistantLight/></feDiffuseLighting>", "svg: <feDiffuseLighting> is not supported"),
+            ("<feSpecularLighting/>", "svg: <feSpecularLighting> is not supported"),
+            ("<feBogus/>", "svg: the element \"feBogus\" is not supported (at line 1 column 49, in filter#f): the primitives are feGaussianBlur, feDropShadow"),
+            ("<circle r='5'/>", "svg: <circle> inside <filter>: a filter holds filter primitives only"),
+            ("<feMergeNode in='SourceGraphic'/>", "svg: <feMergeNode> inside <filter>: a feMergeNode belongs inside a feMerge"),
+            ("<feMerge><feOffset/></feMerge>", "svg: <feOffset> inside <feMerge>: a filter primitive belongs inside a filter"),
+            ("<feOffset><feFlood/></feOffset>", "svg: <feFlood> inside <feOffset>: a filter primitive belongs inside a filter"),
+            ("<feMerge><feMergeNode><feMergeNode/></feMergeNode></feMerge>", "svg: <feMergeNode> inside <feMergeNode>"),
+            ("<feMerge><circle r='5'/></feMerge>", "svg: <circle> inside <feMerge>: a feMerge holds feMergeNode elements only"),
+            ("words", "svg: text \"words\" outside a text element"),
+        ] {
+            has(&filter(primitives), why);
+        }
+        // A result is the filter's own: another filter cannot take it up.
+        has(&undrawn("<defs><filter id='a'><feFlood result='x'/></filter><filter id='b'><feOffset in='x'/></filter></defs><circle r='5'/>"), "svg: in \"x\" is not the result of an earlier primitive");
+        // At the edges of the ranges.
+        drawn("<defs><filter id='f'><feGaussianBlur stdDeviation='50 0'/><feMorphology radius='20'/><feTurbulence baseFrequency='0 1' numOctaves='4' seed='-100000'/><feDisplacementMap scale='-50'/><feComposite k1='-100' k4='100'/></filter></defs><circle r='5'/>");
+        for (inner, why) in [
+            ("<filter id='f'/><circle r='5'/>", "svg: <filter> inside <svg>: masks and filters belong inside defs"),
+            ("<feGaussianBlur stdDeviation='1'/>", "svg: <feGaussianBlur> inside <svg>: a filter primitive belongs inside a filter"),
+            ("<g><feOffset/></g>", "svg: <feOffset> inside <g>: a filter primitive belongs inside a filter"),
+            ("<defs><filter id='f' fill='red'/></defs><circle r='5'/>", "\"fill\" is not an attribute of <filter>"),
+            ("<defs><filter id='f' color-interpolation-filters='auto'/></defs><circle r='5'/>", "one of sRGB, linearRGB"),
+            ("<defs><filter id='f' filterUnits='pixels'/></defs><circle r='5'/>", "one of userSpaceOnUse, objectBoundingBox"),
+            ("<circle r='5' filter='blur(2px)'/>", "svg: filter \"blur(2px)\" is a CSS filter: write a filter element in defs and refer to it with url(#id)"),
+            ("<circle r='5' style='filter: drop-shadow(0 0 2px red)'/>", "svg: filter \"drop-shadow(0 0 2px red)\" is a CSS filter"),
+            ("<circle r='5' filter='url(#f) blur(2px)'/>", "svg: filter \"url(#f) blur(2px)\": url(#id) of a filter in this svg, or none"),
+            ("<circle r='5' filter='url(http://x/a.svg#f)'/>", "svg: filter \"url(http://x/a.svg#f)\": url(#id) of a filter in this svg, or none"),
+            ("<circle r='5' filter='glow'/>", "svg: filter \"glow\": url(#id) of a filter in this svg, or none"),
+            ("<circle id='c' r='1'/><circle r='5' filter='url(#c)'/>", "svg: filter refers to #c, a circle: url(#id) of a filter in this svg"),
+            ("<defs><mask id='m'/></defs><circle r='5' filter='url(#m)'/>", "svg: filter refers to #m, a mask"),
+            ("<defs><filter id='f'/></defs><circle r='5' mask='url(#f)'/>", "svg: mask refers to #f, a filter"),
+            ("<defs><filter id='f'/></defs><circle r='5' clip-path='url(#f)'/>", "svg: clip-path refers to #f, a filter"),
+            ("<defs><filter id='f'/></defs><circle r='5' fill='url(#f)'/>", "svg: fill refers to #f, a filter"),
+        ] {
+            has(&undrawn(inner), why);
+        }
+        // The limits: filters in a look, primitives in a filter (merge nodes not counted), nodes in a merge.
+        let filters = |n: usize| format!("<defs>{}</defs><circle r='5'/>", (0..n).map(|i| format!("<filter id='f{i}'><feOffset/></filter>")).collect::<String>());
+        drawn(&filters(MAX_FILTERS));
+        has(&undrawn(&filters(MAX_FILTERS + 1)), "svg: more than 8 filters");
+        let primitives = |n: usize, nodes: usize| format!("<defs><filter id='f'>{}<feMerge>{}</feMerge></filter></defs><circle r='5'/>", "<feOffset/>".repeat(n - 1), "<feMergeNode/>".repeat(nodes));
+        drawn(&primitives(MAX_FILTER_PRIMITIVES, 8));
+        has(&undrawn(&primitives(MAX_FILTER_PRIMITIVES + 1, 1)), "svg: more than 8 primitives in a filter: a few primitives make an effect");
+        has(&undrawn(&primitives(2, 9)), "svg: more than 8 feMergeNode elements in a feMerge");
+    }
+
+    #[test]
+    fn dashes_are_kept_as_lengths_and_their_offset_as_a_number() {
+        let look = drawn(
+            "<g id='g' stroke='#000000' stroke-dasharray='4,2  1' stroke-dashoffset='-3.5'><path id='p' d='M0 0 L10 0' stroke-dasharray='NONE'/><text id='t' x='5' y='50' strokeDasharray='1 1' strokeDashoffset='2'>a</text></g>\
+             <circle id='c' cx='50' cy='50' r='5' style='stroke-dasharray: 3 3; stroke-dashoffset: 1'/><circle id='d' cx='50' cy='50' r='5' stroke-dasharray='1 2 3 4 5 6 7 8.5'/>",
+        );
+        assert_eq!(attrs(node(&look, "g")), json!({ "stroke": "#000000", "strokeDasharray": "4 2 1", "strokeDashoffset": -3.5 }));
+        assert_eq!(attrs(node(&look, "p")), json!({ "d": "M 0 0 L 10 0", "strokeDasharray": "none" }));
+        assert_eq!(attrs(node(&look, "t")), json!({ "x": 5, "y": 50, "strokeDasharray": "1 1", "strokeDashoffset": 2 }));
+        assert_eq!(attrs(node(&look, "c")), json!({ "cx": 50, "cy": 50, "r": 5, "strokeDasharray": "3 3", "strokeDashoffset": 1 }));
+        assert_eq!(attrs(node(&look, "d"))["strokeDasharray"], json!("1 2 3 4 5 6 7 8.5"));
+        assert_eq!(round_trip(&look), look);
+        // On the root they go to the group that wraps the content.
+        let wrapped = accepted(None, json!({ "svg": "<svg viewBox='0 0 200 200' stroke-dasharray='2'><circle cx='50' cy='50' r='5'/></svg>" })).design.look.unwrap();
+        assert_eq!(attrs(&wrapped.nodes[0]), json!({ "strokeDasharray": "2" }));
+        for (attr, why) in [
+            ("stroke-dasharray='1 1 1 1 1 1 1 1 1'", "svg: stroke-dasharray holds 9 numbers: up to 8 lengths, dash and gap in turn, separated by spaces, or none"),
+            ("stroke-dasharray='1 1 1 1 1 1 1 1 1 1'", "svg: stroke-dasharray \"1 1 1 1 1 1 1 1 1 1\": up to 8 lengths"),
+            ("stroke-dasharray='-1 2'", "svg: stroke-dasharray \"-1 2\" is out of range: lengths from 0 to 800"),
+            ("stroke-dasharray='801'", "is out of range"),
+            ("stroke-dasharray='4px 2px'", "svg: stroke-dasharray \"4px 2px\": up to 8 lengths"),
+            ("stroke-dasharray='50%'", "svg: stroke-dasharray \"50%\""),
+            ("stroke-dasharray=''", "svg: stroke-dasharray holds 0 numbers"),
+            ("stroke-dasharray='1e999'", "svg: stroke-dasharray \"1e999\" is out of range"),
+            ("stroke-dashoffset='99999'", "svg: stroke-dashoffset 99999 is out of range: within 800"),
+            ("stroke-dashoffset='1 2'", "svg: stroke-dashoffset \"1 2\" is not a number"),
+            ("stroke-dasharray='1' strokeDasharray='2'", "stroke-dasharray is given twice"),
+        ] {
+            has(&undrawn(&format!("<circle r='5' {attr}/>")), why);
+        }
+    }
+
+    // ------------------------------------------------------------ new props, eases, built-in names
+
+    #[test]
+    fn skew_dash_offset_and_the_opacities_of_fill_and_stroke_are_props() {
+        let with = |track: Value| figure(json!({ "pivots": { "head": [100, 110] }, "animations": { "a": { "duration": 1, "tracks": [track] } } }));
+        // Skew is relative, in degrees, about the pivot.
+        let look = accepted(None, with(json!({ "target": "head", "prop": "skewX", "values": [0, 80, -80, 0] }))).design.look.unwrap();
+        assert_eq!(look.animations["a"].tracks[0].prop, Prop::SkewX);
+        accepted(None, with(json!({ "target": "label", "prop": "skewY", "values": [0, 12.5] })));
+        has(&refused(None, with(json!({ "target": "head", "prop": "skewY", "values": [0, 80.5] }))), "skewY 80.5 is out of range (at animations.a.tracks[0].values[1]): degrees, within 80 either way");
+        has(&refused(None, with(json!({ "target": "head", "prop": "skewX", "values": [null, 5] }))), "null in a skewX track (at animations.a.tracks[0].values[0]): null is the artwork's own value; translate, rotate, skew and scale are relative to rest");
+        let warned = accepted(None, tracks(json!([{ "target": "eyes", "prop": "skewX", "values": [0, 10, 0] }]))).warnings;
+        assert_eq!(warned, ["eyes has no pivot: it turns and scales about the centre of its box, [90, 75] (at animations.a.tracks[0]): give it a pivot if its joint is elsewhere"]);
+        // The dash offset is a number either way; null needs one on the element.
+        accepted(None, with(json!({ "target": "mouth", "prop": "strokeDashoffset", "values": [0, -20, 0] })));
+        has(&refused(None, with(json!({ "target": "mouth", "prop": "strokeDashoffset", "values": [null, 20] }))), "null is the artwork's own strokeDashoffset, and mouth has no stroke-dashoffset of its own");
+        has(&refused(None, with(json!({ "target": "mouth", "prop": "strokeDashoffset", "values": [0, 900] }))), "strokeDashoffset 900 is out of range (at animations.a.tracks[0].values[1]): within 800 either way");
+        // The opacities of fill and stroke: 0 to 1, under the paint rule of opacity.
+        accepted(None, with(json!({ "target": "face", "prop": "fillOpacity", "values": [1, 0.2, 1] })));
+        accepted(None, with(json!({ "target": "face", "prop": "strokeOpacity", "values": [1, 0.5] })));
+        has(&refused(None, with(json!({ "target": "face", "prop": "fillOpacity", "values": [0, 1.5] }))), "fillOpacity 1.5 is out of range (at animations.a.tracks[0].values[1]): 0 to 1");
+        has(&refused(None, with(json!({ "target": "face", "prop": "strokeOpacity", "values": [null, 0.5] }))), "null is the artwork's own strokeOpacity, and face has no stroke-opacity of its own");
+        has(&refused(None, with(json!({ "target": "face", "prop": "fillOpacity", "values": [1, 0.5, 1], "ease": "step" }))), "ease step on fillOpacity");
+        has(&refused(None, with(json!({ "target": "face", "prop": "strokeOpacity", "values": [1, 0.5, 1], "times": [0, 0.1, 1] }))), "keyframes 0 and 1 of strokeOpacity are 0.1 s apart (at animations.a.tracks[0]): at least 0.17 s between keyframes of fill, stroke and opacity");
+        let looping = |values: Value| figure(json!({ "animations": { "a": { "duration": 1, "loop": true, "tracks": [{ "target": "face", "prop": "fillOpacity", "values": values }] } } }));
+        accepted(None, looping(json!([1, 0.4, 1])));
+        has(&refused(None, looping(json!([1, 0.4]))), "the loop's fillOpacity ends on another value than it starts with");
+        // A one-shot that ends elsewhere is played once at a time.
+        let once = accepted(None, figure(json!({ "animations": { "fade": { "duration": 1, "tracks": [{ "target": "face", "prop": "strokeOpacity", "values": [1, 0] }] } } }))).design.look.unwrap();
+        assert!(!closes(&once, "fade"));
+        // And with a value of its own, null is that value.
+        let own = accepted(None, json!({ "svg": svg("<circle id='c' cx='50' cy='50' r='9' fill-opacity='0.5' stroke-dashoffset='3' stroke='#000000'/>"), "animations": { "a": { "duration": 1, "tracks": [{ "target": "c", "prop": "fillOpacity", "values": [null, 1, null] }, { "target": "c", "prop": "strokeDashoffset", "values": [null, 10, null] }] } } }));
+        assert_eq!(own.warnings, [""; 0]);
+    }
+
+    #[test]
+    fn an_ease_is_a_named_curve_or_a_bezier_for_all_segments_or_one_per_segment() {
+        let with = |ease: Value| tracks(json!([{ "target": "arm", "prop": "rotate", "values": [0, 10, 0, 5, 0], "ease": ease }]));
+        let ease = |ease: Value| accepted(None, with(ease)).design.look.unwrap().animations["a"].tracks[0].ease.clone();
+        // Four numbers are one bezier, for every segment however many there are.
+        assert_eq!(ease(json!([0.25, 0.1, 0.25, 1])), Some(Eases::One(Curve::Bezier([0.25, 0.1, 0.25, 1.0].map(Num::new)))));
+        // A list of curves, one per segment: names and beziers mixed.
+        let each = ease(json!(["inBack", [0, 0, 0.58, 1], "outElastic", [0.68, -0.6, 0.32, 1.6]]));
+        assert_eq!(each, Some(Eases::Each(vec![Curve::Named(Ease::InBack), Curve::Bezier([0.0, 0.0, 0.58, 1.0].map(Num::new)), Curve::Named(Ease::OutElastic), Curve::Bezier([0.68, -0.6, 0.32, 1.6].map(Num::new))])));
+        assert_eq!(serde_json::to_value(&each).unwrap(), json!(["inBack", [0, 0, 0.58, 1], "outElastic", [0.68, -0.6, 0.32, 1.6]]));
+        // The edges of the control points.
+        ease(json!([0, -2, 1, 3]));
+        ease(json!([1, 3, 0, -2]));
+        for wild in [json!([1.2, 0, 0, 1]), json!([0, -2.5, 1, 1]), json!([0, 0, -0.1, 1]), json!([0, 0, 1, 3.5]), json!(["in", [0, 4, 1, 1], "out", "in"])] {
+            has(&refused(None, with(wild.clone())), "an ease [x1, y1, x2, y2] out of range (at animations.a.tracks[0].ease): x1 and x2 from 0 to 1, y1 and y2 from -2 to 3");
+        }
+        has(&refused(None, with(json!([0, 0, 1]))), "ease a list of 3");
+        has(&refused(None, with(json!([0, 0, 1, 1, 1]))), "ease a list of 5");
+        has(&refused(None, with(json!([[0, 0, 1], "in", "out", "in"]))), "ease a list of 4");
+        has(&refused(None, with(json!(["in", "out"]))), "2 eases for 4 segments");
+        // A bezier on the animation applies to its tracks; step stays off paint in a list as well.
+        accepted(None, figure(json!({ "animations": { "a": { "duration": 1, "ease": [0.4, 0, 0.2, 1], "tracks": [{ "target": "face", "prop": "opacity", "values": [0.9, 0.2, 0.9] }] } } })));
+        has(&refused(None, tracks(json!([{ "target": "face", "prop": "opacity", "values": [0.9, 0.2, 0.9], "ease": [[0, 0, 1, 1], "step"] }]))), "ease step on opacity");
+        // Every name on the wire.
+        assert_eq!(Ease::ALL.map(|e| serde_json::to_value(e).unwrap()), ["linear", "in", "out", "inOut", "outBack", "inBack", "inOutBack", "outElastic", "outBounce", "step"].map(|n| json!(n)));
+    }
+
+    #[test]
+    fn a_looks_own_animation_may_bear_the_name_of_built_in_motion() {
+        // walk and greet replace the overlay's hop and wave; the other names the built-in set.
+        let names: Vec<&str> = BUILTIN.iter().copied().chain(["walk", "greet"]).collect();
+        let animations: Map<String, Value> = names.iter().map(|name| (name.to_string(), rotate("arm"))).collect();
+        // No roles: built-in motion would need them, the look's own needs none.
+        let request = figure(json!({ "animations": animations, "states": { "idle": ["breathe", "blink", "walk"], "done": ["greet", "wave", "cheer", "nod", "shake", "doze"] } }));
+        let applied = accepted(None, request);
+        assert_eq!(applied.warnings, [""; 0]);
+        assert_eq!(applied.animations.len(), names.len());
+        let look = applied.design.look.as_ref().unwrap();
+        assert!(names.iter().all(|name| look.animations.contains_key(*name)));
+        assert_eq!(look.states[&LookState::Done], ["greet", "wave", "cheer", "nod", "shake", "doze"]);
+        // Merged in later by name as well, and named in a state of a look that has the roles.
+        let later = accepted(Some(&applied.design), json!({ "pivots": { "body": [100, 190] }, "roles": { "body": "body", "armR": "arm" }, "animations": { "walk": { "duration": 0.6, "loop": true, "tracks": [{ "target": "body", "prop": "rotate", "values": [-3, 3, -3] }] } }, "states": { "idle": ["walk", "breathe"] } }));
+        assert_eq!(later.warnings, [""; 0]);
+    }
+
+    // ------------------------------------------------------------ parents
+
+    #[test]
+    fn parents_tie_a_part_to_another_apart_in_the_drawing_order() {
+        // In FIGURE body holds belly, head (face, eyes with pupil, mouth), arm, cane and label.
+        let applied = accepted(None, figure(json!({ "parents": { "arm": "head", "cane": "arm" } })));
+        let look = applied.design.look.as_ref().unwrap();
+        assert_eq!(look.parents, BTreeMap::from([("arm".to_string(), "head".to_string()), ("cane".to_string(), "arm".to_string())]));
+        assert_eq!(serde_json::to_value(look).unwrap()["parents"], json!({ "arm": "head", "cane": "arm" }));
+        let arm = applied.parts.iter().find(|p| p.id == "arm").unwrap();
+        assert_eq!((arm.parent.as_deref(), arm.to_string()), (Some("head"), "arm rect 140 100 12 40 pivot 146 120 (default) parent head".to_string()));
+        assert_eq!(applied.usage.parents, 2);
+        assert_eq!(&round_trip(look), look);
+
+        for (parents, why) in [
+            (json!({ "face": "head" }), "face is inside head and moves with it already (at parents.face): parents are for parts apart in the drawing order"),
+            (json!({ "body": "head" }), "head is inside body (at parents.body): a part cannot move with what it holds"),
+            (json!({ "arm": "arm" }), "arm moves with itself (at parents.arm): a part moves with another part"),
+            (json!({ "arm": "sky" }), "sky is a linearGradient, or inside defs (at parents.arm)"),
+            (json!({ "pane": "arm" }), "pane is a circle, or inside defs (at parents.pane)"),
+            (json!({ "nowhere": "arm" }), "target \"nowhere\" not found (at parents.nowhere)"),
+            (json!({ "arm": "elsewhere" }), "target \"elsewhere\" not found (at parents.arm)"),
+            (json!({ "arm": 5 }), "a parent is a number (at parents.arm): the id of the part it moves with"),
+            (json!({ "arm": "cane", "cane": "arm" }), "the parents of arm, cane go round in a circle (at parents.arm): a part moves with no part that moves with it, through parents or what it is drawn inside"),
+            (json!({ "arm": "cane", "cane": "label", "label": "arm" }), "go round in a circle"),
+            (json!(["arm"]), "parents is a list (at parents): an object of part ids with the id of the part each moves with, null to remove one"),
+        ] {
+            has(&refused(None, figure(json!({ "parents": parents }))), why);
+        }
+        // A circle may run through what a part is drawn inside: arm moves with face, face is drawn in
+        // head, and head would move with arm.
+        has(&refused(None, figure(json!({ "parents": { "head": "arm", "arm": "face" } }))), "the parents of arm, face, head go round in a circle (at parents.arm)");
+        has(&refused(None, figure(json!({ "parents": { "head": "cane", "cane": "pupil" } }))), "the parents of cane, pupil, head go round in a circle (at parents.cane)");
+        // Moving with a part drawn inside a third is no circle.
+        accepted(None, figure(json!({ "parents": { "arm": "pupil", "cane": "mouth" } })));
+        // A chain of eight links is fine, nine are not; as many entries as the limit, and no more.
+        let circles = |n: usize| svg(&(0..n).map(|i| format!("<circle id='c{i}' cx='100' cy='100' r='5'/>")).collect::<String>());
+        let chain = |links: usize| (1..=links).map(|i| (format!("c{i}"), json!(format!("c{}", i - 1)))).collect::<Map<String, Value>>();
+        accepted(None, json!({ "svg": circles(10), "parents": chain(MAX_CHAIN) }));
+        has(&refused(None, json!({ "svg": circles(10), "parents": chain(MAX_CHAIN + 1) })), "the chain of parents above c9 is longer than 8 (at parents.c9): at most 8 parts above one another");
+        let star = |n: usize| (1..=n).map(|i| (format!("c{i}"), json!("c0"))).collect::<Map<String, Value>>();
+        assert_eq!(accepted(None, json!({ "svg": circles(MAX_PARENTS + 2), "parents": star(MAX_PARENTS) })).usage.parents, MAX_PARENTS);
+        assert_eq!(refused(None, json!({ "svg": circles(MAX_PARENTS + 2), "parents": star(MAX_PARENTS + 1) })), "65 parents (at parents): at most 64 in one look; null removes one");
+
+        // Merged like pivots: by key, null removes one, null for the field removes all.
+        let first = applied.design;
+        let more = accepted(Some(&first), json!({ "parents": { "label": "arm" } })).design;
+        assert_eq!(more.look.as_ref().unwrap().parents.len(), 3);
+        let fewer = accepted(Some(&more), json!({ "parents": { "arm": null } })).design;
+        assert_eq!(fewer.look.as_ref().unwrap().parents, BTreeMap::from([("cane".to_string(), "arm".to_string()), ("label".to_string(), "arm".to_string())]));
+        assert!(accepted(Some(&more), json!({ "parents": null })).design.look.unwrap().parents.is_empty());
+        // A merge is checked against the parents that stay: a circle made of an old and a new entry refuses.
+        has(&refused(Some(&first), json!({ "parents": { "head": "cane" } })), "go round in a circle");
+        // Under new artwork an entry that would close a circle with the others is cleared, not refused.
+        let looped = accepted(None, figure(json!({ "parents": { "arm": "face", "cane": "arm" } }))).design;
+        let nested = "<svg viewBox='0 0 200 200'><g id='body'><g id='cane'><circle id='face' cx='100' cy='80' r='30'/></g><rect id='arm' x='140' y='100' width='12' height='40'/></g></svg>";
+        let kept = accepted(Some(&looped), json!({ "svg": nested, "keep": true }));
+        assert_eq!((kept.design.look.as_ref().unwrap().parents.len(), kept.kept.as_slice(), kept.cleared.as_slice()), (1, ["parents arm".to_string()].as_slice(), ["parents cane".to_string()].as_slice()));
+        // New artwork: keep keeps an entry whose parts are still apart, clears the others.
+        let redrawn = "<svg viewBox='0 0 200 200'><g id='body'><g id='head'><rect id='arm' x='140' y='100' width='12' height='40'/></g><line id='cane' x1='60' y1='120' x2='60' y2='170' stroke='#333333'/></g></svg>";
+        let kept = accepted(Some(&first), json!({ "svg": redrawn, "keep": true }));
+        assert_eq!(kept.design.look.as_ref().unwrap().parents, BTreeMap::from([("cane".to_string(), "arm".to_string())]));
+        assert_eq!((kept.kept.contains(&"parents cane".to_string()), kept.cleared.contains(&"parents arm".to_string())), (true, true), "{:?} {:?}", kept.kept, kept.cleared);
+        // Without keep they are cleared, and the answer says so.
+        assert!(accepted(Some(&first), json!({ "svg": redrawn })).cleared.contains(&"parents arm, cane".to_string()));
+    }
+
+    // ------------------------------------------------------------ drives
+
+    #[test]
+    fn drives_move_parts_by_the_live_inputs() {
+        let with = |drives: Value| figure(json!({ "pivots": { "head": [100, 110], "body": [100, 190] }, "drives": drives }));
+        let drives = json!([
+            { "input": "lookX", "target": "head", "prop": "rotate", "values": [-10, 0, 10] },
+            { "input": "turn", "target": ["face", "label"], "prop": "opacity", "values": [0.4, 1, 0.4], "at": [0, 0.4, 1], "ease": [0.25, 0.1, 0.25, 1] },
+            { "input": "pace", "target": "body", "prop": "skewX", "values": [0, -6], "ease": "outBounce" },
+            { "input": "mouth", "target": "mouth", "prop": "d", "values": [null, "M84 96 Q100 120 116 96"] },
+            { "input": "held", "target": "face", "prop": "fill", "values": [null, "red"] },
+            { "input": "lookY", "target": "pupil", "prop": "translateY", "values": [-3, 3], "ease": ["inOutBack"] }
+        ]);
+        let applied = accepted(None, with(drives.clone()));
+        assert_eq!(applied.warnings, [""; 0]);
+        let look = applied.design.look.as_ref().unwrap();
+        // Stored in its normal form: colours as hex, path data spaced, the optional keys only where given.
+        let stored = serde_json::to_value(&look.drives).unwrap();
+        assert_eq!(stored[1], json!({ "input": "turn", "target": ["face", "label"], "prop": "opacity", "values": [0.4, 1, 0.4], "at": [0, 0.4, 1], "ease": [0.25, 0.1, 0.25, 1] }));
+        assert_eq!(stored[3], json!({ "input": "mouth", "target": "mouth", "prop": "d", "values": [null, "M 84 96 Q 100 120 116 96"] }));
+        assert_eq!(stored[4]["values"], json!([null, "#ff0000"]));
+        assert_eq!(look.drives.iter().map(ToString::to_string).collect::<Vec<_>>(), ["lookX moves head rotate", "turn moves face, label opacity", "pace moves body skewX", "mouth moves mouth d", "held moves face fill", "lookY moves pupil translateY"]);
+        assert_eq!(applied.usage.drives, 6);
+        assert_eq!(&round_trip(look), look);
+        assert_eq!(check_stored(serde_json::to_value(&applied.design).unwrap()).as_ref(), Some(&applied.design));
+
+        let one = |drive: Value| refused(None, with(json!([drive])));
+        for (drive, why) in [
+            (json!({ "input": "gaze", "target": "head", "prop": "rotate", "values": [0, 1] }), "input \"gaze\" (at drives[0]): inputs are lookX, lookY, mouth, pace, turn, held"),
+            (json!({ "target": "head", "prop": "rotate", "values": [0, 1] }), "a drive without an input (at drives[0]): inputs are lookX"),
+            (json!({ "input": 1, "target": "head", "prop": "rotate", "values": [0, 1] }), "input is a number"),
+            (json!({ "input": "lookX", "target": "face", "prop": "opacity", "values": [0, 1] }), "opacity follows lookX (at drives[0]): fill, stroke and the opacities follow only pace, turn and held, which change slowly, so nothing flashes"),
+            (json!({ "input": "mouth", "target": "face", "prop": "fill", "values": [null, "red"] }), "fill follows mouth"),
+            (json!({ "input": "lookY", "target": "face", "prop": "fillOpacity", "values": [0, 1] }), "fillOpacity follows lookY"),
+            (json!({ "input": "turn", "target": "face", "prop": "opacity", "values": [1, 0.5], "ease": "step" }), "ease step on opacity (at drives[0])"),
+            (json!({ "input": "held", "target": "face", "prop": "fill", "values": [null, "red", null], "ease": ["linear", "step"] }), "ease step on fill (at drives[0]): fill, stroke and opacity change smoothly so that nothing flashes"),
+            (json!({ "input": "pace", "target": "face", "prop": "strokeOpacity", "values": [1, 0.5], "ease": "step" }), "ease step on strokeOpacity"),
+            // Nor does it swing, or change more often than a slow input lets a quarter second pass.
+            (json!({ "input": "pace", "target": "face", "prop": "opacity", "values": [1, 0.5], "ease": "outBounce" }), "an ease that swings on opacity (at drives[0]): no outElastic or outBounce on fill, stroke or an opacity, and a bezier with y1 and y2 from 0 to 1"),
+            (json!({ "input": "held", "target": "face", "prop": "opacity", "values": [1, 0.5], "ease": [0, 3, 1, -2] }), "an ease that swings on opacity"),
+            (json!({ "input": "held", "target": "face", "prop": "opacity", "values": [1, 0, 1] }), "3 values of opacity along held stand too close (at drives[0]): 2 values along pace or held, up to 3 along turn, at least 0.34 apart in at"),
+            (json!({ "input": "pace", "target": "face", "prop": "fill", "values": ["red", "blue", "red", "blue"] }), "4 values of fill along pace stand too close"),
+            (json!({ "input": "turn", "target": "face", "prop": "opacity", "values": [1, 0, 1, 0] }), "4 values of opacity along turn stand too close"),
+            (json!({ "input": "turn", "target": "face", "prop": "opacity", "values": [1, 0, 1], "at": [0, 0.2, 1] }), "3 values of opacity along turn stand too close"),
+            (json!({ "input": "lookX", "target": "head", "prop": "rotate", "values": [1] }), "1 keyframes (at drives[0]): 2 to 16 values"),
+            (json!({ "input": "lookX", "target": "head", "prop": "rotate" }), "a drive without values"),
+            (json!({ "input": "lookX", "prop": "rotate", "values": [0, 1] }), "a drive without a target"),
+            (json!({ "input": "lookX", "target": "head", "values": [0, 1] }), "a drive without a prop"),
+            (json!({ "input": "lookX", "target": "head", "prop": "rotate", "values": [0, 1, 2], "at": [0, 0.7, 0.5] }), "at does not rise from 0 to 1 (at drives[0].at)"),
+            (json!({ "input": "lookX", "target": "head", "prop": "rotate", "values": [0, 1, 2], "at": [0, 1] }), "2 places for 3 values (at drives[0]): one place per value"),
+            (json!({ "input": "lookX", "target": "head", "prop": "rotate", "values": [0, 1, 2], "at": "even" }), "at is a string (at drives[0].at)"),
+            (json!({ "input": "lookX", "target": "head", "prop": "rotate", "values": [0, 1, 2], "ease": ["in"] }), "1 eases for 2 segments"),
+            (json!({ "input": "lookX", "target": "head", "prop": "rotate", "values": [null, 5] }), "null in a rotate drive (at drives[0].values[0])"),
+            (json!({ "input": "lookX", "target": "head", "prop": "rotate", "values": [0, 3601] }), "rotate 3601 is out of range"),
+            (json!({ "input": "mouth", "target": "mouth", "prop": "d", "values": ["M0 0 L5 5", "M0 0 Q5 5 9 9"] }), "d values differ in structure"),
+            (json!({ "input": "pace", "target": "arm", "prop": "cx", "values": [0, 1] }), "arm is a rect and has no cx"),
+            (json!({ "input": "pace", "target": "sky", "prop": "rotate", "values": [0, 1] }), "sky is a linearGradient, or inside defs (at drives[0])"),
+            (json!({ "input": "lookX", "target": "head", "prop": "rotate", "values": [0, 1], "phase": 0.5 }), "\"phase\" is not a key here (at drives[0]): a drive follows its input, not time: at places each value along the input"),
+            (json!({ "input": "lookX", "target": "head", "prop": "rotate", "values": [0, 1], "times": [0, 1] }), "\"times\" is not a key here (at drives[0]): a drive follows its input"),
+            (json!({ "input": "lookX", "target": "head", "prop": "rotate", "values": [0, 1], "speed": 2 }), "\"speed\" is not a key here (at drives[0]): keys are input, target, prop, values, at, ease"),
+            (json!(5), "a drive is a number (at drives[0]): an object with input, target, prop and values"),
+        ] {
+            has(&one(drive), why);
+        }
+        has(&refused(None, with(json!({ "input": "lookX" }))), "drives is an object (at drives): a list of up to 16 drives, [] or null for none");
+        // As many as the limit, and no more.
+        let many = |n: usize| json!(vec![json!({ "input": "lookX", "target": "head", "prop": "rotate", "values": [-5, 5] }); n]);
+        assert_eq!(accepted(None, with(many(MAX_DRIVES))).usage.drives, MAX_DRIVES);
+        assert_eq!(refused(None, with(many(MAX_DRIVES + 1))), "drives is a list of 17 (at drives): a list of up to 16 drives, [] or null for none");
+        // A rotate without a pivot warns as a track does.
+        assert_eq!(accepted(None, figure(json!({ "drives": [{ "input": "lookX", "target": "eyes", "prop": "rotate", "values": [-5, 5] }] }))).warnings, ["eyes has no pivot: it turns and scales about the centre of its box, [90, 75] (at drives[0]): give it a pivot if its joint is elsewhere"]);
+
+        // The list replaces; null and [] remove it; a call that does not name it keeps it.
+        let first = applied.design;
+        assert_eq!(accepted(Some(&first), json!({ "drives": [drives[0]] })).design.look.unwrap().drives.len(), 1);
+        assert!(accepted(Some(&first), json!({ "drives": null })).design.look.unwrap().drives.is_empty());
+        assert!(accepted(Some(&first), json!({ "drives": [] })).design.look.unwrap().drives.is_empty());
+        assert_eq!(accepted(Some(&first), json!({ "gaze": 2 })).design.look.unwrap().drives.len(), 6);
+        // New artwork: keep keeps every drive whose targets still exist and fit, clears the others.
+        let redrawn = "<svg viewBox='0 0 200 200'><g id='body'><g id='head'><circle id='face' cx='100' cy='80' r='30' fill='#ffcc00'/><path id='mouth' d='M84 96 Q100 104 116 96'/></g></g></svg>";
+        let kept = accepted(Some(&first), json!({ "svg": redrawn, "keep": true }));
+        assert_eq!(kept.design.look.as_ref().unwrap().drives.iter().map(ToString::to_string).collect::<Vec<_>>(), ["lookX moves head rotate", "pace moves body skewX", "mouth moves mouth d", "held moves face fill"]);
+        assert!(kept.kept.contains(&"drives".to_string()) && kept.cleared.contains(&"drives".to_string()), "{:?} {:?}", kept.kept, kept.cleared);
+        assert!(accepted(Some(&first), json!({ "svg": redrawn })).cleared.contains(&"drives".to_string()));
+    }
+
+    #[test]
+    fn the_new_wire_types_have_the_shapes_of_the_contract() {
+        let look = accepted(None, figure(json!({ "parents": { "arm": "head" }, "drives": [{ "input": "lookX", "target": "arm", "prop": "rotate", "values": [-5, 5] }] }))).design.look.unwrap();
+        let v = serde_json::to_value(&look).unwrap();
+        assert_eq!(v.as_object().unwrap().keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(), ["animations", "drives", "gaze", "mouth", "nodes", "parents", "pivots", "roles", "states", "viewBox"].into());
+        assert_eq!((&v["parents"], &v["drives"]), (&json!({ "arm": "head" }), &json!([{ "input": "lookX", "target": "arm", "prop": "rotate", "values": [-5, 5] }])));
+        assert_eq!(serde_json::from_value::<Look>(v.clone()).unwrap(), look);
+        // Absent or null they are empty, and an empty one is not written.
+        for empty in [json!(null), json!([])] {
+            let mut absent = v.clone();
+            absent.as_object_mut().unwrap().remove("parents");
+            absent["drives"] = empty;
+            let read = serde_json::from_value::<Look>(absent).unwrap();
+            assert!(read.parents.is_empty() && read.drives.is_empty());
+            assert!(serde_json::to_value(&read).unwrap().get("drives").is_none());
+        }
+        // Nothing unknown gets into a drive; an input is one of six names.
+        let mut tampered = v.clone();
+        tampered["drives"][0]["phase"] = json!(0.5);
+        assert!(serde_json::from_value::<Look>(tampered).is_err());
+        let mut tampered = v.clone();
+        tampered["drives"][0]["input"] = json!("gaze");
+        assert!(serde_json::from_value::<Look>(tampered).is_err());
+        for input in Input::ALL {
+            assert_eq!(serde_json::to_value(input).unwrap(), json!(input.name()));
+        }
+        assert_eq!(Input::ALL.map(Input::name), ["lookX", "lookY", "mouth", "pace", "turn", "held"]);
+        // An ease: a name, four numbers, or a list of those.
+        for (written, read) in [(json!("inBack"), Eases::One(Curve::Named(Ease::InBack))), (json!([0, 0.5, 1, 1]), Eases::One(Curve::Bezier([0.0, 0.5, 1.0, 1.0].map(Num::new)))), (json!([[0, 0, 1, 1], "out"]), Eases::Each(vec![Curve::Bezier([0.0, 0.0, 1.0, 1.0].map(Num::new)), Curve::Named(Ease::Out)]))] {
+            assert_eq!(serde_json::from_value::<Eases>(written.clone()).unwrap(), read);
+            assert_eq!(serde_json::to_value(&read).unwrap(), written);
+        }
+        // The new tags and props on the wire.
+        for (tag, name) in [(Tag::Use, "use"), (Tag::Mask, "mask"), (Tag::Filter, "filter"), (Tag::FeGaussianBlur, "feGaussianBlur"), (Tag::FeDropShadow, "feDropShadow"), (Tag::FeMergeNode, "feMergeNode"), (Tag::FeDisplacementMap, "feDisplacementMap")] {
+            assert_eq!(serde_json::to_value(tag).unwrap(), json!(name));
+        }
+        for (prop, name) in [(Prop::SkewX, "skewX"), (Prop::SkewY, "skewY"), (Prop::FillOpacity, "fillOpacity"), (Prop::StrokeOpacity, "strokeOpacity"), (Prop::StrokeDashoffset, "strokeDashoffset")] {
+            assert_eq!(serde_json::to_value(prop).unwrap(), json!(name));
+        }
+    }
+
+    #[test]
+    fn a_stored_use_mask_filter_parent_or_drive_is_believed_in_nothing() {
+        let design = accepted(
+            None,
+            json!({
+                "svg": svg("<defs><g id='dot'><circle cx='5' cy='5' r='4'/></g><mask id='m' mask-type='luminance'><rect width='200' height='200' fill='#ffffff'/></mask><filter id='f'><feGaussianBlur stdDeviation='2' result='b'/><feMerge><feMergeNode in='b'/><feMergeNode in='SourceGraphic'/></feMerge></filter><clipPath id='cp'><circle r='9'/></clipPath></defs><g id='body' mask='url(#m)' filter='url(#f)' stroke='#000000' stroke-dasharray='2 1'><use id='a' href='#dot' x='50' y='50'/><use id='b' href='#dot' x='80' y='50'/></g>"),
+                "parents": { "b": "a" },
+                "drives": [{ "input": "turn", "target": "a", "prop": "opacity", "values": [0.5, 1, 0.5] }]
+            }),
+        )
+        .design;
+        let stored = serde_json::to_value(&design).unwrap();
+        assert_eq!(check_stored(stored.clone()), Some(design.clone()));
+        let (defs, body) = ("/look/nodes/0", "/look/nodes/1");
+        assert_eq!((&stored["look"]["nodes"][1]["id"], &stored["look"]["nodes"][1]["children"][0]["id"]), (&json!("body"), &json!("a")));
+        let tamper = |path: &str, value: Value| {
+            let mut v = stored.clone();
+            put(&mut v, path, value);
+            check_stored(v)
+        };
+        for (path, value) in [
+            (format!("{body}/children/0/attrs/useRef"), json!("nope")),
+            (format!("{body}/children/0/attrs/useRef"), json!("m")),
+            (format!("{body}/children/0/attrs/useRef"), json!("b")),
+            (format!("{body}/children/0/attrs/useRef"), json!("dot' onload='alert(1)")),
+            (format!("{body}/children/0/attrs/useRef"), json!("http://x/a.svg#dot")),
+            (format!("{body}/children/0/attrs/href"), json!("#dot")),
+            (format!("{body}/children/0/attrs/width"), json!(10)),
+            (format!("{body}/children/0/children"), json!([{ "tag": "circle", "attrs": { "r": 5 } }])),
+            (format!("{body}/attrs/maskRef"), json!("cp")),
+            (format!("{body}/attrs/maskRef"), json!("f")),
+            (format!("{body}/attrs/filterRef"), json!("m")),
+            (format!("{body}/attrs/filterRef"), json!("blur(2px)")),
+            (format!("{body}/attrs/filter"), json!("url(#f)")),
+            (format!("{body}/attrs/strokeDasharray"), json!("-1 2")),
+            (format!("{body}/attrs/strokeDasharray"), json!("1 1 1 1 1 1 1 1 1")),
+            (format!("{body}/attrs/strokeDashoffset"), json!(1e9)),
+            (format!("{defs}/children/2/children/0/attrs/stdDeviation"), json!("999")),
+            (format!("{defs}/children/2/children/0/attrs/in"), json!("BackgroundImage")),
+            (format!("{defs}/children/2/children/0/attrs/result"), json!("SourceGraphic")),
+            (format!("{defs}/children/2/children/1/children/0/attrs/in"), json!("later")),
+            (format!("{defs}/children/2/children/0/tag"), json!("feImage")),
+            (format!("{defs}/children/2/children/0/tag"), json!("feTile")),
+            (format!("{defs}/children/2/children/0/attrs/href"), json!("http://x/a.png")),
+            (format!("{defs}/children/1/attrs/maskType"), json!("colour")),
+            (format!("{defs}/children/1/children/0/attrs/maskRef"), json!("m")),
+            (format!("{defs}/children/1/children/0/tag"), json!("text")),
+            (format!("{defs}/children/0/tag"), json!("mask")),
+            ("/look/parents/b".into(), json!("nowhere")),
+            ("/look/parents/a".into(), json!("b")),
+            ("/look/parents/body".into(), json!("a")),
+            ("/look/parents".into(), json!(["a"])),
+            ("/look/drives/0/input".into(), json!("lookX")),
+            ("/look/drives/0/input".into(), json!("gaze")),
+            ("/look/drives/0/target".into(), json!("dot")),
+            ("/look/drives/0/values".into(), json!([0.5, 2])),
+            ("/look/drives/0/at".into(), json!([0, 1])),
+            ("/look/drives/0/ease".into(), json!([2, 0, 1, 1])),
+            ("/look/drives/0/phase".into(), json!(0.5)),
+            ("/look/drives".into(), json!({})),
+        ] {
+            assert_eq!(tamper(&path, value.clone()), None, "{path} = {value}");
+        }
+        // The boxes of what a use repeats are computed again as well.
+        assert_eq!(tamper(&format!("{body}/children/0/box"), json!([0, 0, 1, 1])), Some(design.clone()));
+        assert_eq!(tamper("/look/drives/0/ease", json!([0.25, 0.1, 0.25, 1])).map(|d| d.look.unwrap().drives[0].ease.clone()), Some(Some(Eases::One(Curve::Bezier([0.25, 0.1, 0.25, 1.0].map(Num::new))))));
+    }
+
+    /// One call with every piece of artwork and rig this file took on last: what a guide shows.
+    #[test]
+    fn a_compact_design_with_use_mask_filter_dashes_parents_and_drives_has_no_warning() {
+        let call = json!({
+            "name": "Wisp",
+            "svg": "<svg viewBox='0 0 200 200'><defs><g id='eye'><circle r='7' fill='#ffffff'/><circle r='3' fill='#222222'/></g><mask id='cut'><rect x='0' y='0' width='200' height='130' fill='#ffffff'/></mask><filter id='glow'><feGaussianBlur in='SourceGraphic' stdDeviation='3' result='soft'/><feMerge><feMergeNode in='soft'/><feMergeNode in='SourceGraphic'/></feMerge></filter></defs><g id='body' filter='url(#glow)'><circle cx='100' cy='110' r='50' fill='#7cc4ff' mask='url(#cut)'/><path d='M60 130 Q100 150 140 130' fill='none' stroke='#2b6cb0' stroke-width='3' stroke-dasharray='6 4'/></g><g id='eyes'><use id='eyeL' href='#eye' x='82' y='100'/><use id='eyeR' href='#eye' x='118' y='100'/></g><path id='tail' d='M100 160 Q120 180 100 190' fill='none' stroke='#7cc4ff' stroke-width='6' stroke-linecap='round'/></svg>",
+            "pivots": { "body": [100, 160], "eyes": [100, 100], "tail": [100, 160] },
+            "parents": { "eyes": "body", "tail": "body" },
+            "roles": { "body": "body", "eyes": "eyes" },
+            "animations": { "bob": { "duration": 2, "loop": true, "ease": [0.45, 0, 0.55, 1], "tracks": [
+                { "target": "body", "prop": "translateY", "values": [0, -6, 0] },
+                { "target": "body", "prop": "skewX", "values": [0, 3, 0], "ease": "inOutBack" }
+            ] } },
+            "states": { "idle": ["bob", "blink"] },
+            "drives": [
+                { "input": "lookX", "target": "eyes", "prop": "rotate", "values": [-8, 0, 8] },
+                { "input": "turn", "target": "tail", "prop": "opacity", "values": [1, 0.4, 1], "at": [0, 0.5, 1], "ease": [0.25, 0.1, 0.25, 1] }
+            ]
+        });
+        let applied = accepted(None, call);
+        assert_eq!(applied.warnings, [""; 0]);
+        let look = applied.design.look.as_ref().unwrap();
+        assert_eq!((look.parents.len(), look.drives.len(), bbox(look, "eyeL")), (2, 2, [75.0, 93.0, 14.0, 14.0]));
+        assert_eq!(&round_trip(look), look);
     }
 }

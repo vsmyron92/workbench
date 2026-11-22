@@ -813,3 +813,44 @@ export function step(world: World, i: StepInput): World {
   }
   return world
 }
+
+// ---------------------------------------------------------------- what a walk tells the look
+
+/** What a figure's walk gives the drives of its look, each from 0 (or -1 for `turn`) to 1. */
+export interface WalkFeel {
+  pace: number
+  turn: number
+  held: number
+}
+
+/** A way that leads more up or down than this to the side faces the viewer. */
+const SIDEWAYS = 0.25
+
+/**
+ * What one step of the walk tells a figure's look: `pace`, how fast it really moved by itself
+ * over the stroll speed (at most 1; 0 when it did not walk); `turn`, the side it walks to
+ * (-1 left, 1 right; 0 for a way that leads mostly up or down), else the side of the avatar
+ * it meets or visits, or of the guest coming to it, else 0; `held`, 1 while the user drags
+ * it. `was`: where it stood before the step; `dt`: the time the step was given.
+ */
+export function walkFeel(b: Body, was: Point | null, dt: number, bodies: ReadonlyMap<string, Body>, dragged: boolean): WalkFeel {
+  if (dragged) return { pace: 0, turn: 0, held: 1 }
+  const step = clamp(finite(dt, 0), 0, MAX_STEP_MS)
+  let pace = 0
+  let turn = 0
+  if (b.walking) {
+    const dx = was ? b.x - was.x : 0
+    const dy = was ? b.y - was.y : 0
+    if (step > 0) pace = clamp((Math.hypot(dx, dy) * 1000) / step / STROLL_PX_S, 0, 1)
+    // The side it is on its way to: the end of its walk, else the way it went.
+    const wx = b.to ? b.to.x - b.x : dx
+    const wy = b.to ? b.to.y - b.y : dy
+    const way = Math.hypot(wx, wy)
+    if (way > 0.5 && Math.abs(wx) / way >= SIDEWAYS) turn = Math.sign(wx)
+  } else {
+    const beside = b.mode === 'meet' || b.mode === 'visit' ? b.partner : b.looks !== null && bodies.get(b.looks)?.partner === b.id ? b.looks : null
+    const other = beside === null ? undefined : bodies.get(beside)
+    if (other && Math.abs(other.x - b.x) > 0.5) turn = Math.sign(other.x - b.x)
+  }
+  return { pace: finite(pace, 0), turn, held: 0 }
+}

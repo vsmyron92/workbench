@@ -23,7 +23,8 @@ use super::brief::{self, Brief, BriefVariant};
 use super::cli;
 use super::device::{HeardRequest, heard, reply, turn_off};
 use super::routes::BODY_LIMIT;
-use super::session::{NOT_A_SESSION, NO_AVATAR, QUIET, SWITCHED_OFF, TURNED_OFF};
+use super::session::{self, NOT_A_SESSION, NO_AVATAR, QUIET, SWITCHED_OFF, TURNED_OFF};
+use super::preview;
 use super::store::{Ask, DESIGN_PER_MINUTE, MAX_WAIT_HOOK_SECS, MAX_WAIT_TOOL_SECS, Outcome, SAY_PER_MINUTE, list};
 use super::tests::{Env, Events, clicked, env, figure, kinds, pasted};
 use super::{PREALLOWED, Via};
@@ -60,6 +61,7 @@ async fn call(e: &Env, tid: &str, name: &str, args: Value) -> ApiResult<String> 
     (tool(name).handler)(e.state.clone(), ctx(e, tid), args).await.map(|out| match out {
         ToolOutput::Text(text) => text,
         ToolOutput::Json(value) => value.to_string(),
+        ToolOutput::Images { text, .. } => text,
     })
 }
 
@@ -236,8 +238,8 @@ fn the_five_tools_say_what_they_do_and_what_they_take() {
     let tools = super::mcp_tools();
     assert_eq!(tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), NAMES);
     let arguments: [&[&str]; 5] = [
-        &["guide", "look"],
-        &["animations", "gaze", "keep", "mouth", "name", "pivots", "roles", "states", "svg", "voice"],
+        &["count", "frames", "guide", "look", "picture", "pose"],
+        &["animations", "drives", "gaze", "keep", "mouth", "name", "parents", "pivots", "roles", "states", "svg", "voice"],
         &["gesture", "lang", "text", "wait"],
         &["askId", "cancel", "choices", "freeText", "gesture", "lang", "text", "waitSeconds"],
         &["mode", "play", "stop", "times"],
@@ -246,7 +248,7 @@ fn the_five_tools_say_what_they_do_and_what_they_take() {
         // None changes remote state.
         assert!(!t.mutating, "{}", t.name);
         let length = t.description.chars().count();
-        assert!((80..600).contains(&length), "{}: a description of {length} characters", t.name);
+        assert!((80..700).contains(&length), "{}: a description of {length} characters", t.name);
         assert_eq!(t.input_schema["type"], "object", "{}", t.name);
         let properties = &t.input_schema["properties"];
         // What the schema names is what the call takes: no tool takes a terminal id.
@@ -350,7 +352,7 @@ async fn a_session_designs_speaks_and_gestures_through_its_tools() {
     // A refused design changes nothing and says what to fix.
     let err = call(&e, &tid, "avatar_design", json!({ "svg": "<svg viewBox='0 0 200 200'><use href='#body'/></svg>" })).await.unwrap_err();
     assert_eq!((err.status.as_u16(), err.code), (400, "bad_request"));
-    assert!(err.message.contains("repeat the shape") && err.message.ends_with("\nNothing was changed."), "{}", err.message);
+    assert!(err.message.contains("href refers to #body, which is not in this svg") && err.message.ends_with("\nNothing was changed."), "{}", err.message);
     assert_eq!((e.avatar(&tid).revision, events.kinds().len()), (1, 0));
 
     // A line is queued; the answer is one sentence.
@@ -619,7 +621,7 @@ async fn a_session_without_the_tools_does_the_same_through_its_hook_routes() {
     // A refusal says what to fix; a body that is neither says what the route takes.
     let sent = post("design", Some("image/svg+xml"), b"<svg viewBox='0 0 200 200'><use href='#face'/></svg>".to_vec()).await;
     assert_eq!((sent.status, sent.code().as_str()), (400, "bad_request"));
-    assert!(sent.message().contains("repeat the shape") && sent.message().ends_with("\nNothing was changed."), "{}", sent.message());
+    assert!(sent.message().contains("href refers to #face, which is not in this svg") && sent.message().ends_with("\nNothing was changed."), "{}", sent.message());
     let sent = post("design", JSON, b"name=Dot".to_vec()).await;
     assert_eq!(sent.status, 400);
     assert!(sent.message().starts_with("the body is not JSON") && sent.message().contains("or the artwork alone"), "{}", sent.message());
@@ -1140,6 +1142,7 @@ async fn the_curl_forms_a_dev_container_session_is_given_work_as_they_are_writte
         let (cwd, url, tid, own) = (dir.path().to_path_buf(), format!("http://{addr}"), tid.clone(), own.clone());
         async move {
             tokio::task::spawn_blocking(move || {
+                let cwd_tmp = cwd.clone();
                 let out = std::process::Command::new("sh")
                     .args(["-c", &command])
                     .current_dir(cwd)
@@ -1148,6 +1151,7 @@ async fn the_curl_forms_a_dev_container_session_is_given_work_as_they_are_writte
                     .env("WORKBENCH_URL", url)
                     .env("WORKBENCH_TERMINAL_ID", tid)
                     .env("WORKBENCH_AGENT_TOKEN", own)
+                    .env("TMPDIR", &cwd_tmp)
                     .output()
                     .expect("sh runs");
                 (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
@@ -1170,9 +1174,11 @@ async fn the_curl_forms_a_dev_container_session_is_given_work_as_they_are_writte
     let routes = guide.split("U for `").nth(1).and_then(|rest| rest.split('`').next()).expect("what U stands for").to_string();
     assert_eq!(routes, "$WORKBENCH_URL/api/hooks/avatar/$WORKBENCH_TERMINAL_ID");
     let forms: Vec<String> = guide.lines().filter(|line| line.starts_with("    C ")).map(|line| line.trim().replacen("C ", &format!("{call} "), 1).replace("\"U/", &format!("\"{routes}/"))).collect();
-    assert_eq!(forms.len(), 5, "{forms:?}");
+    assert_eq!(forms.len(), 6, "{forms:?}");
+    std::fs::write(dir.path().join("picture.json"), "{\"frames\": \"hop\", \"count\": 3}").unwrap();
     let mut outputs = vec![guide.clone()];
-    for (form, expected) in forms.iter().zip(["Saved as revision 1, named Dot.", "{\"lineId\":\"L", "{\"answered\":false,\"reason\":\"timeout\",\"askId\":\"Q", "{\"ok\":true,\"note\":\"Playing hop.\"}", "{\n  \"note\": \"You have a live avatar: "]) {
+    // The picture goes into its file: the call itself prints nothing.
+    for (form, expected) in forms.iter().zip(["Saved as revision 1, named Dot.", "{\"lineId\":\"L", "{\"answered\":false,\"reason\":\"timeout\",\"askId\":\"Q", "{\"ok\":true,\"note\":\"Playing hop.\"}", "{\n  \"note\": \"You have a live avatar: ", ""]) {
         let (code, out, err) = sh(form.clone()).await;
         assert_eq!((code, err.as_str()), (Some(0), ""), "{form}\n{out}");
         assert!(out.starts_with(expected), "{form}\nprinted: {out}");
@@ -1183,6 +1189,8 @@ async fn the_curl_forms_a_dev_container_session_is_given_work_as_they_are_writte
     assert_eq!((avatar.designed, avatar.name.as_str(), avatar.via), (true, "Dot", Via::Command));
     assert_eq!(avatar.lines.iter().map(|l| (l.text.as_str(), l.gesture.as_deref())).collect::<Vec<_>>(), [("One short line.", Some("hop")), ("Deploy now?", None)]);
     assert!(outputs[5].contains("\"design\": {"), "status with look=1 brings the stored design: {}", outputs[5]);
+    let picture = std::fs::read(dir.path().join("avatar.png")).expect("the picture was written into TMPDIR");
+    assert!(picture.starts_with(b"\x89PNG\r\n\x1a\n") && outputs[6].is_empty(), "{} bytes", picture.len());
 
     // A refusal: curl ends with a failure and still prints what Workbench said.
     std::fs::write(dir.path().join("act.json"), "{\"play\": \"wink\"}").unwrap();
@@ -1192,6 +1200,114 @@ async fn the_curl_forms_a_dev_container_session_is_given_work_as_they_are_writte
     outputs.push(out);
     // Nothing the commands printed shows the token, and none of them has it in its own text.
     assert!(outputs.iter().all(|out| !out.contains(&own)) && forms.iter().all(|form| !form.contains(&own) && form.contains("-H @-")));
+}
+
+// ---------------------------------------------------------------- pictures
+
+/// Width and height of a PNG, from its header.
+fn png_size(png: &[u8]) -> (u32, u32) {
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG: {} bytes", png.len());
+    (u32::from_be_bytes(png[16..20].try_into().unwrap()), u32::from_be_bytes(png[20..24].try_into().unwrap()))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_is_shown_what_it_drew() {
+    let e = env().await;
+    let tid = e.with_avatar();
+    let out = |name: &'static str, args: Value| {
+        let (state, ctx) = (e.state.clone(), ctx(&e, &tid));
+        async move { (tool(name).handler)(state, ctx, args).await }
+    };
+    let pictured = |output: ApiResult<ToolOutput>| match output {
+        Ok(ToolOutput::Images { text, png }) => (text, png),
+        Ok(_) => panic!("an answer without a picture"),
+        Err(e) => panic!("refused: {}", e.message),
+    };
+    let refused = |output: ApiResult<ToolOutput>| output.err().expect("refused").message;
+
+    // Nothing of its own to see yet: a design call that draws nothing brings no picture, and a
+    // picture that is asked for is refused with what to do.
+    assert!(matches!(out("avatar_design", json!({ "name": "Dot" })).await, Ok(ToolOutput::Text(_))));
+    assert_eq!(refused(out("avatar_status", json!({ "picture": true })).await), session::NO_LOOK_TO_DRAW);
+
+    // A design answer carries the look at rest, and says what the picture shows.
+    let (text, png) = pictured(out("avatar_design", figure()).await);
+    assert!(text.starts_with("Saved as revision ") && text.contains("\nPicture: your avatar at rest, on the light panel and on the dark one"), "{text}");
+    assert_eq!(png.len(), 1);
+    let sheet = png_size(&png[0]);
+    assert!(sheet.0 > 2 * preview::SHEET_FIGURE_PX && sheet.1 > preview::SHEET_FIGURE_PX, "{sheet:?}");
+
+    // The status shows it again, in a pose, or one of its animations as a row of moments.
+    let (text, png) = pictured(out("avatar_status", json!({ "picture": true })).await);
+    assert!(text.contains("\"designed\": true") && text.ends_with("at its resting size and as a face."), "{text}");
+    assert_eq!(png_size(&png[0]), sheet);
+    let (text, posed) = pictured(out("avatar_status", json!({ "pose": { "animation": "hop", "at": 0.5, "mouth": 1, "lookX": 1 } })).await);
+    assert!(text.contains("Picture: your avatar in that pose"), "{text}");
+    assert!(png_size(&posed[0]) == sheet && posed[0] != png[0], "a pose is another picture");
+    let (text, strip) = pictured(out("avatar_status", json!({ "frames": "hop", "count": 3 })).await);
+    assert!(text.ends_with("Picture: 3 moments of hop, from its start on the left to its end on the right."), "{text}");
+    assert_eq!(png_size(&strip[0]).1, preview::STRIP_FRAME_PX);
+    assert!(png_size(&strip[0]).0 >= 3 * preview::STRIP_FRAME_PX);
+    let (_, six) = pictured(out("avatar_status", json!({ "frames": "hop" })).await);
+    assert!(png_size(&six[0]).0 >= 6 * preview::STRIP_FRAME_PX);
+
+    // What cannot be drawn is said in a sentence.
+    for (args, words) in [
+        (json!({ "frames": "breathe" }), "built-in"),
+        (json!({ "frames": "wink" }), "no animation \"wink\""),
+        (json!({ "frames": "hop", "count": 9 }), "count is a whole number from 2 to 8"),
+        (json!({ "frames": "hop", "pose": {} }), "two pictures"),
+        (json!({ "count": 3 }), "name the animation with frames"),
+        (json!({ "pose": { "turn": 5 } }), "turn in a pose is a number from -1 to 1"),
+        (json!({ "pose": { "spin": 1 } }), "a pose takes"),
+        (json!({ "picture": "yes" }), "picture is a string"),
+    ] {
+        let said = refused(out("avatar_status", args.clone()).await);
+        assert!(said.contains(words), "{args}: {said}");
+    }
+    // A status without a picture is text, as before.
+    assert!(matches!(out("avatar_status", json!({})).await, Ok(ToolOutput::Text(_))));
+
+    // A look that would cost too much to draw is not stored: the browser would pay for it on
+    // every frame. (This one asks the renderer for a layer larger than memory.)
+    let before = e.avatar(&tid).revision;
+    let heavy = json!({ "svg": "<svg viewBox='0 0 200 200'><defs><filter id='f' filterUnits='userSpaceOnUse' x='-400' y='-400' width='800' height='800'><feOffset dx='1' dy='1'/></filter></defs><g id='g' transform='translate(100 100) scale(1000 0.001) rotate(45)' filter='url(#f)'><circle cx='0' cy='0' r='0.01' fill='#3366cc'/></g></svg>" });
+    let said = refused(out("avatar_design", heavy).await);
+    assert!(said.starts_with("a filter sits on a part that is stretched or skewed too far to draw") && said.ends_with("\nNothing was changed."), "{said}");
+    let many = json!({ "svg": format!("<svg viewBox='0 0 200 200'><defs><filter id='f' filterUnits='userSpaceOnUse' x='-200' y='-200' width='600' height='600'><feTurbulence baseFrequency='0.05' numOctaves='4'/><feMorphology operator='dilate' radius='20'/><feGaussianBlur stdDeviation='50'/></filter></defs>{}</svg>", "<circle cx='100' cy='100' r='40' fill='#3366cc' filter='url(#f)'/>".repeat(8)) });
+    let said = refused(out("avatar_design", many).await);
+    assert!(said.starts_with("this look's filters cost too much to draw (about ") && said.ends_with("\nNothing was changed."), "{said}");
+    assert_eq!(e.avatar(&tid).revision, before);
+
+    // An avatar the user turned off is not drawn for its session either.
+    turn_off(&e.state, &tid, now_ms()).unwrap();
+    assert_eq!(refused(out("avatar_status", json!({ "picture": true })).await), TURNED_OFF);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_picture_route_answers_a_png_to_the_session_alone() {
+    let e = env().await;
+    let tid = e.with_avatar();
+    let other = e.with_avatar();
+    call(&e, &tid, "avatar_design", figure()).await.unwrap();
+    let addr = serve(&e).await;
+    let own = token(&e, &tid);
+    let post = |bearer: String, body: &'static str| {
+        let url = format!("http://{addr}/api/hooks/avatar/{tid}/picture");
+        async move { reqwest::Client::new().post(url).bearer_auth(bearer).body(body).send().await.unwrap() }
+    };
+    let rest = post(own.clone(), "").await;
+    assert_eq!((rest.status().as_u16(), rest.headers()["content-type"].to_str().unwrap()), (200, "image/png"));
+    let rest = rest.bytes().await.unwrap();
+    png_size(&rest);
+    let strip = post(own.clone(), "{\"frames\": \"hop\", \"count\": 2}").await;
+    assert_eq!(strip.status().as_u16(), 200);
+    assert_eq!(png_size(&strip.bytes().await.unwrap()).1, preview::STRIP_FRAME_PX);
+    // Its keys and no others; a session's token opens only its own avatar.
+    let wrong = post(own.clone(), "{\"look\": true}").await;
+    assert_eq!(wrong.status().as_u16(), 400);
+    assert!(wrong.text().await.unwrap().contains("picture has no look"));
+    assert_eq!(post(token(&e, &other), "").await.status().as_u16(), 401);
 }
 
 // ---------------------------------------------------------------- the command
@@ -1254,6 +1370,21 @@ async fn the_command_drives_the_avatar_like_the_tools_do() {
     assert_eq!(ran(run(&["act", "hop", "--times", "2"], "").await), (0, "Playing hop 2 times.\n".to_string(), String::new()));
     let (code, out, _) = ran(run(&["status"], "").await);
     assert!(code == 0 && out.starts_with("{\n  \"note\": \"You have a live avatar: say the short version with your avatar say command, ask with your avatar ask command.\","), "{out}");
+    // A picture goes into the file the command names, and the command says what it shows.
+    let png = dir.path().join("avatar.png");
+    let (code, out, err) = ran(run(&["picture", png.to_str().unwrap(), "--frames", "hop", "--count", "2"], "").await);
+    assert_eq!((code, err.as_str()), (0, ""), "{out}");
+    assert!(out.starts_with("Picture written to ") && out.contains("moments of hop") && std::fs::read(&png).unwrap().starts_with(b"\x89PNG"), "{out}");
+    let (code, out, _) = ran(run(&["picture", png.to_str().unwrap(), "--pose", "-"], "{\"mouth\": 1}").await);
+    assert!(code == 0 && out.contains("in that pose"), "{out}");
+    // Without a name the picture goes to the temporary directory, and the command says where.
+    let (code, out, _) = ran(run(&["picture"], "").await);
+    let written = std::env::temp_dir().join("workbench-avatar-rest.png");
+    assert!(code == 0 && out.starts_with(&format!("Picture written to {}: your avatar at rest", written.display())), "{out}");
+    assert!(std::fs::read(&written).unwrap().starts_with(b"\x89PNG"));
+    let _ = std::fs::remove_file(&written);
+    let (code, _, err) = ran(run(&["picture", png.to_str().unwrap(), "--frames", "wink"], "").await);
+    assert!(code == 1 && err.contains("no animation \"wink\""), "{err}");
     let (code, out, _) = ran(run(&["status", "--look"], "").await);
     assert!(code == 0 && serde_json::from_str::<Value>(&out).unwrap()["avatar"]["design"]["svg"].is_string(), "{out}");
     let (code, out, err) = ran(run(&["guide"], "").await);
@@ -1279,7 +1410,7 @@ async fn the_command_drives_the_avatar_like_the_tools_do() {
     assert_eq!(ran(run(&["status"], "").await), (1, String::new(), "invalid agent token\n".to_string()));
 
     // No output of the command ever shows the token it sent.
-    assert_eq!(outputs.len(), 13);
+    assert_eq!(outputs.len(), 17);
     for (code, out, err) in &outputs {
         assert!(!out.contains(&own) && !err.contains(&own), "the token is in the output of a run that ended with {code}");
     }

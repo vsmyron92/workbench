@@ -53,13 +53,34 @@ A session's [avatar](avatar.md) is drawn and worded by the session, so everythin
 untrusted:
 
 - **The drawing never reaches the page as markup.** The server reads the session's SVG into a
-  closed, typed, bounded tree of shapes and stores only that; scripts, styles, images, links and
-  anything that reaches outside the drawing are refused. The browser builds the figure from that
-  tree with Workbench's own tables of elements and attributes, inside a fixed, clipped box of at
-  most 132 pixels (the box itself is not drawn), below Workbench's menus, dialogs and toasts and
-  never over the agents column; walking figures keep to the middle of the workspace window.
-  Flashing is limited (colour and opacity changes at least 0.17 seconds apart), and a figure that
-  costs too much to draw is held still.
+  closed, typed, bounded tree and stores only that: shapes, groups, short texts, copies of them
+  (`use`), gradients, clip paths, masks, filters of a fixed set of steps, and dashes. Every
+  reference in it is a bare id that must name an element of the same drawing, of the right kind:
+  a copy repeats only a part of this drawing that holds no copy itself, and a filter's steps only
+  blur, shift, colour, combine, add noise to or distort what is drawn. Scripts, styles, images
+  (also inside a filter), links, patterns, symbols, embedded HTML, event attributes and anything
+  that reaches outside the drawing are refused. The browser checks the tree again and builds the figure with Workbench's
+  own tables of elements and attributes, inside a fixed, clipped box of at most 132 pixels (the
+  box itself is not drawn), below Workbench's menus, dialogs and toasts and never over the agents
+  column; walking figures keep to the middle of the workspace window. Flashing is limited: colour
+  and opacity changes stand at least 0.17 seconds apart and never jump, spring or bounce, and
+  colours and opacities follow only the figure's walk, its turn and a drag, which change slowly,
+  in two values (three along the turn), never the pointer. Cost is limited: a drawing that would
+  be too costly to draw (filter work, masked, clipped, filtered or half-transparent layers, a
+  filter on a stretched part, very fine dashes) is refused before it is stored, since the browser
+  would pay that cost on every frame, and a figure that still costs too much is held still.
+- **Pictures for the session are drawn from the same tree.** So that a session can see what it
+  drew, Workbench renders its stored look to a PNG on the server. The renderer reads the stored
+  look again as untrusted data, writes the SVG it renders from its own tables of elements and
+  attributes (every value parsed and written again, ids printed only when they resolve inside the
+  drawing), and resolves nothing external: no files, no images, no network, and fonts only from
+  the system's sans-serif, a character it lacks left out rather than searched for in every font
+  file. It bounds the work: elements, copies and depth while it reads, and before anything is
+  drawn it costs the parsed drawing the way the renderer sizes its layers (filter work, layers,
+  the largest layer, dashes) and refuses a picture over any of them; a design call asks the same
+  of the look at rest. It draws on a thread of its own, at most two pictures at a time for all
+  sessions. A picture goes only to the session that asked for it, of its own avatar, and none is
+  drawn for an avatar you turned off.
 - **Text is one line of plain text.** A line, a question, a choice, the avatar's name and the
   words in its drawing lose line breaks and control characters, have the session's secrets
   masked, and are shown as text, never as Markdown or links. A refusal that quotes what the
@@ -103,7 +124,8 @@ untrusted:
   start). CLIs without Workbench's tools run `workbench avatar`, which sends the session's token
   only to this computer; in a dev container `curl` reads it from standard input, so it is on no
   command line.
-- **Everything is bounded:** the size of a drawing and of every text, lines and calls a minute,
+- **Everything is bounded:** the size of a drawing and of every text, its filters, copies, drives
+  and parts that move with another, lines and calls a minute (a picture counts as a status call),
   waits, sessions with an avatar. A refused call changes nothing and says which limit it met.
 
 ## What repositories can and cannot do

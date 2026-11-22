@@ -1,14 +1,12 @@
-// The server's two example looks (its golden files) and its limits, read from the server's
-// own sources: what the validator stores is what the browser accepts with equal content,
+// The server's example looks (its golden files) and its limits, read from the server's own
+// sources: what the validator stores is what the browser accepts with equal content,
 // compiles, and draws from its tables. The files are loaded with `?raw` from outside web/
 // (vite reads them from disk, tsc takes the type from vite/client), as the Confluence
-// converter's test loads its sample.
+// converter's test loads its sample; every `*.look.json` of the examples is one of them.
 
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import pipRaw from '../../../../../server/src/avatar/examples/pip.look.json?raw'
-import tockRaw from '../../../../../server/src/avatar/examples/tock.look.json?raw'
 import lookRs from '../../../../../server/src/avatar/look.rs?raw'
 import { resolves, stateList } from './builtin'
 import { defaultLook } from './defaultLook'
@@ -19,10 +17,13 @@ import { LIMITS, MORE_LIMITS, TOKENS, checkLook, cleanIdPrefix, faceViewBox, loo
 import { AVATAR_STATES } from './types'
 import type { Look, LookNode } from './types'
 
-const GOLDEN: readonly (readonly [string, string])[] = [
-  ['pip', pipRaw],
-  ['tock', tockRaw],
-]
+const FILES: Record<string, string> = import.meta.glob('../../../../../server/src/avatar/examples/*.look.json', { query: '?raw', import: 'default', eager: true })
+
+/** Every example look, by its name (the file name without `.look.json`), in the order of the names. */
+const GOLDEN: readonly (readonly [string, string])[] = Object.entries(FILES)
+  .map(([path, raw]): [string, string] => [path.replace(/^.*\//, '').replace(/\.look\.json$/, ''), raw])
+  .sort((a, b) => a[0].localeCompare(b[0]))
+const rawOf = (name: string): string => GOLDEN.find(([n]) => n === name)?.[1] ?? ''
 
 /** A golden file as the server would send it, checked. */
 function golden(raw: string): Look {
@@ -79,7 +80,38 @@ function elements(html: string): Element[] {
 }
 
 /** The tags a look may draw, and the root the app draws them in. */
-const TAGS = new Set(['svg', 'g', 'path', 'circle', 'ellipse', 'rect', 'line', 'polyline', 'polygon', 'text', 'defs', 'linearGradient', 'radialGradient', 'stop', 'clipPath'])
+const TAGS = new Set([
+  'svg',
+  'g',
+  'path',
+  'circle',
+  'ellipse',
+  'rect',
+  'line',
+  'polyline',
+  'polygon',
+  'text',
+  'defs',
+  'linearGradient',
+  'radialGradient',
+  'stop',
+  'clipPath',
+  'use',
+  'mask',
+  'filter',
+  'feGaussianBlur',
+  'feDropShadow',
+  'feOffset',
+  'feFlood',
+  'feColorMatrix',
+  'feComposite',
+  'feBlend',
+  'feMerge',
+  'feMergeNode',
+  'feMorphology',
+  'feTurbulence',
+  'feDisplacementMap',
+])
 
 /** Every attribute a look may put on an element, by the name the DOM gets. `viewBox` is the root's, set by the app. */
 const ATTRS = new Set([
@@ -92,12 +124,17 @@ const ATTRS = new Set([
   'stroke-linecap',
   'stroke-linejoin',
   'stroke-miterlimit',
+  'stroke-dasharray',
+  'stroke-dashoffset',
   'fill-opacity',
   'stroke-opacity',
   'opacity',
   'fill-rule',
   'clip-rule',
   'clip-path',
+  'mask',
+  'filter',
+  'href',
   'd',
   'cx',
   'cy',
@@ -127,10 +164,39 @@ const ATTRS = new Set([
   'stop-color',
   'stop-opacity',
   'clipPathUnits',
+  'maskUnits',
+  'maskContentUnits',
+  'mask-type',
+  'filterUnits',
+  'primitiveUnits',
+  'color-interpolation-filters',
+  'in',
+  'in2',
+  'result',
+  'stdDeviation',
+  'dx',
+  'dy',
+  'flood-color',
+  'flood-opacity',
+  'type',
+  'values',
+  'operator',
+  'k1',
+  'k2',
+  'k3',
+  'k4',
+  'mode',
+  'radius',
+  'baseFrequency',
+  'numOctaves',
+  'seed',
+  'scale',
+  'xChannelSelector',
+  'yChannelSelector',
 ])
 
-/** The attributes that may hold a reference to another element. */
-const REFERRING = new Set(['fill', 'stroke', 'clip-path'])
+/** The attributes that may hold a reference to another element, as `url(#…)`; a `use` names its part as `#…`. */
+const REFERRING = new Set(['fill', 'stroke', 'clip-path', 'mask', 'filter'])
 
 function countNodes(nodes: readonly LookNode[]): number {
   let n = 0
@@ -152,6 +218,7 @@ function expectDrawnFromTables(look: Look, prefix: string, tokens: boolean) {
     if (el.tag !== 'text') expect(el.text.trim(), `text in <${el.tag}>`).toBe('')
     for (const [name, value] of el.attrs) {
       expect(ATTRS.has(name), `${el.tag} ${name}`).toBe(true)
+      if (name === 'href') expect(el.tag, `href on <${el.tag}>`).toBe('use')
       if (name === 'id') {
         expect(value.startsWith(clean), `id ${value}`).toBe(true)
         expect(ids.has(value), `id ${value} twice`).toBe(false)
@@ -172,6 +239,11 @@ function expectDrawnFromTables(look: Look, prefix: string, tokens: boolean) {
         expect(m, `${el.tag} ${name}="${value}"`).not.toBeNull()
         expect(ids.has(m?.[1] ?? ''), `${value} resolves`).toBe(true)
         references++
+      } else if (name === 'href') {
+        const m = /^#([A-Za-z0-9_-]+)$/.exec(value)
+        expect(m, `${el.tag} href="${value}"`).not.toBeNull()
+        expect(ids.has(m?.[1] ?? ''), `${value} resolves`).toBe(true)
+        references++
       } else if (value.includes('var(')) {
         // Only the app's own default look is painted with the theme's tokens.
         expect(tokens && token.has(value), `${el.tag} ${name}="${value}"`).toBe(true)
@@ -186,6 +258,11 @@ function expectDrawnFromTables(look: Look, prefix: string, tokens: boolean) {
 // ---------------------------------------------------------------- the golden looks
 
 describe('the server’s example looks', () => {
+  it('are there: the two of the start and every one added since', () => {
+    expect(GOLDEN.map(([name]) => name)).toEqual(expect.arrayContaining(['pip', 'tock']))
+    for (const [name, raw] of GOLDEN) expect(raw.length, name).toBeGreaterThan(100)
+  })
+
   it('are accepted with equal content', () => {
     for (const [name, raw] of GOLDEN) {
       const stored: unknown = JSON.parse(raw)
@@ -208,19 +285,22 @@ describe('the server’s example looks', () => {
       for (const animation of Object.keys(look.animations)) {
         expect(resolves(look, animation), `${name} ${animation}`).toBe(true)
         // It moves something: a clip of it changes the pose of at least one part.
-        const rest = sample(c, [], 0, null, null)
+        const rest = sample(c, [], 0)
         let moved = false
         for (const t of [120, 400, 900, 1700]) {
-          for (const [id, pose] of sample(c, [{ name: animation, startMs: 0, weight: 1, mode: 'once', times: 1 }], t, null, null)) {
+          for (const [id, pose] of sample(c, [{ name: animation, startMs: 0, weight: 1, mode: 'once', times: 1 }], t)) {
             const was = rest.get(id)
             if (pose.transform !== was?.transform || [...pose.attrs].some(([k, v]) => was?.attrs.get(k) !== v)) moved = true
           }
         }
         expect(moved, `${name} ${animation} moves nothing`).toBe(true)
       }
+      // A look with roles has something to play in every state; one without has only its own animations.
+      const roled = Object.keys(look.roles).length > 0
       for (const state of AVATAR_STATES) {
         const list = stateList(look, state)
-        expect(list.length, `${name} ${state}`).toBeGreaterThan(0)
+        if (roled) expect(list.length, `${name} ${state}`).toBeGreaterThan(0)
+        else for (const entry of list) expect(Object.hasOwn(look.animations, entry), `${name} ${state} ${entry}`).toBe(true)
         for (const entry of list) expect(resolves(look, entry), `${name} ${state} ${entry}`).toBe(true)
       }
     }
@@ -231,15 +311,18 @@ describe('the server’s example looks', () => {
       const look = golden(raw)
       // React's useId gives ":r5:": the prefix is cleaned before it is printed.
       const drawn = expectDrawnFromTables(look, `:r5:${name}-`, false)
-      expect(drawn.references, name).toBeGreaterThan(0)
+      // Pip and Tock paint with gradients and clip; every other example is held to the same rules, whatever it refers to.
+      if (name === 'pip' || name === 'tock') expect(drawn.references, name).toBeGreaterThan(0)
       expect(drawn.html).not.toContain(':r5:')
-      expect(drawn.html).toContain(`id="r5${name}-mouth"`)
+      const first = [...lookIndex(look).keys()][0]
+      expect(drawn.html).toContain(`id="r5${name}-${first}"`)
       // Two figures of one look on a page share no id.
       const other = expectDrawnFromTables(look, 'b-', false)
       for (const id of other.ids) expect(drawn.ids.has(id), id).toBe(false)
     }
+    expect(expectDrawnFromTables(golden(rawOf('pip')), 'p-', false).html).toContain('id="p-mouth"')
     // Pip's two letters (it snores) are text nodes.
-    expect(expectDrawnFromTables(golden(pipRaw), 'p-', false).html.match(/<text [^>]*>[^<]+<\/text>/g)).toHaveLength(2)
+    expect(expectDrawnFromTables(golden(rawOf('pip')), 'p-', false).html.match(/<text [^>]*>[^<]+<\/text>/g)).toHaveLength(2)
   })
 
   it('give the engine every part it asks for, under the prefix they were drawn with', () => {
@@ -257,11 +340,16 @@ describe('the server’s example looks', () => {
         },
         { state: 'idle', reducedMotion: false, idPrefix: 'g1-' },
       )
-      expect(asked.length, name).toBeGreaterThan(5)
+      expect(asked.length, name).toBeGreaterThan(name === 'pip' || name === 'tock' ? 5 : 0)
       for (const id of asked) expect(ids.has(`g1-${id}`), `${name} ${id}`).toBe(true)
+      // Walking, turning, held and let go: every input the overlay feeds.
+      let walk = { pace: 0, turn: 0, held: 0 }
+      handle.setInputs(() => walk)
       for (const state of AVATAR_STATES) {
         handle.setState(state)
-        f.run(600)
+        f.run(300)
+        walk = { pace: walk.pace === 0 ? 1 : 0, turn: walk.turn === 1 ? -1 : 1, held: walk.held === 0 ? 1 : 0 }
+        f.run(300)
       }
       expect(handle.frozen(), name).toBe(false)
       handle.detach()
@@ -278,7 +366,8 @@ describe('the server’s example looks', () => {
       let strings = 0
       for (let t = 0; t <= 9000; t += 61) {
         const clips: Clip[] = names.map((n, i) => ({ name: n, startMs: i * 70, weight: ((t + i * 17) % 100) / 100, mode: (['state', 'once', 'hold', 'loop'] as const)[(i + Math.floor(t / 800)) % 4], times: 1 + (i % 3) }))
-        for (const [id, pose] of sample(c, clips, t, (t % 500) / 500, [Math.sin(t), Math.cos(t)])) {
+        const inputs = { mouth: (t % 500) / 500, gaze: [Math.sin(t), Math.cos(t)] as const, pace: (t % 700) / 700, turn: Math.sin(t / 300), held: (t % 900) / 900 }
+        for (const [id, pose] of sample(c, clips, t, inputs)) {
           if (pose.transform !== undefined) {
             strings++
             expect(pose.transform, `${name} ${id}`).toMatch(/^[a-zA-Z0-9 ().-]+$/)
@@ -294,7 +383,7 @@ describe('the server’s example looks', () => {
     }
   })
 
-  it('have a square face inside their viewBox', () => {
+  it('have a square face inside their viewBox, around the head when they name one', () => {
     for (const [name, raw] of GOLDEN) {
       const look = golden(raw)
       const [x, y, w, h] = faceViewBox(look)
@@ -306,7 +395,7 @@ describe('the server’s example looks', () => {
       expect(x + w, name).toBeLessThanOrEqual(look.viewBox[0] + look.viewBox[2])
       expect(y + h, name).toBeLessThanOrEqual(look.viewBox[1] + look.viewBox[3])
       // It shows the head, not the whole figure.
-      expect(w, name).toBeLessThan(look.viewBox[2])
+      if (look.roles.head !== undefined) expect(w, name).toBeLessThan(look.viewBox[2])
     }
   })
 })
@@ -327,7 +416,7 @@ describe('the limits', () => {
   for (const m of lookRs.matchAll(/^pub const (MAX_[A-Z0-9_]+): usize = (\d+);/gm)) consts.set(m[1], Number(m[2]))
 
   it('are read from look.rs, every one of them', () => {
-    expect(consts.size).toBeGreaterThanOrEqual(17)
+    expect(consts.size).toBeGreaterThanOrEqual(22)
     // No limit is written in a form this test cannot read.
     expect(lookRs.match(/^pub const MAX_/gm)).toHaveLength(consts.size)
     for (const [name, value] of consts) expect(Number.isSafeInteger(value) && value > 0, name).toBe(true)
@@ -362,6 +451,11 @@ describe('the limits', () => {
       stateNames: 'MAX_STATE_NAMES',
       mouthDrives: 'MAX_MOUTH_DRIVES',
       transforms: 'MAX_TRANSFORMS',
+      filters: 'MAX_FILTERS',
+      filterPrimitives: 'MAX_FILTER_PRIMITIVES',
+      dashes: 'MAX_DASHES',
+      parents: 'MAX_PARENTS',
+      drives: 'MAX_DRIVES',
     }
     expect(Object.keys(MORE_LIMITS).sort()).toEqual(Object.keys(pairs).sort())
     for (const [key, name] of Object.entries(pairs)) {
@@ -377,6 +471,8 @@ describe('the limits', () => {
       expect(Object.keys(look.animations).length, name).toBeLessThanOrEqual(LIMITS.animations)
       expect(look.mouth.length, name).toBeLessThanOrEqual(MORE_LIMITS.mouthDrives)
       for (const list of Object.values(look.states)) expect(list?.length ?? 0, name).toBeLessThanOrEqual(MORE_LIMITS.stateNames)
+      expect(Object.keys(look.parents ?? {}).length, name).toBeLessThanOrEqual(MORE_LIMITS.parents)
+      expect((look.drives ?? []).length, name).toBeLessThanOrEqual(MORE_LIMITS.drives)
     }
   })
 })

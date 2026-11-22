@@ -96,7 +96,7 @@ In a frame the choice counts from 1; in the tool's answer `choice` counts from 0
 - `linesWaiting`: lines no device took up yet. "Not said: … lines are still waiting to be spoken. Speak less often."
 - `askCallsPerMinute`: every ask call, waits and withdrawals included: wait longer in one call instead.
 - `designsPerMinute`: "Wait a minute, then send one complete call."
-- `gesturesPerMinute` and `statusCallsPerMinute`: play fewer gestures; go on with what the last status said.
+- `gesturesPerMinute` and `statusCallsPerMinute`: play fewer gestures; go on with what the last status said. A picture asked for counts as a status call.
 - `sayChars`, `askChars`, `choices`, `choiceChars`, `nameChars`: sizes. "the line has … characters: at most …".
 - `lineUnheardAfterSeconds` and `heldGestureSeconds`: a line no device took up in that time is unheard; a held gesture ends by itself.
 
@@ -114,9 +114,12 @@ workbench avatar ask --cancel
 workbench avatar act takeoff --mode hold
 workbench avatar act --stop all
 workbench avatar status --look
+workbench avatar picture
+workbench avatar picture --frames takeoff --count 6
+workbench avatar picture --pose pose.json
 ```
 
-Bodies are files: never put JSON or artwork into a shell string. `design -` reads standard input, and a file that starts with `<` is the artwork alone. say also takes `--lang` and `--wait`, ask `--no-free-text` and prints JSON, act `--times`. A line with an apostrophe goes in double quotes; keep `$`, backticks and `!` out of lines, which they do not belong in anyway. Exit status 0 is done; 1 is refused, or no answer in time, with the reason on standard error; 2 means nothing was sent (not inside a session, Workbench not reachable, or a file that cannot be read): the message says which.
+Bodies are files: never put JSON or artwork into a shell string. `design -` reads standard input, and a file that starts with `<` is the artwork alone. say also takes `--lang` and `--wait`, ask `--no-free-text` and prints JSON, act `--times`. picture writes a PNG of the avatar to the system's temporary directory (`workbench-avatar-rest.png`, `-frames.png`, `-pose.png`), or to a file it names, and prints where it is and what it shows: at rest without options, one of your own animations as a row of moments with `--frames`, the figure in a pose with `--pose` (a file holding, for example, `{"held": 1}` or `{"animation": "takeoff", "at": 0.4}`). Open the file if your CLI can show you an image: the design answer of the command and of curl carries no picture. A line with an apostrophe goes in double quotes; keep `$`, backticks and `!` out of lines, which they do not belong in anyway. Exit status 0 is done; 1 is refused, or no answer in time, with the reason on standard error; 2 means nothing was sent (not inside a session, Workbench not reachable, or a file that cannot be read): the message says which.
 
 In a dev container the calls are HTTP. C stands for
 
@@ -133,6 +136,7 @@ C -H 'Content-Type: text/plain' --data-binary 'One short line.' "U/say?gesture=t
 C --data-binary @ask.json "U/ask"
 C --data-binary @act.json "U/act"
 C "U/status?look=1"
+C --data-binary @picture.json -o "${TMPDIR:-/tmp}/avatar.png" "U/picture"
 ```
 
-The token travels in a header that the shell's own printf writes to curl's standard input, so it is in no command line: never put it after `-H`, in a URL or in a file. `ask.json` holds the fields of the tool (`{"text", "choices", "freeText", "waitSeconds"}`, then `{"askId"}` or `{"cancel": true}`), `act.json` `{"play", "mode", "times"}` or `{"stop"}`. A refusal answers an HTTP error whose body is `{"error": {"code", "message"}}`. A curl older than 7.76 has no `--fail-with-body`: leave it out. Without curl, make the same request with python3's urllib.request and the header built from `os.environ` inside the script.
+The token travels in a header that the shell's own printf writes to curl's standard input, so it is in no command line: never put it after `-H`, in a URL or in a file. `ask.json` holds the fields of the tool (`{"text", "choices", "freeText", "waitSeconds"}`, then `{"askId"}` or `{"cancel": true}`), `act.json` `{"play", "mode", "times"}` or `{"stop"}`, `picture.json` `{}` for the avatar at rest, `{"frames": "takeoff", "count": 6}` or `{"pose": {"held": 1}}`; the answer is the PNG. A refusal answers an HTTP error whose body is `{"error": {"code", "message"}}`. A curl older than 7.76 has no `--fail-with-body`: leave it out. Without curl, make the same request with python3's urllib.request and the header built from `os.environ` inside the script.

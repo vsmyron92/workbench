@@ -13,6 +13,7 @@ import { DESIGNING, DESIGN_NOT_SHOWN, FACE_PX, FIGURE_PX, FIGURE_PX_PHONE, FIGUR
 import type { FigureButtonProps, FigureProps } from './Figure'
 import { defaultLook } from './lib/defaultLook'
 import { compile } from './lib/engine'
+import { richLook, wire } from './lib/fixtures'
 import { faceViewBox } from './lib/look'
 import { AVATAR_STATES } from './lib/types'
 import type { AvatarState, Look, SessionTone } from './lib/types'
@@ -177,6 +178,32 @@ describe('Figure', () => {
     expect(b).toContain('--wb-av-size:132px')
     expect(b).toContain('url(#b-shell)')
     expect(a).not.toContain('id="b-')
+  })
+
+  it('draws a design with a mask, filters, uses and dashes, every reference under its own prefix', () => {
+    const raw = wire(richLook())
+    expect(drawnLook(raw, 't1')).toMatchObject({ own: true, rejected: false })
+    const html = draw({ look: raw, idPrefix: ':r9:' })
+    expect(html).toContain('data-drawn="own"')
+    expect(html).toContain('<use id="r9leafL" href="#r9leaf"')
+    expect(html).toContain('mask="url(#r9vignette)" filter="url(#r9soft)"')
+    expect(html).toContain('<feGaussianBlur in="SourceAlpha" stdDeviation="2" result="blur">')
+    expect(html).toContain('stroke-dasharray="6 3"')
+    expect(html).not.toContain(':r9:')
+    expect(html.match(/ style=/g)).toHaveLength(1)
+    expect(html.match(/ class=/g)).toHaveLength(2)
+    expect(html).not.toMatch(/ on[a-z]+=/i)
+    // A use of what is not there refuses the whole design: the default look is drawn, and said to be.
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const broken = wire(richLook()) as { nodes: unknown[] }
+    broken.nodes.push({ tag: 'use', attrs: { useRef: 'gone' } })
+    expect(drawnLook(broken, 't1')).toMatchObject({ own: false, rejected: true })
+  })
+
+  it('takes the walk through the engine only: a reader changes nothing of what is drawn', () => {
+    const raw = wire(richLook())
+    expect(draw({ look: raw, inputs: () => ({ pace: 1, turn: -1, held: 1 }) })).toBe(draw({ look: raw }))
+    expect(draw({ look: raw, inputs: null })).toBe(draw({ look: raw }))
   })
 
   it('draws a still look for the face: only the head, without an engine', () => {

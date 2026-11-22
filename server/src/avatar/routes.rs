@@ -27,6 +27,8 @@
 //! * `POST …/design`: the arguments of `avatar_design` as JSON, or the artwork alone
 //!   (`Content-Type: image/svg+xml`, or a body that starts with `<`) → the design answer as
 //!   `text/plain`.
+//! * `POST …/picture`: nothing or `{}` (the avatar at rest), `{pose}` or `{frames, count?}` as
+//!   `avatar_status` takes them → the picture as `image/png`. It counts as a status call.
 //! * `POST …/say {text, gesture?, lang?, wait?}`, or the line itself as `text/plain` with
 //!   `gesture`, `lang` and `wait` as query parameters → `{lineId, outcome?, voice?, note}`.
 //! * `POST …/ask`: the arguments of `avatar_ask` → its answer; the request is held for the wait.
@@ -51,7 +53,7 @@ use serde_json::{Value, json};
 
 use super::brief;
 use super::device::{self, ClaimRequest, HeardRequest, ReplyRequest};
-use super::session::{self, ActRequest, AskArgs, Call, Pass, SayRequest, StatusRequest};
+use super::session::{self, ActRequest, AskArgs, Call, Pass, PictureRequest, SayRequest, StatusRequest};
 use super::store::{self, AvatarInfo, AvatarList, MAX_WAIT_HOOK_SECS};
 use super::{Via, look, tools};
 use crate::app::AppState;
@@ -77,6 +79,7 @@ pub fn router() -> Router<AppState> {
         .route(&format!("{hooks}/guide"), get(hook_guide))
         .route(&format!("{hooks}/status"), get(hook_status))
         .route(&format!("{hooks}/design"), post(hook_design))
+        .route(&format!("{hooks}/picture"), post(hook_picture))
         .route(&format!("{hooks}/say"), post(hook_say))
         .route(&format!("{hooks}/ask"), post(hook_ask))
         .route(&format!("{hooks}/act"), post(hook_act))
@@ -265,7 +268,19 @@ async fn hook_design(State(state): State<AppState>, Path(tid): Path<String>, hea
     // of a design starts with.
     let artwork = media(&headers) == "image/svg+xml" || unmarked(&body).iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'<');
     let args = if artwork { json!({ "svg": text_of(&body, "the artwork")? }) } else { json_of(&body, "the design as a JSON object, or the artwork alone (it starts with <svg)")? };
-    Ok(plain(tools::design(&state, pass, args).await?.text))
+    Ok(plain(format!("{}\nTo see it, ask for a picture and open the file.", tools::design(&state, pass, args).await?.text)))
+}
+
+/// A picture of the session's avatar as a PNG: the body is empty or `{}` for the look at rest,
+/// or `{pose}` or `{frames, count?}` as `avatar_status` takes them. It counts as a status call.
+async fn hook_picture(State(state): State<AppState>, Path(tid): Path<String>, headers: HeaderMap, body: Bytes) -> ApiResult<Response> {
+    let pass = enter(&state, &tid, &headers, Call::Status)?;
+    let mask = pass.mask(&state);
+    let args = if body.iter().all(u8::is_ascii_whitespace) { json!({}) } else { json_of(&body, "{} for the avatar at rest, {\"pose\": {…}} or {\"frames\": \"<animation>\"}")? };
+    session::fields(&args, "picture", &["pose", "frames", "count"], &mask)?;
+    let wanted = PictureRequest::parse(&args, &mask)?.unwrap_or_else(PictureRequest::rest);
+    let png = tools::picture(&state, &tid, wanted).await?;
+    Ok(([(header::CONTENT_TYPE, "image/png")], png).into_response())
 }
 
 async fn hook_say(State(state): State<AppState>, Path(tid): Path<String>, headers: HeaderMap, uri: Uri, body: Bytes) -> ApiResult<Json<session::SayAnswer>> {

@@ -4,4 +4,4 @@
 - `avatar_say {text, gesture?, lang?, wait?}`: one line. It does not wait: send it beside your other tool calls.
 - `avatar_ask {text, choices?, freeText?, waitSeconds?}`: waits up to 50 s; then `{askId}` waits again, `{cancel: true}` withdraws.
 - `avatar_act {play, mode?, times?}` or `{stop}`: a gesture; mode hold or loop stays until stop.
-- `avatar_status {look?}`: parts, animation names, the open question, your last lines.
+- `avatar_status {look?}`: parts, animation names, the open question, your last lines. With `picture: true`, `pose: {…}` or `frames: "<animation>"` it shows you the avatar.

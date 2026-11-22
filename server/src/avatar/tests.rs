@@ -1862,6 +1862,47 @@ async fn status_begins_with_what_to_do_and_describes_the_avatar() {
     assert_eq!(report.design, Some(json!({ "name": "", "voice": {} })));
 }
 
+#[tokio::test]
+async fn the_answer_and_the_status_name_the_parents_and_the_drives() {
+    let e = env().await;
+    let tid = e.with_avatar();
+    let mut design = figure();
+    design["parents"] = json!({ "arm": "face" });
+    design["drives"] = json!([
+        { "input": "lookX", "target": "face", "prop": "rotate", "values": [-8, 8] },
+        { "input": "turn", "target": ["arm", "pupil"], "prop": "opacity", "values": [1, 0.5, 1] }
+    ]);
+    design["animations"]["flash"] = json!({ "duration": 1, "tracks": [{ "target": "arm", "prop": "fillOpacity", "values": [1, 0.2] }] });
+    let drawn = e.design(&tid, design, T0).unwrap();
+    let answer: Vec<&str> = drawn.text.lines().collect();
+    // The part line names the part it moves with; a line lists the drives; usage counts both.
+    assert!(answer.contains(&"arm rect 140 100 12 40 pivot 146 100 parent face"), "{}", drawn.text);
+    assert!(answer.contains(&"Drives: lookX moves face rotate; turn moves arm, pupil opacity."), "{}", drawn.text);
+    let usage = answer.iter().find(|line| line.starts_with("Usage: ")).unwrap();
+    assert!(usage.ends_with(" of 32 KiB, 5 of 300 elements, 5 of 32 animations, 1 of 64 parents, 2 of 16 drives."), "{usage}");
+
+    let pass = gate(&e.state, &tid, Call::Status, Via::Tools, T0 + 1).unwrap();
+    let report = status(&e.state, &pass, StatusRequest { guide: false, look: true }).unwrap();
+    let json: Value = serde_json::from_str(&report.text()).unwrap();
+    let avatar = &json["avatar"];
+    assert!(avatar["parts"].as_array().unwrap().contains(&json!("arm rect 140 100 12 40 pivot 146 100 parent face")), "{}", avatar["parts"]);
+    assert_eq!(avatar["drives"], json!(["lookX moves face rotate", "turn moves arm, pupil opacity"]));
+    let limits = &json["limits"];
+    assert_eq!((&limits["filters"], &limits["primitivesPerFilter"], &limits["dashes"], &limits["parents"], &limits["drives"]), (&json!(8), &json!(8), &json!(8), &json!(64), &json!(16)));
+    // The stored design as a design call carries them, and sent again it is the same design.
+    let stored = avatar["design"].clone();
+    assert_eq!((&stored["parents"], stored["drives"].as_array().map(Vec::len)), (&json!({ "arm": "face" }), Some(2)));
+    assert!(e.design(&tid, stored, T0 + 2).unwrap().text.starts_with("Nothing to save"));
+    // A look without them reads as before: no drives line, no drives in the status.
+    let plain = e.with_avatar();
+    e.design(&plain, figure(), T0).unwrap();
+    let pass = gate(&e.state, &plain, Call::Status, Via::Tools, T0 + 1).unwrap();
+    let json: Value = serde_json::from_str(&status(&e.state, &pass, StatusRequest { guide: false, look: true }).unwrap().text()).unwrap();
+    assert!(json["avatar"].get("drives").is_none() && json["avatar"]["design"].get("parents").is_none() && json["avatar"]["design"].get("drives").is_none());
+    // A gesture played several times names the opacity of fill that would flash.
+    assert_eq!(e.act(&tid, ActRequest { play: Some("flash".into()), times: Some(2), ..Default::default() }, T0 + 3).unwrap_err().message, "flash cannot repeat: its fillOpacity ends on another value than it starts with. Play it once, or close the track.");
+}
+
 // ---------------------------------------------------------------- act
 
 #[tokio::test]

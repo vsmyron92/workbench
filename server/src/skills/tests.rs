@@ -1088,7 +1088,7 @@ fn json_fences(text: &str) -> Vec<String> {
 
 /// The keys only a design call has: a JSON example that holds one of them is a design call (the
 /// arguments of say, ask, act and status have none of them).
-const DESIGN_ONLY: [&str; 8] = ["svg", "pivots", "roles", "animations", "states", "mouth", "gaze", "keep"];
+const DESIGN_ONLY: [&str; 10] = ["svg", "pivots", "parents", "roles", "animations", "states", "drives", "mouth", "gaze", "keep"];
 
 /// A design the avatar skill shows is one a session may send as it stands: the validator accepts it
 /// without a refusal and without a single warning, as it does the guide's own example. A call
@@ -1130,6 +1130,9 @@ fn every_design_in_the_avatar_skill_is_accepted_without_a_warning() {
 fn design_accepted(path: &str, current: Option<&crate::avatar::look::Design>, call: &Value) -> crate::avatar::look::Applied {
     let applied = crate::avatar::look::apply(current, call).unwrap_or_else(|problems| panic!("{path}: the design is refused:\n{}\n{call}", crate::avatar::look::message(&problems)));
     assert!(applied.warnings.is_empty(), "{path}: the design has warnings:\n{}\n{call}", applied.warnings.join("\n"));
+    if let Some(look) = &applied.design.look {
+        crate::avatar::affordable(look).unwrap_or_else(|why| panic!("{path}: the design is refused before it is stored: {why}\n{call}"));
+    }
     applied
 }
 

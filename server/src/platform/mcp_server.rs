@@ -13,7 +13,8 @@
 //!   the body. They may call `server/discover`.
 //!
 //! Tool failures are *results* with `isError: true` (the model can react);
-//! malformed requests are JSON-RPC errors.
+//! malformed requests are JSON-RPC errors. A tool's pictures (`ToolOutput::Images`)
+//! follow its text as `image` content blocks (base64 PNG).
 //!
 //! Auth: an agent token (`WORKBENCH_AGENT_TOKEN`, bound to one terminal) or the
 //! master token as `Authorization: Bearer`. With the master token a caller may
@@ -533,22 +534,34 @@ async fn call_tool(state: &AppState, caller: &Caller, params: Map<String, Value>
         .and_then(Value::as_str)
         .ok_or((INVALID_PARAMS, "tools/call needs params.name".to_string()))?
         .to_string();
-    let mut args = match params.get("arguments") {
+    let args = match params.get("arguments") {
         None | Some(Value::Null) => Map::new(),
         Some(Value::Object(m)) => m.clone(),
         Some(_) => return Err((INVALID_PARAMS, "arguments must be an object".into())),
     };
     let tools = state.platform.tools();
     let tool = tools.iter().find(|t| t.name == name).ok_or((INVALID_PARAMS, format!("Unknown tool: {name}")))?;
+    Ok(run_tool(state, caller, tool, args).await)
+}
 
+/// One call of a tool: its answer as the result of `tools/call` (the text, then its pictures),
+/// and the Activity record and `mcp.call` event made from its arguments and its error.
+async fn run_tool(state: &AppState, caller: &Caller, tool: &McpTool, mut args: Map<String, Value>) -> Value {
+    let name = tool.name.clone();
     let ctx = caller.ctx(state);
     let summary = summary_of(state, ctx.terminal_id.as_deref(), &mut args);
     let started = Instant::now();
     let task = tokio::spawn((tool.handler)(state.clone(), ctx.clone(), Value::Object(args)));
     let _abort = AbortOnDrop(task.abort_handle());
+    // Pictures go to the session after the text; everything else here works from the text.
+    let mut images: Vec<Vec<u8>> = vec![];
     let outcome: Result<String, String> = match tokio::time::timeout(MAX_TOOL_TIME, task).await {
         Ok(Ok(Ok(ToolOutput::Text(t)))) => Ok(t),
         Ok(Ok(Ok(ToolOutput::Json(v)))) => Ok(serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())),
+        Ok(Ok(Ok(ToolOutput::Images { text, png }))) => {
+            images = png;
+            Ok(text)
+        }
         Ok(Ok(Err(e))) => Err(e.message),
         Ok(Err(join)) if join.is_panic() => {
             tracing::error!(tool = name, "mcp tool panicked");
@@ -596,7 +609,9 @@ async fn call_tool(state: &AppState, caller: &Caller, params: Map<String, Value>
         Ok(t) => (t, false),
         Err(e) => (e, true),
     };
-    Ok(json!({ "content": [{ "type": "text", "text": cap_output(text) }], "isError": is_error }))
+    let mut content = vec![json!({ "type": "text", "text": cap_output(text) })];
+    content.extend(images.iter().map(|png| json!({ "type": "image", "data": base64::engine::general_purpose::STANDARD.encode(png), "mimeType": "image/png" })));
+    json!({ "content": content, "isError": is_error })
 }
 
 fn cap_output(text: String) -> String {
@@ -1164,5 +1179,54 @@ mod tests {
         let summary = summary_of(state, Some(&tid), &mut args);
         assert!(summary.ends_with(&format!("({} chars)", SUMMARY_LOOK + 17)) && !summary.contains("s3cr3t"), "{summary}");
         assert_eq!(args["text"], json!(long));
+    }
+
+    /// `ToolOutput::Images`: the session reads the text first, then each picture as an `image`
+    /// block of base64 PNG. A failed call of the same tool is its error text alone. The Activity
+    /// record and `mcp.call` are made from the arguments and the error, as for any call, and the
+    /// session's secrets are masked there.
+    #[tokio::test]
+    async fn pictures_follow_the_text_and_an_error_stays_text() {
+        const SECRET: &str = "hunter2hunter2hunter2";
+        let app = testutil::app().await;
+        let state = &app.state;
+        let tid = state.terminals.insert_test_agent(None, json!({})).id;
+        state.terminals.get(&tid).unwrap().redact.lock().push(crate::secrets::Secret::from_value(SECRET.into()));
+        let pictures = crate::mcp::tool("test_pictures", "Draws two pictures.", json!({ "type": "object" }), false, |_, _, args: Value| async move {
+            if let Some(why) = args.get("fail").and_then(Value::as_str) {
+                return Err(crate::error::ApiError::bad_request(format!("no pictures: {why}")));
+            }
+            Ok(ToolOutput::Images { text: "Two pictures: light, then dark.".into(), png: vec![b"\x89PNG\r\n\x1a\none".to_vec(), b"\x89PNG\r\n\x1a\ntwo".to_vec()] })
+        });
+        let caller = Caller { terminal_id: Some(tid.clone()), project_hint: None };
+        let mut events = state.events.subscribe();
+        let args = |v: Value| v.as_object().unwrap().clone();
+
+        let out = run_tool(state, &caller, &pictures, args(json!({ "look": format!("key {SECRET}") }))).await;
+        let png = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert_eq!(
+            out,
+            json!({ "content": [
+                { "type": "text", "text": "Two pictures: light, then dark." },
+                { "type": "image", "data": png(b"\x89PNG\r\n\x1a\none"), "mimeType": "image/png" },
+                { "type": "image", "data": png(b"\x89PNG\r\n\x1a\ntwo"), "mimeType": "image/png" }
+            ], "isError": false })
+        );
+
+        let out = run_tool(state, &caller, &pictures, args(json!({ "fail": format!("the look {SECRET} is off") }))).await;
+        assert_eq!(out, json!({ "content": [{ "type": "text", "text": format!("no pictures: the look {SECRET} is off") }], "isError": true }));
+
+        let calls = state.platform.activity.calls(10);
+        assert_eq!(calls.iter().map(|c| (c.tool.as_str(), c.ok)).collect::<Vec<_>>(), [("test_pictures", false), ("test_pictures", true)], "newest first");
+        assert_eq!(calls[1].summary, "look=\"key ••••••\"");
+        assert_eq!(calls[0].error.as_deref(), Some("no pictures: the look •••••• is off"));
+        let mut announced = vec![];
+        while let Ok(event) = events.try_recv() {
+            if event.kind == "mcp.call" {
+                assert!(!event.data.to_string().contains("hunter2") && !event.data.to_string().contains("image/png"), "{}", event.data);
+                announced.push(event.data["ok"].clone());
+            }
+        }
+        assert_eq!(announced, [json!(true), json!(false)]);
     }
 }

@@ -63,6 +63,7 @@ server/            Rust crate `workbench`
   src/data/          SLICE data: the data viewer: series (analog, digital, events), lane plots, followed capture files, MCP data_* tools
   src/skills/        SLICE skills: which skills each agent CLI can load (folders, plugins, settings, the newest session's listing), what they cost, and Workbench's own optional skills (install, update, remove)
   src/avatar/        SLICE avatar: a session's live avatar: records and their files (store), the look validator (look: an SVG subset into a closed, typed tree),
+                     pictures of a look for the session (preview: the stored look drawn as a PNG with resvg),
                      one line of plain text (text), what a session may do (session) and what only devices do (device), device and hook routes,
                      MCP avatar_* tools, `workbench avatar` (cli), the brief and the guide (brief, guide*.md)
   src/gitlab/        SLICE gitlab: MRs, pipelines, jobs, envs, issues, registry
@@ -196,7 +197,7 @@ A project is a directory, and it may hold **several git repositories**: a folder
 - **Voice input** uses the browser's own speech recognition: the microphone permission is the browser's, Workbench receives no audio and has no endpoint for it, and a transcript is only text in the new-session prompt until the user starts the session, so a misheard word never reaches an agent by itself. See "Voice input" under TypeScript.
 - **Avatars** (`/api/avatar/**`, `/api/hooks/avatar/**`, MCP `avatar_*`) show and say what a session writes, so all of it is untrusted, and a session acts on nothing but its own avatar. See "Avatar".
   - **Who may do what.** A tool takes no terminal id: it acts on the calling session's avatar (`McpCtx::terminal_id`), and a caller that is not a running agent session gets 400. A hook route accepts only the agent token of the terminal in its path; another session's token and the master token get 401 there. What answers for the user (a reply, dismissing a question, turning an avatar on or off, resetting its look, claiming a line and reporting what became of it) is a POST under `/api/avatar/{terminalId}` for signed-in devices only (`Caller::Device`, so also the device key and the same origin): the master token, a file a session could read, and in-process calls get 403, agent tokens 401. The two GETs only read. With `[avatar] sessions = "any"` (the default) a session gets an avatar with its first design, say, ask or act call and may start another session with one (`workbench_start_session` `avatar`); with `sessions = "asked"` only the user gives one to a session that has none (the Avatar option, or "give" from a device; avatars sessions have already stay until the user turns each off), and a session that asks to start another with one gets 409, as does a session whose own avatar the user turned off. That refusal concerns the `avatar` argument only: under `any` a session started without it may still take one itself. The master token is the user's own: `POST /api/agents` with it and `avatar: true` starts a session with one, as the composer does. A session never turns on one the user turned off.
-  - **What a session sends is bounded and masked.** Its artwork never reaches a browser as markup: the server parses it into a closed, typed tree and stores and sends only that, and the browser checks the tree again and builds elements from literal tables. Every text (a name, a line, a question, a choice, SVG `text`) is one line of plain text with the session's secrets masked (`text::plain` with `Terminals::redact_text`). A refusal that quotes what the session sent masks the quote before it is cut, a refused design that holds a secret is answered from a masked copy of the call (`look::apply_masked`), and the platform masks the error of a failed MCP call in the Activity view and `mcp.call` as it masks the argument summary. Every size, count, rate and wait has a named limit, refused attempts count, and a hook body (256 KiB at most) is parsed only after the token and the rate were checked. The session's identity around its words is Workbench's (provider icon, tab title, project); the agent's own name only follows it, in quotation marks, and a notification of a question nobody saw has Workbench's own title.
+  - **What a session sends is bounded and masked.** Its artwork never reaches a browser as markup: the server parses it into a closed, typed tree and stores and sends only that, and the browser checks the tree again and builds elements from literal tables. The pictures a session asks for of its own avatar are drawn on the server from the stored tree, read again as untrusted data: the SVG the renderer reads is written from its own tables, nothing outside the look is resolved (no files, images or network, no fallback font search), the cost of drawing is checked on the parsed tree before anything is drawn (and at design time, so a look too costly to draw is never stored), at most two are drawn at a time for all sessions, and none for an avatar the user turned off. Every text (a name, a line, a question, a choice, SVG `text`) is one line of plain text with the session's secrets masked (`text::plain` with `Terminals::redact_text`). A refusal that quotes what the session sent masks the quote before it is cut, a refused design that holds a secret is answered from a masked copy of the call (`look::apply_masked`), and the platform masks the error of a failed MCP call in the Activity view and `mcp.call` as it masks the argument summary. Every size, count, rate and wait has a named limit, refused attempts count, and a hook body (256 KiB at most) is parsed only after the token and the rate were checked. The session's identity around its words is Workbench's (provider icon, tab title, project); the agent's own name only follows it, in quotation marks, and a notification of a question nobody saw has Workbench's own title.
   - **What reaches a session.** Nothing under the hook routes puts text into one. A reply pastes a fixed frame, the question's id and the user's own words or the choice that was clicked, never the question or other text the session wrote, through `POST /api/agents/ask` (refused while the session shows a dialog or is starting; the Enter is withheld when a dialog opened during the paste; the echo of what Workbench typed there is not taken for a dialog, one beside it is). Telling a running session of its avatar (given or turned on from a device, or once it is idle when it was not told yet) pastes Workbench's fixed brief; turning an avatar off pastes nothing. The avatar never shows Allow or Deny: while its session needs a permission or an answer, `say` and `ask` answer 409 and the bubble offers to open the session.
   - **Voice is the browser's.** Workbench sends and receives no audio and has no speech endpoint. A line is said aloud only after the user chose voice in that browser with a click, with an online voice (which sends the line to the browser maker's speech service) only after the user allowed online voices, and never while a dictation is live. A dictated reply is text until the user sends it. Hidden means silent: a browser that hides its avatars shows no figure or caption and says nothing, and its visible tabs report the lines `hidden`.
 - **Updates** replace the program Workbench runs from, so only config.toml (or the release build itself) says where releases come from, never a repository's config; the source is https (plain http only for this computer), no token is sent, and redirects go to https only. Nothing is installed without a click or `workbench update`: `POST /api/platform/update/install` and `POST /api/platform/restart` refuse in-process callers (agents over MCP get 403; agent tokens are not valid under `/api`), and there is no MCP tool for either. A download is installed only when its SHA-256 matches the release's checksum file (and GitHub's own digest when the API gives one), the archive holds the program as a regular file, and that program reports the release's version when run. The checksum comes from the same release as the archive: it catches a damaged download; TLS to the release host is what vouches for the publisher (releases are not signed). See "Updates".
@@ -226,6 +227,7 @@ A project is a directory, and it may hold **several git repositories**: a folder
 | `devcontainer::{summary, running_target, exec_target, uses_container, run_inside, port_route, agent_command, container_has_curl, write_into, kill_inside, workspace_mount, require_supported, docker::exec}`, `ExecTarget::{wrap, map_path, describe}` | devcontainer | projects (`ProjectSummary.devcontainer`), terminals (`meta.inContainer`), apps (runs inside, readiness, previews), lsp and debug (servers and adapters inside, path mapping), files (`workspace_mount`: agent paths back to the host), terminals and lsp (`require_supported`: `unsupported_platform` before a shell, an agent session or a language server is asked to run inside a container) |
 | `<slice>::mcp_tools() -> Vec<McpTool>` | each slice | platform (`/mcp` server via `mcp::all_tools`) |
 | `McpTool::{acts, quiet}` (builder calls on what `mcp::tool(…)` returns; fields `acts`, `quiet`) | core | avatar (its tools), platform (`tools/list` annotations, the Activity ring and `mcp.call`) |
+| `ToolOutput::Images { text, png }` (a tool's text followed by PNG pictures; the Activity record and `mcp.call` are made from the arguments and the error, never from the pictures) | core | avatar (`avatar_design`, `avatar_status` with `picture`, `pose` or `frames`), platform (`tools/call`: one `image` content block of base64 PNG per picture, after the text block) |
 | `<slice>::{router, start}`, `terminals::shutdown`, `apps::shutdown`, `lsp::shutdown`, `debug::shutdown`, `avatar::shutdown` (`avatar::start` right after `terminals::start`; `avatar::shutdown` right before `terminals::shutdown`) | each slice | app.rs |
 | `git::{cli_askpass, cli_git_editor}`, `terminals::cli_statusline`, `avatar::cli`, `platform::service::cli`, `platform::update::cli` | git, terminals, avatar, platform | main.rs (`askpass`, `git-editor`, `statusline`, `avatar`, `service`, `update`; `cli_askpass` also for `util::os::helper::askpass_prompt`) |
 | `state.platform.update.restart_requested()` (a restart was asked for: shut down, then `util::os::proc::reexec`; a stop signal that came first wins) | platform | main.rs (`serve`) |
@@ -494,7 +496,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `/api/projects/{pid}/debug/**` | debug |
 | `/api/projects/{pid}/data/**`, `POST /api/hooks/data/{terminalId}/append` (a script in a hosted session, with its agent token) | data |
 | `/api/projects/{pid}/skills`, `…/skills/{id}`, `…/skills/{id}/file?path=`, `POST /api/skills/install`, `POST /api/skills/remove` (devices and the master token; in-process callers refused on the two writes) | skills |
-| `GET /api/avatar`, `GET /api/avatar/{terminalId}` (devices, the master token and in-process calls); `POST /api/avatar/{terminalId}/lines/{lineId}/claim\|heard`, `…/reply`, `…/asks/{askId}/dismiss`, `…/on\|off\|reset` (devices only: the master token and in-process calls 403, agent tokens 401); `GET /api/hooks/avatar/{terminalId}/guide\|status`, `POST …/design\|say\|ask\|act` (only that terminal's own agent token; the master token 401) | avatar |
+| `GET /api/avatar`, `GET /api/avatar/{terminalId}` (devices, the master token and in-process calls); `POST /api/avatar/{terminalId}/lines/{lineId}/claim\|heard`, `…/reply`, `…/asks/{askId}/dismiss`, `…/on\|off\|reset` (devices only: the master token and in-process calls 403, agent tokens 401); `GET /api/hooks/avatar/{terminalId}/guide\|status`, `POST …/design\|picture\|say\|ask\|act` (only that terminal's own agent token; the master token 401; `picture` answers `image/png`) | avatar |
 | `/api/projects/{pid}/git/**` (`?repo=<id>` on every route; `GET git/repos`: the repositories with their branch, ahead/behind, changed files, state and forge, one entry's `error` instead of failing them all) | git |
 | `/api/projects/{pid}/gitlab/**` (`?repo=<id>`, `forge::RepoParam`), `/api/gitlab/**` | gitlab |
 | `/api/projects/{pid}/github/**` (`?repo=<id>`, `forge::RepoParam`), `/api/github/**` | github |
@@ -603,8 +605,8 @@ Added in the third phase and since (the project tools confined with `McpCtx::pro
 | `confluence_add_inline_comment` (mutating), `confluence_upload_attachment` (mutating; a file of the session's project, never hidden, key/token-named or `sensitive` files, symlinks resolved first), `confluence_labels` (mutating) | atlassian | Confluence authoring |
 | `jira_boards`, `jira_board_issues` | atlassian | read-only Jira Software boards |
 | `gitlab_test_failures {pipelineId}` | gitlab | read-only: the failed and errored tests of a pipeline's JUnit report, with file and output |
-| `avatar_status {guide?, look?}` | avatar | read-only: whether the session has an avatar and may use it, its name, parts (`id tag x y w h pivot x y`), animation names, the built-in motion it may name, the open question, the last 6 lines with what became of them, the limits; `guide` puts the authoring guide first, `look` adds the stored design as a design call |
-| `avatar_design {name?, svg?, pivots?, roles?, animations?, states?, mouth?, gaze?, voice?, keep?}` | avatar | `acts`: draws or changes the look; a call with `svg` is a new look, one without merges; refused whole with what to fix, or answered with the parts, usage and warnings |
+| `avatar_status {guide?, look?, picture?, pose?, frames?, count?}` | avatar | read-only: whether the session has an avatar and may use it, its name, parts (`id tag x y w h pivot x y`, `parent id`), animation names, drives, the built-in motion it may name, the open question, the last 6 lines with what became of them, the limits; `guide` puts the authoring guide first, `look` adds the stored design as a design call; `picture: true` (the look at rest), `pose {animation?, at?, lookX?, lookY?, turn?, mouth?, pace?, held?}` or `frames` (one of the look's own animations, `count` 2 to 8 moments) add a picture (`ToolOutput::Images`) |
+| `avatar_design {name?, svg?, pivots?, parents?, roles?, animations?, states?, mouth?, gaze?, drives?, voice?, keep?}` | avatar | `acts`: draws or changes the look; a call with `svg` is a new look, one without merges; refused whole with what to fix (also a look that costs too much to draw), or answered with the parts, drives, usage and warnings and a picture of the look at rest |
 | `avatar_say {text, gesture?, lang?, wait?}` | avatar | `acts`, `quiet`: one line, queued at once; the answer says what became of the earlier lines; `wait` returns with this line's outcome, or that a tab still holds it to present it |
 | `avatar_ask {text, choices?, freeText?, waitSeconds?, gesture?, lang?}`, `{askId, waitSeconds?}`, `{cancel: true}` | avatar | `acts`: asks one question and waits for the answer (default 45 s, at most 50), waits again for the open one, or withdraws it |
 | `avatar_act {play, mode?, times?}` or `{stop}` | avatar | `acts`, `quiet`: plays an animation once (up to 5 times), held or looping (until stopped, the next play or 2 minutes), or stops one or `all` |
@@ -1631,9 +1633,10 @@ it applies only where the `workbench` tools exist. They add what tool descriptio
 tools in the order that works, the limits and refusals found in the code, and facts that exist nowhere in a user's repository
 (the `.workbench.toml` schema, the report sandbox). A test fails the build when a skill names a tool that does not exist,
 links to a file it does not have, has a TOML example that does not parse as `ProjectFile` (or `GlobalConfig` when it says
-`# config.toml`), a JSON example of `workbench-avatar` that does not parse or holds a design the avatar validator refuses or
-warns about (a complete one with `svg`, or a call without it merged, as `avatar_design` merges it, into the last complete design
-before it in its file, else the one after it), or front matter that does not parse or uses a key other CLIs reject.
+`# config.toml`), a JSON example of `workbench-avatar` that does not parse, or holds a design (a complete one with `svg`, or a call without it
+merged, as `avatar_design` merges it, into the last complete design before it in its file, else the one after it) that the
+avatar validator refuses or warns about or that costs too much to draw (`avatar::affordable`, test-only: the check a design call
+makes before it stores a look), or front matter that does not parse or uses a key other CLIs reject.
 
 **Verified:** unit tests (front matter in every YAML style skills use, the checks, the session listing including a 2 MB line,
 every root rule with scratch folders laid out as each CLI lays its own, plugins by registry only and not outside Claude's
@@ -1651,7 +1654,7 @@ source), Windows (the paths compile and the tests are portable, but nothing ran 
 ## Avatar (avatar)
 
 A hosted agent session can have a **live avatar**: a small animated character over the Workbench window that the session draws
-itself (an SVG subset, with JSON for pivots, roles, animations, states, mouth and voice), that says the session's short lines
+itself (an SVG subset, with JSON for pivots, parents, roles, animations, states, drives, mouth and voice), that says the session's short lines
 as captions and, where the user chose voice in that browser, aloud with the browser's speech synthesis, asks the user questions
 and takes the answer (a click on a choice, typed text or dictation), and mirrors the session's state. In the wide form the
 figures walk about the dock area and meet. By default (`[avatar] sessions = "any"`) a session gets one with its first design,
@@ -1664,7 +1667,7 @@ every other session with `workbench avatar` on the host or `curl` against the ho
 
 **Server** (`server/src/avatar/`). Every way in (tool, hook route, command) calls the same state functions and gets the same
 words back. `text.rs`: `plain(s, max, mask)`, the one function for every text an avatar carries; `look.rs`: the pure validator
-and a look's wire types; `store.rs` (`AvatarState` on `AppState.avatar`): limits, wire types (`AvatarInfo`, `Line`, `Ask`,
+and a look's wire types; `preview.rs`: the look drawn as a PNG for the session (*Pictures*); `store.rs` (`AvatarState` on `AppState.avatar`): limits, wire types (`AvatarInfo`, `Line`, `Ask`,
 `AvatarList`), records, ids, files, events, what terminal events do (`on_event`, `reconcile`) and what only time ends (`sweep`,
 every 5 s); `session.rs`: what a session may do with its own avatar, and every answer text; `device.rs`: what only devices do;
 `routes.rs`, `tools.rs`, `cli.rs`, `brief.rs` with the `guide*.md` files; `examples/`: golden designs. One store lock covers a
@@ -1725,19 +1728,66 @@ masked. A call whose client went away leaves the question open, or pastes an ans
 refused the answer is lost and a warning is logged.
 
 **The look.** `look::apply` reads the artwork with quick-xml into a closed, typed, bounded tree (`Look`): element and attribute
-names come from its tables, every value is parsed and written again, references are bare ids inside the document. `filter`,
-SMIL, `class`, `font-family` and a few more are dropped with a counted warning; scripts, `style`, `image`, `a`, `use`, `mask`,
-`href`, event attributes, anything that reaches outside the document or is not named, and any limit exceeded refuse the whole
-call, the problems grouped by kind with what is accepted. Pivots, roles (`body`, `head`, `eyes`,
-`pupils`, `armL`, `armR`: through them the built-in breathing, blinking, gaze, state poses and gestures drive any character),
-the session's own keyframe animations, the map of nine states (Workbench chooses the state, never the session), mouth drives
-and gaze are checked in the same pass; paint keyframes stay 0.17 s apart, and a loop's paint ends as it starts. Only the tree
-is stored and sent; the browser checks it again (`checkLook`: a fresh object from allow-listed keys) and builds React elements
-from literal tables (`lookElements`), so no markup a session wrote reaches the DOM. A call with `svg` is a new look (`keep:
-true` keeps what still fits), one without merges the fields it sends; a device's reset restores the default look and keeps the
-name and voice. The session cannot see what it drew: the answer lists each part's box and pivot, its animations, its use of
-the limits, the built-in motion that applies and the warnings, and `avatar_status {look: true}` gives the stored design back
-as a design call (`to_svg`).
+names come from its tables, every value is parsed and written again, references are bare ids inside the document. Drawn: `g`,
+the shapes, `text` and `use` (`href` or `xlink:href` of a local `#id` only: a `g`, shape or `text` of the artwork, not inside a
+`clipPath`, `mask` or `filter`, not around the `use`, and holding no `use` itself, so nothing recurses; a `use` counts its
+target's elements against `MAX_ELEMENTS`, and one with an id is a part, its box the target's moved by `x`, `y`); in `defs`
+gradients, `clipPath`, `mask` (`g` and shapes), `filter` and the `g`, shapes and `text` a `use` repeats, all inert there. A
+filter holds up to `MAX_FILTER_PRIMITIVES` of `feGaussianBlur`, `feDropShadow`, `feOffset`, `feFlood`, `feColorMatrix`,
+`feComposite`, `feBlend`, `feMerge` (`feMergeNode`), `feMorphology`, `feTurbulence` and `feDisplacementMap`, whose `in` and
+`in2` name `SourceGraphic`, `SourceAlpha` or an earlier `result` of the same filter. `mask`, `filter` and `clip-path` are
+`url(#id)` of an element of that kind; `stroke-dasharray` and `stroke-dashoffset` are kept. SMIL, `class`, `font-family` and a
+few more are dropped with a counted warning; scripts, `style`, `image`, `a`, `pattern`, `symbol`, `foreignObject`, `feImage`,
+`feTile`, the lighting primitives, `feComponentTransfer`, `feConvolveMatrix`, a CSS filter function, an `href` to anything but
+a local id, event attributes, anything that reaches outside the document or is not named, and any limit exceeded refuse the
+whole call, the problems grouped by kind with what is accepted. Pivots; `parents` (part to part: the child moves with
+everything that moves its parent, as if it were nested in it, while it keeps its place in the drawing order; not for a part
+nested in the other, no circles, also through nesting, chains of 8); roles (`body`, `head`, `eyes`, `pupils`, `armL`, `armR`,
+optional: through them the built-in breathing, blinking, gaze, state poses and gestures drive any character); the session's own
+keyframe animations (translate, rotate, skew and scales relative to rest; paint, the opacities, `strokeDashoffset`, `d` and
+geometry absolute; an ease by name or a cubic bezier of four numbers; one with a built-in's name replaces the built-in); the
+map of nine states (Workbench chooses the state, never the session); drives (`{input, target, prop, values, at?, ease?}`:
+`lookX`, `lookY`, `mouth`, `pace`, `turn` or `held` moves a prop of the session's own parts; paint and the opacities only from
+`pace`, `turn` and `held`, which the browser moves slowly, with at most 2 values along `pace` or `held` and 3 along `turn`, at
+least 0.34 apart in `at`); mouth drives and gaze are checked in the same pass. Flash: paint and opacity keyframes stay 0.17 s
+apart, never ease `step`, `outElastic`, `outBounce` or a bezier whose y1 or y2 leaves 0 to 1 (the back eases stay allowed), in
+tracks and drives alike, and a loop's paint ends as it starts. A new look is then asked whether it can be drawn at rest within
+the picture's cost (`preview::affordable`, *Pictures*): one that cannot is refused whole, "… Nothing was changed." Only the
+tree is stored and sent (the wire format writes `parents` and `drives` only when they hold something); the browser checks it
+again (`checkLook`: a fresh object from allow-listed keys) and builds React elements from literal tables (`lookElements`), so
+no markup a session wrote reaches the DOM. A call with `svg` is a new look (`keep: true` keeps what still fits), one without
+merges the fields it sends (`parents` by entry, `drives` as a whole list); a device's reset restores the default look and keeps
+the name and voice. The answer lists each part's box and pivot (and its parent), its animations and drives, its use of the
+limits, the built-in motion that applies and the warnings; with the tools it carries a picture of the look at rest
+(*Pictures*), and `avatar_status {look: true}` gives the stored design back as a design call (`to_svg`).
+
+**Pictures** (`preview.rs`). A session cannot see the browser, so it is shown what it drew. `preview::sheet(look, pose)` draws
+the look in one pose 264 px on the light and on the dark panel side by side, and under each at 56 px as it rests and its face
+at 40 px (the square the browser crops around the head); `preview::strip(look, animation, frames)` draws 2 to 8 moments
+(default 6) of one of the look's own animations, 132 px each, on the light panel. Both answer one PNG, and the text beside it
+says what it shows (nothing is written in the picture). A pose is one of the look's own animations at a progress and the inputs
+`lookX`, `lookY` (a vector at most one long), `mouth`, `pace`, `turn`, `held`, applied as the browser engine applies them
+(animation, drives, mouth entries, gaze, `parents`; in a one-shot a track is at rest again after its last keyframe); the
+built-in animations are the browser's alone, and a pose or a strip that names one is answered with a sentence. The renderer
+reads the stored look as JSON in the wire format, as untrusted data again: it writes the SVG it renders from its own tables
+(tags, attribute names, keywords), prints an id or a reference only when it matches the id pattern and resolves to an element
+of the right kind, bounds the walk (elements, `use` expansions, depth, list lengths), and gives usvg no resources directory and
+an image resolver that resolves nothing; system fonts are loaded once, only for a look with text, and a character the
+sans-serif font lacks is not drawn (no fallback search through every font file). Before anything is drawn the parsed usvg tree
+is costed the way the renderer sizes its layers: filter work in passes of a cheap primitive over the panel (`FILTER_WORK` 60; a
+drop shadow over the whole figure is about ten, a blur six), layers the size of the panel (`LAYER_WORK` 60: every group that is
+filtered, masked, clipped or not opaque is one, a mask or a clip one more), the largest single layer (`LAYER_MOST`, which a
+filter on a part squeezed one way and stretched the other exceeds: "a filter sits on a part that is stretched or skewed too far
+to draw") and dashes (`MAX_DASHES_DRAWN`); over any of them the answer is a sentence that says what to change.
+`preview::affordable` asks the same of the look at rest without drawing, and `session::design` refuses a new look that fails
+it: what is too costly for the renderer is too costly for the browser on every frame. A pose or a strip that goes over is
+refused the same way. Panel colours repeat `--bg-panel` and `--fg` of `web/src/theme/tokens.css`. Drawing runs on a blocking
+thread, at most two pictures at a time for all sessions (`tools::DRAWING`; the others wait), from a copy of the look taken out
+of the store; an avatar the user turned off is not drawn (`TURNED_OFF`). `avatar_design` returns `ToolOutput::Images` with the
+look at rest (plain text for a session that drew nothing, or with "No picture: …" when it cannot be drawn: the design is saved
+all the same); `avatar_status` with `picture: true`, `pose` or `frames` (and `count`) adds one, and a picture that cannot be
+drawn refuses that call. `POST …/picture` and `workbench avatar picture` give the same pictures as `image/png` to a session
+without the tools.
 
 **Brief and guide** (`brief.rs`). `avatar::session_brief(&Brief {variant, via, in_container, shell, whole})` is one line for a
 first prompt: `First` (started with the option, or moved or restarted without a look), `Moved` (continues on another account,
@@ -1745,30 +1795,36 @@ look kept), `Again` (a new conversation of a session whose avatar is on and draw
 an avatar). What `device::tell` pastes by itself into a running session that is still to be told is `brief::telling`: `Given`
 when the avatar has no look of its own, `Again` when it has one, either as a whole prompt that ends "… then go on with what you
 were doing." A brief's forms: the five tools; on the host `workbench avatar` by this program's absolute path
-(`util::os::proc::runnable_exe`); in a dev container `curl`, the token written to standard input as a header (`-H @-`) and so in
-no command line. It starts with `BRIEF_MARK` (`[Workbench avatar]`); as the whole prompt it ends with what to do now, wrapped in
-`BRIEF_TAGS` (`<workbench-avatar>`…), which History summaries skip. The terminals slice puts it below a blank line after the
-user's prompt in argv and one space behind it in a paste, except after a prompt that is a command of the CLI (after leading
-white space it starts with `/` or `!`): that prompt goes in alone, with `"avatarBrief": "later"` beside `"avatar": true` in the
-terminal's meta, and the session is told once it is idle. It cuts the brief from titles and History rows (`own_prompt`, only
-where Workbench put the mark, followed by one of the briefs' openings), and writes Claude Code's `permissions.allow` =
-`PREALLOWED` (the five `mcp__workbench__avatar_*` rules, nothing wider) into its `--settings` file when the session starts with
-its avatar on, and no `permissions` key otherwise. The guide (`guide.md` with `guide_tools.md` or a half of `guide_command.md`)
-is read once before drawing (`avatar_status {guide: true}`, `GET …/guide`, `workbench avatar guide`); tests keep each form under
-7 KiB and its example a design the validator takes without a warning. Its built-in motion says in one sentence that an idle
-figure strolls and meets others, and that the look's own `walk` (`loop: true`) and `greet` replace the hop and the wave. A
+(`util::os::proc::runnable_exe`); in a dev container `curl`, the token written to standard input as a header (`-H @-`) and so
+in no command line. It starts with `BRIEF_MARK` (`[Workbench avatar]`); as the whole prompt it ends with what to do now,
+wrapped in `BRIEF_TAGS` (`<workbench-avatar>`…), which History summaries skip. The terminals slice puts it below a blank line
+after the user's prompt in argv and one space behind it in a paste, except after a prompt that is a command of the CLI (after
+leading white space it starts with `/` or `!`): that prompt goes in alone, with `"avatarBrief": "later"` beside `"avatar":
+true` in the terminal's meta, and the session is told once it is idle. It cuts the brief from titles and History rows
+(`own_prompt`, only where Workbench put the mark, followed by one of the briefs' openings), and writes Claude Code's
+`permissions.allow` = `PREALLOWED` (the five `mcp__workbench__avatar_*` rules, nothing wider) into its `--settings` file when
+the session starts with its avatar on, and no `permissions` key otherwise. The guide (`guide.md` with `guide_tools.md` or a
+half of `guide_command.md`) is read once before drawing (`avatar_status {guide: true}`, `GET …/guide`, `workbench avatar
+guide`); tests keep each form under 10 KiB and its example a design the validator takes without a warning that shows `use`, a
+filter, `parents` and drives. It says in one sentence that an idle figure strolls and meets others, hopping along and waving,
+or playing the look's own `walk` (`loop: true`) and `greet` where it defines them, that an animation of the look's own with a
+built-in's name replaces Workbench's, and that a session designs in two or three calls, looking at the picture in between. A
 session that takes an avatar itself is given no brief.
 
 **Hook routes and the command.** Under `/api/hooks/avatar/{terminalId}/`: `GET guide` (text/markdown: the command guide, then
 the status; 409 for a session that may not use an avatar), `GET status?look=1`, `POST design` (a design call's JSON, or the
-artwork alone as `image/svg+xml` or a body that starts with `<`), `POST say` (JSON, or `text/plain` with `gesture`, `lang` and
-`wait` in the query), `POST ask` (held for the wait, up to 110 s), `POST act`. Each checks the token first (that terminal's agent
-token, else 401), then the gate, and only then parses the body (at most 256 KiB, as on every avatar route). `workbench avatar
-guide | status [--look] | say <text…> [--gesture g] [--lang l] [--wait] | ask <text…> [--choice c]… [--no-free-text] [--wait
-<seconds>] | ask --again <askId> | ask --cancel | act <name> [--mode once|hold|loop] [--times n] | act --stop <name|all> | design
-<file|->` makes one hook call per form with `WORKBENCH_URL` (loopback only), `WORKBENCH_TERMINAL_ID` and
+artwork alone as `image/svg+xml` or a body that starts with `<`; text only, ending with how to see a picture), `POST picture`
+(empty or `{}` for the look at rest, `{pose}` or `{frames, count?}`: `image/png`; it counts as a status call), `POST say`
+(JSON, or `text/plain` with `gesture`, `lang` and `wait` in the query), `POST ask` (held for the wait, up to 110 s), `POST
+act`. Each checks the token first (that terminal's agent token, else 401), then the gate, and only then parses the body (at
+most 256 KiB, as on every avatar route). `workbench avatar guide | status [--look] | say <text…> [--gesture g] [--lang l]
+[--wait] | ask <text…> [--choice c]… [--no-free-text] [--wait <seconds>] | ask --again <askId> | ask --cancel | act <name>
+[--mode once|hold|loop] [--times n] | act --stop <name|all> | design <file|-> | picture [<file.png>] [--frames <animation>
+[--count n]] [--pose <file|->]` makes one hook call per form with `WORKBENCH_URL` (loopback only), `WORKBENCH_TERMINAL_ID` and
 `WORKBENCH_AGENT_TOKEN` from the session's environment; the token goes in a header and is never printed, and artwork comes from
-a file or standard input. Exit 0: done; 1: refused or no answer, the reason on standard error; 2: nothing was sent.
+a file or standard input; `picture` writes the PNG to the file it names, else to `workbench-avatar-rest.png`, `-frames.png` or
+`-pose.png` in the system's temporary directory, and prints where it is and what it shows. Exit 0: done; 1: refused or no
+answer, the reason on standard error; 2: nothing was sent.
 
 **Limits** (`store.rs`, `look.rs`; `avatar_status` lists them): `MAX_SAY_CHARS` 400, `MAX_ASK_CHARS` 300, `MAX_CHOICES` 4,
 `MAX_CHOICE_CHARS` 40, `MAX_NAME_CHARS` 32, `MAX_REPLY_CHARS` 4,000, `MAX_LINES` 30, `MAX_PENDING_LINES` 3; per terminal and
@@ -1778,7 +1834,11 @@ minute `SAY_PER_MINUTE` 6 (lines and new questions), `DESIGN_PER_MINUTE` 6, `ACT
 a newer gesture takes the place of one that waits), `LEASE_EXTRA_SECS` 15, `NUDGE_AFTER_SECS` 8, `NUDGES_PER_10_MIN` 3,
 `BRIEF_RETRY_SECS` 30, `BRIEF_REFUSALS` 5, `MAX_AVATARS` 64 (none is evicted), `MAX_ASKED` 64; `MAX_DESIGN_BYTES` 256 KiB,
 `MAX_SVG_BYTES` 32 KiB (also as stored), `MAX_LOOK_BYTES` 128 KiB, `MAX_ELEMENTS` 300, `MAX_DEPTH` 10, `MAX_TEXTS` 6,
-`MAX_ANIMATIONS` 32, `MAX_TRACKS` 16, `MAX_KEYFRAMES` 16, `MAX_STATE_NAMES` 6, `MAX_MOUTH_DRIVES` 4.
+`MAX_ANIMATIONS` 32, `MAX_TRACKS` 16, `MAX_KEYFRAMES` 16, `MAX_STATE_NAMES` 6, `MAX_MOUTH_DRIVES` 4, `MAX_FILTERS` 8,
+`MAX_FILTER_PRIMITIVES` 8 (`feMergeNode` not counted), `MAX_DASHES` 8, `MAX_PARENTS` 64, `MAX_DRIVES` 16; pictures
+(`preview.rs`): `STRIP_FRAMES_MIN` 2, `STRIP_FRAMES_MAX` 8, `STRIP_FRAMES_DEFAULT` 6, `FILTER_WORK` 60 passes over a panel,
+`LAYER_WORK` 60 panel-sized layers, `LAYER_MOST` 30 panels for one layer, `MAX_DASHES_DRAWN` 100,000; two pictures drawn at a
+time (`tools::DRAWING`).
 
 **Lifecycle.** `avatar::start` runs right after `terminals::start`: it subscribes, reads the stored avatars against the
 terminals that exist (`reconcile`, again after a lagged receiver), then follows `terminal.*` and sweeps. *Created*:
@@ -1817,7 +1877,11 @@ boundary of its own: nothing loaded with the app imports a look, the engine or s
 window's one engine (`lib/engine.ts`: at most 30 frames a second, visible time only; a figure whose frames average over 4 ms
 across 30 frames is frozen at rest), speaker (`lib/speech.ts`: one line at a time, by the browser's synthesis or the silent
 engine, which keeps the caption up as long as the line would take, with the same lip sync) and arbiter (`lib/arbiter.ts`: which
-tab says a line).
+tab says a line). The engine applies a look's animations, then its drives, then its mouth and gaze, and carries a part that
+has a `parents` entry along with a matrix written in front of its own transform. The inputs of drives: `lookX` and `lookY`
+from the gaze's reader, `mouth` from the mouth's, `pace`, `turn` and `held` from the walk (`walkFeel` of `lib/roam.ts`), eased
+towards their targets, the last three at most `INPUT_RATE` (4) units a second; outside the walk they are 0, and with reduced
+motion every input but `mouth` stays at rest.
 
 **On stage.** Avatars that are on, of open agent sessions of the project on screen; an exited one sleeps for a minute, then
 leaves. Another project's avatar is a guest, only while it asks: its bubble names the project, the question is presented, then
@@ -1831,7 +1895,9 @@ speaking and listening glow with a wider halo besides (that is what tells them a
 pulses, working and starting have a faint glow that swells and fades (with reduced motion the faint one stays), exited
 pales (grayscale, opacity), and a 1 px edge of the theme's text colour at rest keeps the figure readable on both themes. A
 face (the compact forms) is the look cropped to its head, as large as its place (28 px, phone 40) and fading out at its
-lower edge. The name and "Voice off" stand only under the large figure ("Designing its look…" under any), and the name under
+lower edge; it is still, drawn without an engine in the rest pose with what the look's drives set at rest written once
+(`writeStill`), so a side view that a `turn` drive hides at rest is hidden there too. The name and "Voice off" stand only
+under the large figure ("Designing its look…" under any), and the name under
 a walking figure that is hovered or holds the focus; the unseen dot sits at the upper right of the figure's outline; the
 "+n" chip is the one stage with a box, as large as a resting figure and drawn above walking figures. **Wide** (desktop shell, workspace
 window open and at least 480 x 320 px): the figures walk (below) while `roam` is on and motion is not reduced, up to 8
@@ -1885,7 +1951,8 @@ while it stays on stage and walking stays on. Open bubbles, the app's line, the 
 (each but the chip belongs to its avatar, which is not in its own way), measured every 120 ms; free walkers, those that only
 stand (no post, not dragged) and sleeping ones step out of them. The hop is 5 px per 22 px of way and the lean 5°; a look's own
 `walk` with `loop: true` plays (mode loop) while the figure walks, in place of the hop, unless the session holds a gesture, and
-no cue is played over a held gesture. After a step that came `LONG_PAUSE_MS` (2 s) or more after the last one (a hidden tab)
+no cue is played over a held gesture. A look with a drive on `pace` gets no hop either, and one with a drive on `turn` no
+lean: its own parts show the walk and the turn. After a step that came `LONG_PAUSE_MS` (2 s) or more after the last one (a hidden tab)
 the figures do not all set off at the same moment. Walking off (the switch, reduced motion, the compact layout) clears the
 walk, so the next one begins in the column again.
 
@@ -1953,7 +2020,7 @@ of a session's card and header follows `useAvatarOn`, else `meta.avatar`; a sess
 "finished" toast.
 
 **Trust rules.**
-1. **Artwork is untrusted markup.** Only the parsed tree is stored and sent; the browser checks it again and builds elements from literal tables, and looks up data only through a `Map`, a `Set` or a `switch` of literals.
+1. **Artwork is untrusted markup.** Only the parsed tree is stored and sent; the browser checks it again and builds elements from literal tables, and looks up data only through a `Map`, a `Set` or a `switch` of literals. A reference (`use`, `mask`, `filter`, `clip-path`, a filter's `in`) names an element of the same look. The server's pictures are drawn from the stored tree read again as untrusted data, written from the renderer's own tables, with nothing external resolved.
 2. **Text is one line of plain text** with the session's secrets masked, shown as text nodes, never Markdown; a reply is masked where it is stored and broadcast, and the session gets the user's own words.
 3. **An avatar belongs to one session.** No tool takes a terminal id; a hook route takes only the agent token of the terminal in its path.
 4. **Who has an avatar is the user's choice**: with `[avatar] sessions = "any"` (the default) a session takes one with its first call or starts with one (the option, `workbench_start_session`'s `avatar`); with `"asked"` only the option or a device's "give" gives one, and avatars sessions have already stay until the user turns each off. Turned off on one device, it is off on all, the session's calls are refused, and no session turns it on again.
@@ -1964,39 +2031,41 @@ of a session's card and header follows `useAvatarOn`, else `meta.avatar`; a sess
 9. **What is pasted into a session holds no agent-written text but a clicked choice**: a fixed frame, the question's id and the user's own words.
 10. **Everything is bounded**: every size, count, rate and wait is a named constant, a request is checked whole before anything changes, refused attempts count, and a refusal states the limit.
 11. **The stage is the app's**: a clipped box of a fixed size, itself not seen, below the app's palette, dialogs, toasts and menus, never over the agents column in the wide form (walking figures keep to the dock); the session's identity comes first, the agent's name after it.
-12. **Flash and cost are bounded**: a stage is at most 132 px, paint and opacity keyframes stay 0.17 s apart, the engine draws at most 30 frames a second, and a figure that costs too much is frozen.
+12. **Flash and cost are bounded**: a stage is at most 132 px; paint and opacity keyframes stay 0.17 s apart and never step, spring, bounce or follow a bezier that leaves 0 to 1; paint and opacity drives follow only the slow inputs (a full swing in at least 0.25 s), in at most 2 values along `pace` or `held` and 3 along `turn`; the engine draws at most 30 frames a second and freezes a figure that costs too much; a look whose filters, layers or dashes would cost too much to draw is refused at design time, and a picture of a pose that would is not drawn.
 
-**Verified.** Unit and integration tests: Rust tests in the slice (the validator with hostile and oversized input and the golden
-examples; `text::plain`; the state functions with the clock passed in: gate, rates, leases, outcomes, waits, hand-offs, an
-answer racing a call that leaves, restart, sweep, nudge, the telling of a session that was not told; every route through the
-real router with each kind of caller; the command against a real listener; briefs and guide), tests in terminals (end to end
-through its fake CLIs: the brief in argv and pasted, a first prompt that is a command, the pre-allowed tools, moved and
-restarted sessions, the withheld Enter and the echo of texts sent before, titles and History without the brief), platform and
-config; web unit tests (the lib, cache, stage, layout, the bubble's timeline, widget, commands, preferences, voices, render
-tests of figure, face and bubble, what loads with the app). A real browser: headless Chrome against a scratch instance running
-the real binary, with the tests' stand-in CLIs as sessions and a stand-in speech synthesizer in the page (Chrome's own engine
-only where named): the brief and the five allowed tools; every `workbench avatar` form as a real process; an agent token refused
-on `/api/avatar/**`, the master token on the device POSTs and the hook routes; caption, first voice choice by a real click, the
-preferred voice, `spoken` with its name, the mouth, Stop; a question answered by a click while the call waited, a timed-out one
-answered by typing and arriving framed; stand-in dictation; a permission dialog silencing the avatar; two avatars; both themes,
-the compact and phone forms; two tabs (only the visible one spoke; when it closed mid-line, the other said the next line); hide,
-show, reduced motion; 72 requests, none off the origin, no CSP violation or console error; Chrome's own speech engine (online
-voices only: a caption until they were allowed, then a line said and acknowledged `spoken`); the composer, the palette, giving
-an avatar later, a guest; a server restart (records and looks back, no transcript, restarted sessions told with `Again`).
-The walk and `workbench_start_session` with `avatar`: unit tests of `lib/roam.ts`, an end-to-end test of that start, and in a
-real browser three and eight figures walking, a meeting, a line said where the figure stands (its bubble
-inside the dock), a drag, a click and walking switched off (the column), with no page error and none of 53 observed rests on a
-control.
+**Verified.** Unit and integration tests: Rust tests in the slice (the validator with hostile and oversized input and the
+golden examples; the picture renderer: the SVG it writes from its tables, the pose math against numbers worked out by hand, the
+eases, sheets and strips of the example looks, its refusals and cost checks; a design refused for its cost; pictures refused
+for an avatar turned off; `text::plain`; the state functions with the clock passed in: gate, rates, leases, outcomes, waits,
+hand-offs, an answer racing a call that leaves, restart, sweep, nudge, the telling of a session that was not told; every route
+through the real router with each kind of caller; the command against a real listener; briefs and guide), tests in terminals
+(end to end through its fake CLIs: the brief in argv and pasted, a first prompt that is a command, the pre-allowed tools, moved
+and restarted sessions, the withheld Enter and the echo of texts sent before, titles and History without the brief), platform
+(a tool's pictures as image blocks after its text, none in the Activity record) and config; web unit tests (the lib, cache,
+stage, layout, the bubble's timeline, widget, commands, preferences, voices, render tests of figure, face and bubble, what
+loads with the app). A real browser: headless Chrome against a scratch instance running the real binary, with the tests'
+stand-in CLIs as sessions and a stand-in speech synthesizer in the page (Chrome's own engine only where named): the brief and
+the five allowed tools; every `workbench avatar` form as a real process; an agent token refused on `/api/avatar/**`, the master
+token on the device POSTs and the hook routes; caption, first voice choice by a real click, the preferred voice, `spoken` with
+its name, the mouth, Stop; a question answered by a click while the call waited, a timed-out one answered by typing and
+arriving framed; stand-in dictation; a permission dialog silencing the avatar; two avatars; both themes, the compact and phone
+forms; two tabs (only the visible one spoke; when it closed mid-line, the other said the next line); hide, show, reduced
+motion; 72 requests, none off the origin, no CSP violation or console error; Chrome's own speech engine (online voices only: a
+caption until they were allowed, then a line said and acknowledged `spoken`); the composer, the palette, giving an avatar
+later, a guest; a server restart (records and looks back, no transcript, restarted sessions told with `Again`). The walk and
+`workbench_start_session` with `avatar`: unit tests of `lib/roam.ts`, an end-to-end test of that start, and in a real browser
+three and eight figures walking, a meeting, a line said where the figure stands (its bubble inside the dock), a drag, a click
+and walking switched off (the column), with no page error and none of 53 observed rests on a control.
 
 **Not verified.** Sound leaving a loudspeaker (the browser's own speech engine was driven once in headless Chrome and reported
 the line spoken; nobody heard it); real dictation with a microphone (a stand-in recognizer was used); a real Claude Code reading
 the `permissions.allow` entries of its settings file and using the tools (the tests' stand-in for Claude Code was used); real
-Codex, Kimi Code, Gemini CLI and Aider sessions; a dev container session; Windows at run time (the server is type-checked for
-Windows only); Safari and iOS (speech needs a tap there, by design, but it was not tried).
+Codex, Kimi Code, Gemini CLI and Aider sessions; a dev container session; a real model looking at the pictures (the tests check the PNG and the image blocks, not what a
+model makes of them); Windows at run time (the server is type-checked for Windows only); Safari and iOS (speech needs a tap
+there, by design, but it was not tried).
 
 **Deferred on purpose.** Voices made by a command on the server; hands-free listening (a microphone that stays open); a pop-out
-window for the avatar; spoken attention announcements; a session changing where or whether avatars are shown; a rendered
-preview of its own drawing for the session.
+window for the avatar; spoken attention announcements; a session changing where or whether avatars are shown.
 
 ## Third phase (2026-09-27): code intelligence, debugger, CLion VCS, Confluence authoring, push, approvals, local history
 

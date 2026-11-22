@@ -4,7 +4,7 @@
 //! `workbench avatar guide | status [--look] | say <text…> [--gesture g] [--lang l] [--wait] |
 //! ask <text…> [--choice c]… [--no-free-text] [--wait <seconds>] | ask --again <askId> |
 //! ask --cancel | act <name> [--mode once|hold|loop] [--times n] | act --stop <name|all> |
-//! design <file|->`.
+//! design <file|-> | picture [<file.png>] [--frames <animation> [--count n]] [--pose <file|->]`.
 //!
 //! It runs inside a hosted session and finds its Workbench the way the status line helper does:
 //! `WORKBENCH_URL`, `WORKBENCH_TERMINAL_ID` and `WORKBENCH_AGENT_TOKEN` from the session's
@@ -18,7 +18,8 @@
 //! `<`.
 //!
 //! Output: the answer on standard output (text for guide, say, act and design; JSON for status
-//! and ask). Exit status 0: done. 1: Workbench refused the call, or did not answer; the reason
+//! and ask). `picture` writes the PNG to the file it names, or to one in the system's temporary directory,
+//! and prints where it is and what it shows. Exit status 0: done. 1: Workbench refused the call, or did not answer; the reason
 //! is on standard error and says what to do. 2: nothing was sent (not inside a session, no
 //! Workbench there, a file that cannot be read, a form this command does not have).
 
@@ -126,6 +127,20 @@ pub enum AvatarAction {
         /// The file, or - for standard input.
         file: String,
     },
+    /// Write a picture of the avatar to a PNG file: at rest, in a pose, or an animation as a row of moments.
+    Picture {
+        /// The PNG file to write; without it, a file in the system's temporary directory.
+        file: Option<String>,
+        /// One of the avatar's own animations, drawn as a row of moments from start to end.
+        #[arg(long, value_name = "ANIMATION")]
+        frames: Option<String>,
+        /// With --frames: how many moments, 2 to 8 (default 6).
+        #[arg(long)]
+        count: Option<u32>,
+        /// A file with a pose as JSON, or - for standard input: {animation, at, lookX, lookY, turn, mouth, pace, held}.
+        #[arg(long, value_name = "FILE")]
+        pose: Option<String>,
+    },
 }
 
 /// The Workbench that hosts this session, from the session's environment.
@@ -168,6 +183,8 @@ enum Show {
     Body,
     /// The `note` of a JSON answer: what happened, in words.
     Note,
+    /// The body is a picture: it is written to the file the call names.
+    Picture,
 }
 
 /// One call of a hook route.
@@ -179,15 +196,17 @@ struct Call {
     body: Option<(&'static str, Vec<u8>)>,
     patience: Duration,
     show: Show,
+    /// Where a picture is written, and what it shows.
+    picture: Option<(String, String)>,
 }
 
 impl Call {
     fn get(path: &str) -> Call {
-        Call { method: "GET", path: path.to_string(), body: None, patience: PATIENCE, show: Show::Body }
+        Call { method: "GET", path: path.to_string(), body: None, patience: PATIENCE, show: Show::Body, picture: None }
     }
 
     fn post(path: &str, body: Value, show: Show) -> Call {
-        Call { method: "POST", path: path.to_string(), body: Some(("application/json", body.to_string().into_bytes())), patience: PATIENCE, show }
+        Call { method: "POST", path: path.to_string(), body: Some(("application/json", body.to_string().into_bytes())), patience: PATIENCE, show, picture: None }
     }
 
     /// The call a form of the command makes. `Err`: the form is incomplete, or its file cannot be read.
@@ -270,7 +289,43 @@ impl Call {
                 }
                 // The artwork alone starts with a tag; a design starts with a brace.
                 let artwork = content.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'<');
-                Call { method: "POST", path: "/design".to_string(), body: Some((if artwork { "image/svg+xml" } else { "application/json" }, content)), patience: PATIENCE, show: Show::Body }
+                Call { method: "POST", path: "/design".to_string(), body: Some((if artwork { "image/svg+xml" } else { "application/json" }, content)), patience: PATIENCE, show: Show::Body, picture: None }
+            }
+            AvatarAction::Picture { file, frames, count, pose } => {
+                if file.as_deref().is_some_and(|f| f.trim().is_empty() || f == "-") {
+                    return Err("picture writes a PNG file: name one, or name none and it goes to the temporary directory.".to_string());
+                }
+                // Out of the repository unless the session says where: one file per kind of picture.
+                let file = file.unwrap_or_else(|| {
+                    let kind = if frames.is_some() { "frames" } else if pose.is_some() { "pose" } else { "rest" };
+                    std::env::temp_dir().join(format!("workbench-avatar-{kind}.png")).to_string_lossy().into_owned()
+                });
+                let mut body = Map::new();
+                let shows = match (&frames, &pose) {
+                    (Some(_), Some(_)) => return Err("--frames and --pose are two pictures: ask for one of them.".to_string()),
+                    (Some(animation), None) => format!("moments of {animation}, from its start on the left to its end on the right"),
+                    (None, Some(_)) => "your avatar in that pose, on the light panel and on the dark one; under each, at rest: at its resting size and as a face".to_string(),
+                    (None, None) => "your avatar at rest, on the light panel and on the dark one; under each, at its resting size and as a face".to_string(),
+                };
+                put(&mut body, "frames", frames);
+                if let Some(count) = count {
+                    body.insert("count".into(), json!(count));
+                }
+                if let Some(pose) = pose {
+                    let mut content = Vec::new();
+                    let most = 64 * 1024;
+                    let read = if pose == "-" {
+                        input.take(most).read_to_end(&mut content).map_err(|e| format!("cannot read the pose from standard input: {e}"))
+                    } else {
+                        std::fs::File::open(&pose).and_then(|f| f.take(most).read_to_end(&mut content)).map_err(|e| format!("cannot read the pose file: {e}"))
+                    };
+                    read?;
+                    let value: Value = serde_json::from_slice(&utf8(content)?).map_err(|e| format!("the pose is not JSON ({e}): write an object such as {{\"turn\": 1, \"mouth\": 1}}."))?;
+                    body.insert("pose".into(), value);
+                }
+                let mut call = Call::post("/picture", Value::Object(body), Show::Picture);
+                call.picture = Some((file, shows));
+                call
             }
         })
     }
@@ -426,8 +481,17 @@ fn run(action: AvatarAction, session: Result<Session, String>, input: &mut dyn R
         let _ = writeln!(err, "{}", refusal(&answer));
         return REFUSED;
     }
+    if let (Show::Picture, Some((file, shows))) = (call.show, &call.picture) {
+        if let Err(e) = std::fs::write(file, &answer.body) {
+            let _ = writeln!(err, "cannot write the picture to {file}: {e}");
+            return NOT_SENT;
+        }
+        let _ = writeln!(out, "Picture written to {file}: {shows}. Open it and look.");
+        return 0;
+    }
     let text = String::from_utf8_lossy(&answer.body);
     let shown = match call.show {
+        Show::Picture => String::new(),
         Show::Body => text.trim_end().to_string(),
         Show::Note => serde_json::from_str::<Value>(&text).ok().and_then(|v| v.get("note").and_then(Value::as_str).map(str::to_string)).unwrap_or_else(|| text.trim_end().to_string()),
     };
@@ -523,9 +587,9 @@ pub(super) mod tests {
 
     #[test]
     fn no_workbench_there_is_said_without_the_token() {
-        // A port nobody listens on.
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-        let url = format!("http://{free}");
+        // A port nobody listens on: a reserved one, since a port that was just free may be
+        // taken by another test's server before the command connects.
+        let url = "http://127.0.0.1:1".to_string();
         let (code, out, err) = run_with(AvatarAction::Say { text: vec!["Hello.".into()], gesture: None, lang: None, wait: false }, [Some(&url), Some(TID), Some(TOKEN)], "");
         assert_eq!((code, out.as_str()), (NOT_SENT, ""), "{err}");
         assert!(err.contains("cannot reach Workbench") && err.contains("work without the avatar") && !err.contains(TOKEN), "{err}");

@@ -56,10 +56,11 @@ A session that starts with an avatar is told in its first prompt (after your own
 whole prompt when you gave none), or in a pasted message when you gave it the avatar later. A
 first prompt that is a command of its CLI (it starts with `/` or `!`) goes in alone, and the
 session is told in a pasted message once it is idle. It reads a short guide and draws its
-character, name and voice in one or two calls. Without a task it greets you through the avatar
-and says that it is ready; given the avatar while it works, it greets you and goes on; with a
-task it starts on the task. From then on it says one or two plain sentences when it starts, when
-something happens that you should know, and when it finishes.
+character, name and voice in two or three calls, looking at a picture of it in between. Without
+a task it greets you through the avatar and says that it is ready; given the avatar while it
+works, it greets you and goes on; with a task it starts on the task. From then on it says one or
+two plain sentences when it starts, when something happens that you should know, and when it
+finishes.
 
 A session that takes an avatar itself is told nothing: it may read the guide first, and its first
 call gives it the avatar.
@@ -67,8 +68,11 @@ call gives it the avatar.
 Until the drawing arrives the figure shows Workbench's default look, and for a session started
 with one the words "Designing its look…". When its own look arrives the figure waves once.
 
-The session cannot see what it drew: Workbench answers each drawing with the size and place of
-every part, so a session may need one repair call.
+The session does not see your browser, so Workbench shows it what it drew: each drawing is
+answered with a picture of the figure on a light and on a dark panel, at its resting size and as
+a face, and with the size and place of every part. A session corrects what looks wrong with a
+call or two more, and may ask for more pictures: one of its animations as a row of moments, or
+the figure as it looks towards the pointer, turns, speaks or is held.
 
 Claude Code is allowed the five avatar tools without a permission request while its avatar is
 on (Workbench writes them into the `permissions.allow` list of the settings file it gives the
@@ -101,8 +105,9 @@ question, or you opened it); under the pointer or with the focus it stays small 
 name. In the column (below) a figure also grows while the pointer rests on it or it has the
 focus, and shrinks again 6 seconds after. The large figure has the avatar's name under it (or
 the session's title, while it has none), and "Voice off" until you have chosen voice in this
-browser. Its pupils follow the pointer. A dot at the upper right of its outline marks a line
-you have not seen yet. Hovering shows three controls: **Reply to** *<name>*, **Open the session** and **Avatar
+browser. Its pupils follow the pointer, and whatever else its session tied to where it looks,
+how it walks or whether you drag it moves too (a head that turns, a side view while it walks,
+legs that dangle). A dot at the upper right of its outline marks a line you have not seen yet. Hovering shows three controls: **Reply to** *<name>*, **Open the session** and **Avatar
 menu**. The tooltip is the session's title and its state.
 
 **The glow** around the figure's outline shows the session's state in the colours of its tab and
@@ -139,8 +144,8 @@ answered. Only avatars of sessions whose tab is open in the project on screen ar
 
 **Walking about.** The figures start where their column stands (below; by default the top right
 of the dock, the middle of the workspace window where files and panels open), and walk about the
-dock: a stroll, a rest, another stroll, with a little hop and lean. They keep off the tool
-windows around the dock and their stripes of buttons. A figure rests where nothing you press or
+dock: a stroll, a rest, another stroll, with a little hop and lean (or a walk and a turn the
+session drew itself). They keep off the tool windows around the dock and their stripes of buttons. A figure rests where nothing you press or
 type into is under any part of it (buttons, tabs, links, fields, tree rows, editors, terminals),
 looking near by first and then anywhere in the dock. Where there is no such place, because an
 editor or a terminal fills the dock, the figures stand at home instead of pacing: home is a
@@ -194,7 +199,8 @@ else it says is shown or said in this window.
 **The compact form.** With the workspace window collapsed (Alt+F12), or smaller than 480 by 320
 pixels, the avatar in front is a small face at the right end of the agents window's top bar, and
 its bubble a panel under that bar, at most 480 pixels wide. A face has no frame and does not
-walk, here or on a phone. The face counts the avatars behind it, and its menu lists them. While
+walk or move, here or on a phone: it shows the head as the figure rests, with what the session
+tied to its walk at rest (a side view that shows only while it walks is hidden). The face counts the avatars behind it, and its menu lists them. While
 the session on screen has a permission request the panel stays closed, and the face shows how
 many permission requests wait.
 
@@ -383,11 +389,20 @@ host) or the same calls through a command (every other CLI):
 
 | Tool | Command (host) | Does |
 | --- | --- | --- |
-| `avatar_design` | `workbench avatar design <file>` | Draws or changes the avatar: the artwork (a strict subset of SVG), which parts are the body, head, eyes, pupils and arms (so Workbench's built-in breathing, blinking, gaze and gestures move any drawing), its own animations (a looping one named `walk` plays while the figure walks, one named `greet` when it greets another), what plays in which state, the mouth, the name and the voice. |
+| `avatar_design` | `workbench avatar design <file>` | Draws or changes the avatar: the artwork (a strict subset of SVG), which parts are the body, head, eyes, pupils and arms (so Workbench's built-in breathing, blinking, gaze and gestures move any drawing), which part moves with which, its own animations (a looping one named `walk` plays while the figure walks, one named `greet` when it greets another, and one with the name of a built-in one replaces it), what plays in which state, its drives, the mouth, the name and the voice. The tool's answer brings a picture of the result. |
 | `avatar_say` | `workbench avatar say …` | Says one line of one or two plain sentences, optionally with a gesture. |
 | `avatar_ask` | `workbench avatar ask …` | Asks one question with up to four choices and waits for the answer; waits again, or withdraws the question. |
 | `avatar_act` | `workbench avatar act …` | Plays one of its animations as a gesture, holds or loops it, or stops it. |
-| `avatar_status` | `workbench avatar status`, `guide` | Reads the avatar back: its parts and animations, the open question, its last lines and what became of them, the limits, and the guide. |
+| `avatar_status` | `workbench avatar status`, `guide`, `picture` | Reads the avatar back: its parts, animations and drives, the open question, its last lines and what became of them, the limits, and the guide. On request a picture: the figure at rest or in a pose, or one of its own animations as a row of moments (the command writes it to a PNG file). |
+
+A drawing is shapes, groups, a few short texts and copies of them (`use`), with gradients, clip
+paths, masks, filters (blur, drop shadow, offset, flood, colour matrix, composite, blend, merge,
+morphology, turbulence, displacement) and dashed lines, all referring only to each other. Its
+parts move by Workbench's built-in motion (through the parts named body, head, eyes, pupils and
+arms), by the session's own keyframe animations, and by **drives**: where the figure looks (the
+pointer, its question, another avatar), its speech, how fast it walks, which way it turns and
+whether you drag it. A part may move with another one without being drawn inside it, so that it
+keeps its place in front of or behind the rest.
 
 The session learns what became of each line: spoken (with the name of the voice), shown as a
 caption, skipped by you, not shown because you hid the avatars, or not heard because no window had
@@ -407,8 +422,9 @@ A session cannot:
 - say or ask anything while a permission request or a question is open in the session, show
   **Allow** or **Deny**, or answer a permission request;
 - put markup, scripts, images, links or formatting on screen: its drawing is read by the server
-  into a closed, bounded set of shapes and only that set reaches the page, and its text is one
-  line of plain text with the session's secrets masked;
+  into a closed, bounded set of shapes, gradients, masks and filters that refer only to each
+  other, and only that set reaches the page; its text is one line of plain text with the
+  session's secrets masked;
 - put text of its own into your session: a reply carries your words or the choice you clicked.
 
 See [security](security.md#avatars) for the rules behind this.
@@ -429,6 +445,10 @@ choose it:
 - **A question nobody saw** becomes a notification with the project, the session's title and the
   question (at most 200 characters): on this computer's desktop and, if you set up push, through
   the browsers' push services.
+- **Pictures of the avatar** are drawn by Workbench on this computer, from the stored look, and
+  go only to the session that asked: in its tool's answer (and from there to its model service,
+  like any tool answer), or into a file its command writes (in the system's temporary directory
+  unless it names another). None is drawn for an avatar you turned off.
 
 Workbench keeps one file per avatar in its data folder, `avatar/<session id>.json` under
 `~/.local/share/workbench` (readable only by you): whether it is on, its name, look and voice, how
@@ -446,15 +466,18 @@ says so while **Avatar** is ticked:
 - **On the host**, `workbench avatar` (by the full path of the Workbench program):
   `guide`, `status [--look]`, `design <file|->`, `say <text> [--gesture g] [--lang l] [--wait]`,
   `ask <text> [--choice c]… [--no-free-text] [--wait <seconds>]`, `ask --again <id>`,
-  `ask --cancel`, `act <name> [--mode once|hold|loop] [--times n]`, `act --stop <name|all>`. It
-  works only inside an agent session: it reads the session's `WORKBENCH_URL`,
-  `WORKBENCH_TERMINAL_ID` and `WORKBENCH_AGENT_TOKEN`, and sends the token only to this computer.
+  `ask --cancel`, `act <name> [--mode once|hold|loop] [--times n]`, `act --stop <name|all>`,
+  `picture [<file.png>] [--frames <animation> [--count n]] [--pose <file|->]` (writes a picture
+  of the avatar to that file, or to the system's temporary directory, and prints where, for a
+  session that can open an image). It works only inside an
+  agent session: it reads the session's `WORKBENCH_URL`, `WORKBENCH_TERMINAL_ID` and
+  `WORKBENCH_AGENT_TOKEN`, and sends the token only to this computer.
   Exit status 0 means done, 1 refused or no answer (the reason is on standard error), 2 nothing
   was sent.
 - **In a dev container**, where that program does not exist, `curl` against
-  `$WORKBENCH_URL/api/hooks/avatar/$WORKBENCH_TERMINAL_ID/` (`guide`, `status`, `design`, `say`,
-  `ask`, `act`). The token goes in a header that the shell writes to curl's standard input, never
-  on a command line. Claude Code keeps its tools in a container.
+  `$WORKBENCH_URL/api/hooks/avatar/$WORKBENCH_TERMINAL_ID/` (`guide`, `status`, `design`,
+  `picture`, `say`, `ask`, `act`). The token goes in a header that the shell writes to curl's
+  standard input, never on a command line. Claude Code keeps its tools in a container.
 
 **Such a CLI may ask you before it runs the command**, as it asks for any command, unless you
 allow that command in the CLI's own settings. The session is told that if its CLI asks for every
@@ -475,8 +498,12 @@ tool call and gets the same answer.
   seconds returns to the session at once as unseen, and stays open.
 - A held or looping gesture ends by itself after two minutes; a gesture plays at most 5 times in a
   row.
-- A drawing is at most 32 KiB of artwork with 300 elements, 32 animations of 16 tracks of 16
-  keyframes, and 256 KiB for the whole call.
+- A drawing is at most 32 KiB of artwork with 300 elements (a repeated part counts with what it
+  repeats), 8 filters of 8 steps each, 32 animations of 16 tracks of 16 keyframes, 64 parts
+  that move with another, 16 drives, and 256 KiB for the whole call. A drawing that would cost
+  too much to draw on every frame (heavy filters, many masked, clipped or half-transparent
+  groups, a filter on a stretched part, very fine dashes) is refused, and so is a picture of a
+  pose that would.
 - At most 64 sessions, running or in the history, have an avatar (none is taken away). Giving
   one more, or a session taking one itself, is refused with a message (`avatar_status` of a
   session without one then says that none is to be had), and a session started with one (the
@@ -484,9 +511,12 @@ tool call and gets the same answer.
   no longer need from the history.
 - On screen: 56 pixels at rest, 132 active (48 and 96 on a phone), a face of 28 pixels in the top
   bar (40 on a phone), eight walking figures, or four in the column. Colour and opacity changes
-  are at least 0.17 seconds apart, a figure's animations are drawn at 30 frames a second at most
-  (its walk across the window follows the screen's rate), and a figure that takes too long to
-  draw is held still in its rest pose.
+  are at least 0.17 seconds apart and never jump, spring or bounce, and they follow only how
+  fast a figure walks, which way it turns and whether you drag it, which change slowly, in at
+  most two or three steps, never the pointer or the speech; a
+  figure's animations are drawn at 30 frames a second at most (its walk across the window
+  follows the screen's rate), and a figure that takes too long to draw is held still in its rest
+  pose.
 
 ## Troubleshooting
 
@@ -546,6 +576,10 @@ avatar` command. Its terminal shows what it tried, and the refusal it got, if an
 - A real Claude Code reading the `permissions.allow` entries of its settings file and using the
   tools: the tests' stand-in for Claude Code was used.
 - Real Codex, Kimi Code, Gemini CLI and Aider sessions.
+- A real model looking at the pictures of its avatar: the tests check the PNG and the image
+  blocks the tools send, not what a model makes of them. The picture follows the browser's pose
+  rules but is drawn by another renderer, with the system's sans-serif font for text (a
+  character that font lacks is left out of the picture).
 - A session in a dev container.
 - Windows at run time: the server is type-checked for Windows only.
 - Safari and iOS: speech needs a tap there, by design, but it was not tried.
@@ -554,8 +588,7 @@ avatar` command. Its terminal shows what it tried, and the refusal it got, if an
 
 Deferred on purpose: voices made by a command on the server, hands-free listening (a microphone
 that stays open), a pop-out window for the avatar, spoken attention announcements, a session
-changing where or whether avatars are shown, and a rendered preview of its own drawing for the
-session.
+changing where or whether avatars are shown.
 
 An optional skill, `workbench-avatar`, teaches an agent to draw and speak through its avatar. It
 has a session use an avatar when it was started with one or given one, and take one itself only

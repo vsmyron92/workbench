@@ -69,6 +69,7 @@ fn text(o: ToolOutput) -> String {
     match o {
         ToolOutput::Text(t) => t,
         ToolOutput::Json(v) => v.to_string(),
+        ToolOutput::Images { text, .. } => text,
     }
 }
 
@@ -76,6 +77,7 @@ fn json_of(o: ToolOutput) -> Value {
     match o {
         ToolOutput::Json(v) => v,
         ToolOutput::Text(t) => panic!("expected JSON, got {t}"),
+        ToolOutput::Images { text, .. } => panic!("expected JSON, got {text}"),
     }
 }
 
@@ -441,7 +443,10 @@ async fn a_file_that_becomes_a_link_out_of_the_project_is_not_read() {
     std::os::unix::fs::symlink(outside.path().join("secret.csv"), e.root.join("captures/late.csv")).unwrap();
     wait_for("the refusal", || e.state.data.sources.list(&e.pid).iter().any(|s| s["state"] == "error")).await;
     let src = &e.state.data.sources.list(&e.pid)[0];
-    assert!(src["error"].as_str().unwrap().contains("outside the project"), "{src}");
+    // Either guard may be the one that refuses it, by when the link appears: the check of where
+    // the path leads, or the open that follows no link.
+    let error = src["error"].as_str().unwrap();
+    assert!(error.contains("outside the project") || error.contains("symbolic links"), "{src}");
     assert!(e.state.data.series_infos(&e.state, &e.pid).is_empty(), "nothing of it was read");
 }
 

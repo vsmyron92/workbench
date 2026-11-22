@@ -5,11 +5,11 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { defaultLook } from './defaultLook'
-import { BUDGET_FRAMES, GESTURE_BLEND_MS, MOUTH_TAIL_MS, STATE_FADE_MS, compile, createEngine, ease, easeMouth, sample } from './engine'
-import type { Clip, Compiled, Pose } from './engine'
-import { fakeFrames, readTransform, sampleLook, wire } from './fixtures'
+import { BUDGET_FRAMES, GESTURE_BLEND_MS, INPUT_RATE, MOUTH_TAIL_MS, STATE_FADE_MS, bezier, compile, createEngine, ease, easeInput, easeMouth, sample, writeStill } from './engine'
+import type { Clip, Compiled, Pose, SampleInputs, WalkInputs } from './engine'
+import { fakeFrames, readTransform, richLook, sampleLook, wire } from './fixtures'
 import { checkLook, lookElements } from './look'
-import type { Animation, Look, Track } from './types'
+import type { Animation, Drive, Look, LookNode, Track } from './types'
 
 /** A plain rig with no roles (so no built-in motion gets in the way), plus whatever a test adds. */
 function rig(animations: Record<string, Animation> = {}, extra: Partial<Look> = {}): Look {
@@ -72,7 +72,7 @@ function compiled(look: Look): Compiled {
 
 /** The pose of one part. */
 function pose(c: Compiled, clips: Clip[], tMs: number, id = 'dot', mouth: number | null = null, gaze: readonly [number, number] | null = null, reducedMotion = false): Pose {
-  const p = sample(c, clips, tMs, mouth, gaze, { reducedMotion }).get(id)
+  const p = sample(c, clips, tMs, { mouth, gaze }, { reducedMotion }).get(id)
   if (!p) throw new Error(`no pose for ${id}`)
   return p
 }
@@ -194,13 +194,13 @@ describe('compile', () => {
     const look = checkLook(wire(sampleLook())) as Look
     look.animations.tint = { duration: 2, loop: true, tracks: [{ target: ['face', 'cheek'], prop: 'fill', values: ['#ff0000', '#0000ff', '#ff0000'] }] }
     const c = compiled(look)
-    const poses = sample(c, [clip('tint')], 500, null, null)
+    const poses = sample(c, [clip('tint')], 500)
     // The cheek has a plain colour, the face a gradient: the track colours both.
     expect(poses.get('cheek')?.attrs.get('fill')).toBe('rgb(128,0,128)')
     expect(poses.get('face')?.attrs.get('fill')).toBe('rgb(128,0,128)')
     expect(poses.get('face')?.refs).toBeUndefined()
     // At rest the face is in its gradient: the pose names it and holds no colour for it.
-    const rest = sample(c, [], 0, null, null)
+    const rest = sample(c, [], 0)
     expect(rest.get('face')?.attrs.has('fill')).toBe(false)
     expect([...(rest.get('face')?.refs ?? [])]).toEqual([['fill', 'skin']])
     expect(rest.get('cheek')?.refs).toBeUndefined()
@@ -232,11 +232,11 @@ describe('compile', () => {
       { tag: 'circle', id: 'worse', attrs: { fillRef: 'sky) url(//x' } },
     )
     const c = compiled(look)
-    const poses = sample(c, [clip('tint')], 500, null, null)
+    const poses = sample(c, [clip('tint')], 500)
     expect(poses.get('dot')?.attrs.get('fill')).toBe('rgb(128,0,128)')
     for (const id of ['themed', 'lost', 'odd', 'worse']) expect(poses.has(id), id).toBe(false)
     // The default look is painted with tokens throughout: none of its parts is given a paint.
-    for (const p of sample(compiled(defaultLook('t1')), [clip('glow'), clip('wave', { mode: 'once' })], 300, 0.5, [1, 0]).values()) {
+    for (const p of sample(compiled(defaultLook('t1')), [clip('glow'), clip('wave', { mode: 'once' })], 300, { mouth: 0.5, gaze: [1, 0] }).values()) {
       expect(p.refs).toBeUndefined()
       expect(p.attrs.has('fill') || p.attrs.has('stroke')).toBe(false)
     }
@@ -356,7 +356,7 @@ describe('sample: one track', () => {
 
   it('applies one track to every target of its list', () => {
     const c = compiled(rig({ both: one({ target: ['dot', 'oval', 'dot'], prop: 'translateY', values: [0, 8] }) }))
-    const poses = sample(c, [clip('both')], 500, null, null)
+    const poses = sample(c, [clip('both')], 500)
     expect(poses.get('dot')?.transform).toBe('translate(0 4)')
     expect(poses.get('oval')?.transform).toBe('translate(0 4)')
   })
@@ -384,7 +384,7 @@ describe('sample: pivots and the part’s own transform', () => {
 
   it('writes the rest pose for every part it may move, so a part returns to the artwork', () => {
     const c = compiled(rig({ fade: one({ prop: 'opacity', values: [1, 0] }), grow: one({ prop: 'r', values: [6, 9] }), wide: one({ target: 'oval', prop: 'strokeWidth', values: [1, 4] }) }))
-    const rest = sample(c, [], 0, null, null)
+    const rest = sample(c, [], 0)
     expect([...rest.keys()].sort()).toEqual(['dot', 'oval'])
     expect(rest.get('dot')?.attrs).toEqual(new Map<string, string | null>([['opacity', '0.5'], ['r', '6']]))
     // The artwork sets no stroke width: the attribute is removed again.
@@ -486,11 +486,11 @@ describe('sample: several animations at once', () => {
     const odd = [clip('nope'), clip('constructor'), clip('__proto__'), clip('toString'), clip('hasOwnProperty'), clip('a', { startMs: Number.NaN }), clip('a', { startMs: Infinity }), null, undefined, 7, 'a', { name: 7 }] as unknown as Clip[]
     expect(pose(c, odd, 100).transform).toBeUndefined()
     expect(moved(c, [...odd, clip('a')], 100).tx).toBe(10)
-    expect(sample(c, 'a' as unknown as Clip[], 100, null, null).get('dot')?.transform).toBeUndefined()
+    expect(sample(c, 'a' as unknown as Clip[], 100).get('dot')?.transform).toBeUndefined()
     // A moment that is not a number, or a look that was never compiled: nothing at all.
-    expect(sample(c, [clip('a')], Number.NaN, null, null).size).toBe(0)
-    expect(sample(c, [clip('a')], Infinity, null, null).size).toBe(0)
-    expect(sample({ look: rig() }, [clip('a')], 0, null, null).size).toBe(0)
+    expect(sample(c, [clip('a')], Number.NaN).size).toBe(0)
+    expect(sample(c, [clip('a')], Infinity).size).toBe(0)
+    expect(sample({ look: rig() }, [clip('a')], 0).size).toBe(0)
   })
 })
 
@@ -564,7 +564,7 @@ describe('sample: mouth and gaze', () => {
     const off = compiled(look(0))
     expect(pose(off, [], 0, 'pupils', null, [1, 0]).transform).toBeUndefined()
     // No pupils role: nothing to move.
-    expect(sample(compiled(rig()), [], 0, null, [1, 0]).size).toBe(0)
+    expect(sample(compiled(rig()), [], 0, { gaze: [1, 0] }).size).toBe(0)
   })
 })
 
@@ -602,24 +602,24 @@ describe('sample: what it writes', () => {
     let poses = 0
     for (let t = 0; t <= 6000; t += 37) {
       const clips: Clip[] = names.map((name, i) => clip(name, { startMs: i * 90, weight: ((t + i * 13) % 100) / 100, mode: (['state', 'once', 'hold', 'loop'] as const)[(i + Math.floor(t / 500)) % 4], times: 1 + (i % 5) }))
-      const got = sample(c, clips, t, (t % 700) / 700, [Math.sin(t), Math.cos(t)])
+      const got = sample(c, clips, t, { mouth: (t % 700) / 700, gaze: [Math.sin(t), Math.cos(t)] })
       expectFormatted(got)
       poses += got.size
     }
     expect(poses).toBeGreaterThan(1000)
-    expectFormatted(sample(compiled(defaultLook('t1')), [clip('glow'), clip('sway'), clip('cheer', { mode: 'once' })], 300, 0.7, [1, 1]))
+    expectFormatted(sample(compiled(defaultLook('t1')), [clip('glow'), clip('sway'), clip('cheer', { mode: 'once' })], 300, { mouth: 0.7, gaze: [1, 1] }))
   })
 
   it('leaves a part out rather than write a number that is not finite', () => {
     const c = compiled(rig({ far: one({ prop: 'translateX', values: [0, 9e5] }, { loop: true }), near: one({ target: 'oval', prop: 'translateX', values: [0, 5] }, { loop: true }) }))
     // Twenty clips of the same far travel, each at the top of the range, at a weight no clip should have.
     const clips = Array.from({ length: 20 }, () => clip('far', { weight: 1 }))
-    const got = sample(c, [...clips, clip('near')], 999.999, null, null)
+    const got = sample(c, [...clips, clip('near')], 999.999)
     expectFormatted(got)
     expect(got.get('oval')?.transform).toMatch(/^translate\(/)
     const huge = compiled(rig({ a: one({ prop: 'scale', values: [10, 10] }, { loop: true }) }))
     // Scales multiply: enough of them and the product is no number any more. The part is left out; nothing throws.
-    const many = sample(huge, Array.from({ length: 400 }, () => clip('a')), 0, null, null)
+    const many = sample(huge, Array.from({ length: 400 }, () => clip('a')), 0)
     expect(many.has('dot')).toBe(false)
   })
 })
@@ -1175,5 +1175,521 @@ describe('createEngine', () => {
     }
     for (const id of ['body', 'eyes', 'pupils', 'armR', 'brow']) expect(f.find(id).attrs.has('transform'), id).toBe(false)
     expect(f.find('head').attrs.get('transform')).toBe('translate(0 -2)')
+  })
+})
+
+// ---------------------------------------------------------------- the new eases, props, drives and parents
+
+describe('ease: the new ones', () => {
+  it('follow the formulas at known points', () => {
+    const c1 = 1.70158
+    const c2 = c1 * 1.525
+    const c3 = c1 + 1
+    expect(ease('inBack', 0)).toBe(0)
+    expect(ease('inBack', 1)).toBeCloseTo(1, 12)
+    expect(ease('inBack', 0.5)).toBeCloseTo(c3 / 8 - c1 / 4, 12)
+    expect(ease('inBack', 0.5)).toBeCloseTo(-0.0876975, 6)
+    expect(ease('inOutBack', 0)).toBeCloseTo(0, 12)
+    expect(ease('inOutBack', 0.5)).toBeCloseTo(0.5, 12)
+    expect(ease('inOutBack', 1)).toBeCloseTo(1, 12)
+    expect(ease('inOutBack', 0.25)).toBeCloseTo((0.25 * ((c2 + 1) * 0.5 - c2)) / 2, 12)
+    expect(ease('inOutBack', 0.25)).toBeCloseTo(-0.0996818, 6)
+    expect(ease('inOutBack', 0.75)).toBeCloseTo(1.0996818, 6)
+    expect(ease('outElastic', 0)).toBe(0)
+    expect(ease('outElastic', 1)).toBe(1)
+    // 2^-1 sin(π/6) + 1, and 2^-5 sin(17π/6) + 1.
+    expect(ease('outElastic', 0.1)).toBeCloseTo(1.25, 12)
+    expect(ease('outElastic', 0.5)).toBeCloseTo(1.015625, 12)
+    expect(ease('outBounce', 0)).toBe(0)
+    expect(ease('outBounce', 0.2)).toBeCloseTo(0.3025, 12)
+    expect(ease('outBounce', 1 / 2.75)).toBeCloseTo(1, 12)
+    expect(ease('outBounce', 0.5)).toBeCloseTo(0.765625, 12)
+    expect(ease('outBounce', 0.8)).toBeCloseTo(0.94, 12)
+    expect(ease('outBounce', 0.95)).toBeCloseTo(0.98453125, 12)
+    expect(ease('outBounce', 1)).toBeCloseTo(1, 12)
+  })
+
+  it('solves a bezier by Newton, or by bisection where the slope is flat', () => {
+    // CSS `ease`, `ease-in-out` and `linear` as beziers.
+    expect(bezier([0.25, 0.1, 0.25, 1], 0.5)).toBeCloseTo(0.8024034, 6)
+    expect(bezier([0.42, 0, 0.58, 1], 0.5)).toBeCloseTo(0.5, 9)
+    expect(bezier([0.42, 0, 0.58, 1], 0.25)).toBeCloseTo(1 - bezier([0.42, 0, 0.58, 1], 0.75), 9)
+    for (const t of [0, 0.3, 0.7, 1]) expect(bezier([0, 0, 1, 1], t), String(t)).toBeCloseTo(t, 5)
+    // Flat in the middle: x'(0.5) = 0 for x1 = 1, x2 = 0. Bisection finds s = 0.5, and y(0.5) = 0.5.
+    expect(bezier([1, 0, 0, 1], 0.5)).toBeCloseTo(0.5, 5)
+    // y may overshoot: past 1 and below 0.
+    expect(bezier([0.3, -1, 0.7, 2], 0.2)).toBeLessThan(0)
+    expect(bezier([0.3, -1, 0.7, 2], 0.8)).toBeGreaterThan(1)
+    expect(ease([0.25, 0.1, 0.25, 1], 0.5)).toBe(bezier([0.25, 0.1, 0.25, 1], 0.5))
+    // Where Newton would leave 0 … 1 (a curve that starts flat), bisection lands: the value
+    // never leaves the way between the curve's ends.
+    for (const b of [[0, 0, 0, 1], [1, 0, 1, 1], [0, 1, 0, 1], [1, 1, 1, 0]] as const) {
+      for (const t of [0, 0.001, 0.01, 0.5, 0.99, 0.999, 1]) {
+        const v = bezier([...b], t)
+        expect(v, `${b.join(',')} at ${t}`).toBeGreaterThanOrEqual(-1e-6)
+        expect(v, `${b.join(',')} at ${t}`).toBeLessThanOrEqual(1 + 1e-6)
+      }
+    }
+    // x = s³ there, so s = 0.1 and y = 3 · 0.9 · 0.01 + 0.001.
+    expect(bezier([0, 0, 0, 1], 0.001)).toBeCloseTo(0.028, 6)
+  })
+
+  it('ease a track, segment by segment', () => {
+    const c = compiled(rig({ go: one({ prop: 'translateX', values: [0, 100, 200], ease: [[0.25, 0.1, 0.25, 1], 'outBounce'] }, { loop: true, duration: 2 }) }))
+    expect(moved(c, [clip('go')], 500).tx).toBeCloseTo(80.24, 1)
+    expect(moved(c, [clip('go')], 1400).tx).toBeCloseTo(100 + 100 * ease('outBounce', 0.4), 1)
+    // An animation's bezier stands for each segment of its tracks.
+    const all = compiled(rig({ go: one({ prop: 'translateX', values: [0, 100, 200] }, { loop: true, duration: 2, ease: [0.42, 0, 0.58, 1] }) }))
+    expect(moved(all, [clip('go')], 1500).tx).toBeCloseTo(150, 1)
+    expect(moved(all, [clip('go')], 250).tx).toBeCloseTo(100 * bezier([0.42, 0, 0.58, 1], 0.25), 1)
+  })
+})
+
+describe('sample: skews and the new paints', () => {
+  it('skews about the pivot, between the rotation and the scale', () => {
+    const c = compiled(rig({ tilt: { duration: 1, loop: true, tracks: [{ target: 'dot', prop: 'rotate', values: [10, 10] }, { target: 'dot', prop: 'skewX', values: [20, 20] }, { target: 'dot', prop: 'skewY', values: [-5, -5] }, { target: 'dot', prop: 'scale', values: [2, 2] }] } }))
+    expect(pose(c, [clip('tilt')], 0).transform).toBe('rotate(10 100 120) translate(100 120) skewX(20) skewY(-5) translate(-100 -120) translate(100 120) scale(2 2) translate(-100 -120)')
+    expect(readTransform(pose(c, [clip('tilt')], 0).transform)).toEqual({ tx: 0, ty: 0, rot: 10, kx: 20, ky: -5, sx: 2, sy: 2, pivot: [100, 120] })
+    // One skew alone writes only that one; skews add like rotations, weighed like them.
+    const skew = (prop: Track['prop'], value: number): Animation => ({ duration: 1, loop: true, tracks: [{ target: 'dot', prop, values: [value, value] }] })
+    const x = compiled(rig({ a: skew('skewX', 12), b: skew('skewX', 6) }))
+    expect(pose(x, [clip('a')], 0).transform).toBe('translate(100 120) skewX(12) translate(-100 -120)')
+    expect(moved(x, [clip('a'), clip('b', { weight: 0.5 })], 0).kx).toBe(15)
+    const y = compiled(rig({ a: skew('skewY', -30) }))
+    expect(pose(y, [clip('a')], 0, 'dot').transform).toBe('translate(100 120) skewY(-30) translate(-100 -120)')
+    // On the head, after its own transform.
+    const head = compiled(rig({ tilt: { duration: 1, loop: true, tracks: [{ target: 'head', prop: 'skewY', values: [8, 8] }] } }))
+    expect(pose(head, [clip('tilt')], 0, 'head').transform).toBe('translate(0 -2) translate(100 90) skewY(8) translate(-100 -90)')
+  })
+
+  it('writes fill and stroke opacities and the dash offset under their attribute names, and puts the artwork’s back', () => {
+    const look = rig({ dim: { duration: 1, loop: true, tracks: [{ target: 'dot', prop: 'fillOpacity', values: [0.25, 0.25] }, { target: 'dot', prop: 'strokeOpacity', values: [0.5, 0.5] }, { target: 'dot', prop: 'strokeDashoffset', values: [12, 12] }] } })
+    // The dot, the body's second child.
+    Object.assign(look.nodes[0].children?.[1].attrs ?? {}, { fillOpacity: 0.8 })
+    const c = compiled(look)
+    const p = pose(c, [clip('dim')], 0)
+    expect(p.attrs.get('fill-opacity')).toBe('0.25')
+    expect(p.attrs.get('stroke-opacity')).toBe('0.5')
+    expect(p.attrs.get('stroke-dashoffset')).toBe('12')
+    // At rest: the artwork's own value, or no attribute where it has none.
+    const rest = pose(c, [], 0)
+    expect(rest.attrs.get('fill-opacity')).toBe('0.8')
+    expect(rest.attrs.get('stroke-opacity')).toBeNull()
+    expect(rest.attrs.get('stroke-dashoffset')).toBeNull()
+    // Half a weight blends from what the artwork has: its own 0.8, the defaults 1 and 0.
+    const half = pose(c, [clip('dim', { weight: 0.5 })], 0)
+    expect(half.attrs.get('fill-opacity')).toBe('0.525')
+    expect(half.attrs.get('stroke-opacity')).toBe('0.75')
+    expect(half.attrs.get('stroke-dashoffset')).toBe('6')
+  })
+
+  it('takes what a part inherits as the value to blend from', () => {
+    const look = rig({ dim: { duration: 1, loop: true, tracks: [{ target: 'oval', prop: 'strokeOpacity', values: [0, 0] }, { target: 'oval', prop: 'strokeDashoffset', values: [10, 10] }] } })
+    look.nodes[0].attrs = { strokeOpacity: 0.4, strokeDashoffset: 2 }
+    const half = pose(compiled(look), [clip('dim', { weight: 0.5 })], 0, 'oval')
+    expect(half.attrs.get('stroke-opacity')).toBe('0.2')
+    expect(half.attrs.get('stroke-dashoffset')).toBe('6')
+  })
+})
+
+describe('sample: drives', () => {
+  const driven = (drives: Drive[], animations: Record<string, Animation> = {}, extra: Partial<Look> = {}) => compiled(rig(animations, { drives, ...extra }))
+  const at = (c: Compiled, inputs: SampleInputs | null | undefined, id = 'dot', clips: Clip[] = [], reducedMotion = false): Pose => {
+    const p = sample(c, clips, 0, inputs, { reducedMotion }).get(id)
+    if (!p) throw new Error(`no pose for ${id}`)
+    return p
+  }
+  const all: Drive[] = [
+    { input: 'turn', target: 'dot', prop: 'translateX', values: [-10, 0, 10] },
+    { input: 'pace', target: 'dot', prop: 'translateY', values: [0, 20] },
+    { input: 'held', target: 'oval', prop: 'rotate', values: [0, 30] },
+    { input: 'mouth', target: 'oval', prop: 'ry', values: [4, 12] },
+    { input: 'lookX', target: 'head', prop: 'translateX', values: [-4, 4] },
+    { input: 'lookY', target: 'head', prop: 'translateY', values: [-2, 2] },
+  ]
+
+  it('sample each drive where its input is: lookX, lookY and turn from -1 to 1, the others from 0 to 1', () => {
+    const c = driven(all)
+    expect(readTransform(at(c, { turn: -1 }).transform).tx).toBe(-10)
+    expect(readTransform(at(c, { turn: 0 }).transform).tx).toBe(0)
+    expect(readTransform(at(c, { turn: 0.5 }).transform).tx).toBe(5)
+    expect(readTransform(at(c, { turn: 1 }).transform).tx).toBe(10)
+    expect(readTransform(at(c, { pace: 0.25 }).transform).ty).toBe(5)
+    expect(readTransform(at(c, { held: 1 }, 'oval').transform).rot).toBe(30)
+    expect(at(c, { mouth: 0.5 }, 'oval').attrs.get('ry')).toBe('8')
+    expect(readTransform(at(c, { gaze: [1, 0] }, 'head').transform, 'translate(0 -2)')).toMatchObject({ tx: 4, ty: 0 })
+    // A vector longer than 1 is 1.
+    expect(readTransform(at(c, { gaze: [3, 4] }, 'head').transform, 'translate(0 -2)')).toMatchObject({ tx: 2.4, ty: 1.6 })
+    // Outside its range an input is at its end; what is no number is at rest.
+    expect(readTransform(at(c, { turn: 7, pace: -3 }).transform)).toMatchObject({ tx: 10, ty: 0 })
+    expect(at(c, { turn: Number.NaN, pace: Infinity }).transform).toBeUndefined()
+  })
+
+  it('apply at rest when an input is not given, and not at all without inputs', () => {
+    const c = driven(all)
+    // Every input at rest: turn and where it looks at their middle, the others at 0, so the mouth's 4.
+    expect(at(c, {}).transform).toBeUndefined()
+    expect(at(c, {}, 'oval').attrs.get('ry')).toBe('4')
+    expect(at(c, { mouth: null, gaze: null }, 'oval').attrs.get('ry')).toBe('4')
+    // No inputs: the rest pose, the artwork's own value.
+    expect(at(c, undefined, 'oval').attrs.get('ry')).toBe('2')
+    expect(at(c, null, 'oval').attrs.get('ry')).toBe('2')
+  })
+
+  it('take their keyframes along `at`, eased per segment, and null for the artwork’s own value', () => {
+    const c = driven([
+      { input: 'pace', target: 'dot', prop: 'translateX', values: [0, 10, 20], at: [0, 0.8, 1], ease: ['linear', 'in'] },
+      { input: 'held', target: 'dot', prop: 'r', values: [null, 12] },
+      { input: 'turn', target: 'oval', prop: 'translateY', values: [0, 8], ease: [0.42, 0, 0.58, 1] },
+    ])
+    expect(readTransform(at(c, { pace: 0.4 }).transform).tx).toBe(5)
+    expect(readTransform(at(c, { pace: 0.9 }).transform).tx).toBe(12.5)
+    expect(at(c, { held: 0 }).attrs.get('r')).toBe('6')
+    expect(at(c, { held: 0.5 }).attrs.get('r')).toBe('9')
+    expect(readTransform(at(c, { turn: -0.5 }, 'oval').transform).ty).toBeCloseTo(8 * bezier([0.42, 0, 0.58, 1], 0.25), 2)
+  })
+
+  it('come after the animations: moves add, scales multiply, every other prop is the drive’s', () => {
+    const c = driven(
+      [
+        { input: 'turn', target: 'dot', prop: 'translateX', values: [0, 0, 5] },
+        { input: 'turn', target: 'dot', prop: 'scaleX', values: [3, 3] },
+        { input: 'held', target: 'dot', prop: 'opacity', values: [null, 1] },
+      ],
+      { side: { duration: 1, loop: true, tracks: [{ target: 'dot', prop: 'translateX', values: [10, 10] }, { target: 'dot', prop: 'scaleX', values: [2, 2] }, { target: 'dot', prop: 'opacity', values: [0.2, 0.2] }] } },
+    )
+    const p = at(c, { turn: 1, held: 0 }, 'dot', [clip('side')])
+    expect(readTransform(p.transform)).toMatchObject({ tx: 15, sx: 6 })
+    // The drive holds the opacity: at its null the artwork's own 0.5, not the animation's 0.2.
+    expect(p.attrs.get('opacity')).toBe('0.5')
+    expect(at(c, { held: 1 }, 'dot', [clip('side')]).attrs.get('opacity')).toBe('1')
+    // A gesture does not take a drive's place either (sampled once it has blended in).
+    expect(readTransform(sample(c, [clip('side', { mode: 'hold' })], 500, { turn: 1 }).get('dot')?.transform)).toMatchObject({ tx: 15, sx: 6 })
+  })
+
+  it('come before the look’s mouth and gaze: the mouth has the last word on its prop, the gaze adds', () => {
+    const c = driven([{ input: 'pace', target: 'oval', prop: 'scaleY', values: [1, 3] }, { input: 'lookX', target: 'pupils', prop: 'translateX', values: [-5, 5] }], {}, { mouth: [{ target: 'oval', prop: 'scaleY', open: 4 }], roles: { pupils: 'pupils' } })
+    expect(readTransform(at(c, { pace: 1 }, 'oval').transform).sy).toBe(3)
+    expect(readTransform(at(c, { pace: 1, mouth: 0.5 }, 'oval').transform).sy).toBe(2.5)
+    // The drive's 5 and the gaze's 3% of 200.
+    expect(readTransform(at(c, { gaze: [1, 0] }, 'pupils').transform).tx).toBe(11)
+  })
+
+  it('keep every input but the mouth at rest with reduced motion, and are still applied there', () => {
+    const c = driven(all)
+    const calm = { turn: 1, pace: 1, held: 1, gaze: [1, 1] as const, mouth: 1 }
+    expect(at(c, calm, 'dot', [], true).transform).toBeUndefined()
+    expect(at(c, calm, 'head', [], true).transform).toBe('translate(0 -2)')
+    expect(at(c, calm, 'oval', [], true).transform).toBeUndefined()
+    expect(at(c, calm, 'oval', [], true).attrs.get('ry')).toBe('12')
+    // At rest is a value too: a drive whose middle is not the artwork's still shows it.
+    const tilted = driven([{ input: 'turn', target: 'dot', prop: 'rotate', values: [-20, 4, 20] }])
+    expect(readTransform(at(tilted, { turn: 1 }, 'dot', [], true).transform).rot).toBe(4)
+  })
+
+  it('refuse to compile a paint driven by an input that moves fast, or an input that is none', () => {
+    for (const input of ['lookX', 'lookY', 'mouth'] as const) expect(compile(rig({}, { drives: [{ input, target: 'dot', prop: 'opacity', values: [0, 1] }] })), input).toBeNull()
+    expect(compile(rig({}, { drives: [{ input: 'held', target: 'dot', prop: 'fill', values: ['#000000', '#ffffff'] }] }))).not.toBeNull()
+    expect(compile(rig({}, { drives: [{ input: 'speed' as 'pace', target: 'dot', prop: 'translateX', values: [0, 1] }] }))).toBeNull()
+    expect(compile(rig({}, { drives: [{ input: 'pace', target: 'nowhere', prop: 'translateX', values: [0, 1] }] }))).toBeNull()
+    expect(compile(rig({}, { drives: 'all' as unknown as Drive[] }))).toBeNull()
+  })
+})
+
+describe('writeStill', () => {
+  const recorder = () => {
+    const writes: string[] = []
+    const find = (id: string) => ({ setAttribute: (name: string, value: string) => void writes.push(`${id} ${name}=${value}`), removeAttribute: (name: string) => void writes.push(`${id} -${name}`) })
+    return { writes, find }
+  }
+
+  it('writes what the drives set at rest, once, on a look drawn without an engine', () => {
+    // A side view that shows only while it walks: hidden at rest, though the artwork draws it.
+    const look = rig({}, {
+      drives: [
+        { input: 'turn', target: 'oval', prop: 'opacity', values: [1, 0, 1] },
+        { input: 'lookX', target: 'head', prop: 'translateX', values: [-4, 4] },
+        { input: 'held', target: 'dot', prop: 'rotate', values: [0, 30] },
+      ],
+    })
+    const { writes, find } = recorder()
+    writeStill(look, find, 'p-')
+    expect(writes).toEqual(['oval opacity=0'])
+  })
+
+  it('writes nothing for a look without drives: the artwork is its rest', () => {
+    const { writes, find } = recorder()
+    writeStill(rig({ sway: { duration: 1, loop: true, tracks: [{ target: 'dot', prop: 'rotate', values: [-3, 3, -3] }] } }), find, 'p-')
+    expect(writes).toEqual([])
+  })
+
+  it('leaves the others posed when one node throws or is missing', () => {
+    const look = rig({}, { drives: [{ input: 'turn', target: ['oval', 'dot'], prop: 'opacity', values: [1, 0, 1] }] })
+    const writes: string[] = []
+    writeStill(look, (id) => (id === 'oval' ? null : { setAttribute: (name: string, value: string) => void writes.push(`${id} ${name}=${value}`), removeAttribute: () => undefined }), 'p-')
+    expect(writes).toEqual(['dot opacity=0'])
+  })
+})
+
+describe('sample: parents', () => {
+  function bones(nodes: LookNode[], parents: Record<string, string>, animations: Record<string, Animation> = {}, pivots: Look['pivots'] = {}): Look {
+    return { viewBox: [0, 0, 200, 200], nodes, pivots, roles: {}, animations, states: {}, mouth: [], gaze: null, parents }
+  }
+  const hold = (target: string, prop: Track['prop'], value: number): Animation => ({ duration: 1, loop: true, tracks: [{ target, prop, values: [value, value] }] })
+  const posed = (c: Compiled, names: string[], id: string) => sample(c, names.map((n) => clip(n)), 0).get(id)?.transform
+  /** A point through `matrix(a b c d e f)`. */
+  const through = (m: readonly number[] | undefined, x: number, y: number) => {
+    if (!m) throw new Error('no matrix')
+    return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]
+  }
+
+  it('moves a child with its parent and with the group the parent turns in, as if it were nested there', () => {
+    const c = compiled(
+      bones(
+        [
+          { tag: 'g', id: 'spin', box: [80, 80, 40, 40], children: [{ tag: 'g', id: 'shoulder', attrs: { transform: 'translate(10 0)' }, box: [90, 90, 20, 20] }] },
+          { tag: 'path', id: 'hand', attrs: { d: 'M 100 50 L 110 50' }, box: [100, 50, 10, 0] },
+        ],
+        { hand: 'shoulder' },
+        { turn: hold('spin', 'rotate', 90), push: hold('shoulder', 'translateX', 5), wave: hold('hand', 'rotate', 30) },
+        { spin: [100, 100], hand: [100, 50] },
+      ),
+    )
+    // At rest: nothing in front.
+    expect(posed(c, [], 'hand')).toBeUndefined()
+    // D(shoulder) = rotate(90 100 100)·translate(15 0)·translate(-10 0): C = [0 1 -1 0 200 5].
+    expect(posed(c, ['turn', 'push'], 'hand')).toBe('matrix(0 1 -1 0 200 5)')
+    expect(through(readTransform(posed(c, ['turn', 'push'], 'hand')).matrix, 100, 50)).toEqual([150, 105])
+    expect(posed(c, ['turn'], 'hand')).toBe('matrix(0 1 -1 0 200 0)')
+    expect(posed(c, ['push'], 'hand')).toBe('matrix(1 0 0 1 5 0)')
+    // Its own motion stays in its own coordinates, about its own pivot, behind the correction.
+    expect(posed(c, ['turn', 'push', 'wave'], 'hand')).toBe('matrix(0 1 -1 0 200 5) rotate(30 100 50)')
+    // The parent and the group are written as they always are.
+    expect(posed(c, ['turn', 'push'], 'shoulder')).toBe('translate(10 0) translate(5 0)')
+    expect(posed(c, ['turn', 'push'], 'spin')).toBe('rotate(90 100 100)')
+  })
+
+  it('follows a chain of two', () => {
+    const c = compiled(
+      bones(
+        [
+          { tag: 'g', id: 'upper', box: [0, 0, 10, 10] },
+          { tag: 'g', id: 'fore', box: [0, 0, 10, 10] },
+          { tag: 'path', id: 'hand', attrs: { d: 'M 0 0 L 1 0' }, box: [0, 0, 1, 0] },
+        ],
+        { fore: 'upper', hand: 'fore' },
+        { lift: hold('upper', 'rotate', 90), reach: hold('fore', 'translateX', 10) },
+        { upper: [0, 0] },
+      ),
+    )
+    // fore: C = D(upper) = rotate(90); hand: C = D(fore) = W(fore) = rotate(90)·translate(10 0).
+    expect(posed(c, ['lift', 'reach'], 'fore')).toBe('matrix(0 1 -1 0 0 0) translate(10 0)')
+    expect(posed(c, ['lift', 'reach'], 'hand')).toBe('matrix(0 1 -1 0 0 10)')
+    expect(through(readTransform(posed(c, ['lift', 'reach'], 'hand')).matrix, 1, 0)).toEqual([0, 11])
+    expect(posed(c, ['reach'], 'hand')).toBe('matrix(1 0 0 1 10 0)')
+    expect(posed(c, ['lift'], 'hand')).toBe('matrix(0 1 -1 0 0 0)')
+  })
+
+  it('works in the coordinates of the group the child is drawn in', () => {
+    const c = compiled(
+      bones(
+        [
+          { tag: 'g', attrs: { transform: 'scale(2)' }, children: [{ tag: 'circle', id: 'bead', attrs: { cx: 10, cy: 10, r: 2 }, box: [8, 8, 4, 4] }] },
+          { tag: 'g', id: 'mover', box: [0, 0, 10, 10] },
+        ],
+        { bead: 'mover' },
+        { slide: hold('mover', 'translateX', 10) },
+      ),
+    )
+    // P = scale(2), D = translate(10 0): C = P⁻¹·D·P = translate(5 0), so the bead moves 10 in the viewBox.
+    expect(posed(c, ['slide'], 'bead')).toBe('matrix(1 0 0 1 5 0)')
+  })
+
+  it('leaves out a child whose matrices cannot be inverted, and one whose rig leads back to itself', () => {
+    const flat = compiled(
+      bones(
+        [
+          { tag: 'g', id: 'flat', attrs: { transform: 'scale(0)' }, box: [0, 0, 10, 10] },
+          { tag: 'circle', id: 'kid', attrs: { cx: 5, cy: 5, r: 1 }, box: [4, 4, 2, 2] },
+          { tag: 'g', attrs: { transform: 'scale(0 1)' }, children: [{ tag: 'circle', id: 'hidden', attrs: { cx: 5, cy: 5, r: 1 }, box: [4, 4, 2, 2] }] },
+          { tag: 'g', id: 'mover', box: [0, 0, 10, 10] },
+        ],
+        { kid: 'flat', hidden: 'mover' },
+        { slide: hold('mover', 'translateX', 10) },
+      ),
+    )
+    const poses = sample(flat, [clip('slide')], 0)
+    expect(poses.has('kid')).toBe(false)
+    expect(poses.has('hidden')).toBe(false)
+    expect(poses.get('mover')?.transform).toBe('translate(10 0)')
+    // a moves with c, c with b, and b is drawn inside a: each waits for the other, so neither is posed.
+    const loop = compile(
+      bones(
+        [
+          { tag: 'g', id: 'a', box: [0, 0, 10, 10], children: [{ tag: 'g', id: 'b', box: [0, 0, 10, 10] }] },
+          { tag: 'g', id: 'c', box: [0, 0, 10, 10] },
+          { tag: 'g', id: 'd', box: [0, 0, 10, 10] },
+        ],
+        { a: 'c', c: 'b' },
+        { nudge: hold('d', 'translateX', 3), bend: hold('b', 'rotate', 10) },
+      ),
+    )
+    expect(loop).not.toBeNull()
+    const looped = sample(loop as Compiled, [clip('nudge'), clip('bend')], 0)
+    expect(looped.has('a')).toBe(false)
+    expect(looped.has('c')).toBe(false)
+    expect(looped.get('d')?.transform).toBe('translate(3 0)')
+  })
+
+  it('refuses a cycle or a chain past eight links that skipped the check, and writes no matrix for a look without parents', () => {
+    const nodes = (n: number): LookNode[] => Array.from({ length: n }, (_, i) => ({ tag: 'g', id: `p${i}`, box: [0, 0, 1, 1] }))
+    expect(compile(bones(nodes(2), { p0: 'p1', p1: 'p0' }))).toBeNull()
+    const chain = (links: number) => Object.fromEntries(Array.from({ length: links }, (_, i) => [`p${i}`, `p${i + 1}`]))
+    expect(compile(bones(nodes(9), chain(8)))).not.toBeNull()
+    expect(compile(bones(nodes(10), chain(9)))).toBeNull()
+    expect(compile(bones(nodes(2), { p0: 'nowhere' }))).toBeNull()
+    const c = compiled(checkLook(wire(sampleLook())) as Look)
+    for (let t = 0; t < 3000; t += 97) for (const p of sample(c, [clip('hop'), clip('peek'), clip('breathe')], t, { gaze: [1, 0] }).values()) expect(p.transform ?? '').not.toContain('matrix(')
+  })
+})
+
+describe('createEngine: the walk', () => {
+  const walkLook = () =>
+    rig({}, {
+      drives: [
+        { input: 'pace', target: 'dot', prop: 'translateX', values: [0, 100] },
+        { input: 'turn', target: 'oval', prop: 'translateX', values: [-100, 0, 100] },
+        { input: 'held', target: 'oval', prop: 'translateY', values: [0, 100] },
+      ],
+    })
+  const tx = (f: ReturnType<typeof fakeFrames>, id: string) => readTransform(f.nodes.get(id)?.attrs.get('transform')).tx
+  const ty = (f: ReturnType<typeof fakeFrames>, id: string) => readTransform(f.nodes.get(id)?.attrs.get('transform')).ty
+
+  it('moves pace, turn and held towards what it is told, at most 4 a second', () => {
+    expect(INPUT_RATE).toBe(4)
+    expect(easeInput(0, 1, 100)).toBeCloseTo(0.4, 12)
+    expect(easeInput(0.9, 1, 100)).toBe(1)
+    expect(easeInput(1, -1, 250)).toBe(0)
+    expect(easeInput(0.3, 1, 0)).toBe(0.3)
+    expect(easeInput(0.3, 1, Number.NaN)).toBe(0.3)
+    expect(easeInput(Number.NaN, 1, 16)).toBe(0)
+    const f = fakeFrames()
+    const engine = createEngine(f.host)
+    const handle = engine.attach(walkLook(), (id) => f.find(id), { state: 'idle', reducedMotion: false })
+    let want: WalkInputs | null = { pace: 1, turn: -1, held: 1 }
+    handle.setInputs(() => want)
+    // The first frame counts no time; then 40 ms is 0.16.
+    f.frame(40)
+    f.frame(40)
+    expect(tx(f, 'dot')).toBe(16)
+    expect(tx(f, 'oval')).toBe(-16)
+    expect(ty(f, 'oval')).toBe(16)
+    f.run(200)
+    expect(tx(f, 'dot')).toBe(96)
+    f.run(80)
+    expect(tx(f, 'dot')).toBe(100)
+    expect(tx(f, 'oval')).toBe(-100)
+    // Nothing said: back to rest, as slowly. A full swing of turn takes half a second.
+    want = { turn: 1 }
+    f.frame(40)
+    expect(tx(f, 'dot')).toBe(84)
+    f.run(440)
+    expect(tx(f, 'oval')).toBe(92)
+    f.run(80)
+    expect(tx(f, 'oval')).toBe(100)
+    expect(f.find('dot').attrs.has('transform')).toBe(false)
+    want = null
+    f.run(400)
+    expect(f.find('oval').attrs.has('transform')).toBe(false)
+  })
+
+  it('is at rest at once with reduced motion, and copes with a reader that throws or says odd things', () => {
+    const f = fakeFrames()
+    const engine = createEngine(f.host)
+    const handle = engine.attach(walkLook(), (id) => f.find(id), { state: 'idle', reducedMotion: false })
+    let read: () => WalkInputs | null = () => ({ pace: 1 })
+    handle.setInputs(() => read())
+    f.run(400)
+    expect(tx(f, 'dot')).toBe(100)
+    handle.setReducedMotion(true)
+    f.frame(40)
+    expect(f.find('dot').attrs.has('transform')).toBe(false)
+    handle.setReducedMotion(false)
+    f.run(400)
+    read = () => {
+      throw new Error('gone')
+    }
+    f.run(400)
+    expect(f.find('dot').attrs.has('transform')).toBe(false)
+    expect(handle.frozen()).toBe(false)
+    read = () => ({ pace: 'fast', turn: 7, held: Number.NaN }) as unknown as WalkInputs
+    f.run(600)
+    expect(f.find('dot').attrs.has('transform')).toBe(false)
+    expect(tx(f, 'oval')).toBe(100)
+    handle.setInputs(null)
+    f.run(600)
+    expect(f.find('oval').attrs.has('transform')).toBe(false)
+  })
+
+  it('reads the walk only for a look that drives something', () => {
+    const f = fakeFrames()
+    const engine = createEngine(f.host)
+    const handle = engine.attach(rig({ travel: { duration: 10, loop: true, tracks: [{ target: 'dot', prop: 'translateX', values: [0, 100] }] } }, { states: { idle: ['travel'] } }), (id) => f.find(id), { state: 'idle', reducedMotion: false })
+    let reads = 0
+    handle.setInputs(() => {
+      reads++
+      return { pace: 1 }
+    })
+    f.run(400)
+    expect(reads).toBe(0)
+  })
+
+  it('keeps where it looks and its mouth up for drives that read them, without pupils or a mouth entry', () => {
+    const f = fakeFrames()
+    const engine = createEngine(f.host)
+    const look = rig({}, { drives: [{ input: 'lookX', target: 'dot', prop: 'translateX', values: [-10, 10] }, { input: 'mouth', target: 'oval', prop: 'ry', values: [2, 12] }] })
+    const handle = engine.attach(look, (id) => f.find(id), { state: 'idle', reducedMotion: false })
+    handle.setGaze(() => [1, 0])
+    handle.setMouth(() => 1)
+    f.run(1000)
+    expect(tx(f, 'dot')).toBeCloseTo(10, 1)
+    expect(Number(f.find('oval').attrs.get('ry'))).toBeCloseTo(12, 1)
+    handle.setMouth(() => -1)
+    f.run(400)
+    expect(f.find('oval').attrs.get('ry')).toBe('2')
+  })
+
+  it('runs the rich look: every part, every input, only strings of numbers to attributes of its own table', () => {
+    const f = fakeFrames()
+    const engine = createEngine(f.host)
+    const look = checkLook(wire(richLook())) as Look
+    expect(compile(look)).not.toBeNull()
+    const handle = engine.attach(look, (id) => f.find(id), { state: 'idle', reducedMotion: false, idPrefix: 'p-' })
+    let t = 0
+    handle.setMouth(() => (Math.floor(t / 900) % 2 ? Math.abs(Math.sin(t / 90)) : -1))
+    handle.setGaze(() => [Math.cos(t / 300), Math.sin(t / 300)])
+    handle.setInputs(() => ({ pace: Math.abs(Math.sin(t / 700)), turn: Math.sign(Math.sin(t / 1100)), held: Math.floor(t / 2000) % 2 }))
+    for (let i = 0; i < 400; i++) {
+      t += 40
+      if (i % 37 === 0) handle.play((['lean', 'drop', 'twirl'] as const)[(i / 37) % 3], 'once')
+      f.frame(40)
+    }
+    const allowed = new Set(['transform', 'opacity', 'fill-opacity', 'stroke-opacity', 'stroke-dashoffset', 'fill', 'stroke', 'stroke-width', 'd', 'cx', 'cy', 'r', 'rx', 'ry', 'x', 'y', 'width', 'height', 'x1', 'y1', 'x2', 'y2'])
+    const touched = new Set<string>()
+    for (const [id, node] of f.nodes) {
+      for (const [name, value] of node.writes) {
+        touched.add(`${id} ${name}`)
+        expect(allowed.has(name), `${id} ${name}`).toBe(true)
+        if (value !== null) expect(value, `${id} ${name}`).toMatch(name === 'transform' ? TRANSFORM : ATTR)
+      }
+    }
+    for (const what of ['spin transform', 'torso stroke-dashoffset', 'torso fill-opacity', 'torso fill', 'body transform', 'head transform', 'leafL transform', 'hand stroke-opacity', 'hand transform']) expect(touched.has(what), what).toBe(true)
+    expect(f.find('hand').writes.some(([name, value]) => name === 'transform' && value?.startsWith('matrix('))).toBe(true)
+    expect(handle.frozen()).toBe(false)
+    handle.detach()
+    expect(f.find('torso').attrs.get('fill')).toBe('rgb(74,123,208)')
+    expect(f.find('torso').attrs.get('stroke-dashoffset')).toBe('0')
+    for (const id of ['spin', 'body', 'head', 'hand', 'leafR']) expect(f.find(id).attrs.has('transform'), id).toBe(false)
+    expect(f.find('leafL').attrs.get('transform')).toBe('rotate(-20 60 125)')
   })
 })

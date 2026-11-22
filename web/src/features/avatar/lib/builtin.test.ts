@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { BUILTIN, builtinAnimations, gazeTravel, resolves, rolePart, stateList } from './builtin'
-import { animationProblems, sampleLook, wire } from './fixtures'
+import { animationProblems, richLook, sampleLook, wire } from './fixtures'
 import { checkLook } from './look'
 import { AVATAR_STATES } from './types'
 import type { Animation, Look, Role } from './types'
@@ -266,6 +266,20 @@ describe('stateList', () => {
     expect(resolves(look, 'wave')).toBe(false)
     expect(resolves(look, 'hasOwnProperty')).toBe(false)
     expect(resolves(look, 7)).toBe(false)
+  })
+
+  it('gives a look that names no role no built-in motion, whatever its parts are called and whatever rig it has', () => {
+    const look = checkLook(wire(richLook())) as Look
+    expect(Object.keys(look.roles)).toEqual([])
+    expect(names(look)).toEqual([])
+    for (const state of AVATAR_STATES) expect(stateList(look, state).filter((n) => !Object.hasOwn(look.animations, n)), state).toEqual([])
+    expect(stateList(look, 'idle')).toEqual(['twirl'])
+    expect(stateList(look, 'sleeping')).toEqual(['twirl'])
+    for (const name of BUILTIN) expect(resolves(look, name), name).toBe(false)
+    // Parts named like the roles are no roles.
+    const named = withRoles(['body', 'head', 'eyes', 'pupils', 'armL', 'armR'])
+    named.roles = {}
+    expect(names(named)).toEqual([])
   })
 
   it('lets an agent animation take a built-in’s name', () => {

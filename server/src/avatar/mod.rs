@@ -13,8 +13,10 @@
 //! (`text`), and every size, count, rate and wait has a named limit (`store`).
 //!
 //! Modules: `text` (the one function for a line of plain text), `look` (pure: the artwork parsed
-//! into a closed, typed, bounded tree, its pivots, roles, animations, mouth, gaze and voice
-//! validated and normalised, boxes, the geometry lint; the wire types of a look; its limits),
+//! into a closed, typed, bounded tree, its pivots, parents, roles, animations, drives, mouth,
+//! gaze and voice validated and normalised, boxes, the geometry lint; the wire types of a look;
+//! its limits), `preview` (a look drawn as a PNG in one pose or as moments of an animation, so a
+//! session sees what it drew: the stored look read again as untrusted data and rendered here),
 //! `store` (`AvatarState`: the records, their transcript, open question and leases in memory,
 //! the files under `data_dir/avatar/`, what terminal events do to them, the sweep), `session`
 //! (what a session may do with its own avatar: the gate, design, say, ask, act, status, and the
@@ -52,6 +54,7 @@ mod brief;
 mod cli;
 pub mod device;
 pub mod look;
+mod preview;
 mod routes;
 pub mod session;
 pub mod store;
@@ -76,6 +79,13 @@ pub use brief::{BRIEF_MARK, BRIEF_TAGS, Brief, BriefVariant, PREALLOWED, session
 pub use cli::{ABOUT, AvatarArgs, cli};
 pub use routes::router;
 pub use store::AvatarState;
+
+/// Whether a look can be drawn within what a picture may cost, as a design call asks before it
+/// stores one: for the tests that hold documented examples to what a session may send.
+#[cfg(test)]
+pub fn affordable(look: &look::Look) -> Result<(), String> {
+    preview::affordable(&serde_json::to_value(look).map_err(|e| e.to_string())?)
+}
 
 /// The slice's MCP tools: `avatar_status`, `avatar_design`, `avatar_say`, `avatar_ask`,
 /// `avatar_act`. Each acts on the calling session's own avatar.

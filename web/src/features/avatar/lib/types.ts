@@ -35,11 +35,29 @@ export type Tag =
   | 'radialGradient'
   | 'stop'
   | 'clipPath'
+  | 'use'
+  | 'mask'
+  | 'filter'
+  | 'feGaussianBlur'
+  | 'feDropShadow'
+  | 'feOffset'
+  | 'feFlood'
+  | 'feColorMatrix'
+  | 'feComposite'
+  | 'feBlend'
+  | 'feMerge'
+  | 'feMergeNode'
+  | 'feMorphology'
+  | 'feTurbulence'
+  | 'feDisplacementMap'
 
 /** `[x, y, width, height]`. */
 export type Box = [number, number, number, number]
 
-/** The validated design: artwork tree with boxes, pivots, roles, animations, state map, mouth and gaze. */
+/**
+ * The validated design: artwork tree with boxes, pivots, roles, animations, state map, mouth
+ * and gaze, and the session's own rig: `parents` and `drives`, present only when they hold something.
+ */
 export interface Look {
   viewBox: Box
   nodes: LookNode[]
@@ -52,6 +70,10 @@ export interface Look {
   mouth: MouthDrive[]
   /** Pupil travel in viewBox units; null: 3% of the viewBox width. */
   gaze: number | null
+  /** Part id -> the part it moves with, as if it were nested in it, while it keeps its place in the drawing order. */
+  parents?: Record<string, string>
+  /** Up to 16: the live inputs (where it looks, its mouth, its walk) moving its own parts. */
+  drives?: Drive[]
 }
 
 export interface LookNode {
@@ -68,16 +90,26 @@ export interface LookNode {
   text?: string
 }
 
-export type Ease = 'linear' | 'in' | 'out' | 'inOut' | 'outBack' | 'step'
+export type EaseName = 'linear' | 'in' | 'out' | 'inOut' | 'outBack' | 'step' | 'inBack' | 'inOutBack' | 'outElastic' | 'outBounce'
+
+/** A cubic bezier `[x1, y1, x2, y2]`: x from 0 to 1, y from -2 to 3. */
+export type Bezier = [number, number, number, number]
+
+export type Ease = EaseName | Bezier
 
 export type Prop =
   | 'translateX'
   | 'translateY'
   | 'rotate'
+  | 'skewX'
+  | 'skewY'
   | 'scale'
   | 'scaleX'
   | 'scaleY'
   | 'opacity'
+  | 'fillOpacity'
+  | 'strokeOpacity'
+  | 'strokeDashoffset'
   | 'fill'
   | 'stroke'
   | 'strokeWidth'
@@ -125,6 +157,29 @@ export interface Track {
   phase?: number
   /** Seconds, one-shots: this track starts later. */
   delay?: number
+}
+
+/**
+ * A live input: where it looks (`lookX`, `lookY`: -1 to 1, x to the right, y down), how open
+ * its mouth is (0 to 1), how fast it walks (`pace`: 0 to 1), which way it faces (`turn`: -1
+ * left, 0 the viewer, 1 right), and whether the user holds it (`held`: 0 to 1).
+ */
+export type DriveInput = 'lookX' | 'lookY' | 'mouth' | 'pace' | 'turn' | 'held'
+
+export const DRIVE_INPUTS: readonly DriveInput[] = ['lookX', 'lookY', 'mouth', 'pace', 'turn', 'held']
+
+/** An input moving parts: its values sit along the input's range, as a track's keyframes sit along its time. */
+export interface Drive {
+  input: DriveInput
+  /** Ids in the artwork (g, shapes, text or use). */
+  target: string | string[]
+  prop: Prop
+  /** 2 to 16; null: the artwork's own value. */
+  values: (number | string | null)[]
+  /** Where along the input's range each value sits, 0 to 1, rising, first 0, last 1; default: even. */
+  at?: number[]
+  /** One for all segments or one per segment; default linear. */
+  ease?: Ease | Ease[]
 }
 
 export type MouthProp = 'scaleY' | 'scaleX' | 'scale' | 'translateY' | 'ry' | 'r' | 'height'

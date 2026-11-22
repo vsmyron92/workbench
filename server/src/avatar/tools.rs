@@ -7,6 +7,10 @@
 //! refused. Every call passes the gate first, which counts the attempt, and only then are its
 //! arguments read.
 //!
+//! `avatar_design` answers with a picture of what was drawn, and `avatar_status` with one when it
+//! is asked for (`ToolOutput::Images`): a session cannot see the browser. Pictures are drawn on a
+//! blocking thread.
+//!
 //! None of them changes remote state, so none is `mutating`. `avatar_status` only reads; the
 //! other four do something for the user to see (`McpTool::acts`), and the two an agent calls
 //! all the time, `avatar_say` and `avatar_act`, stay out of the Activity view when they succeed
@@ -18,7 +22,7 @@
 
 use serde_json::{Value, json};
 
-use super::session::{self, ActRequest, AskArgs, Call, Pass, SayRequest, StatusRequest};
+use super::session::{self, ActRequest, AskArgs, Call, Pass, PictureRequest, SayRequest, StatusRequest};
 use super::store::MAX_WAIT_TOOL_SECS;
 use super::{Via, brief};
 use crate::app::AppState;
@@ -42,6 +46,32 @@ pub(super) async fn design(state: &AppState, pass: Pass, args: Value) -> ApiResu
     tokio::task::spawn_blocking(move || session::design(&state, &pass, &args, crate::util::now_ms())).await.map_err(|_| ApiError::internal("the design call did not finish"))?
 }
 
+/// Pictures drawn at one time, for all sessions together: drawing takes a core, and a session's
+/// own rate says nothing about how many sessions ask at once. The others wait their turn.
+static DRAWING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// A picture of the session's avatar, drawn on a thread of its own.
+pub(super) async fn picture(state: &AppState, tid: &str, req: PictureRequest) -> ApiResult<Vec<u8>> {
+    let (state, tid) = (state.clone(), tid.to_string());
+    let turn = DRAWING.acquire().await.map_err(|_| ApiError::internal("the picture was not drawn"))?;
+    let drawn = tokio::task::spawn_blocking(move || session::picture(&state, &tid, &req)).await.map_err(|_| ApiError::internal("the picture was not drawn"));
+    drop(turn);
+    drawn?
+}
+
+/// The picture that goes with a design answer: the look at rest. A session that drew nothing of
+/// its own gets none; a look that cannot be drawn is still saved, and the answer says why there
+/// is no picture.
+async fn designed_picture(state: &AppState, tid: &str, text: String) -> ToolOutput {
+    let rest = PictureRequest::rest();
+    let caption = rest.caption();
+    match picture(state, tid, rest).await {
+        Ok(png) => ToolOutput::Images { text: format!("{text}\n{caption} Look at it and correct what is off."), png: vec![png] },
+        Err(e) if e.message == session::NO_LOOK_TO_DRAW => ToolOutput::Text(text),
+        Err(e) => ToolOutput::Text(format!("{text}\nNo picture: {}", e.message)),
+    }
+}
+
 // ---------------------------------------------------------------- avatar_status
 
 fn status_tool() -> McpTool {
@@ -49,18 +79,30 @@ fn status_tool() -> McpTool {
         "avatar_status",
         "This session's avatar: whether it has one, its name, parts, animation names, the open question, the last \
          lines with what became of them, the limits. With guide true the authoring guide comes first: read it once \
-         before avatar_design. With look true the stored design comes back in full (the artwork as SVG).",
+         before avatar_design. With look true the stored design comes back in full (the artwork as SVG). To see the \
+         avatar: picture true draws it at rest, pose draws it under inputs or inside an animation, frames draws one \
+         of your own animations as a row of moments.",
         json!({ "type": "object", "properties": {
             "guide": { "type": "boolean", "description": "Put the authoring guide before the status: how to draw, rig and animate the avatar, with an example. Read it once, before the first avatar_design." },
-            "look": { "type": "boolean", "description": "Include the stored design as an avatar_design call would send it: svg, pivots, roles, animations, states, mouth, gaze, voice, name." }
+            "look": { "type": "boolean", "description": "Include the stored design as an avatar_design call would send it: svg, pivots, parents, roles, animations, states, drives, mouth, gaze, voice, name." },
+            "picture": { "type": "boolean", "description": "Add a picture of the avatar at rest: on the light and the dark panel, and under each at its resting size and as a face." },
+            "pose": { "type": "object", "description": "Add a picture of the avatar in a pose: {animation?: one of your own, at?: 0 to 1 into it (default 0.5), lookX?, lookY?, turn?: -1 to 1, mouth?, pace?, held?: 0 to 1}. Shows what your drives, mouth and gaze do." },
+            "frames": { "type": "string", "description": "Add a picture of one of your own animations as a row of moments, start to end." },
+            "count": { "type": "integer", "minimum": 2, "maximum": 8, "description": "With frames: how many moments, 2 to 8 (default 6)." }
         } }),
         false,
         |state, ctx, args| async move {
             let pass = enter(&state, &ctx, Call::Status)?;
             let req = StatusRequest::parse(&args, &pass.mask(&state))?;
+            let wanted = PictureRequest::parse(&args, &pass.mask(&state))?;
             let status = session::status(&state, &pass, req)?;
             // The guide is for a session that may use its avatar: one that has none reads why instead.
-            Ok(ToolOutput::Text(if req.guide && status.allowed { format!("{}\n## This session's avatar now\n\n{}", brief::guide(Via::Tools, false), status.text()) } else { status.text() }))
+            let text = if req.guide && status.allowed { format!("{}\n## This session's avatar now\n\n{}", brief::guide(Via::Tools, false), status.text()) } else { status.text() };
+            let Some(wanted) = wanted else { return Ok(ToolOutput::Text(text)) };
+            // A picture that cannot be drawn is the answer: the session asked to see something.
+            let caption = wanted.caption();
+            let png = picture(&state, pass.terminal_id(), wanted).await?;
+            Ok(ToolOutput::Images { text: format!("{text}\n{caption}"), png: vec![png] })
         },
     )
 }
@@ -71,26 +113,31 @@ fn design_tool() -> McpTool {
     tool(
         "avatar_design",
         "Design or change this session's avatar: svg (the artwork, a strict SVG subset whose parts carry ids), pivots \
-         and roles (so Workbench's built-in breathing, blinking, gaze and gestures drive your character), animations \
-         (your own keyframe tracks), states, mouth (lip sync), voice, name. Not CSS and not SMIL: read the guide first \
+         and roles (so Workbench's built-in breathing, blinking, gaze and gestures drive your character), parents (a \
+         part that moves with another), animations (your own keyframe tracks), states, mouth (lip sync), drives (where \
+         it looks, how it walks and turns, moving your parts), voice, name. Not CSS and not SMIL: read the guide first \
          (avatar_status with guide true). A call with svg is a new look; without it the fields you send are merged. A \
          refused call changes nothing and lists what to fix.",
         json!({ "type": "object", "properties": {
             "name": { "type": "string", "description": "The avatar's own name, at most 32 characters." },
-            "svg": { "type": "string", "description": "The artwork: one <svg viewBox='0 0 200 200'> of g, path, circle, ellipse, rect, line, polyline, polygon and text, attribute values in single quotes, an id on every part that moves. At most 32 KiB and 300 elements." },
-            "pivots": { "type": "object", "description": "Part id to [x, y]: the point the part turns and scales about, in the coordinates it is drawn in. null removes one." },
+            "svg": { "type": "string", "description": "The artwork: one <svg viewBox='0 0 200 200'> of g, path, circle, ellipse, rect, line, polyline, polygon, text and use (href='#id' of a g, a shape or a text, also one in defs); in defs linearGradient, radialGradient, clipPath, mask and filter (feGaussianBlur, feDropShadow, feOffset, feFlood, feColorMatrix, feComposite, feBlend, feMerge, feMorphology, feTurbulence, feDisplacementMap), used with clip-path, mask and filter='url(#id)'; stroke-dasharray and stroke-dashoffset. Attribute values in single quotes, an id on every part that moves. At most 32 KiB and 300 elements, each use counting what it repeats." },
+            "pivots": { "type": "object", "description": "Part id to [x, y]: the point the part turns, skews and scales about, in the coordinates it is drawn in. null removes one." },
+            "parents": { "type": "object", "description": "Part id to the id of the part it moves with, as if it were drawn inside it, while it keeps its place in the drawing order (a wing behind the body that moves with the body). Not for a part already inside the other; at most 64, chains of 8. Merged by id; null removes one." },
             "roles": { "type": "object", "description": "Which parts are the body, head, eyes, pupils, armL and armR: role to part id. They let the built-in motion drive the character. null removes one." },
-            "animations": { "type": "object", "description": "Name to {duration, loop? | every?: [min, max], tracks: [{target, prop, values, times?, ease?, phase?, delay?}]}. Merged by name; null removes one." },
+            "animations": { "type": "object", "description": "Name to {duration, loop? | every?: [min, max], ease?, tracks: [{target, prop, values, times?, ease?, phase?, delay?}]}. prop: translateX, translateY, rotate, skewX, skewY, scale, scaleX, scaleY, opacity, fillOpacity, strokeOpacity, fill, stroke, strokeWidth, strokeDashoffset, d or a shape's own number. ease: linear, in, out, inOut, inBack, outBack, inOutBack, outElastic, outBounce, step, a bezier [x1, y1, x2, y2], or a list with one per segment. A name of the built-in motion (wave, walk, greet…) replaces it. Merged by name; null removes one." },
             "states": { "type": "object", "description": "State (idle, working, speaking, listening, waiting, attention, error, done, sleeping) to a list of up to 6 animation names, yours or built in. [] is stillness, null the default." },
             "mouth": { "description": "Lip sync: {target, open} morphs a path (open is path data in the structure of the path's own d), {target, prop, open} moves one number (scaleY, scaleX, scale, translateY, ry, r or height). One drive, or a list of up to 4." },
             "gaze": { "type": "number", "description": "How far the part with the pupils role travels when it looks at the pointer, in viewBox units, at most 5% of the width. 0 switches it off." },
+            "drives": { "type": "array", "description": "Up to 16 {input, target, prop, values, at?, ease?}: the input moves the prop of the target part (or up to 16) through values placed along its range (at: 0 to 1, rising; evenly without it). input: lookX, lookY (-1 to 1, where it looks), mouth (0 to 1 while it speaks), pace (0 standing to 1 walking fast), turn (-1 left to 1 right), held (0 to 1 while dragged). fill, stroke and the opacities follow only pace, turn and held. Replaces the stored list; null or [] removes it." },
             "voice": { "type": "object", "description": "{lang: a tag such as en-GB, prefer: up to 5 pieces of browser voice names, pitch: 0.7 to 1.4, rate: 0.8 to 1.3}." },
-            "keep": { "type": "boolean", "description": "With svg: keep the pivots, roles, animations, states, mouth and gaze whose parts still exist, where this call gives none." }
+            "keep": { "type": "boolean", "description": "With svg: keep the pivots, parents, roles, animations, states, mouth, gaze and drives whose parts still exist, where this call gives none." }
         } }),
         false,
         |state, ctx, args| async move {
             let pass = enter(&state, &ctx, Call::Design)?;
-            Ok(ToolOutput::Text(design(&state, pass, args).await?.text))
+            let tid = pass.terminal_id().to_string();
+            let text = design(&state, pass, args).await?.text;
+            Ok(designed_picture(&state, &tid, text).await)
         },
     )
     .acts()

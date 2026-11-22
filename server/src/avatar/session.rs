@@ -27,7 +27,7 @@ use super::store::{
     MAX_CHOICE_CHARS, MAX_CHOICES, MAX_LINES, MAX_NAME_CHARS, MAX_PENDING_LINES, MAX_REPLY_CHARS, MAX_SAY_CHARS, MAX_WAIT_HOOK_SECS, MAX_WAIT_TOOL_SECS, OpenAsk, Outcome, Reason, Record, ReplyVia, SAY_PER_MINUTE,
     SAY_WAIT_EXTRA_SECS, SAY_WAIT_SOFT_MS, SPEECH_CHARS_PER_SEC, STATUS_LINES, STATUS_PER_MINUTE, Speaker, UNSEEN_SECS, Windows, emit_act, emit_ask, emit_changed, emit_say, ensure_loaded, next_id, running_agent, save,
 };
-use super::{Sessions, Via, text};
+use super::{Sessions, Via, preview, text};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
 use crate::terminals::AgentState;
@@ -319,7 +319,7 @@ fn loops(look: Option<&Look>, name: &str) -> bool {
     }
 }
 
-/// The first of the animation's `fill`, `stroke` and `opacity` tracks that does not end on the
+/// The first of the animation's `fill`, `stroke` and opacity tracks that does not end on the
 /// value it starts with, by its prop. Each track is asked alone, with the rule the validator has.
 fn open_paint(look: &Look, name: &str) -> Option<&'static str> {
     let animation = look.animations.get(name)?;
@@ -328,6 +328,8 @@ fn open_paint(look: &Look, name: &str) -> Option<&'static str> {
             Prop::Fill => "fill",
             Prop::Stroke => "stroke",
             Prop::Opacity => "opacity",
+            Prop::FillOpacity => "fillOpacity",
+            Prop::StrokeOpacity => "strokeOpacity",
             _ => return None,
         };
         let mut alone = look.clone();
@@ -383,6 +385,11 @@ pub fn design(state: &AppState, pass: &Pass, args: &Value, now: i64) -> ApiResul
     let current: Design = on_record(&mut state.avatar.inner.lock().records, tid)?.design.clone();
     let mask = |s: &str| state.terminals.redact_text(tid, s);
     let applied = look::apply_masked(Some(&current), args, &mask).map_err(|problems| ApiError::bad_request(format!("{}\nNothing was changed.", look::message(&problems))))?;
+    // A look that costs too much to draw is not stored: the browser would pay for it on every
+    // frame, and the session could not be shown it.
+    if let Some(look) = applied.design.look.as_ref().filter(|look| current.look.as_ref() != Some(*look)) {
+        preview::affordable(&serde_json::to_value(look)?).map_err(|why| ApiError::bad_request(format!("{}\nNothing was changed.", mask(&why))))?;
+    }
 
     let mut guard = state.avatar.inner.lock();
     let rec = on_record(&mut guard.records, tid)?;
@@ -405,7 +412,12 @@ fn kib(bytes: usize) -> String {
     format!("{:.1}", bytes as f64 / 1024.0)
 }
 
-/// What the session reads after a design call. It cannot see what it drew: this describes it.
+/// The look's drives, one line each: "lookX moves head rotate".
+fn drives(look: &Look) -> Vec<String> {
+    look.drives.iter().map(ToString::to_string).collect()
+}
+
+/// What the session reads after a design call, beside the picture: the parts and where they are.
 fn design_answer(rec: &Record, applied: &Applied, changed: bool) -> String {
     let named = if rec.design.name.is_empty() { "no name yet".to_string() } else { format!("named {}", rec.design.name) };
     let mut out = if changed { format!("Saved as revision {}, {named}.", rec.revision) } else { format!("Nothing to save: the avatar already has this design. It is revision {}, {named}.", rec.revision) };
@@ -425,9 +437,12 @@ fn design_answer(rec: &Record, applied: &Applied, changed: bool) -> String {
             } else {
                 out.push_str(&format!("\nYour animations: {}.", applied.animations.join(", ")));
             }
+            if !look.drives.is_empty() {
+                out.push_str(&format!("\nDrives: {}.", drives(look).join("; ")));
+            }
             let usage = applied.usage;
             out.push_str(&format!(
-                "\nUsage: svg {} of {} KiB, {} of {} elements, {} of {} animations.",
+                "\nUsage: svg {} of {} KiB, {} of {} elements, {} of {} animations",
                 kib(usage.svg_bytes),
                 look::MAX_SVG_BYTES / 1024,
                 usage.elements,
@@ -435,6 +450,14 @@ fn design_answer(rec: &Record, applied: &Applied, changed: bool) -> String {
                 usage.animations,
                 look::MAX_ANIMATIONS
             ));
+            // Parents and drives only where the look has them.
+            if usage.parents > 0 {
+                out.push_str(&format!(", {} of {} parents", usage.parents, look::MAX_PARENTS));
+            }
+            if usage.drives > 0 {
+                out.push_str(&format!(", {} of {} drives", usage.drives, look::MAX_DRIVES));
+            }
+            out.push('.');
             let built = built_in(Some(look));
             if built.is_empty() {
                 out.push_str("\nNo built-in motion applies: name roles (body, head, eyes, pupils, armL, armR) and Workbench moves them.");
@@ -1267,7 +1290,7 @@ pub struct StatusRequest {
 impl StatusRequest {
     /// `mask`: the session's secret masking ([`Pass::mask`]), for a refusal that quotes a key.
     pub fn parse(args: &Value, mask: &dyn Fn(&str) -> String) -> ApiResult<StatusRequest> {
-        let o = fields(args, "status", &["guide", "look"], mask)?;
+        let o = fields(args, "status", &["guide", "look", "picture", "pose", "frames", "count"], mask)?;
         Ok(StatusRequest { guide: flag_of(o, "guide")?.unwrap_or(false), look: flag_of(o, "look")?.unwrap_or(false) })
     }
 }
@@ -1302,10 +1325,14 @@ pub struct StatusAvatar {
     pub designed: bool,
     pub revision: u64,
     pub via: Via,
-    /// One line per part with an id: `id tag x y w h pivot x y`, in root coordinates, at rest.
+    /// One line per part with an id: `id tag x y w h pivot x y`, in root coordinates, at rest,
+    /// then `parent id` for a part that moves with another.
     pub parts: Vec<String>,
     /// The look's own animations.
     pub animations: Vec<String>,
+    /// What the live inputs move, one line each: "lookX moves head rotate".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub drives: Vec<String>,
     /// The built-in motion a gesture may name.
     pub built_in: Vec<String>,
     pub voice: Voice,
@@ -1384,6 +1411,11 @@ pub struct StatusLimits {
     pub animations: usize,
     pub tracks_per_animation: usize,
     pub keyframes_per_track: usize,
+    pub filters: usize,
+    pub primitives_per_filter: usize,
+    pub dashes: usize,
+    pub parents: usize,
+    pub drives: usize,
 }
 
 fn limits() -> StatusLimits {
@@ -1413,6 +1445,11 @@ fn limits() -> StatusLimits {
         animations: look::MAX_ANIMATIONS,
         tracks_per_animation: look::MAX_TRACKS,
         keyframes_per_track: look::MAX_KEYFRAMES,
+        filters: look::MAX_FILTERS,
+        primitives_per_filter: look::MAX_FILTER_PRIMITIVES,
+        dashes: look::MAX_DASHES,
+        parents: look::MAX_PARENTS,
+        drives: look::MAX_DRIVES,
     }
 }
 
@@ -1427,6 +1464,13 @@ fn design_call(design: &Design) -> Value {
         call["states"] = json!(look.states);
         call["mouth"] = json!(look.mouth);
         call["gaze"] = json!(look.gaze);
+        // Written only when the look has them, as the stored look writes them.
+        if !look.parents.is_empty() {
+            call["parents"] = json!(look.parents);
+        }
+        if !look.drives.is_empty() {
+            call["drives"] = json!(look.drives);
+        }
     }
     call
 }
@@ -1467,6 +1511,7 @@ pub fn status(state: &AppState, pass: &Pass, req: StatusRequest) -> ApiResult<St
         via: rec.via,
         parts: look.map(|l| look::parts(l).iter().map(ToString::to_string).collect()).unwrap_or_default(),
         animations: own_animations(look),
+        drives: look.map(drives).unwrap_or_default(),
         built_in: built_in(look).into_iter().map(str::to_string).collect(),
         voice: rec.design.voice.clone(),
         held: rec.held.as_ref().map(|held| StatusHeld { name: held.name.clone(), mode: held.mode }),
@@ -1480,6 +1525,87 @@ pub fn status(state: &AppState, pass: &Pass, req: StatusRequest) -> ApiResult<St
         (true, Via::Command) => NOTE_COMMAND,
     };
     Ok(Status { note: note.to_string(), allowed: rec.on, avatar: Some(avatar), limits: limits() })
+}
+
+// ---------------------------------------------------------------- pictures
+
+/// A session without a look of its own asked for a picture.
+pub const NO_LOOK_TO_DRAW: &str = "There is no look of your own to draw yet: this avatar shows Workbench's default look. Send svg with a design call first.";
+
+/// What a session asks to see of its avatar.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PictureRequest {
+    /// The figure in one pose, on the light and on the dark panel.
+    Sheet(preview::Pose),
+    /// Moments of one of its own animations, in a row.
+    Strip { animation: String, frames: usize },
+}
+
+impl PictureRequest {
+    /// The look at rest.
+    pub fn rest() -> PictureRequest {
+        PictureRequest::Sheet(preview::Pose::default())
+    }
+
+    /// From `{picture?, pose?, frames?, count?}` beside whatever else the call takes (the caller
+    /// has checked its keys). `picture: true` is the look at rest, `pose` the look in that pose,
+    /// `frames` a strip of that animation with `count` moments. `None`: no picture was asked for.
+    pub fn parse(args: &Value, mask: &dyn Fn(&str) -> String) -> ApiResult<Option<PictureRequest>> {
+        let Some(o) = args.as_object() else { return Ok(None) };
+        let wanted = flag_of(o, "picture")?.unwrap_or(false);
+        let frames = text_of(o, "frames")?;
+        let count = number_of(o, "count")?;
+        let pose = o.get("pose").filter(|v| !v.is_null());
+        if let Some(animation) = frames {
+            if pose.is_some() {
+                return Err(ApiError::bad_request("frames and pose are two pictures: ask for one of them in a call"));
+            }
+            let frames = match count {
+                None => preview::STRIP_FRAMES_DEFAULT,
+                Some(n) if n.fract() == 0.0 && (preview::STRIP_FRAMES_MIN as f64..=preview::STRIP_FRAMES_MAX as f64).contains(&n) => n as usize,
+                Some(_) => return Err(ApiError::bad_request(format!("count is a whole number from {} to {}: how many moments of the animation to draw", preview::STRIP_FRAMES_MIN, preview::STRIP_FRAMES_MAX))),
+            };
+            return Ok(Some(PictureRequest::Strip { animation, frames }));
+        }
+        if count.is_some() {
+            return Err(ApiError::bad_request("count says how many moments of an animation to draw: name the animation with frames"));
+        }
+        match pose {
+            Some(pose) => Ok(Some(PictureRequest::Sheet(preview::Pose::from_json(pose).map_err(|why| ApiError::bad_request(mask(&why)))?))),
+            None => Ok(wanted.then(PictureRequest::rest)),
+        }
+    }
+
+    /// What the picture shows, for the text beside it: nothing is written in the picture itself.
+    pub fn caption(&self) -> String {
+        match self {
+            PictureRequest::Sheet(pose) if *pose == preview::Pose::default() => "Picture: your avatar at rest, on the light panel and on the dark one; under each, at its resting size and as a face.".to_string(),
+            PictureRequest::Sheet(_) => "Picture: your avatar in that pose, on the light panel and on the dark one; under each, at rest: at its resting size and as a face.".to_string(),
+            PictureRequest::Strip { animation, frames } => format!("Picture: {frames} moments of {animation}, from its start on the left to its end on the right."),
+        }
+    }
+}
+
+/// The picture a session asked for of its own avatar, as a PNG. Drawing is CPU work: call this on
+/// a blocking thread. A session whose avatar has the default look has nothing of its own to see.
+pub fn picture(state: &AppState, tid: &str, req: &PictureRequest) -> ApiResult<Vec<u8>> {
+    // The look is copied out: nothing is drawn under the store's lock.
+    let look: Option<Look> = {
+        let inner = state.avatar.inner.lock();
+        let rec = inner.records.get(tid).ok_or_else(|| ApiError::conflict(NO_AVATAR))?;
+        // An avatar the user turned off is not drawn for its session either.
+        if !rec.on {
+            return Err(ApiError::conflict(TURNED_OFF));
+        }
+        rec.design.look.clone()
+    };
+    let look = look.ok_or_else(|| ApiError::conflict(NO_LOOK_TO_DRAW))?;
+    let look = serde_json::to_value(&look)?;
+    let drawn = match req {
+        PictureRequest::Sheet(pose) => preview::sheet(&look, pose),
+        PictureRequest::Strip { animation, frames } => preview::strip(&look, animation, *frames),
+    };
+    drawn.map_err(|why| ApiError::bad_request(state.terminals.redact_text(tid, &why)))
 }
 
 // ---------------------------------------------------------------- reading arguments

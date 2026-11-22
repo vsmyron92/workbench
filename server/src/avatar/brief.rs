@@ -472,15 +472,15 @@ mod tests {
     }
 
     #[test]
-    fn the_guide_a_session_reads_is_under_seven_kilobytes() {
-        const MOST: usize = 7 * 1024;
+    fn the_guide_a_session_reads_is_under_ten_kilobytes() {
+        const MOST: usize = 10 * 1024;
         // The command part is two halves, one for a session on the host and one for a session in
         // a dev container: a session is given the half that is its own. With the tools part, with
         // either half, the guide stays under the limit (the host half with a program path of
-        // ordinary length: it is written out in each of its five commands).
+        // ordinary length: it is written out in each of its six commands).
         let exe = Path::new("/opt/workbench/bin/workbench");
         let (host, container) = GUIDE_COMMAND.split_once(CONTAINER_MARK).expect("two halves");
-        assert_eq!(host.matches(PROGRAM_MARK).count(), 5);
+        assert_eq!(host.matches(PROGRAM_MARK).count(), 6);
         assert!(!container.contains(PROGRAM_MARK));
         for (via, in_container) in [(Via::Tools, false), (Via::Tools, true), (Via::Command, false), (Via::Command, true)] {
             let given = guide_with(via, in_container, Dialect::Posix, Some(exe));
@@ -502,7 +502,7 @@ mod tests {
         assert!(!tools.contains("curl") && !tools.contains("/opt/workbench"), "{tools}");
 
         let host = guide_with(Via::Command, false, Dialect::Posix, Some(exe));
-        for form in ["avatar status", "avatar design ", "avatar say ", "avatar ask ", "avatar act "] {
+        for form in ["avatar status", "avatar design ", "avatar say ", "avatar ask ", "avatar act ", "avatar picture "] {
             assert!(host.contains(&format!("/opt/workbench/bin/workbench {form}")), "the host part shows `{form}`: {host}");
         }
         assert!(!host.contains("curl") && !host.contains("avatar_say"), "{host}");
@@ -510,7 +510,7 @@ mod tests {
         assert!(windows.contains("& 'C:\\Program Files\\Workbench\\workbench.exe' avatar say "), "{windows}");
 
         let container = guide_with(Via::Command, true, Dialect::Posix, Some(exe));
-        for route in ["/status", "/design", "/say", "/ask", "/act"] {
+        for route in ["/status", "/design", "/say", "/ask", "/act", "/picture"] {
             assert!(container.contains(route), "the dev-container part names {route}");
         }
         assert!(container.contains("-H @-") && container.contains("python3") && !container.contains("/opt/workbench") && !container.contains("avatar_say"), "{container}");
@@ -522,7 +522,13 @@ mod tests {
         let applied = look::apply(None, &design).unwrap_or_else(|problems| panic!("the example is refused:\n{}", look::message(&problems)));
         assert!(applied.warnings.is_empty(), "the example has warnings:\n{}", applied.warnings.join("\n"));
         let look = applied.design.look.expect("a look");
+        crate::avatar::affordable(&look).expect("a design call stores it");
 
+        // It shows the forms a session would not guess: a part that follows another from outside
+        // it, inputs that move parts of its own, a shape drawn twice, a filter.
+        assert!(look.parents.len() == 1 && look.drives.len() == 2, "{:?} {:?}", look.parents, look.drives);
+        let svg = design["svg"].as_str().unwrap();
+        assert!(svg.contains("<use ") && svg.contains("<filter "), "{svg}");
         // It is a character with parts, not a blob: a body, a head on it, eyes with pupils, arms.
         for role in ["body", "head", "eyes", "pupils", "armL", "armR"] {
             assert!(design["roles"][role].is_string(), "the example names the {role} role");
@@ -537,7 +543,7 @@ mod tests {
         assert_eq!(look::builtins(&look), look::BUILTIN);
         // Small: it is an example of the form, and a session is told to draw about this much.
         let text = fenced(GUIDE, "json")[0];
-        assert!((1000..=1800).contains(&text.len()), "the example is {} bytes", text.len());
+        assert!((1000..=2400).contains(&text.len()), "the example is {} bytes", text.len());
         assert!(applied.usage.elements <= 40, "{} elements", applied.usage.elements);
         // It stays inside the part of the viewBox the guide names, at rest.
         for part in &applied.parts {
@@ -624,11 +630,13 @@ mod tests {
         let says = |text: String, words: &str| assert!(text.contains(words), "{words:?} is not in:\n{text}");
 
         // Not the SVG you know.
-        says(refused(&|d| svg(d, "<circle cx='116' cy='74' r='9' fill='#fff'/>", "<use href='#x'/>")), "repeat the shape");
+        says(refused(&|d| svg(d, "<use href='#eye' x='32'/>", "<use href='#x' x='32'/>")), "which is not in this svg");
+        says(refused(&|d| svg(d, "<use href='#eye' x='32'/>", "<use href='http://example.com/a.svg#eye'/>")), "reaches outside the artwork");
+        says(refused(&|d| svg(d, "<g id='head'>", "<g id='head'><pattern id='p'/>")), "pattern");
         says(refused(&|d| svg(d, "<g id='head'>", "<g id='head' onclick='x()'>")), "onclick");
         let dropped = warned(&|d| svg(d, "<g id='head'>", "<g id='head' transform-origin='100 106' class='a'>"));
         says(dropped.clone(), "Not drawn: class (1)");
-        says(dropped, "transform-origin is not used (at line 1 column 318, in g#head): give the part a pivot in pivots instead");
+        says(dropped, "transform-origin is not used (at line 1 column 651, in g#head): give the part a pivot in pivots instead");
         says(refused(&|d| svg(d, "x2='54' y2='140'", "x2='5400' y2='140'")), "out of range");
         // Motion: a loop's paint closes; paint keyframes keep their distance; null needs a value of its own.
         let paint = |values: Value, extra: &[(&str, Value)]| {
@@ -666,15 +674,18 @@ mod tests {
             ("phase and delay", "phase"),
             ("a state names an animation", "built-in"),
             ("null needs the artwork's own value", "null"),
-            ("built-in motion is not drawn again", "do not redefine"),
+            ("a session's own animation takes a built-in's name", "replaces workbench's"),
+            ("a parent keeps the drawing order", "without being nested"),
+            ("colours follow the slow inputs only", "take pace, turn and held only"),
+            ("a use repeats nothing that holds a use", "never of one that holds a use"),
             ("no transform on animated parts", "no transform"),
-            ("design in at most two calls", "at most two calls"),
+            ("design in a few calls, looking in between", "two or three calls"),
             ("designed true: do not design again", "designed true"),
         ] {
             assert!(guide.contains(words), "the guide does not say: {rule} ({words:?})");
         }
         // Every limit it names is the validator's.
-        for (what, limit) in [("32 KiB", look::MAX_SVG_BYTES / 1024), ("300 elements", look::MAX_ELEMENTS), ("32 animations", look::MAX_ANIMATIONS), ("16 tracks", look::MAX_TRACKS), ("16 keyframes", look::MAX_KEYFRAMES)] {
+        for (what, limit) in [("32 KiB", look::MAX_SVG_BYTES / 1024), ("300 elements", look::MAX_ELEMENTS), ("32 animations", look::MAX_ANIMATIONS), ("16 tracks", look::MAX_TRACKS), ("16 keyframes", look::MAX_KEYFRAMES), ("16 drives", look::MAX_DRIVES), ("64 parents", look::MAX_PARENTS), ("8 per filter", look::MAX_FILTER_PRIMITIVES), ("8 filters", look::MAX_FILTERS)] {
             assert!(GUIDE.contains(what) && what.starts_with(&limit.to_string()), "the guide names {what}");
         }
     }

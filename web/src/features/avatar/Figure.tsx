@@ -7,7 +7,7 @@
 // dot, the "Voice off" chip) is the app's.
 //
 // How it is bound (10.7): the SVG tree is built once per look object and prefix and
-// remounted for a new look; state, mouth, gaze and gestures reach the engine through its
+// remounted for a new look; state, mouth, gaze, the walk and gestures reach the engine through its
 // handle in effects, never through props of the SVG tree; the engine attaches in a layout
 // effect and detaches in its cleanup; its targets are the nodes inside this stage, found
 // through a ref, never by a document-wide id.
@@ -19,8 +19,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, type CS
 import { VolumeX } from 'lucide-react'
 import { ErrorBoundary } from '@/ui'
 import { defaultLook } from './lib/defaultLook'
-import { compile } from './lib/engine'
-import type { Engine, FigureHandle } from './lib/engine'
+import { compile, writeStill } from './lib/engine'
+import type { Engine, FigureHandle, WalkInputs } from './lib/engine'
 import { checkLook, cleanIdPrefix, faceViewBox, lookElements, viewBoxOf } from './lib/look'
 import type { AvatarState, Look, SessionTone } from './lib/types'
 import './avatar.css'
@@ -196,9 +196,18 @@ function Stage({ size, drawn, children }: { size: number; drawn: 'own' | 'defaul
  * figure falls back to. `look` is a checked look (`drawnLook`), never a record's raw one.
  */
 export const StillLook = memo(function StillLook({ look, idPrefix, size, face = false, drawn = 'fallback' }: { look: Look; idPrefix: string; size: number; face?: boolean; drawn?: 'own' | 'default' | 'fallback' }) {
+  // What the look's drives set at rest is written once: no engine runs here.
+  const pose = useCallback(
+    (svg: SVGSVGElement | null) => {
+      if (!svg) return
+      const prefix = cleanIdPrefix(idPrefix)
+      writeStill(look, (id) => svg.querySelector<SVGElement>(`[id="${prefix}${id}"]`), idPrefix)
+    },
+    [look, idPrefix],
+  )
   return (
     <Stage size={size} drawn={drawn}>
-      <Artwork look={look} idPrefix={idPrefix} face={face} />
+      <Artwork look={look} idPrefix={idPrefix} face={face} onSvg={pose} />
     </Stage>
   )
 })
@@ -224,6 +233,11 @@ export interface FigureProps {
   /** Where the pupils look, as a vector of length up to 1; a reader that answers null lets the figure glance about. */
   gaze: (() => readonly [number, number] | null) | null
   /**
+   * How the figure walks (`pace`, `turn`, `held`), for the drives of its look: only the
+   * walking overlay knows; absent or null, all three are at rest.
+   */
+  inputs?: (() => WalkInputs | null) | null
+  /**
    * The record's `held` gesture: played when the figure attaches and whenever it changes
    * (`since` tells a second play of the same one), ended when it becomes null. Gestures
    * that play once go through `onHandle`; a held one is not played by hand as well.
@@ -236,7 +250,7 @@ export interface FigureProps {
 type BoundProps = Omit<FigureProps, 'look' | 'seed' | 'revision'> & { look: Look; own: boolean }
 
 /** The stage with its artwork, attached to the engine. */
-function Bound({ look, own, idPrefix, size, engine, state, reducedMotion, mouth, gaze, held, onHandle }: BoundProps) {
+function Bound({ look, own, idPrefix, size, engine, state, reducedMotion, mouth, gaze, inputs = null, held, onHandle }: BoundProps) {
   /** The nodes of this stage that carry an id, by that id (prefix included). Filled when the SVG mounts. */
   const nodes = useRef(new Map<string, Element>())
   const collect = useCallback((svg: SVGSVGElement | null) => {
@@ -248,8 +262,8 @@ function Bound({ look, own, idPrefix, size, engine, state, reducedMotion, mouth,
 
   const handle = useRef<FigureHandle | null>(null)
   // What the figure is told now, for the moment it attaches (the effects below pass on what changes later).
-  const latest = useRef({ state, reducedMotion, mouth, gaze, onHandle })
-  latest.current = { state, reducedMotion, mouth, gaze, onHandle }
+  const latest = useRef({ state, reducedMotion, mouth, gaze, inputs, onHandle })
+  latest.current = { state, reducedMotion, mouth, gaze, inputs, onHandle }
 
   useLayoutEffect(() => {
     if (!engine) return
@@ -258,6 +272,7 @@ function Bound({ look, own, idPrefix, size, engine, state, reducedMotion, mouth,
     const h = engine.attach(look, (id) => nodes.current.get(prefix + id) ?? null, { state: now.state, reducedMotion: now.reducedMotion, idPrefix })
     h.setMouth(now.mouth)
     h.setGaze(now.gaze)
+    h.setInputs(now.inputs)
     handle.current = h
     now.onHandle?.(h)
     return () => {
@@ -272,6 +287,7 @@ function Bound({ look, own, idPrefix, size, engine, state, reducedMotion, mouth,
   useEffect(() => handle.current?.setReducedMotion(reducedMotion), [reducedMotion])
   useEffect(() => handle.current?.setMouth(mouth), [mouth])
   useEffect(() => handle.current?.setGaze(gaze), [gaze])
+  useEffect(() => handle.current?.setInputs(inputs), [inputs])
 
   // The held gesture is a state of the record: it is played for every handle, and ended when the record lets go of it.
   const heldName = held?.name ?? null

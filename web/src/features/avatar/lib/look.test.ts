@@ -6,17 +6,21 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { defaultLook } from './defaultLook'
-import { sampleLook, wire } from './fixtures'
+import { richLook, sampleLook, wire } from './fixtures'
 import {
   LIMITS,
+  MAX_CHAIN_LINKS,
   MORE_LIMITS,
   boxThrough,
   checkLook,
   cleanIdPrefix,
+  drivesOn,
   faceViewBox,
   fmt,
   formatPath,
   formatTransform,
+  invert,
+  isEase,
   isId,
   lookElements,
   lookIndex,
@@ -403,7 +407,11 @@ describe('checkLook rejects', () => {
     expect(checked((l) => void (find(l, 'clip').children as Json[]).push({ tag: 'g' }))).toBeNull()
     expect(checked((l) => void (find(l, 'clip').children as Json[]).push({ tag: 'text', text: 'x' }))).toBeNull()
     expect(checked((l) => void (find(l, 'skin').children as Json[]).push(circle))).toBeNull()
-    expect(checked((l) => void ((nodesOf(l)[0].children as Json[]).push({ tag: 'g' })))).toBeNull()
+    // Defs hold groups, shapes and text to use, but no use, no defs and no stop of their own.
+    expect(checked((l) => void ((nodesOf(l)[0].children as Json[]).push({ tag: 'g' })))).not.toBeNull()
+    expect(checked((l) => void ((nodesOf(l)[0].children as Json[]).push({ tag: 'use', attrs: { useRef: 'face' } })))).toBeNull()
+    expect(checked((l) => void ((nodesOf(l)[0].children as Json[]).push({ tag: 'defs' })))).toBeNull()
+    expect(checked((l) => void ((nodesOf(l)[0].children as Json[]).push({ tag: 'stop', attrs: { offset: 0 } })))).toBeNull()
     // A clip path's own shapes may not be clipped again.
     expect(checked((l) => void (((find(l, 'clip').children as Json[])[0].attrs as Json).clipPathRef = 'clip'))).toBeNull()
     expect(checked((l) => void (find(l, 'shadow').text = 'hello'))).toBeNull()
@@ -470,7 +478,8 @@ describe('checkLook rejects', () => {
     expect(checked(morph(MORE_LIMITS.dKeyframeChars, 3))).not.toBeNull()
     expect(checked(morph(MORE_LIMITS.dKeyframeChars + 1, 1))).toBeNull()
     expect(checked(morph(MORE_LIMITS.dKeyframeChars, 4))).toBeNull()
-    expect(MORE_LIMITS).toEqual({ targets: 16, dKeyframeChars: 1000, dKeyframesTotal: 6000, stateNames: 6, mouthDrives: 4, transforms: 8 })
+    expect(MORE_LIMITS).toEqual({ targets: 16, dKeyframeChars: 1000, dKeyframesTotal: 6000, stateNames: 6, mouthDrives: 4, transforms: 8, filters: 8, filterPrimitives: 8, dashes: 8, parents: 64, drives: 16 })
+    expect(Object.isFrozen(MORE_LIMITS)).toBe(true)
   })
 })
 
@@ -1004,5 +1013,644 @@ describe('the geometry of a look', () => {
     expect(propFits('rotate', 'g')).toBe(true)
     expect(propFits('rotate', 'stop')).toBe(false)
     expect(propFits('constructor' as 'd', 'path')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------- the richer artwork and the free rig
+
+/** The rich look as it comes off the wire, changed by `change`, through `checkLook`. */
+function rich(change?: (look: Json) => void): Look | null {
+  const look = wire(richLook()) as Json
+  change?.(look)
+  return checkLook(look)
+}
+const defsOf = (look: Json) => (look.nodes as Json[])[0].children as Json[]
+const filterSteps = (look: Json, id: string) => find(look, id).children as Json[]
+const drivesOf = (look: Json) => look.drives as Json[]
+const parentsOf = (look: Json) => look.parents as Json
+const circle = (over: Json = {}) => ({ tag: 'circle', attrs: { cx: 1, cy: 1, r: 1 }, ...over })
+
+const RICH_TAGS = new Set([...ALLOWED_TAGS, 'use', 'mask', 'filter', 'feGaussianBlur', 'feDropShadow', 'feOffset', 'feFlood', 'feColorMatrix', 'feComposite', 'feBlend', 'feMerge', 'feMergeNode', 'feMorphology', 'feTurbulence', 'feDisplacementMap'])
+const RICH_ATTRS = new Set([
+  ...ALLOWED_ATTRS,
+  'href',
+  'mask',
+  'filter',
+  'stroke-dasharray',
+  'stroke-dashoffset',
+  'maskUnits',
+  'maskContentUnits',
+  'mask-type',
+  'filterUnits',
+  'primitiveUnits',
+  'color-interpolation-filters',
+  'in',
+  'in2',
+  'result',
+  'stdDeviation',
+  'dx',
+  'dy',
+  'flood-color',
+  'flood-opacity',
+  'type',
+  'values',
+  'operator',
+  'k1',
+  'k2',
+  'k3',
+  'k4',
+  'mode',
+  'radius',
+  'baseFrequency',
+  'numOctaves',
+  'seed',
+  'scale',
+  'xChannelSelector',
+  'yChannelSelector',
+])
+
+/** Every tag and attribute of some markup is in the rich tables; ids, references and hrefs carry the prefix. */
+function expectOnlyRich(markup: string, prefix: string) {
+  const found = names(markup)
+  for (const tag of found.tags) expect(RICH_TAGS.has(tag), `tag ${tag}`).toBe(true)
+  for (const attr of found.attrs) expect(RICH_ATTRS.has(attr), `attribute ${attr}`).toBe(true)
+  for (const id of found.ids) expect(id.startsWith(prefix), `id ${id}`).toBe(true)
+  for (const ref of found.refs) expect(ref.startsWith(prefix), `reference ${ref}`).toBe(true)
+  for (const href of markup.matchAll(/ href="([^"]*)"/g)) expect(href[1].startsWith(`#${prefix}`), `href ${href[1]}`).toBe(true)
+  return found
+}
+
+describe('checkLook on use, masks, filters and dashes', () => {
+  it('accepts them, and gives back an equal look', () => {
+    const sent = richLook()
+    const got = checkLook(wire(sent))
+    expect(got).not.toBeNull()
+    expect(got).toEqual(sent)
+    expect(checkLook(wire(got))).toEqual(got)
+    // A use with an id is a part: animated, turned about its pivot, given a role, a parent, a drive.
+    expect(rich((l) => void ((l.pivots as Json).leafL = [60, 125]))).not.toBeNull()
+    expect(rich((l) => void (l.roles = { armL: 'leafL' }))).not.toBeNull()
+    expect(rich((l) => void (parentsOf(l).leafL = 'hand'))).not.toBeNull()
+  })
+
+  it('a use only of a group, a shape or a text of the look that is drawn by itself and holds no use', () => {
+    const useOf = (target: string, over: Json = {}) => ({ tag: 'use', attrs: { useRef: target, ...over } })
+    expect(rich((l) => void nodesOf(l).push(useOf('torso')))).not.toBeNull()
+    expect(rich((l) => void nodesOf(l).push(useOf('head', { x: -3, y: 4, opacity: 0.5, strokeDasharray: '2 1' })))).not.toBeNull()
+    // A target after the use is a target too.
+    expect(rich((l) => void nodesOf(l).unshift(useOf('hand')))).not.toBeNull()
+    for (const target of ['nowhere', 'fade', 'vignette', 'soft', 'leafL', 'constructor', 'url(#leaf)', '#leaf', '']) {
+      expect(rich((l) => void nodesOf(l).push(useOf(target))), target).toBeNull()
+    }
+    // Inside a clip path or a mask: nothing to repeat.
+    expect(rich((l) => {
+      defsOf(l).push({ tag: 'clipPath', id: 'cut', children: [circle({ id: 'hole' })] })
+      nodesOf(l).push(useOf('hole'))
+    })).toBeNull()
+    expect(rich((l) => {
+      ;(find(l, 'vignette').children as Json[]).push(circle({ id: 'spot' }))
+      nodesOf(l).push(useOf('spot'))
+    })).toBeNull()
+    // Around the use, or holding a use: it would repeat itself.
+    expect(rich((l) => void (find(l, 'spin').children as Json[]).push(useOf('spin')))).toBeNull()
+    expect(rich((l) => void (find(l, 'spin').children as Json[]).push(useOf('body')))).toBeNull()
+    expect(rich((l) => {
+      defsOf(l).push({ tag: 'g', id: 'pair', children: [useOf('leaf')] })
+      nodesOf(l).push(useOf('pair'))
+    })).toBeNull()
+    // A use names what it shows, and by nothing but `useRef`; it has no children and no size of its own.
+    expect(rich((l) => void nodesOf(l).push({ tag: 'use' }))).toBeNull()
+    expect(rich((l) => void nodesOf(l).push({ tag: 'use', attrs: { x: 1 } }))).toBeNull()
+    for (const key of ['href', 'xlinkHref', 'xlink:href', 'width', 'height', 'r', 'd']) expect(rich((l) => void (attrsOf(l, 'leafL')[key] = key === 'r' ? 3 : '#leaf')), key).toBeNull()
+    expect(rich((l) => void (find(l, 'leafL').children = [circle()]))).toBeNull()
+    // Not straight in defs, a clip path or a mask.
+    expect(rich((l) => void defsOf(l).push(useOf('leaf')))).toBeNull()
+    expect(rich((l) => void (find(l, 'vignette').children as Json[]).push(useOf('leaf')))).toBeNull()
+  })
+
+  it('counts a use with what it shows against the element limit', () => {
+    const look = (circles: number, uses: number, shown: number) => ({
+      viewBox: [0, 0, 200, 200],
+      nodes: [
+        { tag: 'defs', children: [{ tag: 'g', id: 'blob', children: Array.from({ length: shown - 1 }, () => circle()) }] },
+        ...Array.from({ length: circles }, () => circle()),
+        ...Array.from({ length: uses }, () => ({ tag: 'use', attrs: { useRef: 'blob' } })),
+      ],
+    })
+    // defs, the group of 10 and its circles: 11 elements; each use 1 and the 10 it shows.
+    expect(checkLook(look(300 - 11 - 3 * 11, 3, 10))).not.toBeNull()
+    expect(checkLook(look(300 - 11 - 3 * 11 + 1, 3, 10))).toBeNull()
+    expect(checkLook(look(0, 26, 10))).not.toBeNull()
+    expect(checkLook(look(0, 27, 10))).toBeNull()
+  })
+
+  it('a mask in defs, of groups and shapes that use gradients and nothing else', () => {
+    const mask = (l: Json) => find(l, 'vignette')
+    expect(rich((l) => void (mask(l).attrs = { maskType: 'alpha', x: '-10%', y: '-10%', width: '120%', height: '120%', maskUnits: 'objectBoundingBox', maskContentUnits: 'objectBoundingBox' }))).not.toBeNull()
+    for (const [key, value] of [['maskType', 'luminosity'], ['maskType', 'ALPHA'], ['maskUnits', 'screen'], ['x', 'auto'], ['width', '10px'], ['mask-type', 'alpha'], ['transform', 'scale(2)'], ['fill', '#ffffff'], ['opacity', 0.5]] as const) {
+      expect(rich((l) => void ((mask(l).attrs as Json)[key] = value)), `${key} ${value}`).toBeNull()
+    }
+    for (const child of [{ tag: 'text', text: 'x' }, { tag: 'use', attrs: { useRef: 'leaf' } }, { tag: 'defs' }, { tag: 'mask', id: 'inner' }, { tag: 'clipPath', id: 'inner' }, { tag: 'g', children: [{ tag: 'text', text: 'x' }] }, { tag: 'g', children: [{ tag: 'defs' }] }]) {
+      expect(rich((l) => void (mask(l).children as Json[]).push(child)), JSON.stringify(child)).toBeNull()
+    }
+    expect(rich((l) => void (mask(l).children as Json[]).push({ tag: 'g', children: [{ tag: 'g', children: [circle({ attrs: { cx: 1, cy: 1, r: 1, strokeRef: 'fade' } })] }] }))).not.toBeNull()
+    // What a mask is made of is not clipped, masked or filtered itself; nor is what a clip path is made of.
+    for (const key of ['clipPathRef', 'maskRef', 'filterRef']) {
+      const value = key === 'clipPathRef' ? 'cut' : key === 'maskRef' ? 'vignette' : 'soft'
+      expect(rich((l) => {
+        defsOf(l).push({ tag: 'clipPath', id: 'cut', children: [circle()] })
+        ;(((mask(l).children as Json[])[0].attrs as Json)[key] = value)
+      }), `mask ${key}`).toBeNull()
+      expect(rich((l) => {
+        defsOf(l).push({ tag: 'clipPath', id: 'cut', children: [circle({ attrs: { cx: 1, cy: 1, r: 1, [key]: value } })] })
+      }), `clip ${key}`).toBeNull()
+    }
+    // A mask belongs in defs, and a reference names a mask of this look.
+    expect(rich((l) => void nodesOf(l).push({ tag: 'mask', id: 'loose', children: [circle()] }))).toBeNull()
+    expect(rich((l) => void (find(l, 'spin').children as Json[]).push({ tag: 'mask', id: 'loose' }))).toBeNull()
+    for (const ref of ['soft', 'fade', 'nowhere', 'url(#vignette)', 'constructor']) expect(rich((l) => void (attrsOf(l, 'body').maskRef = ref)), ref).toBeNull()
+    expect(rich((l) => void (attrsOf(l, 'hand').maskRef = 'vignette'))).not.toBeNull()
+    expect(rich((l) => void (attrsOf(l, 'leafL').maskRef = 'vignette'))).not.toBeNull()
+  })
+
+  it('a filter in defs, of the listed primitives with the listed attributes', () => {
+    const steps = (l: Json) => filterSteps(l, 'soft')
+    const add = (step: Json) => (l: Json) => void steps(l).splice(0, 0, step)
+    for (const tag of ['feImage', 'feTile', 'feSpotLight', 'fePointLight', 'feDistantLight', 'feDiffuseLighting', 'feSpecularLighting', 'feComponentTransfer', 'feFuncA', 'feConvolveMatrix', 'animate', 'set', 'script']) {
+      expect(rich(add({ tag })), tag).toBeNull()
+    }
+    // A primitive belongs in a filter, a merge node in a merge, a filter in defs.
+    expect(rich((l) => void nodesOf(l).push({ tag: 'feGaussianBlur', attrs: { stdDeviation: '1' } }))).toBeNull()
+    expect(rich((l) => void defsOf(l).push({ tag: 'feFlood' }))).toBeNull()
+    expect(rich(add({ tag: 'feMergeNode', attrs: { in: 'SourceGraphic' } }))).toBeNull()
+    expect(rich(add({ tag: 'feOffset', children: [{ tag: 'feMergeNode' }] }))).toBeNull()
+    expect(rich(add({ tag: 'feMerge', children: [circle()] }))).toBeNull()
+    expect(rich((l) => void nodesOf(l).push({ tag: 'filter', id: 'loose' }))).toBeNull()
+    expect(rich((l) => void steps(l).push(circle()))).toBeNull()
+    // Attributes of the primitive's own list only (no region of their own, no presentation).
+    for (const [tag, key, value] of [
+      ['feOffset', 'stdDeviation', '1'],
+      ['feFlood', 'in', 'SourceGraphic'],
+      ['feTurbulence', 'in', 'SourceGraphic'],
+      ['feGaussianBlur', 'x', 0],
+      ['feGaussianBlur', 'fill', '#ff0000'],
+      ['feGaussianBlur', 'transform', 'scale(2)'],
+      ['feBlend', 'operator', 'over'],
+      ['feComposite', 'mode', 'multiply'],
+      ['feMergeNode', 'result', 'x'],
+      ['feImage', 'href', '#leaf'],
+    ] as const) {
+      expect(rich(add({ tag, attrs: { [key]: value } })), `${tag} ${key}`).toBeNull()
+    }
+    for (const filterKey of ['fill', 'transform', 'href', 'filterRes', 'maskType']) expect(rich((l) => void ((find(l, 'soft').attrs as Json)[filterKey] = 'x')), filterKey).toBeNull()
+    expect(rich((l) => void ((find(l, 'soft').attrs as Json).colorInterpolationFilters = 'linearRGB'))).not.toBeNull()
+    expect(rich((l) => void ((find(l, 'soft').attrs as Json).colorInterpolationFilters = 'auto'))).toBeNull()
+    // Every value as its kind wants it.
+    const one = (tag: string, attrs: Json) => rich(add({ tag, attrs }))
+    expect(one('feComposite', { operator: 'arithmetic', k1: 0.5, k2: -1, k3: 2, k4: 0 })).not.toBeNull()
+    expect(one('feComposite', { operator: 'lighter' })).toBeNull()
+    expect(one('feComposite', { k1: '0.5' })).toBeNull()
+    expect(one('feMorphology', { operator: 'arithmetic' })).toBeNull()
+    for (const mode of ['normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion']) expect(one('feBlend', { mode }), mode).not.toBeNull()
+    for (const mode of ['hue', 'luminosity', 'plus-lighter', 'Multiply']) expect(one('feBlend', { mode }), mode).toBeNull()
+    for (const type of ['matrix', 'saturate', 'hueRotate', 'luminanceToAlpha']) expect(one('feColorMatrix', { type }), type).not.toBeNull()
+    expect(one('feColorMatrix', { type: 'fractalNoise' })).toBeNull()
+    expect(one('feTurbulence', { type: 'saturate' })).toBeNull()
+    expect(one('feColorMatrix', { values: Array.from({ length: 20 }, (_, i) => i / 10).join(' ') })).not.toBeNull()
+    expect(one('feColorMatrix', { values: Array.from({ length: 21 }, (_, i) => i / 10).join(' ') })).toBeNull()
+    expect(one('feColorMatrix', { values: 0.5 })).not.toBeNull()
+    for (const values of ['1,0', '1  0', ' 1', '1 ', '', 'a', '1 NaN', '1e999']) expect(one('feColorMatrix', { values }), JSON.stringify(values)).toBeNull()
+    for (const [key, ok, bad] of [['xChannelSelector', 'A', 'X'], ['yChannelSelector', 'B', 'r']] as const) {
+      expect(one('feDisplacementMap', { [key]: ok }), ok).not.toBeNull()
+      expect(one('feDisplacementMap', { [key]: bad }), bad).toBeNull()
+    }
+    expect(one('feFlood', { floodColor: 'currentColor', floodOpacity: '50%' })).not.toBeNull()
+    for (const colour of ['none', 'red', '#fff', 'url(#fade)', 'var(--accent)']) expect(one('feFlood', { floodColor: colour }), colour).toBeNull()
+    expect(one('feTurbulence', { seed: -4.5 })).not.toBeNull()
+  })
+
+  it('a filter’s numbers within what the viewBox allows', () => {
+    const one = (tag: string, attrs: Json, viewBox = [0, 0, 200, 200]) =>
+      rich((l) => {
+        l.viewBox = viewBox
+        filterSteps(l, 'soft').unshift({ tag, attrs })
+      })
+    // A blur and a displacement up to a quarter of the width, a morphology up to a tenth; a frequency 0 to 1; 1 to 4 octaves.
+    expect(one('feGaussianBlur', { stdDeviation: '50' })).not.toBeNull()
+    expect(one('feGaussianBlur', { stdDeviation: '50 0' })).not.toBeNull()
+    expect(one('feGaussianBlur', { stdDeviation: 50 })).not.toBeNull()
+    for (const v of ['51', '50.01', '-1', '1 2 3', 51]) expect(one('feGaussianBlur', { stdDeviation: v }), String(v)).toBeNull()
+    expect(one('feGaussianBlur', { stdDeviation: '100' }, [0, 0, 400, 200])).not.toBeNull()
+    expect(one('feDropShadow', { stdDeviation: '51' })).toBeNull()
+    expect(one('feMorphology', { radius: '20 10' })).not.toBeNull()
+    for (const v of ['21', '1 2 3', 21]) expect(one('feMorphology', { radius: v }), String(v)).toBeNull()
+    expect(one('feDisplacementMap', { scale: -50 })).not.toBeNull()
+    for (const v of [51, -51, '4']) expect(one('feDisplacementMap', { scale: v }), String(v)).toBeNull()
+    expect(one('feTurbulence', { baseFrequency: '0 1' })).not.toBeNull()
+    for (const v of ['1.1', '-0.1', '0.1 0.2 0.3']) expect(one('feTurbulence', { baseFrequency: v }), v).toBeNull()
+    for (const n of [1, 4]) expect(one('feTurbulence', { numOctaves: n }), String(n)).not.toBeNull()
+    for (const n of [0, 5, 1.5, '2', -1]) expect(one('feTurbulence', { numOctaves: n }), String(n)).toBeNull()
+  })
+
+  it('a primitive’s in and in2: the source graphic, its alpha, or the result of an earlier primitive of the same filter', () => {
+    const steps = (l: Json) => filterSteps(l, 'soft')
+    const inOf = (l: Json, i: number) => steps(l)[i].attrs as Json
+    expect(rich((l) => void (inOf(l, 0).in = 'SourceGraphic'))).not.toBeNull()
+    // Later, unknown, another filter's, a DOM id, a name SVG has but an avatar does not draw.
+    for (const name of ['shadow', 'nowhere', 'noise', 'leaf', 'BackgroundImage', 'FillPaint', 'url(#blur)', 'constructor', '']) {
+      expect(rich((l) => void (inOf(l, 1).in = name)), name).toBeNull()
+    }
+    expect(rich((l) => void (inOf(l, 3).in2 = 'shadow'))).toBeNull()
+    expect(rich((l) => void (((steps(l)[4].children as Json[])[0].attrs as Json).in = 'later'))).toBeNull()
+    // A result is a name of the id pattern.
+    for (const name of ['1x', 'a b', 'constructor', 'x'.repeat(33)]) expect(rich((l) => void (inOf(l, 0).result = name)), name).toBeNull()
+    // The same name twice: the later one counts from where it is given.
+    expect(rich((l) => {
+      inOf(l, 2).result = 'blur'
+      inOf(l, 3).in = 'blur'
+    })).not.toBeNull()
+    // Results are the filter's own: they are no ids of the look, and may share a name with one.
+    expect(rich((l) => {
+      inOf(l, 0).result = 'leaf'
+      inOf(l, 1).in = 'leaf'
+    })).not.toBeNull()
+  })
+
+  it('at most 8 primitives in a filter (merge nodes not counted), 8 nodes in a merge, 8 filters in a look', () => {
+    const blur = () => ({ tag: 'feGaussianBlur', attrs: { stdDeviation: '1' } })
+    const node = () => ({ tag: 'feMergeNode', attrs: { in: 'SourceGraphic' } })
+    const filter = (id: string, primitives: number, nodes = 0) => ({ tag: 'filter', id, children: [...Array.from({ length: primitives - (nodes > 0 ? 1 : 0) }, blur), ...(nodes > 0 ? [{ tag: 'feMerge', children: Array.from({ length: nodes }, node) }] : [])] })
+    const withFilter = (f: Json) => rich((l) => void defsOf(l).push(f))
+    expect(withFilter(filter('more', MORE_LIMITS.filterPrimitives))).not.toBeNull()
+    expect(withFilter(filter('more', MORE_LIMITS.filterPrimitives + 1))).toBeNull()
+    expect(withFilter(filter('more', MORE_LIMITS.filterPrimitives, 8))).not.toBeNull()
+    expect(withFilter(filter('more', 2, 9))).toBeNull()
+    // The rich look has two already.
+    const filters = (n: number) => rich((l) => void defsOf(l).push(...Array.from({ length: n }, (_, i) => filter(`f${i}`, 1))))
+    expect(filters(MORE_LIMITS.filters - 2)).not.toBeNull()
+    expect(filters(MORE_LIMITS.filters - 1)).toBeNull()
+  })
+
+  it('a filter only by reference to a filter element of the look, never a CSS filter', () => {
+    for (const ref of ['blur(2px)', 'url(#soft)', 'grayscale(1)', 'vignette', 'fade', 'nowhere', 'none']) expect(rich((l) => void (attrsOf(l, 'body').filterRef = ref)), ref).toBeNull()
+    expect(rich((l) => void (attrsOf(l, 'torso').filterRef = 'grain'))).not.toBeNull()
+    expect(rich((l) => void (attrsOf(l, 'body').filter = 'url(#soft)'))).toBeNull()
+  })
+
+  it('dashes: up to 8 numbers of 0 or more, or none; an offset is a number', () => {
+    const dash = (value: unknown) => rich((l) => void (attrsOf(l, 'torso').strokeDasharray = value))
+    for (const ok of ['4', '4 2', '0 0', '1 2 3 4 5 6 7 8', 'none', 3, 0, '0.5 1.25']) expect(dash(ok), String(ok)).not.toBeNull()
+    for (const bad of ['1 2 3 4 5 6 7 8 9', '-1 2', '1,2', '1  2', ' 1', '1 ', '', 'auto', '4px', -1, '1e999', null]) {
+      if (bad === null) continue
+      expect(dash(bad), String(bad)).toBeNull()
+    }
+    expect(rich((l) => void (attrsOf(l, 'torso').strokeDashoffset = -7.5))).not.toBeNull()
+    expect(rich((l) => void (attrsOf(l, 'torso').strokeDashoffset = '7'))).toBeNull()
+    // On groups, text and uses too.
+    expect(rich((l) => void (attrsOf(l, 'body').strokeDasharray = '3 3'))).not.toBeNull()
+    expect(rich((l) => void (attrsOf(l, 'leafL').strokeDashoffset = 2))).not.toBeNull()
+    expect(checkLook({ viewBox: [0, 0, 100, 100], nodes: [{ tag: 'text', attrs: { strokeDasharray: '1 1' }, text: 'x' }] })).not.toBeNull()
+    // Not on a gradient, a stop, a mask or a filter.
+    expect(rich((l) => void ((find(l, 'fade').attrs as Json).strokeDasharray = '1'))).toBeNull()
+    expect(rich((l) => void ((find(l, 'vignette').attrs as Json).strokeDasharray = '1'))).toBeNull()
+  })
+})
+
+describe('checkLook on parents', () => {
+  it('takes part to part, neither inside the other', () => {
+    expect(rich()?.parents).toEqual({ hand: 'head', leafR: 'torso' })
+    expect(rich((l) => void (parentsOf(l).spin = 'torso'))).not.toBeNull()
+    // Nested in its parent, or the parent nested in it.
+    expect(rich((l) => void (parentsOf(l).head = 'spin'))).toBeNull()
+    expect(rich((l) => void (parentsOf(l).head = 'body'))).toBeNull()
+    expect(rich((l) => void (parentsOf(l).body = 'head'))).toBeNull()
+    expect(rich((l) => void (parentsOf(l).hand = 'hand'))).toBeNull()
+    // Parts only: nothing in defs, no gradient, mask or filter, nothing that is not there.
+    for (const name of ['leaf', 'fade', 'vignette', 'soft', 'nowhere', 'constructor']) {
+      expect(rich((l) => void (parentsOf(l).hand = name)), `parent ${name}`).toBeNull()
+      expect(rich((l) => void Object.defineProperty(parentsOf(l), name, { value: 'torso', enumerable: true })), `child ${name}`).toBeNull()
+    }
+    for (const value of [7, null, ['torso'], { id: 'torso' }]) {
+      if (value === null) continue
+      expect(rich((l) => void (parentsOf(l).hand = value)), JSON.stringify(value)).toBeNull()
+    }
+    expect(rich((l) => void (l.parents = ['hand', 'head']))).toBeNull()
+    // Absent, null or empty: none, and nothing is written for it.
+    expect(rich((l) => void delete l.parents)).not.toHaveProperty('parents')
+    expect(rich((l) => void (l.parents = null))).not.toHaveProperty('parents')
+    expect(rich((l) => void (l.parents = {}))).not.toHaveProperty('parents')
+  })
+
+  it('no cycle, no chain longer than eight links, at most 64 entries', () => {
+    const chainLook = (links: number, extra: Record<string, string> = {}) => {
+      const ids = Array.from({ length: links + 1 }, (_, i) => `p${i}`)
+      const parents: Record<string, string> = { ...extra }
+      for (let i = 0; i < links; i++) parents[ids[i]] = ids[i + 1]
+      return checkLook({ viewBox: [0, 0, 200, 200], nodes: ids.map((id) => circle({ id, box: [0, 0, 2, 2] })), parents })
+    }
+    expect(MAX_CHAIN_LINKS).toBe(8)
+    expect(chainLook(MAX_CHAIN_LINKS)).not.toBeNull()
+    expect(chainLook(MAX_CHAIN_LINKS + 1)).toBeNull()
+    expect(chainLook(2, { p2: 'p0' })).toBeNull()
+    expect(chainLook(1, { p1: 'p0' })).toBeNull()
+    const many = (n: number) => {
+      const nodes = Array.from({ length: n + 1 }, (_, i) => circle({ id: `c${i}` }))
+      const parents: Record<string, string> = {}
+      for (let i = 1; i <= n; i++) parents[`c${i}`] = 'c0'
+      return checkLook({ viewBox: [0, 0, 200, 200], nodes, parents })
+    }
+    expect(many(MORE_LIMITS.parents)).not.toBeNull()
+    expect(many(MORE_LIMITS.parents + 1)).toBeNull()
+  })
+})
+
+describe('checkLook on drives', () => {
+  it('takes an input, parts, a prop that fits them, and values like a track’s', () => {
+    expect(rich()?.drives).toEqual(richLook().drives)
+    const drive = (over: Json) => rich((l) => void drivesOf(l).push({ input: 'pace', target: 'torso', prop: 'translateY', values: [0, -4], ...over }))
+    for (const input of ['lookX', 'lookY', 'mouth', 'pace', 'turn', 'held']) expect(drive({ input }), input).not.toBeNull()
+    for (const input of ['walk', 'speed', 'LookX', 'constructor', '', 7, null]) expect(drive({ input }), String(input)).toBeNull()
+    expect(drive({ target: ['torso', 'hand', 'torso'] })?.drives?.at(-1)?.target).toEqual(['torso', 'hand'])
+    for (const target of ['leaf', 'fade', 'nowhere', [], Array.from({ length: MORE_LIMITS.targets + 1 }, () => 'torso')]) expect(drive({ target }), JSON.stringify(target)).toBeNull()
+    expect(drive({ target: Array.from({ length: MORE_LIMITS.targets }, () => 'torso') })).not.toBeNull()
+    expect(drive({ prop: 'd', target: 'hand', values: ['M 140 120 L 160 130', 'M 140 120 L 160 110'] })).not.toBeNull()
+    expect(drive({ prop: 'd', target: 'hand', values: ['M 140 120 L 160 130', 'M 140 120 Q 150 100 160 110'] })).toBeNull()
+    expect(drive({ prop: 'd', target: 'torso', values: ['M 0 0 L 1 1', 'M 0 0 L 2 2'] })).toBeNull()
+    expect(drive({ prop: 'rx', values: [20, 30, null] })).not.toBeNull()
+    expect(drive({ prop: 'points' })).toBeNull()
+    for (const values of [[0], Array.from({ length: LIMITS.keyframes + 1 }, (_, i) => i), [0, '4'], [0, Infinity], 'up']) expect(drive({ values }), JSON.stringify(values)).toBeNull()
+    expect(drive({ prop: 'skewX', values: [0, 81] })).toBeNull()
+    // No time: no phase, no delay, no times; `at` in their place.
+    for (const key of ['phase', 'delay', 'times', 'duration', 'loop']) expect(drive({ [key]: 0.5 }), key).toBeNull()
+    expect(drive({ values: [0, 2, 4], at: [0, 0.2, 1] })).not.toBeNull()
+    for (const at of [[0, 1], [0, 0.5, 0.9], [0.1, 0.5, 1], [0, 0.6, 0.5], [0, 0.5, 0.5], 'even']) expect(drive({ values: [0, 2, 4], at }), JSON.stringify(at)).toBeNull()
+    expect(drive({ values: [0, 2, 4], ease: ['outBounce', [0.1, 0.2, 0.3, 0.4]] })).not.toBeNull()
+    expect(drive({ values: [0, 2, 4], ease: ['in'] })).toBeNull()
+  })
+
+  it('lets only the inputs that move slowly drive a colour or an opacity', () => {
+    const paint = (input: string, prop: string) => {
+      const values = prop === 'fill' || prop === 'stroke' ? ['#000000', '#ffffff'] : [1, 0.2]
+      return rich((l) => void drivesOf(l).push({ input, target: 'torso', prop, values }))
+    }
+    for (const prop of ['fill', 'stroke', 'opacity', 'fillOpacity', 'strokeOpacity']) {
+      for (const input of ['pace', 'turn', 'held']) expect(paint(input, prop), `${input} ${prop}`).not.toBeNull()
+      for (const input of ['lookX', 'lookY', 'mouth']) expect(paint(input, prop), `${input} ${prop}`).toBeNull()
+    }
+    // Everything else moves with any input.
+    for (const input of ['lookX', 'mouth']) expect(paint(input, 'strokeWidth'), input).not.toBeNull()
+  })
+
+  it('keeps a driven colour or opacity from flashing: no jump, no swing, values far apart along the input', () => {
+    const paint = (over: Json) => rich((l) => void drivesOf(l).push({ input: 'held', target: 'torso', prop: 'opacity', values: [1, 0.2], ...over }))
+    expect(paint({})).not.toBeNull()
+    for (const ease of ['step', 'outElastic', 'outBounce', [0, 3, 1, -2], [0.3, -0.5, 0.7, 1]]) expect(paint({ ease }), JSON.stringify(ease)).toBeNull()
+    for (const ease of ['in', 'outBack', 'inOutBack', [0, 0, 0, 1], [0.25, 0.1, 0.25, 1]]) expect(paint({ ease }), JSON.stringify(ease)).not.toBeNull()
+    // Two values along pace and held, three along turn (which runs twice as far), at least 0.34 apart there.
+    expect(paint({ values: [1, 0, 1] })).toBeNull()
+    expect(paint({ input: 'pace', values: [1, 0, 1, 0] })).toBeNull()
+    expect(paint({ input: 'turn', values: [1, 0, 1] })).not.toBeNull()
+    expect(paint({ input: 'turn', values: [1, 0, 1], at: [0, 0.4, 1] })).not.toBeNull()
+    expect(paint({ input: 'turn', values: [1, 0, 1], at: [0, 0.2, 1] })).toBeNull()
+    expect(paint({ input: 'turn', values: [1, 0, 1, 0] })).toBeNull()
+    // What is not paint may swing and stand close.
+    expect(paint({ prop: 'translateY', values: [0, 4, 0, 4, 0], ease: 'outBounce' })).not.toBeNull()
+  })
+
+  it('at most 16, and none at all is no list', () => {
+    const drives = (n: number) => rich((l) => void (l.drives = Array.from({ length: n }, () => ({ input: 'turn', target: 'body', prop: 'rotate', values: [-5, 5] }))))
+    expect(drives(MORE_LIMITS.drives)?.drives).toHaveLength(MORE_LIMITS.drives)
+    expect(drives(MORE_LIMITS.drives + 1)).toBeNull()
+    expect(drives(0)).not.toHaveProperty('drives')
+    expect(rich((l) => void (l.drives = null))).not.toHaveProperty('drives')
+    expect(rich((l) => void (l.drives = { input: 'turn' }))).toBeNull()
+    expect(drivesOn(rich() as Look, 'turn')).toBe(true)
+    expect(drivesOn(rich() as Look, 'lookY')).toBe(false)
+    expect(drivesOn(checked() as Look, 'pace')).toBe(false)
+    expect(drivesOn(null as unknown as Look, 'pace')).toBe(false)
+  })
+
+  it('counts d keyframes of drives with those of the tracks', () => {
+    const key = (chars: number) => `M 0 0${' L 1 1'.repeat((chars - 5) / 6)}`.padEnd(chars, ' ')
+    const look = (driven: number) =>
+      checked((l) => {
+        animation(l, 'grin').tracks = Array.from({ length: 2 }, () => ({ target: 'mouth', prop: 'd', values: [key(MORE_LIMITS.dKeyframeChars), key(MORE_LIMITS.dKeyframeChars)] }))
+        l.drives = Array.from({ length: driven }, () => ({ input: 'mouth', target: 'mouth', prop: 'd', values: [key(MORE_LIMITS.dKeyframeChars), key(MORE_LIMITS.dKeyframeChars)] }))
+      })
+    expect(look(1)).not.toBeNull()
+    expect(look(2)).toBeNull()
+  })
+})
+
+describe('checkLook on the new props and eases', () => {
+  it('skews like it rotates, up to 80 degrees either way', () => {
+    for (const prop of ['skewX', 'skewY']) {
+      expect(checked((l) => void Object.assign(track(l, 'hop'), { prop, values: [0, 80, -80] })), prop).not.toBeNull()
+      expect(checked((l) => void Object.assign(track(l, 'hop'), { prop, values: [0, 80.5] })), prop).toBeNull()
+      expect(propFits(prop as 'skewX', 'use')).toBe(true)
+      expect(propFits(prop as 'skewX', 'stop')).toBe(false)
+    }
+  })
+
+  it('takes fill and stroke opacities from 0 to 1 under the paint rule, and a dash offset as any number', () => {
+    for (const prop of ['fillOpacity', 'strokeOpacity']) {
+      const fade = (duration: number, values: unknown[], ease?: unknown) =>
+        checked((l) => {
+          animation(l, 'hop').duration = duration
+          Object.assign(track(l, 'hop'), { target: 'shadow', prop, values, ease })
+          if (ease === undefined) delete track(l, 'hop').ease
+        })
+      expect(fade(0.34, [1, 0, 1]), prop).not.toBeNull()
+      expect(fade(0.3, [1, 0, 1]), prop).toBeNull()
+      expect(fade(1, [1, 1.5]), prop).toBeNull()
+      expect(fade(1, [1, 0], 'step'), prop).toBeNull()
+    }
+    expect(checked((l) => void Object.assign(track(l, 'hop'), { target: 'shadow', prop: 'strokeDashoffset', values: [0, -400, 1e5] }))).not.toBeNull()
+    expect(checked((l) => void Object.assign(track(l, 'hop'), { target: 'skin', prop: 'strokeDashoffset', values: [0, 1] }))).toBeNull()
+  })
+
+  it('takes the new eases by name, and a bezier as four numbers for all segments or one per segment', () => {
+    for (const ease of ['inBack', 'inOutBack', 'outElastic', 'outBounce', [0.25, 0.1, 0.25, 1], [0, -2, 1, 3], [1, 0, 0, 1]]) {
+      expect(checked((l) => void (track(l, 'hop').ease = ease)), JSON.stringify(ease)).not.toBeNull()
+      expect(checked((l) => void (animation(l, 'hop').ease = ease)), JSON.stringify(ease)).not.toBeNull()
+    }
+    expect(checked((l) => void (track(l, 'hop').ease = ['in', [0.4, 0, 0.2, 1], 'outBounce', [0, 0, 1, 1], 'step']))?.animations.hop.tracks[0].ease).toEqual(['in', [0.4, 0, 0.2, 1], 'outBounce', [0, 0, 1, 1], 'step'])
+    for (const ease of [[-0.1, 0, 0.2, 1], [0.4, 0, 1.1, 1], [0.4, -2.1, 0.2, 1], [0.4, 0, 0.2, 3.1], [0.4, 0, 0.2], [0.4, 0, 0.2, 1, 0], ['in', 0, 0.2, 1], [0.4, 0, 0.2, Number.NaN], [[0.4, 0, 0.2]], 'bezier', 'inback']) {
+      expect(checked((l) => void (track(l, 'hop').ease = ease)), JSON.stringify(ease)).toBeNull()
+    }
+    // A list of beziers has one per segment, like a list of names.
+    expect(checked((l) => void (track(l, 'hop').ease = [[0.4, 0, 0.2, 1], [0.4, 0, 0.2, 1]]))).toBeNull()
+    // A paint never steps, and a bezier is no step.
+    expect(checked((l) => void (track(l, 'blush').ease = [0, 0, 1, 0]))).not.toBeNull()
+    expect(trackEases({ values: [1, 2, 3] }, { ease: [0.4, 0, 0.2, 1] })).toEqual([[0.4, 0, 0.2, 1], [0.4, 0, 0.2, 1]])
+    expect(trackEases({ values: [1, 2, 3, 4, 5] }, { ease: [0.4, 0, 0.2, 1] })).toEqual(Array.from({ length: 4 }, () => [0.4, 0, 0.2, 1]))
+    expect(trackEases({ values: [1, 2, 3], ease: ['inBack', [0, 0, 1, 1]] }, {})).toEqual(['inBack', [0, 0, 1, 1]])
+    expect(isEase([0.4, 0, 0.2, 1])).toBe(true)
+    expect(isEase([0.4, 0, 1.2, 1])).toBe(false)
+    expect(isEase('outBounce')).toBe(true)
+    expect(isEase('bounce')).toBe(false)
+  })
+})
+
+describe('lookElements on the richer artwork', () => {
+  it('draws masks, filters, uses and dashes under their SVG names, every reference prefixed and the filter’s own names not', () => {
+    const look = rich() as Look
+    const markup = render(look, 'p-')
+    const found = expectOnlyRich(markup, 'p-')
+    const drawnTags = ['svg', 'defs', 'linearGradient', 'stop', 'mask', 'rect', 'g', 'circle', 'filter', 'ellipse', 'use', 'path', 'feGaussianBlur', 'feOffset', 'feFlood', 'feComposite', 'feMerge', 'feMergeNode', 'feTurbulence', 'feColorMatrix', 'feDisplacementMap', 'feMorphology', 'feBlend', 'feDropShadow']
+    expect([...found.tags].sort()).toEqual(drawnTags.sort())
+    expect(markup).toContain('<use id="p-leafL" href="#p-leaf" x="50" y="120" transform="rotate(-20 60 125)"></use>')
+    expect(markup).toContain('<use id="p-leafR" href="#p-leaf" x="130" y="120" filter="url(#p-grain)"></use>')
+    expect(markup).toContain('<g id="p-body" mask="url(#p-vignette)" filter="url(#p-soft)">')
+    expect(markup).toContain('<mask id="p-vignette" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="0" y="0" width="200" height="200" mask-type="luminance">')
+    expect(markup).toContain('<filter id="p-soft" x="-20%" y="-20%" width="140%" height="140%" filterUnits="objectBoundingBox" primitiveUnits="userSpaceOnUse" color-interpolation-filters="sRGB">')
+    expect(markup).toContain('<feGaussianBlur in="SourceAlpha" stdDeviation="2" result="blur"></feGaussianBlur>')
+    expect(markup).toContain('<feFlood flood-color="#00000080" flood-opacity="0.6" result="ink"></feFlood>')
+    expect(markup).toContain('<feComposite in="ink" in2="moved" operator="in" result="shadow"></feComposite>')
+    expect(markup).toContain('<feMergeNode in="shadow"></feMergeNode>')
+    expect(markup).toContain('<feTurbulence type="fractalNoise" baseFrequency="0.8 0.6" numOctaves="2" seed="3" result="noise"></feTurbulence>')
+    expect(markup).toContain('<feDisplacementMap in="SourceGraphic" in2="grey" scale="4" xChannelSelector="R" yChannelSelector="G" result="shaken"></feDisplacementMap>')
+    expect(markup).toContain('stroke-dasharray="6 3" stroke-dashoffset="0"')
+    expect(markup).toContain('stroke-dasharray="none"')
+    // The names a filter passes between its primitives are no ids.
+    expect(found.ids).not.toContain('p-blur')
+    expect(markup).not.toMatch(/(?:in|in2|result)="p-/)
+    // Every id of the look is drawn once, nothing else has one.
+    expect([...found.ids].sort()).toEqual([...lookIndex(look).keys()].map((id) => `p-${id}`).sort())
+  })
+
+  it('never draws a use that could repeat itself or name what is not there, and counts what a use shows', () => {
+    const hostile = {
+      viewBox: [0, 0, 200, 200],
+      nodes: [
+        { tag: 'g', id: 'loop', children: [{ tag: 'use', attrs: { useRef: 'loop' } }] },
+        { tag: 'use', attrs: { useRef: 'loop' } },
+        { tag: 'use', attrs: { useRef: 'gone' } },
+        { tag: 'use', attrs: { useRef: 'url(http://example.invalid/x.svg#a)' } },
+        { tag: 'use', attrs: { href: 'http://example.invalid/x.svg#a', xlinkHref: 'javascript:alert(1)' } },
+        { tag: 'circle', id: 'ok' },
+        { tag: 'use', attrs: { useRef: 'ok', onClick: 'alert(1)' } },
+      ],
+    } as unknown as Look
+    const markup = render(hostile, 'h-')
+    expectOnlyRich(markup, 'h-')
+    // Only the use of the circle is drawn; the group's own use would repeat the group inside itself.
+    expect(markup.match(/<use /g)).toHaveLength(1)
+    expect(markup).toContain('<use href="#h-ok"></use>')
+    for (const word of ['example.invalid', 'javascript', 'onclick', 'alert', 'gone']) expect(markup, word).not.toContain(word)
+    // 299 circles leave room for one element: a use that shows a group of three is not drawn.
+    const crowded = { viewBox: [0, 0, 200, 200], nodes: [{ tag: 'g', id: 'trio', children: [{ tag: 'circle' }, { tag: 'circle' }] }, ...Array.from({ length: 296 }, () => ({ tag: 'circle' })), { tag: 'use', attrs: { useRef: 'trio' } }, { tag: 'circle', id: 'last' }] } as unknown as Look
+    const drawn = render(crowded, 'c-')
+    expect(drawn).not.toContain('<use')
+    expect(drawn).toContain('id="c-last"')
+  })
+
+  it('keeps a filter’s and a mask’s content to their own tables whatever the data', () => {
+    const hostile = {
+      viewBox: [0, 0, 200, 200],
+      nodes: [
+        {
+          tag: 'defs',
+          children: [
+            { tag: 'filter', id: 'f', attrs: { style: 'x', href: '#x' }, children: [{ tag: 'feImage', attrs: { href: 'http://example.invalid/x.png' } }, { tag: 'feGaussianBlur', attrs: { stdDeviation: '1e9', in: 'url(#x)', result: '" onload="x' } }, { tag: 'circle' }, { tag: 'feMerge', children: [{ tag: 'feGaussianBlur' }, { tag: 'feMergeNode', attrs: { in: 'javascript:alert(1)' } }] }] },
+            { tag: 'mask', id: 'm', attrs: { maskType: 'evil', mask: 'url(#m)' }, children: [{ tag: 'text', text: 'leak' }, { tag: 'use', attrs: { useRef: 'm' } }, { tag: 'g', children: [{ tag: 'text', text: 'leak' }, { tag: 'rect', attrs: { maskRef: 'm', filterRef: 'f' } }] }] },
+          ],
+        },
+        { tag: 'feFlood', attrs: { floodColor: '#ff0000' } },
+        { tag: 'g', attrs: { maskRef: 'url(#m)', filterRef: 'blur(3px)', strokeDasharray: '1;2' } },
+      ],
+    } as unknown as Look
+    const markup = render(hostile, 'h-')
+    expectOnlyRich(markup, 'h-')
+    for (const word of ['example.invalid', 'javascript', 'onload', 'feImage', 'leak', 'evil', 'blur(', '1e9', 'style']) expect(markup, word).not.toContain(word)
+    expect(markup).toContain('<feGaussianBlur></feGaussianBlur>')
+    expect(markup).toContain('<feMerge><feMergeNode></feMergeNode></feMerge>')
+    // What a rect inside a mask may not carry is still printed by the renderer: the check is what refuses it, the printed reference stays inside the figure.
+    expect(markup).toMatch(/<mask id="h-m"><g><rect mask="url\(#h-m\)" filter="url\(#h-f\)"><\/rect><\/g><\/mask>/)
+    expect(markup).not.toContain('<feFlood')
+    expect(checkLook(hostile)).toBeNull()
+  })
+})
+
+describe('a storm of hostile looks on the richer artwork', () => {
+  function random(seed: number) {
+    let a = seed >>> 0
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0
+      let t = a
+      t = Math.imul(t ^ (t >>> 15), t | 1)
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+  }
+  const PAYLOADS: unknown[] = ['url(http://example.invalid/x)', 'url(#soft)', '#leaf', 'http://example.invalid/x.svg#leaf', 'javascript:alert(1)', '"><script>alert(1)</script>', 'blur(2px)', 'SourceGraphic', 'BackgroundImage', 'constructor', '__proto__', 'leaf', 'vignette', 'soft', 'none', '1 2 3 4 5 6 7 8 9', '0.5', 0, -1, 1e9, Number.NaN, true, null, [], [0.4, 0, 0.2, 1], {}, { tag: 'feImage' }, { tag: 'use', attrs: { useRef: 'body' } }]
+  const KEYS = ['href', 'xlinkHref', 'useRef', 'maskRef', 'filterRef', 'in', 'in2', 'result', 'style', 'onload', 'mask', 'filter', 'stdDeviation', 'strokeDasharray', 'tag', 'attrs', 'id', 'children', 'parents', 'drives', 'input', 'at']
+  const BAD_VALUES = ['example.invalid', 'javascript', 'onload', 'alert', 'script', 'blur(', '<', '>', '"', "'", 'http']
+
+  it('never throws, and never renders a name, a reference or a value outside the tables', () => {
+    const rnd = random(20261122)
+    const pick = <T,>(items: readonly T[]): T => items[Math.floor(rnd() * items.length)]
+    const containers = (root: unknown): object[] => {
+      const out: object[] = []
+      const walk = (v: unknown) => {
+        if (typeof v !== 'object' || v === null) return
+        out.push(v)
+        for (const inner of Object.values(v)) walk(inner)
+      }
+      walk(root)
+      return out
+    }
+    const violations = (markup: string, prefix: string): string[] => {
+      const out: string[] = []
+      const found = names(markup)
+      for (const tag of found.tags) if (!RICH_TAGS.has(tag)) out.push(`tag ${tag}`)
+      for (const attr of found.attrs) if (!RICH_ATTRS.has(attr)) out.push(`attribute ${attr}`)
+      for (const id of found.ids) if (!id.startsWith(prefix)) out.push(`id ${id}`)
+      for (const ref of found.refs) if (!ref.startsWith(prefix)) out.push(`reference ${ref}`)
+      for (const href of markup.matchAll(/ href="([^"]*)"/g)) if (!href[1].startsWith(`#${prefix}`)) out.push(`href ${href[1]}`)
+      for (const value of found.values) for (const word of BAD_VALUES) if (value.includes(word)) out.push(`${word} in the value ${value}`)
+      for (const open of markup.matchAll(/<\/?([A-Za-z][\w:-]*)/g)) if (!RICH_TAGS.has(open[1])) out.push(`<${open[1]}`)
+      return out
+    }
+    let accepted = 0
+    let rejected = 0
+    for (let round = 0; round < 1200; round++) {
+      const look = wire(richLook()) as Json
+      const hits = 1 + Math.floor(rnd() * 3)
+      for (let h = 0; h < hits; h++) {
+        const where = pick(containers(look)) as Record<string, unknown>
+        const keys = Object.keys(where)
+        const mode = rnd()
+        if (mode < 0.55 && keys.length > 0) where[pick(keys)] = pick(PAYLOADS)
+        else if (mode < 0.85 && !Array.isArray(where)) Object.defineProperty(where, pick(KEYS), { value: pick(PAYLOADS), enumerable: true, configurable: true, writable: true })
+        else if (keys.length > 0) delete where[pick(keys)]
+      }
+      const before = JSON.stringify(look)
+      const got = checkLook(look)
+      const bad: string[] = JSON.stringify(look) === before ? [] : ['the input was changed']
+      if (got) {
+        accepted++
+        bad.push(...violations(render(got, 'f-'), 'f-'))
+      } else {
+        rejected++
+      }
+      bad.push(...violations(render(look as unknown as Look, 'r-'), 'r-'))
+      if (bad.length > 0) expect(bad, `round ${round}: ${before}`).toEqual([])
+    }
+    expect(rejected).toBeGreaterThan(800)
+    expect(accepted).toBeGreaterThan(20)
+  })
+})
+
+describe('matrices', () => {
+  it('invert what can be inverted, and nothing else', () => {
+    const m = transformMatrix(parseTransform('translate(10 20) rotate(30) scale(2 3)') ?? [])
+    const back = invert(m)
+    expect(back).not.toBeNull()
+    const product = transformMatrix([{ fn: 'matrix', args: [...m] }, { fn: 'matrix', args: [...(back ?? [])] }])
+    product.forEach((n, i) => expect(n).toBeCloseTo([1, 0, 0, 1, 0, 0][i], 12))
+    expect(invert([0, 0, 0, 0, 5, 5])).toBeNull()
+    expect(invert([1, 2, 2, 4, 0, 0])).toBeNull()
+    expect(invert([Number.NaN, 0, 0, 1, 0, 0])).toBeNull()
   })
 })

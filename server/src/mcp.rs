@@ -70,11 +70,14 @@ impl McpCtx {
     }
 }
 
-/// What a tool returns. `Text` is shown to the model as-is; `Json` is pretty-printed.
+/// What a tool returns. `Text` is shown to the model as-is; `Json` is pretty-printed; `Images` is
+/// its text followed by pictures, each a PNG, which the model sees after the text. The Activity
+/// record of a call is made from its arguments and its error, never from the pictures.
 #[derive(Debug, Clone)]
 pub enum ToolOutput {
     Text(String),
     Json(Value),
+    Images { text: String, png: Vec<Vec<u8>> },
 }
 
 pub type ToolFuture = Pin<Box<dyn Future<Output = Result<ToolOutput, ApiError>> + Send>>;

@@ -1098,6 +1098,7 @@ async fn start_session(state: &AppState, terminal: &str, pid: &str, args: Value)
     match (tool.handler)(state.clone(), ctx, args).await? {
         crate::mcp::ToolOutput::Json(v) => Ok(v),
         crate::mcp::ToolOutput::Text(t) => panic!("text answer {t}"),
+        crate::mcp::ToolOutput::Images { text, .. } => panic!("text answer {text}"),
     }
 }
 

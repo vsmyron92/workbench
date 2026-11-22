@@ -1,11 +1,12 @@
 // The animation engine: a look's keyframe tracks, sampled into attribute values.
 //
 // Three layers, each usable without the next:
-// - `compile` turns every track of a look (the agent's and the built-in ones) into
-//   numbers: colours into RGBA, path data into a command template plus numbers. A value
-//   that does not fit its prop rejects the look.
-// - `sample` is pure: clips in, the pose of every part out. All of the animation rules
-//   live here (composition, weights, gestures over state animations, fades, mouth, gaze).
+// - `compile` turns every track of a look (the agent's and the built-in ones) and every
+//   drive into numbers: colours into RGBA, path data into a command template plus numbers.
+//   A value that does not fit its prop rejects the look.
+// - `sample` is pure: clips and inputs in, the pose of every part out. All of the animation
+//   rules live here (composition, weights, gestures over state animations, fades, drives,
+//   mouth, gaze, and the skeleton of `parents`).
 // - `createEngine` runs one shared frame loop per window and writes poses to nodes. It
 //   counts visible time only, runs at most 30 frames a second, catches per figure, and
 //   freezes a figure whose frames cost too much.
@@ -20,9 +21,38 @@
 // React-free; the frame scheduler, the clock and randomness are passed in.
 
 import { builtinAnimations, gazeTravel, rolePart, stateList } from './builtin'
-import { LIMITS, MORE_LIMITS, cleanIdPrefix, fmt, formatPath, formatTransform, isColourProp, isId, isTransformProp, lookIndex, parseHex, parsePath, parseTransform, propFits, samePathShape, trackEases, trackTimes, viewBoxOf } from './look'
-import type { IndexEntry, PathShape, Rgba } from './look'
-import type { Animation, AvatarState, Ease, Look, LookNode, MouthDrive, Prop, Track } from './types'
+import {
+  IDENTITY,
+  LIMITS,
+  MAX_CHAIN_LINKS,
+  MORE_LIMITS,
+  cleanIdPrefix,
+  fmt,
+  formatPath,
+  formatTransform,
+  invert,
+  isColourProp,
+  isEase,
+  isId,
+  isPaintProp,
+  isTransformProp,
+  lookIndex,
+  multiply,
+  opMatrix,
+  ownTransform,
+  parseHex,
+  parsePath,
+  parseTransform,
+  propFits,
+  samePathShape,
+  trackEases,
+  trackTimes,
+  transformMatrix,
+  viewBoxOf,
+} from './look'
+import type { IndexEntry, Matrix, PathShape, Rgba } from './look'
+import { DRIVE_INPUTS } from './types'
+import type { Animation, AvatarState, Bezier, Drive, DriveInput, Ease, Look, LookNode, MouthDrive, Prop, Track } from './types'
 
 // ---------------------------------------------------------------- public shapes
 
@@ -63,8 +93,33 @@ export interface Pose {
   refs?: Map<string, string>
 }
 
+/**
+ * The live inputs of one moment. Without them nothing but the clips applies (the rest pose
+ * when nothing plays); with them the look's drives apply too, each input that is not given
+ * at rest.
+ */
+export interface SampleInputs {
+  /** How open the mouth is, 0 to 1. null: no line is presented, and the look's `mouth` entries are not applied. */
+  mouth?: number | null
+  /** Where it looks, a vector of length 0 to 1 (x to the right, y down): the pupils and `lookX`, `lookY`. null: ahead. */
+  gaze?: readonly [number, number] | null
+  /** 0 standing to 1 walking fast. */
+  pace?: number
+  /** -1 walking or facing left to 1 right, 0 facing the viewer. */
+  turn?: number
+  /** 0 to 1 while the user drags it. */
+  held?: number
+}
+
+/** What the walking overlay tells a figure about its walk; what it does not say is 0. */
+export interface WalkInputs {
+  pace?: number
+  turn?: number
+  held?: number
+}
+
 export interface SampleOptions {
-  /** No looping or recurring animations and no gaze; gestures and one-shots show their last frame; the mouth still moves. */
+  /** No looping or recurring animations, no gaze, every input but the mouth at rest; gestures and one-shots show their last frame. */
   reducedMotion?: boolean
 }
 
@@ -94,6 +149,8 @@ export interface FigureHandle {
    * right, y down), or null to let the figure glance about by itself.
    */
   setGaze(read: (() => readonly [number, number] | null) | null): void
+  /** `read` gives the figure's walk (`pace`, `turn`, `held`), read every frame; null or nothing given: all at rest. */
+  setInputs(read: (() => WalkInputs | null) | null): void
   setReducedMotion(on: boolean): void
   /** The figure stopped animating: its frames cost too much, or one of its nodes threw. It stays in its rest pose. */
   frozen(): boolean
@@ -123,6 +180,8 @@ export const GESTURE_BLEND_MS = 150
 /** The mouth follows its target with this time constant, and stays applied this long after a line. */
 export const MOUTH_EASE_MS = 60
 export const MOUTH_TAIL_MS = 120
+/** `pace`, `turn` and `held` move at most this much a second (flash safety: a full swing of a paint takes 0.25 s or more). */
+export const INPUT_RATE = 4
 /** At most 30 frames a second. A little under 1000 / 30, so a 60 Hz display gives every second frame. */
 const FRAME_MS = 32
 /** A frame never counts for more than this: a tab that was away does not fast-forward. */
@@ -134,6 +193,8 @@ export const BUDGET_FRAMES = 30
 const HOLD_MAX_MS = 120_000
 const MAX_GESTURES = 6
 const GAZE_EASE_MS = 90
+/** A correction of `parents` this close to the identity is none. */
+const NEAR_IDENTITY = 1e-9
 
 // ---------------------------------------------------------------- compiled form
 
@@ -146,10 +207,16 @@ interface Frames {
   paths: readonly (readonly number[])[]
 }
 
+/**
+ * The channels a relative prop feeds: 0 tx, 1 ty, 2 rotation, 3 skew x, 4 skew y (these add),
+ * 5 sx, 6 sy (these multiply).
+ */
+const SCALE_FROM = 5
+const REST_CHANNELS: readonly number[] = [0, 0, 0, 0, 0, 1, 1]
+
 interface CTrack {
   prop: Prop
   kind: Kind
-  /** 0 tx, 1 ty, 2 rotation, 3 sx, 4 sy: the channels a relative prop feeds. */
   channels: readonly number[]
   times: readonly number[]
   eases: readonly Ease[]
@@ -169,6 +236,12 @@ interface CAnim {
   maxDelayMs: number
 }
 
+/** A drive: a track sampled at its input's position instead of at a moment. */
+interface CDrive {
+  input: DriveInput
+  track: CTrack
+}
+
 /**
  * What an absolute prop is when nothing animates it. `text`: what to write back; null: remove
  * the attribute. `ref`: the paint is this gradient of the look, and that is what is put back.
@@ -182,6 +255,9 @@ interface CTarget {
   pivotY: string
   negX: string
   negY: string
+  /** The pivot as the numbers that are written. */
+  px: number
+  py: number
   /** Absolute props something may animate on this part, with the artwork's own value. */
   rest: Map<Prop, Rest>
   /** Whether something may change its transform. */
@@ -190,9 +266,22 @@ interface CTarget {
 
 type CMouth = { target: string; kind: 'd'; shape: PathShape; closed: readonly number[]; open: readonly number[] } | { target: string; kind: 'channel'; channels: readonly number[]; closed: number; open: number } | { target: string; kind: 'attr'; prop: Prop; closed: number; open: number }
 
+/** The `parents` of a look: what each child moves with, and how its parent rests. */
+interface Skeleton {
+  /** Child -> parent. */
+  parents: ReadonlyMap<string, string>
+  /** Parent -> its rest world undone, R(Q)⁻¹; null when it cannot be undone (its children are left out). */
+  restInverse: ReadonlyMap<string, Matrix | null>
+}
+
 interface Full {
   anims: ReadonlyMap<string, CAnim>
   targets: ReadonlyMap<string, CTarget>
+  drives: readonly CDrive[]
+  /** A drive reads where it looks, or how open its mouth is: the engine keeps those up even without pupils or a `mouth` entry. */
+  readsLook: boolean
+  readsMouth: boolean
+  skeleton: Skeleton | null
   mouth: readonly CMouth[]
   gazeTarget: string | null
   gazeTravel: number
@@ -206,6 +295,9 @@ const COMPILED = new WeakMap<Look, Compiled | null>()
 /** Prop -> the DOM attribute the engine writes. A literal table: no attribute name ever comes from a look. */
 const DOM_ATTR: ReadonlyMap<Prop, string> = new Map<Prop, string>([
   ['opacity', 'opacity'],
+  ['fillOpacity', 'fill-opacity'],
+  ['strokeOpacity', 'stroke-opacity'],
+  ['strokeDashoffset', 'stroke-dashoffset'],
   ['fill', 'fill'],
   ['stroke', 'stroke'],
   ['strokeWidth', 'stroke-width'],
@@ -229,18 +321,73 @@ const CHANNELS: ReadonlyMap<Prop, readonly number[]> = new Map<Prop, readonly nu
   ['translateX', [0]],
   ['translateY', [1]],
   ['rotate', [2]],
-  ['scale', [3, 4]],
-  ['scaleX', [3]],
-  ['scaleY', [4]],
+  ['skewX', [3]],
+  ['skewY', [4]],
+  ['scale', [5, 6]],
+  ['scaleX', [5]],
+  ['scaleY', [6]],
 ])
 
-const EASES: ReadonlySet<string> = new Set(['linear', 'in', 'out', 'inOut', 'outBack', 'step'])
+const INPUTS: ReadonlySet<string> = new Set(DRIVE_INPUTS)
+/** The inputs the engine moves slowly: the only ones that may drive a paint. */
+const SLOW_INPUTS: ReadonlySet<DriveInput> = new Set<DriveInput>(['pace', 'turn', 'held'])
+/** The props whose artwork value is inherited from the elements around a part when it sets none. */
+const INHERITED: ReadonlySet<Prop> = new Set<Prop>(['strokeWidth', 'fillOpacity', 'strokeOpacity', 'strokeDashoffset'])
 
 const clamp01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n)
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 
-/** One eased step of a segment, 0 to 1 in. `outBack` overshoots; `step` holds the start until the end. */
+const C1 = 1.70158
+const C2 = C1 * 1.525
+const C3 = C1 + 1
+const BOUNCE_N = 7.5625
+const BOUNCE_D = 2.75
+
+/**
+ * A cubic bezier from (0, 0) to (1, 1) through `(x1, y1)` and `(x2, y2)`, at `t`: x(s) = t is
+ * solved for s by 8 Newton steps from s = t, or by 20 bisection steps when the slope gets
+ * under 1e-6; the value is y(s).
+ */
+export function bezier(b: Bezier, t: number): number {
+  const [x1, y1, x2, y2] = b
+  const curve = (s: number, p1: number, p2: number) => 3 * (1 - s) * (1 - s) * s * p1 + 3 * (1 - s) * s * s * p2 + s * s * s
+  const slope = (s: number) => 3 * (1 - s) * (1 - s) * x1 + 6 * (1 - s) * s * (x2 - x1) + 3 * s * s * (1 - x2)
+  // Newton from s = t; a step that leaves 0 … 1, a flat slope or a result that is still off
+  // hands over to bisection, which always lands (x rises with s).
+  let s = t
+  let newton = true
+  for (let i = 0; i < 8; i++) {
+    const d = slope(s)
+    if (Math.abs(d) < 1e-6) {
+      newton = false
+      break
+    }
+    s -= (curve(s, x1, x2) - t) / d
+    if (!(s >= 0 && s <= 1)) {
+      newton = false
+      break
+    }
+  }
+  if (!newton || Math.abs(curve(s, x1, x2) - t) > 1e-5) {
+    let lo = 0
+    let hi = 1
+    for (let i = 0; i < 30; i++) {
+      const mid = (lo + hi) / 2
+      if (curve(mid, x1, x2) < t) lo = mid
+      else hi = mid
+    }
+    s = (lo + hi) / 2
+  }
+  return curve(s, y1, y2)
+}
+
+/**
+ * One eased step of a segment, 0 to 1 in. `outBack`, `inBack`, `inOutBack` and
+ * `outElastic` overshoot; `outBounce` bounces; `step` holds the start until the end; four
+ * numbers are a cubic bezier.
+ */
 export function ease(kind: Ease, t: number): number {
+  if (typeof kind !== 'string') return Array.isArray(kind) ? bezier(kind, t) : t
   switch (kind) {
     case 'in':
       return t * t
@@ -249,9 +396,22 @@ export function ease(kind: Ease, t: number): number {
     case 'inOut':
       return t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2
     case 'outBack': {
-      const c1 = 1.70158
       const u = t - 1
-      return 1 + (c1 + 1) * u * u * u + c1 * u * u
+      return 1 + C3 * u * u * u + C1 * u * u
+    }
+    case 'inBack':
+      return C3 * t * t * t - C1 * t * t
+    case 'inOutBack':
+      return t < 0.5 ? ((2 * t) ** 2 * ((C2 + 1) * 2 * t - C2)) / 2 : ((2 * t - 2) ** 2 * ((C2 + 1) * (2 * t - 2) + C2) + 2) / 2
+    case 'outElastic':
+      if (t === 0) return 0
+      if (t === 1) return 1
+      return 2 ** (-10 * t) * Math.sin((10 * t - 0.75) * ((2 * Math.PI) / 3)) + 1
+    case 'outBounce': {
+      if (t < 1 / BOUNCE_D) return BOUNCE_N * t * t
+      if (t < 2 / BOUNCE_D) return BOUNCE_N * (t - 1.5 / BOUNCE_D) ** 2 + 0.75
+      if (t < 2.5 / BOUNCE_D) return BOUNCE_N * (t - 2.25 / BOUNCE_D) ** 2 + 0.9375
+      return BOUNCE_N * (t - 2.625 / BOUNCE_D) ** 2 + 0.984375
     }
     case 'step':
       return t >= 1 ? 1 : 0
@@ -265,6 +425,14 @@ export function easeMouth(open: number, target: number, dtMs: number): number {
   if (!isNum(open) || !isNum(target)) return 0
   if (!isNum(dtMs) || dtMs <= 0) return open
   return open + (target - open) * (1 - Math.exp(-dtMs / MOUTH_EASE_MS))
+}
+
+/** `pace`, `turn` or `held` one frame later: towards its target, at most `INPUT_RATE` a second. */
+export function easeInput(now: number, target: number, dtMs: number): number {
+  if (!isNum(now) || !isNum(target)) return 0
+  if (!isNum(dtMs) || dtMs <= 0) return now
+  const most = (INPUT_RATE * dtMs) / 1000
+  return now + Math.min(Math.max(target - now, -most), most)
 }
 
 function colourText(c: Rgba): string | null {
@@ -291,7 +459,7 @@ function numeric(value: unknown): number | null {
 
 /** What an absolute numeric prop is when the artwork does not set it. */
 function numberDefault(prop: Prop): number {
-  return prop === 'opacity' || prop === 'strokeWidth' ? 1 : 0
+  return prop === 'opacity' || prop === 'strokeWidth' || prop === 'fillOpacity' || prop === 'strokeOpacity' ? 1 : 0
 }
 
 /** The nearest element, from the part outwards, that sets one of these attributes. */
@@ -342,7 +510,7 @@ function restOf(index: ReadonlyMap<string, IndexEntry>, entry: IndexEntry, prop:
   }
   const mine = numeric(own(entry.node.attrs, prop))
   if (mine !== null) return { kind: 'num', value: mine, text: fmt(mine, 3) }
-  const from = prop === 'strokeWidth' ? inherited(entry, [prop]) : null
+  const from = INHERITED.has(prop) ? inherited(entry, [prop]) : null
   return { kind: 'num', value: (from ? numeric(from.value) : null) ?? numberDefault(prop), text: null }
 }
 
@@ -354,6 +522,18 @@ function nearest<T>(values: readonly (T | null)[], at: number): T | null {
     if (after !== undefined && after !== null) return after
   }
   return null
+}
+
+/** An element's own transform as a matrix (the identity when it has none). Read once per node. */
+const OWN_MATRIX = new WeakMap<LookNode, Matrix>()
+function ownMatrix(node: LookNode): Matrix {
+  let m = OWN_MATRIX.get(node)
+  if (!m) {
+    const ops = ownTransform(node)
+    m = ops ? transformMatrix(ops) : IDENTITY
+    OWN_MATRIX.set(node, m)
+  }
+  return m
 }
 
 /** Thrown inside `compile`; the look is rejected. */
@@ -369,7 +549,7 @@ interface Builder {
   targets: Map<string, CTarget>
 }
 
-/** The part an animation, the mouth or the gaze names: it must be drawn (not a gradient, a clip path or what is inside one). */
+/** The part an animation, a drive, a parent, the mouth or the gaze names: it must be drawn (not a gradient, a clip path, a mask, a filter or what is inside one). */
 function partOf(b: Builder, id: unknown): IndexEntry {
   const entry = isId(id) ? b.index.get(id) : undefined
   if (!entry || entry.inert) return misfit()
@@ -395,12 +575,16 @@ function targetOf(b: Builder, id: string): { target: CTarget; entry: IndexEntry 
       py = id === b.bodyId ? box[1] + box[3] : box[1] + box[3] / 2
     }
     const ops = parseTransform(own(entry.node.attrs, 'transform') ?? '')
+    const pivotX = fmt(px, 3) ?? misfit()
+    const pivotY = fmt(py, 3) ?? misfit()
     target = {
       own: (ops ? formatTransform(ops) : null) ?? '',
-      pivotX: fmt(px, 3) ?? misfit(),
-      pivotY: fmt(py, 3) ?? misfit(),
+      pivotX,
+      pivotY,
       negX: fmt(-px, 3) ?? misfit(),
       negY: fmt(-py, 3) ?? misfit(),
+      px: Number(pivotX),
+      py: Number(pivotY),
       rest: new Map(),
       moves: false,
     }
@@ -409,7 +593,7 @@ function targetOf(b: Builder, id: string): { target: CTarget; entry: IndexEntry 
   return { target, entry }
 }
 
-function compileTrack(b: Builder, track: Track, animation: Animation): CTrack | null {
+function compileTrack(b: Builder, track: Track, animation: Pick<Animation, 'times' | 'ease'>): CTrack | null {
   const prop = track.prop
   const kind: Kind = isTransformProp(prop) ? 'rel' : isColourProp(prop) ? 'colour' : prop === 'd' ? 'd' : 'num'
   const values: unknown = track.values
@@ -442,7 +626,7 @@ function compileTrack(b: Builder, track: Track, animation: Animation): CTrack | 
   if (times.length !== n || times[0] !== 0 || times[n - 1] !== 1) return misfit()
   for (let i = 0; i < n; i++) if (!isNum(times[i]) || (i > 0 && !(times[i] > times[i - 1]))) return misfit()
   const eases = trackEases(track, animation)
-  if (eases.length !== n - 1 || !eases.every((e) => EASES.has(e))) return misfit()
+  if (eases.length !== n - 1 || !eases.every((e) => isEase(e))) return misfit()
 
   const named: unknown = track.target
   const ids = typeof named === 'string' ? [named] : Array.isArray(named) ? (named as unknown[]) : misfit()
@@ -532,6 +716,16 @@ function compileAnimation(b: Builder, animation: Animation): CAnim {
   return { durationMs: duration * 1000, loop: animation.loop === true && !every, every, tracks, maxDelayMs }
 }
 
+function compileDrive(b: Builder, drive: Drive): CDrive | null {
+  if (typeof drive !== 'object' || drive === null) return misfit()
+  const input = typeof drive.input === 'string' && INPUTS.has(drive.input) ? drive.input : misfit()
+  // Where it looks and its mouth move fast: they never drive a colour or an opacity.
+  if (isPaintProp(drive.prop) && !SLOW_INPUTS.has(input)) return misfit()
+  // Phase and delay mean nothing here: a drive has no time, only its input's range.
+  const track = compileTrack(b, { target: drive.target, prop: drive.prop, values: drive.values, times: drive.at, ease: drive.ease }, {})
+  return track ? { input, track } : null
+}
+
 function compileMouth(b: Builder, drive: MouthDrive): CMouth {
   if (typeof drive !== 'object' || drive === null || !isId(drive.target)) return misfit()
   const { target, entry } = targetOf(b, drive.target)
@@ -565,6 +759,44 @@ function compileMouth(b: Builder, drive: MouthDrive): CMouth {
   return { target: drive.target, kind: 'd', shape: closed, closed: closed.nums, open: open.nums }
 }
 
+/** The elements around an entry and the entry itself, outermost first. */
+const chainOf = (entry: IndexEntry): readonly LookNode[] => [...entry.ancestors, entry.node]
+
+/** R(E): where a part rests in the viewBox, from the transforms of the elements around it and its own. */
+function restWorld(entry: IndexEntry): Matrix {
+  let m: Matrix = IDENTITY
+  for (const node of chainOf(entry)) m = multiply(m, ownMatrix(node))
+  return m
+}
+
+/** `parents` as the engine uses them: every child a target that moves, every chain bounded. */
+function compileSkeleton(b: Builder): Skeleton | null {
+  const given: unknown = b.look.parents
+  if (typeof given !== 'object' || given === null) return null
+  const names = Object.keys(given)
+  if (names.length === 0) return null
+  if (names.length > MORE_LIMITS.parents) return misfit()
+  const parents = new Map<string, string>()
+  const restInverse = new Map<string, Matrix | null>()
+  for (const child of names) {
+    const parent = own(given, child)
+    if (!isId(child) || !isId(parent) || child === parent) return misfit()
+    const q = partOf(b, parent)
+    targetOf(b, child).target.moves = true
+    parents.set(child, parent)
+    if (!restInverse.has(parent)) restInverse.set(parent, invert(restWorld(q)))
+  }
+  for (const child of parents.keys()) {
+    let at: string | undefined = child
+    let links = 0
+    while (at !== undefined && parents.has(at)) {
+      at = parents.get(at)
+      if (++links > MAX_CHAIN_LINKS) return misfit()
+    }
+  }
+  return { parents, restInverse }
+}
+
 function build(look: Look): Full {
   if (typeof look !== 'object' || look === null) return misfit()
   const b: Builder = { look, index: lookIndex(look), bodyId: rolePart(look, 'body'), targets: new Map() }
@@ -586,23 +818,44 @@ function build(look: Look): Full {
       anims.set(name, compileAnimation(b, (mine as Record<string, Animation>)[name]))
     }
   }
+  const drives: CDrive[] = []
+  const listed: unknown = look.drives
+  if (listed !== undefined && listed !== null) {
+    if (!Array.isArray(listed) || listed.length > MORE_LIMITS.drives) return misfit()
+    for (const drive of listed as Drive[]) {
+      const compiled = compileDrive(b, drive)
+      if (compiled) drives.push(compiled)
+    }
+  }
+  const skeleton = compileSkeleton(b)
   const mouth: CMouth[] = []
-  const drives: unknown = look.mouth
-  if (Array.isArray(drives)) {
-    if (drives.length > MORE_LIMITS.mouthDrives) return misfit()
-    for (const drive of drives as MouthDrive[]) mouth.push(compileMouth(b, drive))
+  const entries: unknown = look.mouth
+  if (Array.isArray(entries)) {
+    if (entries.length > MORE_LIMITS.mouthDrives) return misfit()
+    for (const drive of entries as MouthDrive[]) mouth.push(compileMouth(b, drive))
   }
   let gazeTarget = rolePart(look, 'pupils')
   const travel = gazeTravel(look)
   if (gazeTarget && travel > 0) targetOf(b, gazeTarget).target.moves = true
   else gazeTarget = null
-  return { anims, targets: b.targets, mouth, gazeTarget, gazeTravel: travel, rest: new Map() }
+  return {
+    anims,
+    targets: b.targets,
+    drives,
+    readsLook: drives.some((d) => d.input === 'lookX' || d.input === 'lookY'),
+    readsMouth: drives.some((d) => d.input === 'mouth'),
+    skeleton,
+    mouth,
+    gazeTarget,
+    gazeTravel: travel,
+    rest: new Map(),
+  }
 }
 
 /**
- * Every track of a look turned into numbers, the built-in animations its roles allow
- * included. null when a value does not fit its prop (a string where a number belongs, path
- * keyframes of different structure, a target that does not exist): the look cannot be
+ * Every track and drive of a look turned into numbers, the built-in animations its roles
+ * allow included. null when a value does not fit its prop (a string where a number belongs,
+ * path keyframes of different structure, a target that does not exist): the look cannot be
  * animated and the default look is shown instead. Compiled once per look object.
  */
 export function compile(look: Look): Compiled | null {
@@ -613,7 +866,7 @@ export function compile(look: Look): Compiled | null {
     const full = build(look)
     compiled = Object.freeze({ look })
     FULL.set(compiled, full)
-    full.rest = sample(compiled, [], 0, null, null)
+    full.rest = sample(compiled, [], 0)
   } catch {
     compiled = null
   }
@@ -627,8 +880,8 @@ export function compile(look: Look): Compiled | null {
 type Abs = { kind: 'num'; v: number } | { kind: 'colour'; v: Rgba } | { kind: 'd'; v: readonly number[]; shape: PathShape }
 
 interface Acc {
-  /** tx, ty, rotation, sx, sy. */
-  ch: [number, number, number, number, number]
+  /** tx, ty, rotation, skew x, skew y, sx, sy. */
+  ch: number[]
   abs: Map<Prop, Abs> | null
 }
 
@@ -688,22 +941,174 @@ function absText(value: Abs): string | null {
 }
 
 /**
+ * Where along a drive's range its input is now, 0 to 1. `lookX`, `lookY` and `turn` run from
+ * -1 (position 0) through 0 (0.5) to 1; the others are their own position. With reduced
+ * motion every input but the mouth is at rest.
+ */
+function position(input: DriveInput, i: SampleInputs, reduced: boolean): number {
+  const within = (v: unknown, lo: number) => (isNum(v) ? Math.min(Math.max(v, lo), 1) : 0)
+  switch (input) {
+    case 'mouth':
+      return within(i.mouth, 0)
+    case 'lookX':
+    case 'lookY': {
+      const g = i.gaze
+      if (reduced || !Array.isArray(g) || !isNum(g[0]) || !isNum(g[1])) return 0.5
+      const length = Math.hypot(g[0], g[1])
+      const v = (input === 'lookX' ? g[0] : g[1]) / (length > 1 ? length : 1)
+      return (within(v, -1) + 1) / 2
+    }
+    case 'turn':
+      return reduced ? 0.5 : (within(i.turn, -1) + 1) / 2
+    case 'pace':
+      return reduced ? 0 : within(i.pace, 0)
+    case 'held':
+      return reduced ? 0 : within(i.held, 0)
+  }
+}
+
+/** A part's motion this frame, as the strings written and, for a look with `parents`, as a matrix M(E). */
+interface Motion {
+  parts: string[]
+  m: Matrix
+}
+
+/** `inner` about the point (px, py). */
+function about(px: number, py: number, inner: Matrix): Matrix {
+  return multiply(multiply([1, 0, 0, 1, px, py], inner), [1, 0, 0, 1, -px, -py])
+}
+
+/**
+ * Translate, then rotate, skew and scale about the pivot: each written only when it is not
+ * the identity, and the matrix built from exactly the numbers written. null: a number that is
+ * not finite.
+ */
+function motionOf(t: CTarget, ch: readonly number[] | undefined, withMatrix: boolean): Motion | null {
+  const out: Motion = { parts: [], m: IDENTITY }
+  if (!ch) return out
+  const tx = fmt(ch[0], 2)
+  const ty = fmt(ch[1], 2)
+  const rot = fmt(ch[2], 2)
+  const kx = fmt(ch[3], 2)
+  const ky = fmt(ch[4], 2)
+  const sx = fmt(ch[5], 4)
+  const sy = fmt(ch[6], 4)
+  if (tx === null || ty === null || rot === null || kx === null || ky === null || sx === null || sy === null) return null
+  // Only a look with `parents` needs the matrix: the others never build one.
+  const then = (m: () => Matrix) => {
+    if (withMatrix) out.m = multiply(out.m, m())
+  }
+  if (tx !== '0' || ty !== '0') {
+    out.parts.push(`translate(${tx} ${ty})`)
+    then(() => [1, 0, 0, 1, Number(tx), Number(ty)])
+  }
+  if (rot !== '0') {
+    out.parts.push(`rotate(${rot} ${t.pivotX} ${t.pivotY})`)
+    then(() => opMatrix({ fn: 'rotate', args: [Number(rot), t.px, t.py] }))
+  }
+  if (kx !== '0' || ky !== '0') {
+    const skews = [kx !== '0' ? `skewX(${kx})` : '', ky !== '0' ? `skewY(${ky})` : ''].filter(Boolean).join(' ')
+    out.parts.push(`translate(${t.pivotX} ${t.pivotY}) ${skews} translate(${t.negX} ${t.negY})`)
+    then(() => about(t.px, t.py, multiply(opMatrix({ fn: 'skewX', args: [Number(kx)] }), opMatrix({ fn: 'skewY', args: [Number(ky)] }))))
+  }
+  if (sx !== '1' || sy !== '1') {
+    out.parts.push(`translate(${t.pivotX} ${t.pivotY}) scale(${sx} ${sy}) translate(${t.negX} ${t.negY})`)
+    then(() => about(t.px, t.py, [Number(sx), 0, 0, Number(sy), 0, 0]))
+  }
+  return out
+}
+
+const nearIdentity = (m: Matrix): boolean => Math.abs(m[0] - 1) <= NEAR_IDENTITY && Math.abs(m[1]) <= NEAR_IDENTITY && Math.abs(m[2]) <= NEAR_IDENTITY && Math.abs(m[3] - 1) <= NEAR_IDENTITY && Math.abs(m[4]) <= NEAR_IDENTITY && Math.abs(m[5]) <= NEAR_IDENTITY
+
+/**
+ * The correction C of every child of `parents`, written in front of its transform so that it
+ * moves with its parent as if nested in it. With A1…An the elements around E, outermost
+ * first, S its own transform, M its motion, T = S·M:
+ *
+ * - X(E) = T(E), and for a child of Q: X(E) = C·T(E) with C = P⁻¹·D(Q)·P,
+ *   P = X(A1)·…·X(An) (where E's DOM parent is now), D(Q) = W(Q)·R(Q)⁻¹;
+ * - W(E) = X(A1)·…·X(An)·X(E) (where it is now), R(E) = S(A1)·…·S(An)·S(E) (where it rests).
+ *
+ * null for a child whose matrices cannot be inverted, whose numbers are not finite, or
+ * whose rig depends on itself through what it is nested in: it is left out of the frame.
+ */
+function corrections(full: Full, skeleton: Skeleton, index: ReadonlyMap<string, IndexEntry>, motions: ReadonlyMap<string, Motion | null>): Map<string, Matrix | null> {
+  const transformOf = (node: LookNode): Matrix | null => {
+    const own = ownMatrix(node)
+    const id = node.id
+    if (typeof id !== 'string' || !full.targets.has(id)) return own
+    const motion = motions.get(id)
+    if (motion === null) return null
+    return motion && motion.parts.length > 0 ? multiply(own, motion.m) : own
+  }
+  const live = new Map<LookNode, Matrix | null>()
+  const found = new Map<string, Matrix | null>()
+  const worldAt = (chain: readonly LookNode[], i: number): Matrix | null => {
+    if (i < 0) return IDENTITY
+    const node = chain[i]
+    if (live.has(node)) return live.get(node) ?? null
+    // While it is worked out it counts as unsound: a rig that leads back to itself is left out.
+    live.set(node, null)
+    const outer = worldAt(chain, i - 1)
+    const x = outer ? written(node, outer) : null
+    const world = outer && x ? multiply(outer, x) : null
+    live.set(node, world)
+    return world
+  }
+  const correction = (child: string, outer: Matrix): Matrix | null => {
+    if (found.has(child)) return found.get(child) ?? null
+    found.set(child, null)
+    const parent = skeleton.parents.get(child)
+    const entry = parent === undefined ? undefined : index.get(parent)
+    const restInverse = parent === undefined ? null : (skeleton.restInverse.get(parent) ?? null)
+    const pInverse = invert(outer)
+    let c: Matrix | null = null
+    if (entry && restInverse && pInverse) {
+      const now = worldAt(chainOf(entry), entry.ancestors.length)
+      if (now) c = multiply(multiply(pInverse, multiply(now, restInverse)), outer)
+    }
+    if (c && !c.every((n) => Number.isFinite(n))) c = null
+    found.set(child, c)
+    return c
+  }
+  /** X(E): what is written on it, given where its DOM parent is now. */
+  const written = (node: LookNode, outer: Matrix): Matrix | null => {
+    const t = transformOf(node)
+    if (!t) return null
+    const id = node.id
+    if (typeof id !== 'string' || !skeleton.parents.has(id)) return t
+    const c = correction(id, outer)
+    return c ? multiply(c, t) : null
+  }
+  const out = new Map<string, Matrix | null>()
+  for (const child of skeleton.parents.keys()) {
+    const entry = index.get(child)
+    const outer = entry ? worldAt(entry.ancestors, entry.ancestors.length - 1) : null
+    out.set(child, outer ? correction(child, outer) : null)
+  }
+  return out
+}
+
+/**
  * The pose of every part a look can move, at one moment. Pure: the same arguments give the
  * same poses.
  *
- * - State clips add up: translations and rotations add, scales multiply, and for every
- *   other prop the clip started last wins. A weight `w` applies as `t*w`, `r*w` and
+ * - State clips add up: translations, rotations and skews add, scales multiply, and for
+ *   every other prop the clip started last wins. A weight `w` applies as `t*w`, `r*w` and
  *   `1 + (s-1)*w`.
  * - A gesture's value replaces that sum for the props it animates, blended in over 150 ms
  *   and, when a `once` gesture has played, out again over 150 ms.
  * - A one-shot in a state list leaves its relative props fading for 200 ms after its last frame.
- * - The mouth (`mouthOpen` 0 to 1; null: not applied) and the gaze (`gaze`: a vector of
- *   length 0 to 1; null: none) come last.
+ * - With `inputs`, the look's drives come next, each at its input's position: translations,
+ *   rotations and skews add, scales multiply, every other prop is the drive's.
+ * - The mouth (`inputs.mouth` 0 to 1; null: not applied) and the gaze (`inputs.gaze`: a
+ *   vector of length 0 to 1; null: none) come last.
+ * - `parents` put a correction in front of each child's transform (see `corrections`).
  *
  * A part whose numbers are not finite is left out of the result. A clip whose name means
  * nothing for the look is ignored.
  */
-export function sample(c: Compiled, clips: readonly Clip[], tMs: number, mouthOpen: number | null, gaze: readonly [number, number] | null, opts?: SampleOptions): Map<string, Pose> {
+export function sample(c: Compiled, clips: readonly Clip[], tMs: number, inputs?: SampleInputs | null, opts?: SampleOptions): Map<string, Pose> {
   const out = new Map<string, Pose>()
   const full = FULL.get(c)
   if (!full || !isNum(tMs)) return out
@@ -712,7 +1117,7 @@ export function sample(c: Compiled, clips: readonly Clip[], tMs: number, mouthOp
   const acc = (id: string): Acc => {
     let a = accs.get(id)
     if (!a) {
-      a = { ch: [0, 0, 0, 1, 1], abs: null }
+      a = { ch: [...REST_CHANNELS], abs: null }
       accs.set(id, a)
     }
     return a
@@ -771,7 +1176,7 @@ export function sample(c: Compiled, clips: readonly Clip[], tMs: number, mouthOp
         }
         const a = acc(id)
         for (const ch of track.channels) {
-          if (ch < 3) a.ch[ch] += v * gain
+          if (ch < SCALE_FROM) a.ch[ch] += v * gain
           else a.ch[ch] *= 1 + (v - 1) * gain
         }
       }
@@ -813,11 +1218,11 @@ export function sample(c: Compiled, clips: readonly Clip[], tMs: number, mouthOp
         }
         let m = moved.get(id)
         if (!m) {
-          m = { v: [0, 0, 0, 1, 1], w: [0, 0, 0, 0, 0] }
+          m = { v: [...REST_CHANNELS], w: [0, 0, 0, 0, 0, 0, 0] }
           moved.set(id, m)
         }
         for (const ch of track.channels) {
-          if (ch < 3) m.v[ch] += v
+          if (ch < SCALE_FROM) m.v[ch] += v
           else m.v[ch] *= v
           m.w[ch] = Math.max(m.w[ch], w)
         }
@@ -825,11 +1230,32 @@ export function sample(c: Compiled, clips: readonly Clip[], tMs: number, mouthOp
     }
     for (const [id, m] of moved) {
       const a = acc(id)
-      for (let ch = 0; ch < 5; ch++) if (m.w[ch] > 0) a.ch[ch] = lerp(a.ch[ch], m.v[ch], m.w[ch])
+      for (let ch = 0; ch < REST_CHANNELS.length; ch++) if (m.w[ch] > 0) a.ch[ch] = lerp(a.ch[ch], m.v[ch], m.w[ch])
+    }
+  }
+
+  // The drives: on top of the animations, each at its input's position.
+  if (inputs && full.drives.length > 0) {
+    for (const drive of full.drives) {
+      const p = position(drive.input, inputs, reduced)
+      const track = drive.track
+      for (const [id, frames] of track.frames) {
+        const v = valueAt(track, frames, p)
+        if (typeof v !== 'number') {
+          setAbs(id, track.prop, v, 1)
+          continue
+        }
+        const a = acc(id)
+        for (const ch of track.channels) {
+          if (ch < SCALE_FROM) a.ch[ch] += v
+          else a.ch[ch] *= v
+        }
+      }
     }
   }
 
   // The mouth, then the gaze: applied last.
+  const mouthOpen = inputs?.mouth
   if (isNum(mouthOpen)) {
     const m = clamp01(mouthOpen)
     for (const drive of full.mouth) {
@@ -838,6 +1264,7 @@ export function sample(c: Compiled, clips: readonly Clip[], tMs: number, mouthOp
       else for (const ch of drive.channels) acc(drive.target).ch[ch] = lerp(drive.closed, drive.open, m)
     }
   }
+  const gaze = inputs?.gaze
   if (!reduced && full.gazeTarget && Array.isArray(gaze) && isNum(gaze[0]) && isNum(gaze[1])) {
     const length = Math.hypot(gaze[0], gaze[1])
     const k = full.gazeTravel / (length > 1 ? length : 1)
@@ -846,26 +1273,32 @@ export function sample(c: Compiled, clips: readonly Clip[], tMs: number, mouthOp
     a.ch[1] += gaze[1] * k
   }
 
+  // Every part's motion as it is written; with `parents` also as matrices, for the corrections of the children.
+  const skeleton = full.skeleton
+  const motions = new Map<string, Motion | null>()
+  for (const [id, target] of full.targets) if (target.moves) motions.set(id, motionOf(target, accs.get(id)?.ch, skeleton !== null))
+  const fixes = skeleton ? corrections(full, skeleton, lookIndex(c.look), motions) : null
+
   // Every part the look can move gets a pose, so one that is no longer animated returns to the artwork's own values.
   for (const [id, target] of full.targets) {
     const a = accs.get(id)
     const pose: Pose = { attrs: new Map() }
     let sound = true
     if (target.moves) {
-      const parts: string[] = target.own ? [target.own] : []
-      if (a) {
-        const tx = fmt(a.ch[0], 2)
-        const ty = fmt(a.ch[1], 2)
-        const rot = fmt(a.ch[2], 2)
-        const sx = fmt(a.ch[3], 4)
-        const sy = fmt(a.ch[4], 4)
-        if (tx === null || ty === null || rot === null || sx === null || sy === null) sound = false
-        else {
-          if (tx !== '0' || ty !== '0') parts.push(`translate(${tx} ${ty})`)
-          if (rot !== '0') parts.push(`rotate(${rot} ${target.pivotX} ${target.pivotY})`)
-          if (sx !== '1' || sy !== '1') parts.push(`translate(${target.pivotX} ${target.pivotY}) scale(${sx} ${sy}) translate(${target.negX} ${target.negY})`)
+      const motion = motions.get(id) ?? null
+      const parts: string[] = []
+      if (fixes?.has(id)) {
+        const fix = fixes.get(id) ?? null
+        if (fix === null) sound = false
+        else if (!nearIdentity(fix)) {
+          const numbers = fix.map((n) => fmt(n, 6))
+          if (numbers.some((n) => n === null)) sound = false
+          else parts.push(`matrix(${numbers.join(' ')})`)
         }
       }
+      if (target.own) parts.push(target.own)
+      if (motion === null) sound = false
+      else parts.push(...motion.parts)
       if (parts.length > 0) pose.transform = parts.join(' ')
     } else if (target.own) {
       pose.transform = target.own
@@ -887,6 +1320,43 @@ export function sample(c: Compiled, clips: readonly Clip[], tMs: number, mouthOp
     if (sound) out.set(id, pose)
   }
   return out
+}
+
+// ---------------------------------------------------------------- a still figure
+
+/**
+ * Puts a look that is drawn without an engine (a small face, a fallback) into the pose a
+ * figure holds when nothing plays and every input is at rest. For most looks that is the
+ * artwork as it was rendered and nothing is written. A look with drives differs: a prop a
+ * drive sets belongs to the drive (a side view that shows only while it walks is hidden at
+ * rest), so those values are written once. `find` and `idPrefix` as for `Engine.attach`.
+ */
+export function writeStill(look: Look, find: (id: string) => EngineNode | null, idPrefix: string): void {
+  const compiled = compile(look)
+  const full = compiled ? FULL.get(compiled) : undefined
+  if (!compiled || !full || full.drives.length === 0) return
+  const prefix = cleanIdPrefix(idPrefix)
+  for (const [id, pose] of sample(compiled, [], 0, {})) {
+    const was = full.rest.get(id)
+    let node: EngineNode | null = null
+    try {
+      node = find(id)
+      if (!node || typeof node.setAttribute !== 'function' || typeof node.removeAttribute !== 'function') continue
+      if (pose.transform !== was?.transform) {
+        if (pose.transform === undefined) node.removeAttribute('transform')
+        else node.setAttribute('transform', pose.transform)
+      }
+      for (const [name, value] of pose.attrs) {
+        if (was?.attrs.get(name) === value && !was?.refs?.has(name)) continue
+        if (value === null) node.removeAttribute(name)
+        else node.setAttribute(name, value)
+      }
+      // A paint that is a gradient at rest stays as it was rendered.
+      for (const [name, ref] of pose.refs ?? []) if (!was?.refs?.has(name)) node.setAttribute(name, `url(#${prefix}${ref})`)
+    } catch {
+      // One node that throws keeps the artwork's own values; the others are still posed.
+    }
+  }
 }
 
 // ---------------------------------------------------------------- the loop
@@ -923,6 +1393,7 @@ const INERT: FigureHandle = Object.freeze({
   stop: () => {},
   setMouth: () => {},
   setGaze: () => {},
+  setInputs: () => {},
   setReducedMotion: () => {},
   frozen: () => false,
   detach: () => {},
@@ -1035,6 +1506,7 @@ export function createEngine(host: EngineHost): Engine {
     let reduced = opts?.reducedMotion === true
     let mouthRead: (() => number) | null = null
     let gazeRead: (() => readonly [number, number] | null) | null = null
+    let walkRead: (() => WalkInputs | null) | null = null
     let mouthOpen = 0
     let mouthUntil = -1
     let gazeX = 0
@@ -1043,6 +1515,9 @@ export function createEngine(host: EngineHost): Engine {
     let aimY = 0
     let glanceAt = clock + 2000 + random() * 3000
     let glanceEnd = 0
+    let pace = 0
+    let turn = 0
+    let held = 0
     /** No more frames: detached, frozen, or the engine is gone. */
     let stopped = false
     /** It stopped by itself: its frames cost too much, or one of them threw. */
@@ -1129,7 +1604,7 @@ export function createEngine(host: EngineHost): Engine {
 
           // The mouth: only while a line is presented and for a moment after it.
           let mouth: number | null = null
-          if (full.mouth.length > 0) {
+          if (full.mouth.length > 0 || full.readsMouth) {
             let want = -1
             if (mouthRead) {
               try {
@@ -1150,7 +1625,7 @@ export function createEngine(host: EngineHost): Engine {
 
           // The gaze: where the app says, else a small glance now and then.
           let gaze: readonly [number, number] | null = null
-          if (full.gazeTarget && !reduced) {
+          if ((full.gazeTarget || full.readsLook) && !reduced) {
             let told: readonly [number, number] | null = null
             if (gazeRead) {
               try {
@@ -1186,7 +1661,30 @@ export function createEngine(host: EngineHost): Engine {
             gaze = [gazeX, gazeY]
           }
 
-          write(sample(compiled, clips, now, mouth, gaze, { reducedMotion: reduced }), false)
+          // The walk: towards what the overlay says, slowly; at rest with reduced motion.
+          if (full.drives.length > 0) {
+            let want: WalkInputs | null = null
+            if (walkRead && !reduced) {
+              try {
+                const v = walkRead()
+                if (typeof v === 'object' && v !== null) want = v
+              } catch {
+                want = null
+              }
+            }
+            const within = (v: unknown, lo: number) => (isNum(v) ? Math.min(Math.max(v, lo), 1) : 0)
+            if (reduced) {
+              pace = 0
+              turn = 0
+              held = 0
+            } else {
+              pace = easeInput(pace, within(want?.pace, 0), dt)
+              turn = easeInput(turn, within(want?.turn, -1), dt)
+              held = easeInput(held, within(want?.held, 0), dt)
+            }
+          }
+
+          write(sample(compiled, clips, now, { mouth, gaze, pace, turn, held }, { reducedMotion: reduced }), false)
           cost = host.now() - t0
         } catch {
           // A figure that throws is taken out of the loop and stays static; the others go on.
@@ -1283,6 +1781,9 @@ export function createEngine(host: EngineHost): Engine {
       },
       setGaze(read) {
         gazeRead = typeof read === 'function' ? read : null
+      },
+      setInputs(read) {
+        walkRead = typeof read === 'function' ? read : null
       },
       setReducedMotion(on) {
         reduced = on === true
