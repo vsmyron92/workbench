@@ -37,13 +37,13 @@ Python would have been fine for I/O, but Rust is lower overhead and fits better.
 1. **Workbench itself.** Bind it to a LAN or Tailscale address and pair devices. The phone UI is a separate `MobileShell`.
 2. **Claude Code Remote Control.** Sessions can start with `--remote-control`. Their claude.ai link is shown per session, and `claude remote-control` servers can run per project.
 
-**Local helpers always reach `http://127.0.0.1:<port>`** (`AppState::local_base_url`): agent hooks, the MCP URL in each session's settings, `WORKBENCH_URL`, git askpass and the rebase editor helper, the statusline helper and `workbench open`. When `server.bind` does not cover 127.0.0.1 (just a Tailscale or LAN address, `[::1]`, `127.0.0.2`), `main.rs` also listens on `127.0.0.1:<port>` with plain HTTP (`app::loopback_listen_addr`) and refuses to start if that port is taken.
+**Local helpers always reach `http://127.0.0.1:<port>`** (`AppState::local_base_url`): agent hooks, the MCP URL in each session's settings, `WORKBENCH_URL`, git askpass and the rebase editor helper, the statusline helper, `workbench avatar` (which sends a session's token to a loopback URL only) and `workbench open`. When `server.bind` does not cover 127.0.0.1 (just a Tailscale or LAN address, `[::1]`, `127.0.0.2`), `main.rs` also listens on `127.0.0.1:<port>` with plain HTTP (`app::loopback_listen_addr`) and refuses to start if that port is taken.
 
 ## Repository layout
 
 ```
 server/            Rust crate `workbench`
-  src/main.rs        CLI: serve | open | url | askpass | git-editor | statusline | service | update
+  src/main.rs        CLI: serve | open | url | askpass | git-editor | statusline | avatar | service | update
                      (and git/ssh's askpass call on Windows: WORKBENCH_HELPER=askpass <prompt>)
   src/bin/workbenchw.rs  Windows launcher behind `workbench service` (GUI subsystem; a stub elsewhere)
   src/app.rs         AppState + router assembly (core)
@@ -62,6 +62,9 @@ server/            Rust crate `workbench`
   src/debug/         SLICE debug: Debug Adapter Protocol sessions, launch configurations, breakpoints, remote (embedded) targets
   src/data/          SLICE data: the data viewer: series (analog, digital, events), lane plots, followed capture files, MCP data_* tools
   src/skills/        SLICE skills: which skills each agent CLI can load (folders, plugins, settings, the newest session's listing), what they cost, and Workbench's own optional skills (install, update, remove)
+  src/avatar/        SLICE avatar: a session's live avatar: records and their files (store), the look validator (look: an SVG subset into a closed, typed tree),
+                     one line of plain text (text), what a session may do (session) and what only devices do (device), device and hook routes,
+                     MCP avatar_* tools, `workbench avatar` (cli), the brief and the guide (brief, guide*.md)
   src/gitlab/        SLICE gitlab: MRs, pipelines, jobs, envs, issues, registry
   src/github/        SLICE github: PRs, Actions runs/jobs/logs, issues, releases
   src/workspace/     SLICE workspace: Mr. Mak-style deliverable cards and Home examples, sandboxed report serving, trash
@@ -76,13 +79,16 @@ server/            Rust crate `workbench`
 web/               React 19 + TS + Vite 8
   public/            manifest.webmanifest, sw.js (service worker), icons/ (from scripts/icons.mjs)
   src/api/           fetch client, events socket, shared types, shared queries (core)
-  src/shell/         desktop + mobile shells, dock, palette, dialogs, feature registry (core)
+  src/shell/         desktop + mobile shells, dock, palette, dialogs, feature registry, the bridges features ask through (agentBridge.ts,
+                     devcontainerBridge.ts, avatarBridge.ts) (core)
   src/ui/            shared components (core)
   src/theme/         tokens.css (design tokens), palette.ts (Monaco/xterm colours) (core)
   src/lib/           monacoSetup, languages.ts (file → Monaco language), vhdl.ts (grammar) (core)
-  src/features/<slice>/   one folder per slice; index.ts exports a FeatureModule
+  src/features/<slice>/   one folder per slice; index.ts exports a FeatureModule (features/avatar/: the always-loaded provider, widget and
+                          commands, the overlay as a lazy chunk, lib/ for its pure modules)
 docs/              this file
 skills/            Workbench's own optional agent skills (text only), embedded in the binary: `skills/<name>/SKILL.md` and `references/`
+                   (skills/workbench-avatar/: how a session draws, rigs and drives its avatar)
 packaging/linux/   install.sh shipped in the Linux release archive
 packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows release archive; workbench.ico (from web/scripts/icons.mjs) and workbench.manifest, embedded in the Windows executables
 .github/workflows/ ci.yml (web and server build + tests, Linux and Windows), release.yml (tag → Linux archive, Windows zip when `RELEASE_WINDOWS` is set, + GitHub release)
@@ -93,7 +99,7 @@ packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows rele
 ## Configuration
 
 - `~/.config/workbench/config.toml` (`%APPDATA%\workbench\config.toml` on Windows) holds global settings (`config/global.rs`). It is written with detected defaults on first run.
-  - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions`, `permission_wait` and `failover`) and `[agents.providers.*]` (also `fallback`, `[agents.providers.<name>.local]` and `.api`) and `transfer`, `[terminals]` (`shell`: the argv of new shells; default `$SHELL -l`, on Windows PowerShell), `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[update]` (`check`, `repo`, `api`: see "Updates"), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`, `[debug.servers.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
+  - It contains `[server]` (bind, allowed_hosts, public_url, tls), `[projects]` (roots, include, exclude), `[agents]` defaults (with `answer_permissions`, `permission_wait` and `failover`) and `[agents.providers.*]` (also `fallback`, `[agents.providers.<name>.local]` and `.api`) and `transfer`, `[terminals]` (`shell`: the argv of new shells; default `$SHELL -l`, on Windows PowerShell), `[gitlab]`, `[github]`, `[atlassian]`, `[notify]`, `[push]` (subject, extra_endpoint_hosts), `[update]` (`check`, `repo`, `api`: see "Updates"), `[avatar]` (`enabled`, default true; `sessions`, `asked` or `any`, default `any`: see "Avatar"), `[lsp]` (`idle_minutes`, `[lsp.servers.*]`), `[debug]` (`default_adapter`, `[debug.adapters.*]`, `[debug.servers.*]`), `[devcontainer]` (docker, cli, engine), `extra_roots` and `[secrets]`.
   - Settings saves edit config.toml in place (`platform::config_edit`): comments and layout survive, for every section.
   - Settings saves apply at once. Edits made outside Workbench (an editor, a setup hint followed by hand) apply too: `platform::settings::watch_config` watches the config directory and applies a valid `config.toml` like a raw save (config swapped, secret cache cleared, projects reloaded, `settings.changed`). A file that does not parse or fails the hard checks is reported once (`ui.notify`) and the running config stays; the watcher never writes the file.
 - **Project ids** are the directory name as a slug (`api`, then `api-2`… for another directory of that name) and are bound to the directory for good in `data_dir/project-ids.json` (canonical path → id). Everything keyed by an id belongs to that directory: the overlay `projects/<id>.toml` with its secrets, `data_dir/workspace/<id>`, terminals and agent sessions (`projectId`, hence their MCP confinement). Scan order (roots, then includes) only decides the id the first time a directory is seen; adding a root with a same-named repository or removing the first of two never moves an id, and a new directory never gets an id the file gives to another one, even one that is gone or excluded. A moved repository therefore gets a new id: rename its overlay to follow it.
@@ -109,6 +115,7 @@ packaging/windows/ install.ps1 and CONPTY_NOTICE.md, shipped in the Windows rele
   - `agent.env`, `agent.add_dirs` and any `agent.permission_mode` other than `manual`, `plan` or `dontAsk` are ignored.
   - Language servers, debug adapters and debug servers are commands: only config.toml defines them (`[lsp.servers.*]`, `[debug.adapters.*]`, `[debug.servers.*]`); a repository's `[[debug]]` launch configuration names an adapter (and, in `[debug.remote]`, a server) by id, never a command, and its `${secret:…}` env resolves only against the overlay. What a repository's `[debug.remote]` adds (server arguments, gdb commands, a `connect` address) runs only when the user starts that configuration, like `pre_launch`, and the Start view shows it first.
   - Nothing runs by itself: a service run's `status` (polled in the background) and an env health probe over ssh (`via_host`, unless its host is an overlay `[hosts]` entry) are dropped.
+  - Repository config never reaches `[avatar]`: it is a section of config.toml alone (`GlobalConfig.avatar`), and no project layer has one, so a repository can neither switch avatars on nor give sessions one.
   - A token-less `links.confluence`/`links.jira` keeps its `site` only when it is the configured site or an `https://*.atlassian.net` site, so config.toml's Atlassian token never goes elsewhere.
   - A token-less `repo.gitlab` gets config.toml's `[gitlab]` token only when its base URL, **scheme included**, is the configured host (`gitlab::client::global_host_matches`), so an `http://` twin of an https host never receives it.
   - Commands that run on a click (runs, deploys, env logs and commands) stay: like any IDE's run configurations, the owner sees and starts them.
@@ -130,6 +137,7 @@ Data dir (`~/.local/share/workbench/`; on Windows `%LOCALAPPDATA%\workbench`, ap
 - `project-ids.json`: which directory each project id belongs to (see Configuration).
 - `scratches/` (0700): scratch files (see "Scratch files").
 - Slice state such as terminal metadata and screens (`terminals/`) also lives here, and `devcontainer/<id>.json`: dev container approvals (sha256 of approved plans), settings and the last start.
+- `avatar/<terminal id>.json` (0600 in a 0700 directory, compact JSON): what a session's avatar keeps across restarts, `{version, on, via, name, designed, look, voice}`, and `unbriefed` (the session has yet to be told of it) only while it is true. A file that does not pass the validator is kept aside as `<terminal id>.json.corrupt` (its `on` still holds when it is JSON with a boolean `on`); both go with the terminal. The transcript, the open question and the leases are memory only (see "Avatar").
 - Third phase: `lsp/<id>.json` (code intelligence enabled for that directory), `debug/<project>.json` (breakpoints, watches) and `debug/adapter/` (the adapters' working directory), `push/vapid.json` and `push/subscriptions.json`, `local-history/<project>/` (index and zstd blobs), `git/changelists/<project>.json`, `data/<project>.json` (the data viewer's series definitions and plots; never samples), `git/shelf/<project>/`, `git/rebase/` (a running interactive rebase's staging), `workspace-trash/<scope>/`.
 
 ## Repositories of a project
@@ -186,6 +194,11 @@ A project is a directory, and it may hold **several git repositories**: a folder
 - **Permission requests** of Claude Code sessions are answered only by signed-in devices (`POST /api/agents/{id}/permission`: agent tokens 401, the master token and in-process calls 403), so a session never approves itself through Workbench. One-tap Allow (the attention toast, a push notification) is offered only for a request shown whole: `pendingPermission.complete` and at most 300 characters on 4 lines. See "Approvals".
 - **Web Push** posts to a browser-supplied endpoint: an SSRF boundary. Only the browsers' push services (FCM, Mozilla, Apple, WNS) and `[push] extra_endpoint_hosts` are accepted, https on the default port, no IP literals, no redirects; payloads carry titles and short summaries only. The service worker answers Allow / Deny with the device key it keeps in IndexedDB (as exposed as the page's `localStorage` copy). See "Phone app and push".
 - **Voice input** uses the browser's own speech recognition: the microphone permission is the browser's, Workbench receives no audio and has no endpoint for it, and a transcript is only text in the new-session prompt until the user starts the session, so a misheard word never reaches an agent by itself. See "Voice input" under TypeScript.
+- **Avatars** (`/api/avatar/**`, `/api/hooks/avatar/**`, MCP `avatar_*`) show and say what a session writes, so all of it is untrusted, and a session acts on nothing but its own avatar. See "Avatar".
+  - **Who may do what.** A tool takes no terminal id: it acts on the calling session's avatar (`McpCtx::terminal_id`), and a caller that is not a running agent session gets 400. A hook route accepts only the agent token of the terminal in its path; another session's token and the master token get 401 there. What answers for the user (a reply, dismissing a question, turning an avatar on or off, resetting its look, claiming a line and reporting what became of it) is a POST under `/api/avatar/{terminalId}` for signed-in devices only (`Caller::Device`, so also the device key and the same origin): the master token, a file a session could read, and in-process calls get 403, agent tokens 401. The two GETs only read. With `[avatar] sessions = "any"` (the default) a session gets an avatar with its first design, say, ask or act call and may start another session with one (`workbench_start_session` `avatar`); with `sessions = "asked"` only the user gives one to a session that has none (the Avatar option, or "give" from a device; avatars sessions have already stay until the user turns each off), and a session that asks to start another with one gets 409, as does a session whose own avatar the user turned off. That refusal concerns the `avatar` argument only: under `any` a session started without it may still take one itself. The master token is the user's own: `POST /api/agents` with it and `avatar: true` starts a session with one, as the composer does. A session never turns on one the user turned off.
+  - **What a session sends is bounded and masked.** Its artwork never reaches a browser as markup: the server parses it into a closed, typed tree and stores and sends only that, and the browser checks the tree again and builds elements from literal tables. Every text (a name, a line, a question, a choice, SVG `text`) is one line of plain text with the session's secrets masked (`text::plain` with `Terminals::redact_text`). A refusal that quotes what the session sent masks the quote before it is cut, a refused design that holds a secret is answered from a masked copy of the call (`look::apply_masked`), and the platform masks the error of a failed MCP call in the Activity view and `mcp.call` as it masks the argument summary. Every size, count, rate and wait has a named limit, refused attempts count, and a hook body (256 KiB at most) is parsed only after the token and the rate were checked. The session's identity around its words is Workbench's (provider icon, tab title, project); the agent's own name only follows it, in quotation marks, and a notification of a question nobody saw has Workbench's own title.
+  - **What reaches a session.** Nothing under the hook routes puts text into one. A reply pastes a fixed frame, the question's id and the user's own words or the choice that was clicked, never the question or other text the session wrote, through `POST /api/agents/ask` (refused while the session shows a dialog or is starting; the Enter is withheld when a dialog opened during the paste; the echo of what Workbench typed there is not taken for a dialog, one beside it is). Telling a running session of its avatar (given or turned on from a device, or once it is idle when it was not told yet) pastes Workbench's fixed brief; turning an avatar off pastes nothing. The avatar never shows Allow or Deny: while its session needs a permission or an answer, `say` and `ask` answer 409 and the bubble offers to open the session.
+  - **Voice is the browser's.** Workbench sends and receives no audio and has no speech endpoint. A line is said aloud only after the user chose voice in that browser with a click, with an online voice (which sends the line to the browser maker's speech service) only after the user allowed online voices, and never while a dictation is live. A dictated reply is text until the user sends it. Hidden means silent: a browser that hides its avatars shows no figure or caption and says nothing, and its visible tabs report the lines `hidden`.
 - **Updates** replace the program Workbench runs from, so only config.toml (or the release build itself) says where releases come from, never a repository's config; the source is https (plain http only for this computer), no token is sent, and redirects go to https only. Nothing is installed without a click or `workbench update`: `POST /api/platform/update/install` and `POST /api/platform/restart` refuse in-process callers (agents over MCP get 403; agent tokens are not valid under `/api`), and there is no MCP tool for either. A download is installed only when its SHA-256 matches the release's checksum file (and GitHub's own digest when the API gives one), the archive holds the program as a regular file, and that program reports the release's version when run. The checksum comes from the same release as the archive: it catches a damaged download; TLS to the release host is what vouches for the publisher (releases are not signed). See "Updates".
 - **Environment hygiene:** child processes never inherit the Claude session variables of whatever started Workbench (`util::proc::SESSION_ENV_VARS`).
 - **Remote services:** never echo upstream error bodies that could contain credentials. Build URLs without userinfo.
@@ -198,7 +211,9 @@ A project is a directory, and it may hold **several git repositories**: a folder
 |---|---|---|
 | `Terminals::{spawn, spawn_redacted, respawn_redacted, info, list, kill, write, send_text, subscribe_output, exit_watch, screen_text}` and `SpawnSpec`, `TerminalInfo`, `AgentInfo`, `ExitInfo` | terminals | apps (runs, deploy/logs), platform (MCP), git (optional), debug (pre-launch commands, `runInTerminal` debuggees) |
 | `terminals::{PendingPermission, permission_wait_secs}`, `AgentInfo.pending_permission` (the request a session waits on; `complete` and `detail` decide one-tap Allow) | terminals | platform (push: Allow / Deny, the push TTL) |
-| `terminals::in_container(&TerminalInfo)` | terminals | files (local history: a dev-container agent's paths) |
+| `terminals::in_container(&TerminalInfo)`, `terminals::PASTED_NOT_SENT` (the refusal of `POST /api/agents/ask` whose text went in and whose Enter was withheld) | terminals | files (local history: a dev-container agent's paths), avatar (how a session drives its avatar, the form of its brief and guide; a brief left in the input box counts as told) |
+| `Terminals::redact_text(terminal_id, text)` (the session's secret values and what looks like a credential masked, as permission details are; it answers from `text` alone, an unknown terminal's text unchanged) | terminals | avatar (every text a session sends, every quote of it in a refusal, a reply as it is stored and broadcast), platform (the Activity summary and error of a session's MCP call, `mcp.call.summary` and `mcp.call.error`) |
+| `avatar::{enabled, sessions, active, carried, conversation_started, via_for, session_brief}`, `Sessions` (`Asked`, `Any`), `Brief`, `BriefVariant` (`First`, `Moved`, `Again`, `Given`), `Carried {on, designed}`, `Via`, `PREALLOWED`, `BRIEF_MARK`, `BRIEF_TAGS`, `avatar::session::{SWITCHED_OFF, NOT_YOURS_TO_GIVE, NOT_WITH_YOURS_OFF}`. `active`, `carried` and `conversation_started` may read the stored avatars, which asks the terminals slice for terminal infos: never call them with a terminal's record lock held | avatar | terminals (the Avatar option, refused with `SWITCHED_OFF` while avatars are off; `workbench_start_session`'s `avatar` (400 for a value that is neither true nor false), refused with `NOT_YOURS_TO_GIVE` (409) while avatars are on and `sessions` is not `Any`, and with `NOT_WITH_YOURS_OFF` (409) when `carried` of the caller says its own avatar is off; `supports.avatar`, `avatarVia`, `avatarViaContainer` in the defaults; the brief joined into a first prompt, or `meta.avatarBrief: "later"` for a first prompt that is a command, and cut from titles and History rows; Claude Code's `permissions.allow`; the brief of a moved or restarted session, asked on a blocking thread; `conversation_started(state, terminal_id, told)` whenever a restart starts a new conversation; failover keeps the option) |
 | `terminals::agent_accounts(&AgentsConfig) -> Vec<AgentAccount>` (id, kind, label, enabled, `installed`: a PATH lookup, the configured folder, whether it gets MCP tools), `terminals::claude_project_dir(claude_dir, cwd)` | terminals | skills (the accounts whose folders are read; where Claude Code keeps a project's transcripts) |
 | `files::history::agent_hook(state, terminal_id, payload)` (every Claude hook payload: Write/Edit attribution) | files | terminals (hook route) |
 | `files::history::auto_label(state, pid, text)` ("Before git checkout main", best effort) | files | git (before every operation that rewrites the working tree) |
@@ -210,16 +225,17 @@ A project is a directory, and it may hold **several git repositories**: a folder
 | `apps::detect(root) -> ProjectFile` | apps | projects registry |
 | `devcontainer::{summary, running_target, exec_target, uses_container, run_inside, port_route, agent_command, container_has_curl, write_into, kill_inside, workspace_mount, require_supported, docker::exec}`, `ExecTarget::{wrap, map_path, describe}` | devcontainer | projects (`ProjectSummary.devcontainer`), terminals (`meta.inContainer`), apps (runs inside, readiness, previews), lsp and debug (servers and adapters inside, path mapping), files (`workspace_mount`: agent paths back to the host), terminals and lsp (`require_supported`: `unsupported_platform` before a shell, an agent session or a language server is asked to run inside a container) |
 | `<slice>::mcp_tools() -> Vec<McpTool>` | each slice | platform (`/mcp` server via `mcp::all_tools`) |
-| `<slice>::{router, start}`, `terminals::shutdown`, `apps::shutdown`, `lsp::shutdown`, `debug::shutdown` | each slice | app.rs |
-| `git::{cli_askpass, cli_git_editor}`, `terminals::cli_statusline`, `platform::service::cli`, `platform::update::cli` | git, terminals, platform | main.rs (`askpass`, `git-editor`, `statusline`, `service`, `update`; `cli_askpass` also for `util::os::helper::askpass_prompt`) |
+| `McpTool::{acts, quiet}` (builder calls on what `mcp::tool(…)` returns; fields `acts`, `quiet`) | core | avatar (its tools), platform (`tools/list` annotations, the Activity ring and `mcp.call`) |
+| `<slice>::{router, start}`, `terminals::shutdown`, `apps::shutdown`, `lsp::shutdown`, `debug::shutdown`, `avatar::shutdown` (`avatar::start` right after `terminals::start`; `avatar::shutdown` right before `terminals::shutdown`) | each slice | app.rs |
+| `git::{cli_askpass, cli_git_editor}`, `terminals::cli_statusline`, `avatar::cli`, `platform::service::cli`, `platform::update::cli` | git, terminals, avatar, platform | main.rs (`askpass`, `git-editor`, `statusline`, `avatar`, `service`, `update`; `cli_askpass` also for `util::os::helper::askpass_prompt`) |
 | `state.platform.update.restart_requested()` (a restart was asked for: shut down, then `util::os::proc::reexec`; a stop signal that came first wins) | platform | main.rs (`serve`) |
-| `mcp::call_api(state, method, path, body, ctx)` (a route's error keeps its status and message, and its code when it is one of Workbench's own, `error::CODES`: `not_configured`, `unsupported_platform` with its `feature`…; any other is `upstream`) | core | any MCP tool that reuses a REST route |
+| `mcp::call_api(state, method, path, body, ctx)` (a route's error keeps its status and message, and its code when it is one of Workbench's own, `error::CODES`: `not_configured`, `unsupported_platform` with its `feature`…; any other is `upstream`) | core | any MCP tool that reuses a REST route; avatar (a reply or a brief pasted into a session through `POST /api/agents/ask`) |
 | `McpCtx::{project_for, may_see_project}` | core | every MCP tool that takes a project or reads another terminal |
 | `AppState::secret`, `events.emit/ui_open/ui_open_id/notify`, `projects.require/find_by_path` | core | everyone |
 | `Project::{gitlab, github}() -> Option<(host, path)>` | core | gitlab, github, forge, apps, UI (`ProjectSummary.gitlab/github`) |
 | `auth.watch(caller)` → `SessionWatch::ended`, `auth::session_ended_close()` | core | every WebSocket handler (events, terminals, lsp) |
 | `auth.sessions_ended()` (a watch bumped when device sessions end), `auth.session_active(id)` | core | platform (push subscriptions end with their session) |
-| `lsp::LspConfig`, `debug::DebugConfig`, `platform::push::PushConfig` | lsp, debug, platform | core config (`GlobalConfig.{lsp, debug, push}`: config.toml `[lsp]`, `[debug]`, `[push]`) |
+| `lsp::LspConfig`, `debug::DebugConfig`, `platform::push::PushConfig`, `avatar::AvatarConfig` | lsp, debug, platform, avatar | core config (`GlobalConfig.{lsp, debug, push, avatar}`: config.toml `[lsp]`, `[debug]`, `[push]`, `[avatar]`) |
 
 **Terminals spawned by other slices:**
 - `spawn_redacted(state, spec, secrets)` masks the given secret values (`${secret:…}` in a run's env) in the output at the source: the screen, saved screens, the WebSocket, `screen_text` and MCP never see them. On Windows a value is also masked when ConPTY's repainting puts escape sequences between its characters.
@@ -274,15 +290,15 @@ release archive adds `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY 
   - `toolWindows`: side tool windows;
   - `column`: the desktop's column left of the workspace area (one feature provides it: the agents slice), and `startPanel`: the panel a project's dock opens while it has no tabs of its own (the workspace slice's `workspace.home`);
   - `commands`: the palette, with an optional `shortcut` (and `global: true` for the rare shortcut that must also fire inside terminals and editors);
-  - `topbar` (the workspace window's), `columnbar` (the agents window's, at its right end: the agents slice's attention pill) and `statusbar` widgets;
+  - `topbar` (the workspace window's), `columnbar` (the agents window's, at its right end: the agents slice's attention pill, and the avatar slice's place for its compact face) and `statusbar` widgets;
   - `mobileTabs`, each with an optional `when(project)` (like tool windows: the phone shows only the tabs that apply, and a saved tab that does not apply falls back to the first one) and an optional `openPanel(panel) → boolean`: on a phone, `openPanel` selects the first visible tab that takes the panel (agents takes `terminal` and `agents.home`); panels no tab takes are not opened there;
   - `providers`: global components (listeners, dialog hosts). They wrap the app (`App.tsx` nests them around the shell), so each must render its `children`.
   - `searchProviders`: tabs of **Search Everywhere** (double Shift, `shell/SearchEverywhere.tsx`), each `{id, title, order, minQuery?, inAll?, when?, search(query, ctx, signal) → SearchItem[], hint?}`. Files (10) and Text (40, Find in Files) come from files, Symbols (20, `workspace/symbol` of running language servers; it never enables code intelligence) from lsp, and Actions (30, the palette's commands) from the shell. "All" shows the best few of each; Tab / Shift+Tab switch tabs, Enter opens, Shift+Enter opens to the side. Double Shift is two quick taps of Shift alone, watched in the capture phase without consuming anything, so it works in terminals and editors too.
 - **Tabs per project** (`shell/Dock.tsx`): the dock keeps one layout (tabs and splits) per project in localStorage, `wb.layout.v2.<projectId>`. Switching project saves the layout being left, clears the dock and restores the other one, so each project keeps its own tabs. `wb.layout.v1`, the single layout of earlier versions, is restored once, for the first project that loads. Panels tied to no project (Settings, Help) belong to the layout they were opened in. A project whose dock has no tabs opens on `startPanel` (the Workspace cards).
-- **Desktop layout** (`shell/DesktopShell.tsx`): two windows side by side, then the status bar. The **agents window** on the left has its own top bar (the logo, the project switcher and, at the right end, every feature's `columnbar` widget (the attention pill: "2 working", "1 needs you") and the button that collapses the other window) over the agents column. The **workspace window** holds everything else: its top bar (every feature's `topbar` widget: branch, run selector, environments, CI, debug, dev container; and Commands), then, left to right, the left stripe, the left tool window, the dock with the bottom tool window under it, the right tool window and the right stripe. The left stripe lists the left tool windows (Workspace first, then Files), the bottom ones under them and **Settings** last (`openSettings`, Ctrl+,). Collapsing the workspace window (Alt+F12, `useUi().workOpen`) gives the agents window the whole width; the window stays mounted, so the dock keeps its tabs, and showing a tool window or opening a dock panel expands it again. In an app window (`chrome --app`, an installed app; a normal tab refuses) the browser window follows it (`shell/windowFit.ts`): collapsing resizes it to the agents window's width at the same position and remembers the width freed (`wb.work.freed.v1`), expanding gives that width back. Meanwhile the page stays the desktop layout although it is narrower than the phone breakpoint (`desktopHeld`, used by `App.tsx`).
+- **Desktop layout** (`shell/DesktopShell.tsx`): two windows side by side, then the status bar. The **agents window** on the left has its own top bar (the logo, the project switcher and, at the right end, every feature's `columnbar` widget (the attention pill: "2 working", "1 needs you") and the button that collapses the other window) over the agents column. The **workspace window** holds everything else: its top bar (every feature's `topbar` widget: branch, run selector, environments, CI, debug, dev container; and Commands), then, left to right, the left stripe, the left tool window, the dock with the bottom tool window under it, the right tool window and the right stripe. The left stripe lists the left tool windows (Workspace first, then Files), the bottom ones under them and **Settings** last (`openSettings`, Ctrl+,). Collapsing the workspace window (Alt+F12, `useUi().workOpen`) gives the agents window the whole width; the window stays mounted, so the dock keeps its tabs, and showing a tool window or opening a dock panel expands it again. In an app window (`chrome --app`, an installed app; a normal tab refuses) the browser window follows it (`shell/windowFit.ts`): collapsing resizes it to the agents window's width at the same position and remembers the width freed (`wb.work.freed.v1`), expanding gives that width back. Meanwhile the page stays the desktop layout although it is narrower than the phone breakpoint (`desktopHeld`). `useIsMobile()`, in the same file, says which shell is on screen (`?mobile`, a narrow window or a touch screen up to tablet width, except a desktop window narrowed by collapsing): `App.tsx` mounts the shell by it, and the avatar overlay picks its form by it.
 - **Agents column** (`features/agents/AgentColumn.tsx`, the agents slice's `column`; width and open state in `useUi().column`): agent sessions and terminals are tabs of this column, not of the dock, and there is no Agents tool window (the Terminal tool window holds only the shells started from it, see below). The first tab is the agents home (`AgentsHome`: the composer, **New shell**, the project's sessions, the ones closed lately, history, Remote Control); then the project's open terminals of every kind (`lib/sessions.ts` `columnTabs`: pinned first, then `order`, as the server lists them), then terminals opened on request that are not among them (a closed one's saved screen, a terminal of a project that is gone; `columnExtras` per project, persisted with the selected tab in `wb.agents.v1`). A terminal opened on request (an attention toast's **Open**, the history, a Workspace card, a notification) is shown in the column of the project it belongs to (`lib/sessions.ts` `tabPlace`): another project's session switches to that project, so the columns never mix; one asked for before it is listed is placed under the current project until its `terminal.created` arrives, then moved. The home tab, the tabs and **+** are one flow (`.wb-agcol-tabs`, wrapping): tabs keep their own width (at most 150 px, three to a row in the default width) and take as many rows as they need, under the home tab too. **+** starts an agent session (the home tab's prompt) or a shell (in the dev container or on the host when one runs), resumes a session or starts a Remote Control server. Closing one of the project's own tabs closes the terminal (`closeTerminal`: the process stops, a working agent is asked about first; the session stays in the history); closing a requested one only takes the tab away. Up to 8 terminals stay mounted per project, so their screens do not reload when their tab is shown again; hidden ones never report a size. The agents window is always visible.
 - **Terminal tool window** (`features/agents/TerminalToolWindow.tsx`, bottom, order 10: the first button of the stripe's bottom group, CLion's Terminal): shells under the dock, as tabs, beside whatever the column shows. Its **+** starts one (`newBottomShell`; in the dev container or on the host when one runs) and records its id in `useAgentsUi().bottomTerminals` per project (persisted with its selected tab, `bottomTab`); `columnTabs` leaves those ids out, so a shell is a tab of one place only, and the column host sends an `openPanel` for one of them to the tool window instead (`showBottomTerminal`). Closing its tab stops the shell; ids of shells that are gone or closed are forgotten. Shells started from the column (its **+**, the home tab's **New shell**) stay in the column.
-- **Voice input** (`features/agents/Dictate.tsx`, `lib/dictation.ts`): the new-session composer's microphone (`NewSessionForm`, so the agents home, the New agent session dialog and the phone's compact form) dictates into the prompt with the browser's Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`; TypeScript's DOM lib has no typings for it, so `Recognizer` is the slice of it that is used). The audio goes to the browser's own speech service: Workbench has no route for it and the CSP is unchanged. Each result replaces the previous guess between the text before and after the caret taken when listening starts (`place`), so interim words are corrected in place and never repeated; the prompt's own `onChange`, Start session or another field starting to listen cancels the session (`startDictation` keeps one live), because late words would overwrite the edit. Touch screens (`(pointer: coarse)`) take one utterance per tap (`continuous: false`), as Android's recognizer repeats earlier words in continuous mode. A page that is not a secure context keeps the button and a tap says why; a browser without the API shows none. Speech only fills the prompt: starting the session stays a click.
+- **Voice input** (`features/agents/Dictate.tsx`, `lib/dictation.ts`): the new-session composer's microphone (`NewSessionForm`, so the agents home, the New agent session dialog and the phone's compact form) dictates into the prompt with the browser's Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`; TypeScript's DOM lib has no typings for it, so `Recognizer` is the slice of it that is used). The audio goes to the browser's own speech service: Workbench has no route for it and the CSP is unchanged. Each result replaces the previous guess between the text before and after the caret taken when listening starts (`place`), so interim words are corrected in place and never repeated; the prompt's own `onChange`, Start session or another field starting to listen cancels the session (`startDictation` keeps one live), because late words would overwrite the edit. Touch screens (`(pointer: coarse)`) take one utterance per tap (`continuous: false`), as Android's recognizer repeats earlier words in continuous mode. A page that is not a secure context keeps the button and a tap says why; a browser without the API shows none. Speech only fills the prompt: starting the session stays a click. The avatar's reply box dictates the same way (`useDictation(field, setText, {lang, onProblem})`, `DictateButton` with a `label` of its own), and its text is sent only by Enter or a click; the avatar's speaker asks `dictationLive()` (its `micLive` hook) before a line and every 150 ms while it speaks, so no line is said into a microphone open in this page and a line being said stops when one opens.
 - **Column panels.** `openPanel` sends the kinds `terminal` and `agents.home` (`isColumnKind`) to the column through `setColumnHost({open, close, isOpen})`, whoever asks: a run's output, a deploy, a container shell, `askAgent`, a notification. Ones asked for before the column is mounted are replayed; `closePanel` and `isPanelOpen` ask the column too. On a phone the mobile router takes them first. A dock layout saved before the column existed still lists such tabs: `Dock` removes them on restore and opens `startPanel` in their place. `state/store.ts` `migrateUi` (persist version 1) does the same for the stored tool windows: the left one becomes `workspace`, and a bottom `terminal` is closed.
 - Panels, tool windows and mobile tabs may be `React.lazy` components: the dock, `ToolWindowArea` and the phone shell wrap them in `Suspense`. Both shells are lazy chunks, and so are `AnsiLog`, `Markdown` and Monaco.
 - **Keyboard shortcuts** (`shell/CommandPalette.tsx`, `shell/paletteSearch.ts`) run in the bubble phase: a terminal keeps every key typed into it (Ctrl+T, Ctrl+K, Ctrl+P mean something to bash and Claude Code, like CLion's "Override IDE shortcuts"), and keys a focused widget handled (Monaco's own bindings) are not taken. Ctrl+K opens the palette elsewhere; Ctrl+Shift+P opens it from anywhere. Editor keys are Monaco *actions* added per editor (never `addCommand`, whose keybinding is global); features that hook every editor add theirs a microtask after `onDidCreateEditor` (see "Editor models"). The only capture-phase keys are the debugger's F7/F8/F9/Ctrl+F2 while the current project has a live session; a widget that handles one of them itself declares it with `data-wb-keys="F7 …"` on an ancestor (the git diff viewer's F7 = Next Difference), and terminals keep every key. The full list, with who owns each key, is under "Keyboard shortcuts" below.
@@ -291,6 +307,8 @@ release archive adds `conpty.dll` and `OpenConsole.exe` from Microsoft's ConPTY 
 - `api/health.ts` loads `GET /api/health` once after sign-in. `useUnsupported(feature)` / `unsupportedReason(feature)` and `useExperimental(feature)` read it; features hide what the server's OS leaves out (the dev container chip, status item, commands and the Services link to its panel), explain what is limited (the Attach to Process picker's gdb note, Settings › Notifications), and mark the Services tool window "experimental". Before the report arrives nothing is hidden. Setup hints that must name a place or a command where the server gives none take it from the report's `os` too (`configFileHint(os)` for config.toml, as Secrets names its fix and the port confirmation how a port is freed).
 - `askAgent({projectId, prompt, …})` lives in `shell/agentBridge.ts` and calls `POST /api/agents/ask`.
 - `devcontainerAction(projectId, 'panel' | 'start' | 'stop' | 'rebuild' | 'shell')` lives in `shell/devcontainerBridge.ts`. The devcontainer feature registers the handler, so a Start from the Apps tool window or the phone goes through its confirmation.
+- `shell/avatarBridge.ts`: what the avatar feature tells the agents feature, so the agents feature imports no other feature. `avatarShows(terminalId)` (registered with `setAvatarShows(fn | null)`): that session's avatar is on screen in this window, and its "finished" toast would say what the avatar shows already. `avatarOn(terminalId)`, `watchAvatarsOn(cb)` and the hook `useAvatarOn(terminalId)` (fed by `setAvatarsOn(ids | null)` on every change of the avatar list): the session's avatar is on, for the Avatar badge of its card and header; `null` while that is not known, and the badge then follows `meta.avatar`.
+- **Contract modules between features** (`features/avatar/loaded.test.ts` checks the first two rules). The agents feature imports no other feature. The platform feature imports only the avatar's `store` (`useAvatarPrefs`) and `voices` (`useBrowserVoices`, `testVoice`, the types `BrowserVoice`, `TestVoiceResult`), for Settings › Avatar and the phone's More tab. The avatar feature reads the agents feature's `store` (`useAgentsUi`, read only: `columnTab`, `mobileTerminal`), `lib/sessions` (`tone`, `stateLabel`, `composeBlocked`, `isRunning`), `lib/permission` (`pendingOf`), `lib/dictation` (`dictationLive`) and `Dictate` (`useDictation`, `DictateButton`). The agents store's `lastAvatar` (with `setLastAvatar`, persisted in `wb.agents.v1`) is the composer's Avatar choice, one value for every composer.
 - Data comes from `api` (`api/client.ts`; `api.upload(path, blob, query, onProgress, signal)` streams a raw-body upload with progress; `getDeviceKey()` hands the device key to the service worker) and `useEvent` / `useInvalidateOn` (`api/events.ts`). After a reconnect or `lagged`, `installResync` (mounted once in `App.tsx`) refetches every active query once; `useInvalidateOn` only handles its own event types.
 - Shared queries: `useProjects`, `useProject` and `useTerminals`; `installProjectsSync` (once) keeps the first two fresh from `projects.changed` and `git.changed`. The terminals slice keeps the `['terminals']` cache fresh.
 - The theme preference is applied to `<html data-theme>` synchronously by the store (`state/store.ts`), before React re-renders, so xterm and Monaco effects read the new CSS variables. Highlighted code outside Monaco uses the `--syn-*` tokens.
@@ -367,7 +385,7 @@ Panel ids must be stable so reopening focuses the existing panel. Params must be
 | `jira.board` | `{boardId}` | atlassian | `jira.board:<boardId>` |
 | `app` | `{projectId, env?, run?, url}` | apps | `app:<projectId>:<env\|run>` |
 | `settings` | `{section?}` | platform | `settings` |
-| `help` | `{page?}` (a page slug: `getting-started`, `projects`, `agents`, `version-control`, `remote-access`, `service`, `configuration`, `data-viewer`, `agent-skills`) | help | `help` |
+| `help` | `{page?}` (a page slug: `getting-started`, `projects`, `agents`, `version-control`, `remote-access`, `service`, `configuration`, `data-viewer`, `agent-skills`, `avatar`) | help | `help` |
 | `pr` | `{projectId, number}` | github | `pr:<projectId>:<number>` |
 | `gh.run` | `{projectId, runId}` | github | `gh.run:<projectId>:<runId>` |
 | `gh.job` | `{projectId, jobId}` | github | `gh.job:<projectId>:<jobId>` |
@@ -397,7 +415,7 @@ The IDs below are the defaults. The left stripe, right of the agents column, als
 - **Compare (files):** panel `compare` `{projectId, path, left: {path} | {textKey, label}}` — a project file (right, its buffer, editable) against another file of the project (left, its buffer, editable) or the clipboard (read-only; the text stays in the browser tab, so a reloaded layout says it is gone). Compare With… (tree, editor, palette; the other file comes from Go to File in pick mode, `useQuickOpen.choose`), Compare with Clipboard (editor context menu, palette); Ctrl+S saves the side it is pressed in; Swap sides. Alt+Shift+Insert toggles Column Selection Mode.
 - **Bookmarks (files):** `bookmarks.ts` (a zustand store persisted per browser, every project). F11 toggles one on the caret line, Ctrl+F11 with a mnemonic (0–9, A–Z; unique, taking one moves it), Shift+F11 lists them (typing a mnemonic into the empty list jumps; Delete removes). The editor shows them in the glyph margin's right lane (beside breakpoints) with a decoration collection per editor that follows edits and writes the new lines back.
 - The palette generates a "Show <title>" command per tool window the current project shows (its `when`) unless a feature command already has that title ("Show Git Log", Alt+9).
-- **Phone tabs:** `agents` (permission requests answerable in rows and the full-screen terminal), `git` (with the bisect banner), `workspace` (25), `files`, `ci` (GitLab, when `project.gitlab`), `github` (42, when `project.github`), `docs` (when Confluence is set up), `apps`, `more` (a Help button first, then Notifications: push on/off, topics, test). Help on a phone lives in the More tab: the page list with search, a page with an "All pages" button (`features/help/mobile.ts` holds its state; the More tab's `openPanel` takes the `help` panel). Code intelligence, the debugger and Local History are desktop-only.
+- **Phone tabs:** `agents` (permission requests answerable in rows and the full-screen terminal), `git` (with the bisect banner), `workspace` (25), `files`, `ci` (GitLab, when `project.gitlab`), `github` (42, when `project.github`), `docs` (when Confluence is set up), `apps`, `more` (a Help button first, then an Avatar section after the theme: Show avatars, Voice, and Allow online voices where voice needs them, none while avatars are switched off; then Notifications: push on/off, topics, test). Help on a phone lives in the More tab: the page list with search, a page with an "All pages" button (`features/help/mobile.ts` holds its state; the More tab's `openPanel` takes the `help` panel). Code intelligence, the debugger and Local History are desktop-only.
 
 ### Events
 
@@ -432,8 +450,14 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `data.series` | `{projectId, series: SeriesInfo[]}`: the series list after one was made, changed, cleared or deleted | data |
 | `data.changed` | `{projectId, series: SeriesInfo[]}`: the series that took samples since the last one, at most every 100 ms; a plot refetches its window | data |
 | `data.plots` | `{projectId, plots}`: the project's plots after a change | data |
-| `skills.changed` | `{}` (Workbench installed or removed one of its own skills; the Skills views refetch, as they do on `settings.changed` and `projects.changed`) | skills |
 | `data.sources` | `{projectId, sources}`: followed files and how far they are | data |
+| `skills.changed` | `{}` (Workbench installed or removed one of its own skills; the Skills views refetch, as they do on `settings.changed` and `projects.changed`) | skills |
+| `avatar.changed` | `{terminalId, revision, on}`, `removed: true` once the terminal is gone: the record's design, name, voice, on or off, `via` or existence changed, a closed tab's unpresented lines were dropped, or a session joined `asked` (`revision: 0, on: false`); the browsers fetch the list again | avatar |
+| `avatar.say` | `{terminalId, line, ask?}`: present this line now; with `ask` the line is that question | avatar |
+| `avatar.ask` | `{terminalId, change, ask}`: `change` is `opened`, `waiting`, `waiter_left`, `answered` or why it closed (`superseded`, `dismissed`, `withdrawn`, `session_ended`, `moved_on`); `ask` is the question after the change, `null` once it is closed | avatar |
+| `avatar.line` | `{terminalId, line}`: a line changed without being said (its outcome, a reply of the user) | avatar |
+| `avatar.act` | `{terminalId, seq, play, mode: 'once', times}`, `{terminalId, seq, play, mode: 'hold' \| 'loop'}` or `{terminalId, seq, stop}` (a name or `all`): at most four a second per terminal | avatar |
+| `avatar.nudge` | `{terminalId, askId, name, question}`: a question open 8 s that no device said, showed or is saying; the platform's notifier announces it | avatar |
 | `run.state` | `{name, state, port?, url?, terminalId?, startedAt?, readyAt?, exit?, result?, error?, terminated?, phase?, inContainer?, reach?}` | apps |
 | `devcontainer.state` | `{projectId, state, containerId?, inContainer}` (`none`, `stopped`, `running`, `building`, `error`) | devcontainer |
 | `docker.changed` | `{kinds: ('container' \| 'image')[]}` (a container or image changed; `docker events`, 300 ms debounce, `exec_*` ignored; also after each Services action) | devcontainer |
@@ -449,7 +473,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `workspace.trash` | `{scope}` (a card went to the trash, was restored or purged) | workspace |
 | `push.changed` | `{}` (a device's push subscription was added, changed or removed) | platform |
 | `platform.update` | the update status (`GET /api/platform/update`): after a look, and at each step of an install (the download's progress at most every 300 ms) | platform |
-| `mcp.call` | one activity record (tool, ok, ms, terminalId…) | platform |
+| `mcp.call` | one activity record (tool, ok, ms, terminalId…; none for a `quiet` tool's call that succeeded) | platform |
 | `platform.activity` | one activity record (kinds `attention`, `env`, `deploy`, `pipeline` for GitLab pipelines and GitHub workflow runs, `notify`) | platform |
 
 **Files watcher** (`files/watch.rs` over `util::os::watch`): one per project, 200 ms debounce, 500 paths per event. Linux: an inotify watch per directory the tree shows (gitignore-aware, at most 8000), added as folders appear. Windows: one recursive `ReadDirectoryChangesW` watch on the root, since an open directory handle keeps the folders above it from being renamed; only changes in the folders the same walk covers are kept (not in hard-ignored or gitignored ones), and a folder Windows reports as modified because its entries changed is dropped, so both report the same paths. On Windows a lost batch of notifications (the 64 KB buffer overflowed) is `overflow: true`, and a watch that stops on an error is made again (after 1 s, doubling), also with `overflow: true`; inotify's queue overflow is not reported. After lost notifications Local History gets the paths the batch did report plus the files the same walk finds modified since 5 s before the previous batch was taken (`changed_since`, at most 50,000 entries looked at; more than 500 such files are a checkout and left to the VCS, as a batch over the cap is). That walk runs in a task of its own, one at a time (lost changes that come during a walk are merged for the next), so `fs.changed` and `git.changed` never wait for it. `GET …/files/watch` reports `dirs` (the folders covered), `capped` and `errors`.
@@ -470,6 +494,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 | `/api/projects/{pid}/debug/**` | debug |
 | `/api/projects/{pid}/data/**`, `POST /api/hooks/data/{terminalId}/append` (a script in a hosted session, with its agent token) | data |
 | `/api/projects/{pid}/skills`, `…/skills/{id}`, `…/skills/{id}/file?path=`, `POST /api/skills/install`, `POST /api/skills/remove` (devices and the master token; in-process callers refused on the two writes) | skills |
+| `GET /api/avatar`, `GET /api/avatar/{terminalId}` (devices, the master token and in-process calls); `POST /api/avatar/{terminalId}/lines/{lineId}/claim\|heard`, `…/reply`, `…/asks/{askId}/dismiss`, `…/on\|off\|reset` (devices only: the master token and in-process calls 403, agent tokens 401); `GET /api/hooks/avatar/{terminalId}/guide\|status`, `POST …/design\|say\|ask\|act` (only that terminal's own agent token; the master token 401) | avatar |
 | `/api/projects/{pid}/git/**` (`?repo=<id>` on every route; `GET git/repos`: the repositories with their branch, ahead/behind, changed files, state and forge, one entry's `error` instead of failing them all) | git |
 | `/api/projects/{pid}/gitlab/**` (`?repo=<id>`, `forge::RepoParam`), `/api/gitlab/**` | gitlab |
 | `/api/projects/{pid}/github/**` (`?repo=<id>`, `forge::RepoParam`), `/api/github/**` | github |
@@ -485,7 +510,7 @@ The client sends `{"type":"ping"}` every 25 s and gets `pong`. When the device's
 
 **App previews** are not proxied under `/api`: `GET /api/projects/{pid}/envs/{name}/proxy-url` starts a per-env proxy on its own loopback port (`apps/proxy.rs`) and returns a one-time URL. It is local-only (`url: null` for remote devices).
 
-Cross-slice REST contract: `POST /api/agents/ask {projectId, prompt, terminalId?, newSession?, name?, submit?} → TerminalInfo`. It pastes the prompt into the target agent session: the given one (409 while it shows a dialog), or the project's most recently active one that can take it unasked (see "Agent providers"), or a new one.
+Cross-slice REST contract: `POST /api/agents/ask {projectId, prompt, terminalId?, newSession?, name?, submit?} → TerminalInfo`. It pastes the prompt into the target agent session: the given one (409 while it shows a dialog; it waits up to `FIRST_PROMPT_WAIT`, 10 s, for the prompt the session was started with to go in, then answers 409), or the project's most recently active one that can take it unasked (see "Agent providers"), or a new one. When a dialog opens while the text is being pasted, the Enter that would submit it is withheld (409 `terminals::PASTED_NOT_SENT`, "a dialog opened while your text was being pasted: it is in the session's input box, not sent"): Claude Code's state is asked again, the other CLIs' screens are read with `providers::dialog_beside(kind, screen, sent)`. `sent` are the last texts Workbench pasted or typed into the session (`AgentRt::pasted`: `PASTES_KEPT` 8 texts, `PASTED_BYTES` 256 KiB together, the newest whole): each discounts one echo of itself, in the input box or the history above it, and a single-line text of `QUOTED_TEXT_MIN` 16 bytes or more is also cut out of other lines. So a pasted answer such as "Yes, proceed" is not read as a dialog, and a real dialog beside it still is; the periodic look at the screen discounts the same echoes. A session started by this route never gets the Avatar option.
 
 ### Cross-slice data contracts
 
@@ -527,7 +552,10 @@ interface GitBlame { lines: { line: number; sha: string; author: string; time: n
 // terminals — POST /api/terminals {kind: 'shell', projectId, cwd?: string (project-relative or absolute), cols?, rows?,
 //             container?: boolean (true: in the project's dev container; false: on the host; absent: the project's default)} → TerminalInfo
 // terminals — POST /api/agents/ask → see above; POST /api/agents {projectId, prompt?, name?, model?, effort?,
-//             permissionMode?, remoteControl?, resume?: sessionId, fork?: boolean, inContainer?: boolean} → TerminalInfo
+//             permissionMode?, remoteControl?, resume?: sessionId, fork?: boolean, inContainer?: boolean,
+//             avatar?: true (a live avatar; 400 "avatars are switched off in Settings" while [avatar] enabled = false)} → TerminalInfo
+// terminals — GET /api/agents/defaults providers[]: supports.avatar (every CLI; false for all while avatars are switched off),
+//             avatarVia, avatarViaContainer: 'tools' | 'command' (avatar::via_for on the host and in a dev container)
 // core — ProjectSummary.devcontainer: {configs: string[], state: 'none'|'stopped'|'running'|'building'|'error', inContainer: boolean} | null
 // terminals — AgentInfo.pendingPermission (platform push reads it; so do the toast, cards and phone rows)
 interface PendingPermission {
@@ -541,15 +569,19 @@ interface PendingPermission {
 // terminals — POST /api/agents/{terminalId}/permission {id, decision: 'allow'|'deny', message?, interrupt?,
 //             scope?: 'once'|'session'} → TerminalInfo; devices only; 409 not_pending once settled
 // terminals — TerminalInfo.meta.inContainer: true, meta.container: {id, name, user, folder, docker}: the process runs in the dev container
+// terminals — TerminalInfo.meta.avatar: true: started with the Avatar option or by workbench_start_session with avatar (the avatar
+//             slice makes the record from it; the badge's fallback); meta.avatarBrief: 'later': its first prompt was a command of its CLI and went in without the brief (the
+//             avatar slice tells it once it is idle); meta.movedFrom: <terminal id>: the session continues that terminal's on another
+//             account, and its avatar follows
 ```
 
 **Drag and drop.** Dragging a file or folder carries MIME `application/x-workbench-path` (the absolute path) plus `text/plain`. For example, drag from the files tree onto an agent terminal, and the path is inserted, quoted.
 
 ### MCP tools
 
-Tool names are prefixed by domain: `workbench_` (the UI, sessions, and the files and git tools: `workbench_open_file`, `workbench_show_diff`, `workbench_set_commit_message`, `workbench_changelists`…; git tools take `project` and are confined to the session's project), `gitlab_`, `github_`, `workspace_`, `confluence_`, `jira_`, `env_`, `run_`, `devcontainer_` (`devcontainer_status`, read-only), `code_` (lsp), `debug_` (`debug_state`), `data_` (the data viewer), `files_` (`files_local_history`). `GET /api/platform/tools` lists them. Each has a JSON Schema for its input. Set `mutating: true` when the tool changes remote state.
+Tool names are prefixed by domain: `workbench_` (the UI, sessions, and the files and git tools: `workbench_open_file`, `workbench_show_diff`, `workbench_set_commit_message`, `workbench_changelists`…; git tools take `project` and are confined to the session's project), `gitlab_`, `github_`, `workspace_`, `confluence_`, `jira_`, `env_`, `run_`, `devcontainer_` (`devcontainer_status`, read-only), `code_` (lsp), `debug_` (`debug_state`), `data_` (the data viewer), `files_` (`files_local_history`), `avatar_` (the calling session's own avatar). `GET /api/platform/tools` lists them. Each has a JSON Schema for its input. Set `mutating: true` when the tool changes remote state. A tool that does something for the user to see or hear and changes no remote state is built with `.acts()`: it is listed with `readOnlyHint` and `destructiveHint` both false, so a client that runs read-only calls side by side runs these one after the other, in the order the agent made them. One an agent calls many times in a row with little to tell adds `.quiet()`: a call that succeeds stays out of the Activity view, emits no `mcp.call` and is logged at debug level; a call that fails is recorded like any other. No tool is both `mutating` and `acts` (a test checks). The argument summary of a session's call (Activity, `mcp.call`) is masked with `Terminals::redact_text` before it is cut, and so is the error of a failed one (the session is answered with it unmasked: the values are its own).
 
-Added in the third phase (all confined with `McpCtx::project_for`):
+Added in the third phase and since (the project tools confined with `McpCtx::project_for`; the avatar tools act on the calling session's own avatar, `McpCtx::terminal_id`, and take no project or terminal):
 
 | tool | owner | what |
 |---|---|---|
@@ -565,12 +597,17 @@ Added in the third phase (all confined with `McpCtx::project_for`):
 | `debug_evaluate {expression, context?, frame?, threadId?, sessionId?}` | debug | `mutating`: `watch` (default) or `repl` (debugger commands, echoed into the console as `(agent)`) in a stopped session |
 | `debug_control {action, sessionId?, threadId?, path?, line?, waitSeconds?, frame?, registers?}` | debug | `mutating`: continue, pause, next, stepIn, stepOut, runTo, stop on a live session; waits (≤300 s) for the program to stop and answers like `debug_state` |
 | `debug_breakpoints {action, path?, breakpoints?, lines?, muted?}` | debug | `mutating`: list, add, remove, set, functions, mute, clear for the project's breakpoints; conditions and log messages are accepted |
-| `workbench_start_session {prompt, name?, provider?, model?, effort?, cwd?, projectId?}` | terminals | `mutating`: starts another agent session (any provider) in the caller's project; see "Sessions starting sessions" below |
+| `workbench_start_session {prompt, name?, provider?, model?, effort?, cwd?, avatar?, projectId?}` | terminals | `mutating`: starts another agent session (any provider) in the caller's project, with `avatar: true` with a live avatar; see "Sessions starting sessions" below |
 | `workbench_changelists` | git | read-only: changelists and shelves with their files |
 | `files_local_history {path, limit?, revision?, diff?, against?, content?}` | files | read-only; sensitive paths refused |
 | `confluence_add_inline_comment` (mutating), `confluence_upload_attachment` (mutating; a file of the session's project, never hidden, key/token-named or `sensitive` files, symlinks resolved first), `confluence_labels` (mutating) | atlassian | Confluence authoring |
 | `jira_boards`, `jira_board_issues` | atlassian | read-only Jira Software boards |
 | `gitlab_test_failures {pipelineId}` | gitlab | read-only: the failed and errored tests of a pipeline's JUnit report, with file and output |
+| `avatar_status {guide?, look?}` | avatar | read-only: whether the session has an avatar and may use it, its name, parts (`id tag x y w h pivot x y`), animation names, the built-in motion it may name, the open question, the last 6 lines with what became of them, the limits; `guide` puts the authoring guide first, `look` adds the stored design as a design call |
+| `avatar_design {name?, svg?, pivots?, roles?, animations?, states?, mouth?, gaze?, voice?, keep?}` | avatar | `acts`: draws or changes the look; a call with `svg` is a new look, one without merges; refused whole with what to fix, or answered with the parts, usage and warnings |
+| `avatar_say {text, gesture?, lang?, wait?}` | avatar | `acts`, `quiet`: one line, queued at once; the answer says what became of the earlier lines; `wait` returns with this line's outcome, or that a tab still holds it to present it |
+| `avatar_ask {text, choices?, freeText?, waitSeconds?, gesture?, lang?}`, `{askId, waitSeconds?}`, `{cancel: true}` | avatar | `acts`: asks one question and waits for the answer (default 45 s, at most 50), waits again for the open one, or withdraws it |
+| `avatar_act {play, mode?, times?}` or `{stop}` | avatar | `acts`, `quiet`: plays an animation once (up to 5 times), held or looping (until stopped, the next play or 2 minutes), or stops one or `all` |
 
 `workbench_show_diff`, `workbench_set_commit_message`, `workbench_changelists` and every `gitlab_*` / `github_*` tool take an optional `repo` (a repository id from `workbench_projects`' `repositories`; the default repository when omitted). Panels they open carry `params.repo` next to the real `projectId` (see "Repositories of a project").
 
@@ -580,7 +617,8 @@ Only expose what an agent cannot do easily with its own shell, or what needs Wor
 - Workspace cards (deliverables the owner reviews);
 - environment health;
 - run-configuration output;
-- what only Workbench's running services know: language servers' diagnostics and symbols, a debug session's state, Local History, changelists.
+- what only Workbench's running services know: language servers' diagnostics and symbols, a debug session's state, Local History, changelists;
+- what the user sees and hears of a session: its avatar (`avatar_*`; sessions without these tools use `workbench avatar` or the hook routes).
 
 **Sessions starting sessions** (`workbench_start_session`, 0.18.0). `Terminals::spawn_agent` with `AgentRequest.spawned_by` (serde-skipped, so the REST body cannot set it) runs `Terminals::check_spawn` after `resolve_launch`, and stores `meta.spawnedBy` (the starter's terminal id) on the new terminal. What holds a prompt-injected agent:
 - **Project:** the tool resolves the project with `McpCtx::project_for`; `cwd` goes through `util::paths::resolve_in_root` (no absolute path, no `..`, no link out); the default is the starter's own folder. A dev container session starts its children in the container.
@@ -596,9 +634,10 @@ Only expose what an agent cannot do easily with its own shell, or what needs Wor
   account (`carry_request` leaves it behind for another CLI: a preference, unlike `restricted`). `meta.ultracode` lets the tab and card show a badge. `workbench_start_session`
   has no such parameter and its children do not inherit it: the token spend is the user's choice per session.
 - **Restricted starters** (Claude Code's `--restricted`, `AgentLaunch.restricted`, `AgentRequest.restricted`, never a config default): the tool passes `restricted` on for a Claude child and `check_spawn` refuses every other child (`Terminals::is_restricted`). `resolve_launch` refuses `restricted` for another CLI and with `bypassPermissions`; failover (`switch_account`) carries it, so an account that cannot honour it refuses the session instead of starting it open. `Terminals::sandboxed_agent` also answers for a restricted session, so MCP `run_start` refuses it (its command comes from repository files and would run outside the restriction); the debug tools are gated for no confined session, a sandboxed Codex one included.
+- **Avatar:** `avatar: true` becomes `AgentRequest.avatar`, as the composer's option: `meta.avatar`, the brief joined into the prompt, and `PREALLOWED` for a Claude Code child. The tool asks for it only where sessions take avatars themselves (`avatar::sessions` is `Any`, the default): otherwise 409 `NOT_YOURS_TO_GIVE` ("Not started: here the user decides which sessions have an avatar …"); a caller whose own avatar the user turned off (`avatar::carried` of its terminal, `on: false`) gets 409 `NOT_WITH_YOURS_OFF` ("Not started: the user turned this session's avatar off, so it does not give one to a session it starts. Start it without avatar."); while avatars are switched off `spawn_agent` answers 400 `SWITCHED_OFF`. Nothing is started in any of these. A child never inherits its starter's avatar.
 - **Messaging.** Claude Code 2.1.3xx lets sessions on one machine message each other by name (`ListAgents`, `SendMessage`, `notify_when_idle`; `~/.claude/sessions/<pid>.json` carries `messagingSocketPath`). Verified with 2.1.325 against a Workbench-style session: the message arrives as a `UserPromptSubmit` whose prompt is `<cross-session-message from="…" from-name="…" from-mode="…">`, and a session in `manual` mode answered one from an `auto` session. The tool result names the address (`SendMessage` to the title) when the starter gave a `name` and the child is Claude Code; a derived name (`nameSource: "derived"`) is not known to Workbench.
 
-Agents never enable code intelligence, answer a permission request, stage, commit, shelve, rebase or bisect, update or restart Workbench through MCP. They do drive the debugger (the owner's decision, 0.7.1, no opt-in): start, attach, rerun, steer, evaluate and set conditional breakpoints, through `mutating` tools (see the debug slice).
+Agents never enable code intelligence, answer a permission request, stage, commit, shelve, rebase or bisect, update or restart Workbench through MCP, and never answer for the user through an avatar (reply, dismiss a question, turn an avatar on or off, report a line heard). They do drive the debugger (the owner's decision, 0.7.1, no opt-in): start, attach, rerun, steer, evaluate and set conditional breakpoints, through `mutating` tools (see the debug slice).
 
 **Never** expose deploys or destructive git operations to agents. This includes run configurations that deploy or release: `run_start` refuses runs with `needsConfirm` (and documentation suggestions), which the UI starts only after the user confirms. It also refuses every run to a session whose CLI confines its commands to a sandbox (Codex, unless it bypasses it: `Terminals::sandboxed_agent`): a run's command comes from files such an agent can edit (Makefile, package.json), and Workbench would run it outside the sandbox.
 
@@ -1586,13 +1625,15 @@ unit-tested), `SkillsToolWindow.tsx` (right, 70: summary card, search, groups fo
 `skills.changed`, `settings.changed`, `projects.changed`). Desktop only.
 
 **The bundled skills** (`skills/`): `workbench` (routing and etiquette), `workbench-report-card`, `workbench-data-capture`,
-`workbench-debug-session`, `workbench-project-setup`. Text only, the portable front matter, each opening with the guard that
+`workbench-debug-session`, `workbench-project-setup`, `workbench-avatar` (drawing, rigging and driving a session's avatar). Text only, the portable front matter, each opening with the guard that
 it applies only where the `workbench` tools exist. They add what tool descriptions cannot: *when* to reach for a tool
 (MCP tools may be deferred behind a search, so intent routing needs a description loaded up front), workflows across several
 tools in the order that works, the limits and refusals found in the code, and facts that exist nowhere in a user's repository
 (the `.workbench.toml` schema, the report sandbox). A test fails the build when a skill names a tool that does not exist,
 links to a file it does not have, has a TOML example that does not parse as `ProjectFile` (or `GlobalConfig` when it says
-`# config.toml`), or front matter that does not parse or uses a key other CLIs reject.
+`# config.toml`), a JSON example of `workbench-avatar` that does not parse or holds a design the avatar validator refuses or
+warns about (a complete one with `svg`, or a call without it merged, as `avatar_design` merges it, into the last complete design
+before it in its file, else the one after it), or front matter that does not parse or uses a key other CLIs reject.
 
 **Verified:** unit tests (front matter in every YAML style skills use, the checks, the session listing including a 2 MB line,
 every root rule with scratch folders laid out as each CLI lays its own, plugins by registry only and not outside Claude's
@@ -1606,6 +1647,356 @@ one of them, a 22 MB transcript; 10 ms) found exactly the 45 skills its newest s
 missing and none unexplained, with a listing estimate within 0.2% of the characters that session measured. **Not verified:** Codex, Gemini CLI
 and Kimi Code themselves (none installed here; their folders come from their documentation and, for Codex and Kimi Code, their
 source), Windows (the paths compile and the tests are portable, but nothing ran there), a dev container's accounts.
+
+## Avatar (avatar)
+
+A hosted agent session can have a **live avatar**: a small animated character over the Workbench window that the session draws
+itself (an SVG subset, with JSON for pivots, roles, animations, states, mouth and voice), that says the session's short lines
+as captions and, where the user chose voice in that browser, aloud with the browser's speech synthesis, asks the user questions
+and takes the answer (a click on a choice, typed text or dictation), and mirrors the session's state. In the wide form the
+figures walk about the dock area and meet. By default (`[avatar] sessions = "any"`) a session gets one with its first design,
+say, ask or act call; it also starts with one from the composer's **Avatar** option or `workbench_start_session` with `avatar`,
+and the user gives one later with "Avatar: Give This Session an Avatar" or the status-bar widget's menu. With `sessions =
+"asked"` only the user gives one; switching to it takes no avatar away (each is turned off for itself). The user turns any
+avatar off, and no session turns it on again. Claude Code (anywhere) and Codex (on the host) drive it with five MCP tools,
+every other session with `workbench avatar` on the host or `curl` against the hook routes in a dev container. User guide:
+`docs/avatar.md` (in the app, the Help page `avatar`).
+
+**Server** (`server/src/avatar/`). Every way in (tool, hook route, command) calls the same state functions and gets the same
+words back. `text.rs`: `plain(s, max, mask)`, the one function for every text an avatar carries; `look.rs`: the pure validator
+and a look's wire types; `store.rs` (`AvatarState` on `AppState.avatar`): limits, wire types (`AvatarInfo`, `Line`, `Ask`,
+`AvatarList`), records, ids, files, events, what terminal events do (`on_event`, `reconcile`) and what only time ends (`sweep`,
+every 5 s); `session.rs`: what a session may do with its own avatar, and every answer text; `device.rs`: what only devices do;
+`routes.rs`, `tools.rs`, `cli.rs`, `brief.rs` with the `guide*.md` files; `examples/`: golden designs. One store lock covers a
+record, its file and its events (an avatar's events leave in the order of its changes); it is never held across an await and
+nothing is asked of another slice under it (a design is validated under a `designing` lock of its own). A record (one per agent
+terminal, at most 64) holds `on` (false: turned off by the user; nothing is shown or said, the session's calls are refused),
+the design (`name`; `look`, `null` for the built-in default; `voice` `{lang, prefer, pitch, rate}`), `designed` (exactly while
+it has a look of its own), `revision` (one more per change of the design, 0 at each server start), `via` (`tools` or `command`:
+first `avatar::via_for(kind, in_container)`, then the interface used last), `unbriefed` (the session is still to be told of its
+avatar: see *Telling*), `held`, `ask` and `lines` (newest last, at most 30; the open question's own line is never pushed out).
+`GET /api/avatar` answers `{enabled, sessions, avatars, asked}` (`asked`: running sessions that called for an avatar they lack,
+at most 64; empty under `any`, where none waits for the user to give one). `data_dir/avatar/<terminalId>.json` keeps `{version,
+on, via, name, designed, look, voice}`, and `unbriefed` only while it is true, as compact JSON (a few hundred bytes more than
+the look the validator measured); it is read back through the validator a design call passes (one that fails is kept as
+`.corrupt` and the default look shown, but a file that is JSON with a boolean `on` keeps that `on`: an unreadable design never
+turns an avatar back on) and goes with the terminal; lines, questions, leases and rate windows are memory only.
+
+**Calls and lines.** A call has two steps. `session::gate(state, tid, call, via, now) -> Pass` needs no body: avatars enabled
+(else 403 "avatars are switched off in Settings"), a running agent session (400), an avatar (with `sessions = "any"`, the
+default, one is made with the default look and `via` of this call, unless `MAX_AVATARS` exist (429); otherwise the session
+joins `asked` and gets 409 naming the Avatar option and the command), on (409), within its rate (429, refused attempts
+counted); a status call needs only the first two and its rate, and makes no record: a session without an avatar reads "This
+session has no avatar yet: it gets one with its first design, say, ask or act call." with `allowed: true` under `any` (the
+429's words with `allowed: false` while `MAX_AVATARS` exist), the 409's words with `allowed: false` under `asked`. Then `design`, `say`, `ask`, `act` or `status` checks its whole request
+before anything changes; while the session needs a permission or an answer, `say` and `ask` answer 409. `say` queues a line (`L<boot>-<n>`; `<boot>`, four base-36 characters of the start time, keeps ids unique across
+restarts), emits `avatar.say` and returns at once with what became of earlier lines (each told once); with `wait` it returns
+when a device reported the line spoken, skipped or failed, 1.5 s after it was only shown with no tab holding it, or after its
+estimated speech time and 10 s (at most 50) with the best outcome known; a line a tab holds is waited for up to 50 s
+(`MAX_WAIT_TOOL_SECS`) and answered "is waiting to be presented" while it still has no outcome, and "not heard" is only for a
+line nobody took. A line that reads like code, a path, a URL or Markdown is answered "It will be read out literally: use plain
+words." A tab claims a line to say it aloud (`claim {tab, release?}` → `{speak, leaseMs, retryMs}`): the first gets a lease for
+its estimated speech time (15 characters a second) and 15 s, the holder renews it, others learn when to try again. Nobody claims
+a line older than 60 s (`LINE_STALE_SECS`), except that the holder of a live lease may renew it until the line is
+`LINE_HELD_MAX_SECS` (240 s) old. Devices report `spoken`, `skipped`, `failed`, `shown` or `hidden` (`heard {outcome, voice?}`)
+and a line keeps the best (`spoken > skipped > failed > shown > hidden > unheard`; `shown` and `hidden` are soft). One that no
+device took up within 60 s and no tab holds becomes `unheard`, and the session is told to stop speaking until the user writes;
+`shown` reads "shown as a caption, not spoken" (the server does not know why). With 3 lines waiting another is refused (429).
+
+**Questions and replies.** `ask` takes a question (300 characters), up to 4 distinct choices (40 each) and `freeText` (default
+true, needed without choices), emits `avatar.say` and `avatar.ask {change: "opened"}`, and waits `waitSeconds` (default 45; at
+most 50 for a tool, 110 for a hook request) from the moment a device acknowledged it, or returns `unseen` when none did within 5
+s (a live lease on the question's line counts as acknowledged: a question being said aloud is not unseen). A new question
+supersedes the open one; the same text and choices are the same question, its earlier call handed off (`timeout`). Unanswered it
+stays open (`{askId}` waits again, `{cancel: true}` withdraws it), and the answer tells the session not to ask again. It closes
+`answered`, `dismissed` (by the user, or with the avatar turned off), `withdrawn`, `superseded`, `session_ended` (exit, closed
+tab, removed terminal, server stop) or `moved_on` (idle to working with nothing waiting and no avatar reply within 5 s: the user
+answered in the terminal). `POST …/reply {askId?, text?, choice?, via: click|typed|voice}` never guesses: with `askId` it
+answers exactly that question (else 409 `not_pending`, nothing sent), without one it is a message. A waiting call gets the
+answer (`{delivered: "answer"}`); otherwise it is pasted (`{delivered: "prompt"}`) through `POST /api/agents/ask` in-process,
+which refuses while the session shows a dialog, is starting or is not running, waits up to 10 s for the session's own first
+prompt to go in, waits for a pause in the user's typing, and withholds the Enter when a dialog opened during the paste; a
+refusal records nothing and leaves the question open, and meanwhile a second reply, the session's ask calls and a dismiss answer
+409 `busy`. The paste and what records it run in a task of their own, which the request waits for: a request that goes away
+between the paste and the Enter cannot leave a question open with its answer half delivered. The prompt is a fixed frame, `[via
+avatar, answer with avatar_say] Answer to question Q…: choice 2, "Not yet"` (`, dictated` for dictation, "your avatar say
+command" for a command session, the bare text for a message), with the user's own words, which the transcript and events carry
+masked. A call whose client went away leaves the question open, or pastes an answer it already held, once; when that paste is
+refused the answer is lost and a warning is logged.
+
+**The look.** `look::apply` reads the artwork with quick-xml into a closed, typed, bounded tree (`Look`): element and attribute
+names come from its tables, every value is parsed and written again, references are bare ids inside the document. `filter`,
+SMIL, `class`, `font-family` and a few more are dropped with a counted warning; scripts, `style`, `image`, `a`, `use`, `mask`,
+`href`, event attributes, anything that reaches outside the document or is not named, and any limit exceeded refuse the whole
+call, the problems grouped by kind with what is accepted. Pivots, roles (`body`, `head`, `eyes`,
+`pupils`, `armL`, `armR`: through them the built-in breathing, blinking, gaze, state poses and gestures drive any character),
+the session's own keyframe animations, the map of nine states (Workbench chooses the state, never the session), mouth drives
+and gaze are checked in the same pass; paint keyframes stay 0.17 s apart, and a loop's paint ends as it starts. Only the tree
+is stored and sent; the browser checks it again (`checkLook`: a fresh object from allow-listed keys) and builds React elements
+from literal tables (`lookElements`), so no markup a session wrote reaches the DOM. A call with `svg` is a new look (`keep:
+true` keeps what still fits), one without merges the fields it sends; a device's reset restores the default look and keeps the
+name and voice. The session cannot see what it drew: the answer lists each part's box and pivot, its animations, its use of
+the limits, the built-in motion that applies and the warnings, and `avatar_status {look: true}` gives the stored design back
+as a design call (`to_svg`).
+
+**Brief and guide** (`brief.rs`). `avatar::session_brief(&Brief {variant, via, in_container, shell, whole})` is one line for a
+first prompt: `First` (started with the option, or moved or restarted without a look), `Moved` (continues on another account,
+look kept), `Again` (a new conversation of a session whose avatar is on and drawn) or `Given` (a device gave a running session
+an avatar). What `device::tell` pastes by itself into a running session that is still to be told is `brief::telling`: `Given`
+when the avatar has no look of its own, `Again` when it has one, either as a whole prompt that ends "… then go on with what you
+were doing." A brief's forms: the five tools; on the host `workbench avatar` by this program's absolute path
+(`util::os::proc::runnable_exe`); in a dev container `curl`, the token written to standard input as a header (`-H @-`) and so in
+no command line. It starts with `BRIEF_MARK` (`[Workbench avatar]`); as the whole prompt it ends with what to do now, wrapped in
+`BRIEF_TAGS` (`<workbench-avatar>`…), which History summaries skip. The terminals slice puts it below a blank line after the
+user's prompt in argv and one space behind it in a paste, except after a prompt that is a command of the CLI (after leading
+white space it starts with `/` or `!`): that prompt goes in alone, with `"avatarBrief": "later"` beside `"avatar": true` in the
+terminal's meta, and the session is told once it is idle. It cuts the brief from titles and History rows (`own_prompt`, only
+where Workbench put the mark, followed by one of the briefs' openings), and writes Claude Code's `permissions.allow` =
+`PREALLOWED` (the five `mcp__workbench__avatar_*` rules, nothing wider) into its `--settings` file when the session starts with
+its avatar on, and no `permissions` key otherwise. The guide (`guide.md` with `guide_tools.md` or a half of `guide_command.md`)
+is read once before drawing (`avatar_status {guide: true}`, `GET …/guide`, `workbench avatar guide`); tests keep each form under
+7 KiB and its example a design the validator takes without a warning. Its built-in motion says in one sentence that an idle
+figure strolls and meets others, and that the look's own `walk` (`loop: true`) and `greet` replace the hop and the wave. A
+session that takes an avatar itself is given no brief.
+
+**Hook routes and the command.** Under `/api/hooks/avatar/{terminalId}/`: `GET guide` (text/markdown: the command guide, then
+the status; 409 for a session that may not use an avatar), `GET status?look=1`, `POST design` (a design call's JSON, or the
+artwork alone as `image/svg+xml` or a body that starts with `<`), `POST say` (JSON, or `text/plain` with `gesture`, `lang` and
+`wait` in the query), `POST ask` (held for the wait, up to 110 s), `POST act`. Each checks the token first (that terminal's agent
+token, else 401), then the gate, and only then parses the body (at most 256 KiB, as on every avatar route). `workbench avatar
+guide | status [--look] | say <text…> [--gesture g] [--lang l] [--wait] | ask <text…> [--choice c]… [--no-free-text] [--wait
+<seconds>] | ask --again <askId> | ask --cancel | act <name> [--mode once|hold|loop] [--times n] | act --stop <name|all> | design
+<file|->` makes one hook call per form with `WORKBENCH_URL` (loopback only), `WORKBENCH_TERMINAL_ID` and
+`WORKBENCH_AGENT_TOKEN` from the session's environment; the token goes in a header and is never printed, and artwork comes from
+a file or standard input. Exit 0: done; 1: refused or no answer, the reason on standard error; 2: nothing was sent.
+
+**Limits** (`store.rs`, `look.rs`; `avatar_status` lists them): `MAX_SAY_CHARS` 400, `MAX_ASK_CHARS` 300, `MAX_CHOICES` 4,
+`MAX_CHOICE_CHARS` 40, `MAX_NAME_CHARS` 32, `MAX_REPLY_CHARS` 4,000, `MAX_LINES` 30, `MAX_PENDING_LINES` 3; per terminal and
+minute `SAY_PER_MINUTE` 6 (lines and new questions), `DESIGN_PER_MINUTE` 6, `ACT_PER_MINUTE` 30, `STATUS_PER_MINUTE` 30,
+`ASK_CALLS_PER_MINUTE` 30; `LINE_STALE_SECS` 60, `LINE_HELD_MAX_SECS` 240, `DEFAULT_WAIT_SECS` 45, `MAX_WAIT_TOOL_SECS` 50,
+`MAX_WAIT_HOOK_SECS` 110, `UNSEEN_SECS` 5, `HOLD_MAX_SECS` 120, `MAX_ACT_TIMES` 5, `ACT_GAP_MS` 250 (four `avatar.act` a second;
+a newer gesture takes the place of one that waits), `LEASE_EXTRA_SECS` 15, `NUDGE_AFTER_SECS` 8, `NUDGES_PER_10_MIN` 3,
+`BRIEF_RETRY_SECS` 30, `BRIEF_REFUSALS` 5, `MAX_AVATARS` 64 (none is evicted), `MAX_ASKED` 64; `MAX_DESIGN_BYTES` 256 KiB,
+`MAX_SVG_BYTES` 32 KiB (also as stored), `MAX_LOOK_BYTES` 128 KiB, `MAX_ELEMENTS` 300, `MAX_DEPTH` 10, `MAX_TEXTS` 6,
+`MAX_ANIMATIONS` 32, `MAX_TRACKS` 16, `MAX_KEYFRAMES` 16, `MAX_STATE_NAMES` 6, `MAX_MOUTH_DRIVES` 4.
+
+**Lifecycle.** `avatar::start` runs right after `terminals::start`: it subscribes, reads the stored avatars against the
+terminals that exist (`reconcile`, again after a lagged receiver), then follows `terminal.*` and sweeps. *Created*:
+`meta.avatar` (the option, or `workbench_start_session`'s `avatar`) gives a record with the default look; `meta.movedFrom`
+takes `on` and the design of that terminal's avatar whatever the option says, and `avatar::carried` picks the brief (`Moved`;
+`First` without a look; none when off, and the record is `unbriefed`); `"avatarBrief": "later"` makes the record `unbriefed`
+too; a session that takes an avatar itself gets its record at the gate, not `unbriefed`. *Restarted*: the record decides (`avatar::active`):
+on, the tools are pre-allowed again and a new conversation is told (`Again`, or `First` without a look); off, nothing. Whenever
+a restart starts a NEW conversation, the terminals slice calls `avatar::conversation_started(state, terminal_id, told)`, and the
+record, on or off, takes `unbriefed = !told`; a restarted Aider session that restores its chat history goes on with its
+conversation and is not sent the brief again. *Telling*: `unbriefed` (stored) is set when a device gives an avatar to a session
+that was not started with it, for a first prompt that is a command, for a new conversation while the avatar is off, and every
+time an avatar is turned on (also for a session told before: its last call read that the avatar was off); it is cleared once the
+brief went in (`device::briefed`). A session with `on && unbriefed` is told by `device::tell(state, tid, now)`: at once by `POST
+…/on`, and by the lifecycle when the session becomes idle (`terminal.updated`, and `terminal.created` should it be idle
+already), once per idle, at most every `BRIEF_RETRY_SECS`, until `BRIEF_REFUSALS` refusals (counted again from the next `on`),
+only while it runs and its tab is open. One telling at a time per session (the `briefing` set); the brief is pasted by itself
+through the ask path in a task of its own, and one the Enter guard left in the input box (`terminals::PASTED_NOT_SENT`) counts
+as told. Turning an avatar off pastes nothing: the session's next call is refused with `TURNED_OFF`. *Tab closed*: the question
+closes `session_ended`, unpresented lines become `unheard` and leave the transcript; *exited*: the same, the lines kept;
+*removed*: the record and its files go (`avatar.changed {removed: true}`); *server restart*: records return with revision 0 and
+no lines or question, files of gone terminals are removed. `avatar::shutdown`, right before `terminals::shutdown`, returns every
+waiting call. *Nudge*: a session waiting in `avatar_ask` reads as working, so the sweep emits `avatar.nudge {terminalId, askId,
+name, question}` once per question open 8 s that no device said or showed and no tab holds to say (none during a paste; 3 per
+terminal in ten minutes); the platform's notifier makes it a desktop note and an Attention push under Workbench's own title
+(`Workbench · <project> · <session title>`), the body `<name> asks: <question>` cut to 200 characters, keyed
+`avatar:<terminalId>`, opening the session, with no Activity row.
+
+**Web** (`web/src/features/avatar/`). `Provider.tsx`, loaded with the app, holds the one query `['avatar']`, which events only
+change (`sync.ts` applies the pure reducer of `lib/cache.ts`: `avatar.say`, `avatar.line`, `avatar.ask` and `avatar.act` patch a
+record; `avatar.changed`, `settings.changed`, `hello` (the socket's greeting, once this tab is subscribed) and `resync` fetch
+again, `on` applied at once; `terminal.removed` drops the record and what the browser remembers of it), and weighs a fetched
+answer part by part against newer events (`mergeFetched`). It decides who is on stage (`lib/stage.ts`), reports `hidden` for the
+lines a visible tab with hidden avatars would present, answers the bridge, and mounts `Overlay.tsx`, a lazy chunk in an error
+boundary of its own: nothing loaded with the app imports a look, the engine or speech (`loaded.test.ts`). The overlay owns the
+window's one engine (`lib/engine.ts`: at most 30 frames a second, visible time only; a figure whose frames average over 4 ms
+across 30 frames is frozen at rest), speaker (`lib/speech.ts`: one line at a time, by the browser's synthesis or the silent
+engine, which keeps the caption up as long as the line would take, with the same lip sync) and arbiter (`lib/arbiter.ts`: which
+tab says a line).
+
+**On stage.** Avatars that are on, of open agent sessions of the project on screen; an exited one sleeps for a minute, then
+leaves. Another project's avatar is a guest, only while it asks: its bubble names the project, the question is presented, then
+it stands with the attention glow. 56 px at rest (phone 48); the active one (presenting, asking, hovered for 150 ms, focused,
+opened, or with a draft in the reply box on screen or its microphone listening: a draft kept while the box is not on screen
+holds nothing) is the large one, 132 px (phone 96), and shrinks 6 s after; a walking one is large only while its bubble is
+open (`large`: a figure under the pointer would otherwise grow away from the press). A stage is the app's clipped box on
+z-index 700, below the palette, dialogs, toasts and menus, with no backdrop or border: only the artwork is seen. The state is a
+`drop-shadow` glow around the figure's outline (`.wb-av-ring`, in the tab's colours): error and unread glow, attention,
+speaking and listening glow with a wider halo besides (that is what tells them apart where nothing moves), listening
+pulses, working and starting have a faint glow that swells and fades (with reduced motion the faint one stays), exited
+pales (grayscale, opacity), and a 1 px edge of the theme's text colour at rest keeps the figure readable on both themes. A
+face (the compact forms) is the look cropped to its head, as large as its place (28 px, phone 40) and fading out at its
+lower edge. The name and "Voice off" stand only under the large figure ("Designing its look…" under any), and the name under
+a walking figure that is hovered or holds the focus; the unseen dot sits at the upper right of the figure's outline; the
+"+n" chip is the one stage with a box, as large as a resting figure and drawn above walking figures. **Wide** (desktop shell, workspace
+window open and at least 480 x 320 px): the figures walk (below) while `roam` is on and motion is not reduced, up to 8
+(`MAX_ROAMERS`), the others behind "+n" at the column's place; otherwise a column of at most 4, one under another, then "+n",
+dragged as a group within the workspace window, never over the agents column, its place kept as fractions of the viewport (the
+menu offers four corners and Reset position, only then). **Compact** (that window collapsed or smaller): a 28 px face at the
+right end of the agents window's top bar (the `columnbar` slot) and the bubble a panel under it, at most 480 px wide
+(`PANEL_MAX_PX`, its right edge under the face's). **Phone**: a 40 px face in the header and the panel under it at full width.
+Faces have no frame and do not walk. The compact panel neither opens by itself nor stays open while the session on screen has
+a pending permission request.
+
+**Walking** (`lib/roam.ts`: pure, no DOM, clock or randomness of its own; the overlay steps it every animation frame while the
+tab is visible, writes each figure's transform on its slot and its hop and lean on its button). The area is the dock
+(`.wb-dock-area`, not the tool windows, their stripes or the agents column; else the workspace window), the whole resting
+figure inside it (`feetBounds`). A figure appears at its place in the column (after the "+n" chip when there is one). That
+place is its `home`, and it follows the column wherever the column is now: when the dock shrinks or grows (a tool window opens
+or closes) the homes move with it. A figure the user dropped (`dropped`) has its home where it was dropped, brought inside the
+area while the area is smaller and back when it grows again (nothing of either is stored). It rests, strolls (34 px/s; rests
+of 3.5 to 12 s) or visits: the first visit after 6 to 18 s, then 25 to 70 s apart, taken 45% of the times it could. A stroll
+leads to a quiet place (`quiet`: under the figure's middle and four points of its box nothing matches `IN_USE`: buttons, links,
+inputs, labels, tabs, menu items, options, tree items, editable text, `.xterm`, `.monaco-editor`), up to 260 px away first,
+then anywhere in the area, never onto an obstacle, within 58 px of one that stands (`standing`: wanted, dragged, asleep or in a
+meeting) or to a place another one is walking to. Where no place is quiet it goes home (within `HOME_PX`, 90 px, it is home
+and stays, resting as long as anywhere), so with an editor or a terminal filling the dock the figures stand in their column, or
+where they were dropped, instead of pacing; away from home, a figure that came to rest on something in use moves on after 0.8
+to 2.2 s. Two closer than 58 px step apart, one on its way goes round the other, sideways towards where it is going, and a
+walker slides along a bubble's edge instead of pressing against it. Its hop, its lean and the look's `walk` loop follow what it
+really moved, so one that is held back stands instead of walking on the spot; a walk or visit is given up after `HELD_BACK_MS`
+(1.1 s) without movement, or after `STUCK_MS` (4 s) without coming nearer while it still moves. A host is visited only where
+it stands in nobody's way, at its home or on a quiet place: with nothing quiet the figures visit only among those at home. A
+host that is free and not working stops and looks at its guest from 150 px; the guest stands 62 px beside it, on the side it
+comes from or else the other, and calls the visit off (another in 8 to 20 s) when neither has room; they stand together 3.5 to
+6.5 s; the guest's `greet` cue plays the look's own `greet`, else the built-in wave, the host answers the same way 450 ms
+later, the guest nods past the middle, and they part. Those within 420 px of the avatar presenting a line look at it; up to 3
+near one whose session goes from working to done or to idle cheer. A walker stays where it is (`stays`) while it is the active
+one or shows the app's line for a blocked session, is a guest or focused, has a question open or a held gesture, or is
+speaking, listening, in attention or error. The one whose bubble is open and one with the app's line move to their `post`
+(`postFor`: where the bubble, 312 px with its gap, has room in the dock beside the large figure, stepping sideways to the
+nearest such place; the bubble opens on the side with room, towards the middle when both have), in an area `UNDER_PX` (44 px)
+short of the dock's bottom so that the name and "Voice off" under the large figure stay inside. A post claims the rectangle its
+large figure and its bubble take, on the side the bubble opens, not a distance from other figures: a new one takes the nearest
+height where that rectangle stays `POST_GAP_PX` (12 px) clear of the others', else the other side, and only when nothing fits
+does it stand where it is, so two lines that face each other never overlap. Posts are computed again when the area changes,
+and the bubble's place is measured again once a figure has finished growing. A working one strolls at most 70 px at a time (or
+goes home when it is in the way with nothing quiet near), rests 9 to 26 s and neither visits nor is visited: a visit or a
+meeting under way ends when either session starts to work. An exited one sleeps. A pointer within 64 px that moved within
+`POINTER_FRESH_MS` (2.5 s), or one that rests on the figure, holds it only where the figure stands on nothing in use: over a
+control, an editor or a terminal it walks on, so it never blocks what the pointer came for; a parked pointer, or one the page
+moved under, holds nobody. A dragged figure is `held`, rests 15 s where it was dropped, and that place becomes its `home`
+while it stays on stage and walking stays on. Open bubbles, the app's line, the active figure and the "+n" chip are obstacles
+(each but the chip belongs to its avatar, which is not in its own way), measured every 120 ms; free walkers, those that only
+stand (no post, not dragged) and sleeping ones step out of them. The hop is 5 px per 22 px of way and the lean 5°; a look's own
+`walk` with `loop: true` plays (mode loop) while the figure walks, in place of the hop, unless the session holds a gesture, and
+no cue is played over a held gesture. After a step that came `LONG_PAUSE_MS` (2 s) or more after the last one (a hidden tab)
+the figures do not all set off at the same moment. Walking off (the switch, reduced motion, the compact layout) clears the
+walk, so the next one begins in the column again.
+
+**The bubble** (`Bubble.tsx`, its timeline in `lib/bubble.ts`) is a Workbench component: the provider icon, session title and
+project come first, the agent's name follows in quotation marks; captions, names, choices and replies are text nodes. Only the
+active avatar's is open. It opens by itself for a line presented here and for an open question, and closes 4 s after its last
+reason (a silent line stays 2 s and 1 s per 15 characters first); what the user closed stays closed for that line or question,
+remembered per avatar; opened by the user it shows the last 6 lines. Stray clicks: for 500 ms (`THROUGH_MS`) after it opened or
+changed by itself clicks pass through; then, while the pointer has stayed inside, it takes the pointer but its controls look
+inactive and do not act, until the pointer leaves it once or, from 1,000 ms (`HOLD_MS`) after the change, moves 16 px
+(`HOLD_MOVE_PX`); choices take no click for 600 ms (`CHOICE_GUARD_MS`) after a question appeared or changed. There is no guard
+while the focus is in the reply box, and none for a line the user asked to hear; only a mouse rests (a touch or a pen counts
+while it is down, and a hovering pen not at all). "Sent." and "Sent. It reads this at its next step." go with the next line or
+after 4 s (`NOTE_MS`); an error stays until the next line, a changed draft or another send. The avatar shows no Allow or Deny: a
+session that needs the user gets "Waiting for your decision in the session" with **Open** (a press on the figure still opens its
+transcript, the reply disabled), and while it shows a dialog or is starting and nothing waits, the reply box and choices are
+disabled with the reason. A typed or dictated answer equal to a choice (case and punctuation aside) is sent as that choice; a
+question that changed under a draft says "The question changed." and needs another Enter. Dictation is the agents feature's
+`useDictation`, in the language of the question line, else of the avatar's voice; a dictated reply belongs to the question on
+screen when the microphone was pressed, and the dictation ends when its reply box goes or is disabled, or a choice is clicked.
+An Enter held on a button of the bubble clicks it once. The figure's menu: Stop speaking (the bubble's Stop has its icon), Voice
+in this browser, Hide all avatars, Use the default look, Turn off for this session, Move to and Reset position (wide, while
+the figures stand in their column), Walk around (wide; disabled while motion is reduced), Reduce motion, Avatar settings (not
+on the phone).
+
+**Voice.** Until the user chooses in this browser (`voice: null`) the active figure carries "Voice off" and each bubble
+offers **Hear it** and **Captions only**. Hear it with on-device voices for the line's language turns voice on and says that line
+(`Arbiter.replay`; the click is the gesture browsers require); with only online voices it shows "What an avatar says is sent to
+the browser maker’s speech service to be spoken." with **Allow online voices** and **Captions only**; with none, "This browser
+has no voices: avatars show captions." With voice on, a line nothing here may say shows the same forms (`voiceForm` in
+`lib/bubble.ts`): `online` when the browser has only online voices for its language and they are not allowed, `none` when it has
+none, and that only once the browser has listed its voices; the status-bar widget's tooltip still says "voice on". Speech waits
+for the page's first user gesture (`Click to hear <name>`), never starts while a dictation is live (`dictationLive()`) and stops
+when one starts; turning voice off stops the line being said, and so does withdrawing Allow online voices while an online voice
+says it. One tab speaks: every tab shows the caption, only the lease holder says the line, and a tab claims only when it could
+speak, after 900 ms when hidden or a two-hundredth of its idle time (at most 600 ms) when visible, so the tab in use wins. The
+tab that says a line renews its lease while it speaks, as each chunk starts and on a timer (`RENEW_EVERY_MS` 10 s, or half the
+lease when that is sooner; not within `RENEW_FRESH_MS` 2 s of the last renewal; 2 s after one that failed), so another tab does
+not say it again. A line that waited 20 s is presented silently; on `pagehide` a tab gives its leases back (`fetch` with
+`keepalive`). Preferences (`store.ts`, `wb.avatar.v1`, shared by a browser's windows through `storage` events, except `pos`):
+`show` (true; false: nothing is shown or said here), `voice`, `online` (false), `volume` (0 to 1), `speed` (0.7 to 1.5, times
+the avatar's own rate), `reduceMotion` (figures keep still but for the mouth, and stand in their column; the system setting
+does the same), `roam` (true: the figures walk in the wide form; never with reduced motion), `pos` (the column's place, per
+window), `voices` (each session's browser voice) and `seen` (its newest line seen), the last two for at most 256 sessions and
+pruned with them.
+
+**Settings, widget, commands, composer.** Settings › Avatar (the platform's `sections/Avatar.tsx`): "Sessions may show an
+avatar" (Off, When I give them one, Whenever they want: `[avatar]`, saved to config.toml; the default writes no key, When I
+give them one `sessions = "asked"`, Off `enabled = false`), then "On this device" (Show avatars, Voice, Allow online voices,
+a voice list with Test voice, Speed, Volume, Walk around, Reduce motion), applied at once and never sent to the
+server; the phone's More tab has Show avatars, Voice and, where voice needs it, Allow online voices. The status-bar widget: a
+face with the number shown, a crossed speaker while voice is off or not chosen, "hidden" while hidden; its menu has Stop
+speaking, Voice in this browser, Show avatars, for each open agent session of the project `<title>: give an avatar` (`(asked)`
+for one in `asked`) or `<title>: turn avatar off` (12 at most), and Avatar settings. Palette commands, each listed only while it
+has something to act on: Avatar: Show or Hide Avatars, Avatar: Voice On or Off, Avatar: Stop Speaking, `Avatar: Reply to
+<name>…` (the one thing that moves focus into a reply box), Avatar: Give This Session an Avatar, Avatar: Turn Off for This
+Session, Avatar Settings (always listed); no shortcut. Giving and turning on are `POST …/on`, which tells a running session that
+is still to be told (`device::tell`); when that paste is refused it answers `briefed: false`, and a toast says the session
+"could not be told now. Workbench tells it when it is next idle." with "Tell it again", which posts `on` once more (the lifecycle
+also tells it when it is next idle). Every composer's session options end with an **Avatar** check box, after Ultracode, while
+`supports.avatar` holds, tooltip "Avatar: this session gets a live avatar"; ticked, a line under the options says what it does
+and costs and, for a CLI without Workbench tools where it will run, that it uses `workbench avatar` (`curl` in a dev container)
+and may ask before running it. The choice is one remembered value (`lastAvatar`), sent as `avatar: true`. The **Avatar** badge
+of a session's card and header follows `useAvatarOn`, else `meta.avatar`; a session whose avatar is on screen here gets no
+"finished" toast.
+
+**Trust rules.**
+1. **Artwork is untrusted markup.** Only the parsed tree is stored and sent; the browser checks it again and builds elements from literal tables, and looks up data only through a `Map`, a `Set` or a `switch` of literals.
+2. **Text is one line of plain text** with the session's secrets masked, shown as text nodes, never Markdown; a reply is masked where it is stored and broadcast, and the session gets the user's own words.
+3. **An avatar belongs to one session.** No tool takes a terminal id; a hook route takes only the agent token of the terminal in its path.
+4. **Who has an avatar is the user's choice**: with `[avatar] sessions = "any"` (the default) a session takes one with its first call or starts with one (the option, `workbench_start_session`'s `avatar`); with `"asked"` only the option or a device's "give" gives one, and avatars sessions have already stay until the user turns each off. Turned off on one device, it is off on all, the session's calls are refused, and no session turns it on again.
+5. **Only devices answer for the user.** Reply, dismiss, on, off, reset, claim and heard refuse the master token and in-process calls (403) and agent tokens (401); nothing under the hook routes puts text into a session.
+6. **The avatar never touches permission requests**: no Allow or Deny of its own, nothing sent to `/api/agents/{id}/permission`, `say` and `ask` refused while the session needs the user, no paste into a dialog and no Enter into one that opened during the paste.
+7. **Sound is the user's choice per browser**: captions always, voice after a click in that browser, online voices after the user allowed them, nothing said in a page while a microphone is open in it or while the avatars are hidden.
+8. **A dictated reply is text until the user sends it**, and dictation starts only from a tap on the microphone button.
+9. **What is pasted into a session holds no agent-written text but a clicked choice**: a fixed frame, the question's id and the user's own words.
+10. **Everything is bounded**: every size, count, rate and wait is a named constant, a request is checked whole before anything changes, refused attempts count, and a refusal states the limit.
+11. **The stage is the app's**: a clipped box of a fixed size, itself not seen, below the app's palette, dialogs, toasts and menus, never over the agents column in the wide form (walking figures keep to the dock); the session's identity comes first, the agent's name after it.
+12. **Flash and cost are bounded**: a stage is at most 132 px, paint and opacity keyframes stay 0.17 s apart, the engine draws at most 30 frames a second, and a figure that costs too much is frozen.
+
+**Verified.** Unit and integration tests: Rust tests in the slice (the validator with hostile and oversized input and the golden
+examples; `text::plain`; the state functions with the clock passed in: gate, rates, leases, outcomes, waits, hand-offs, an
+answer racing a call that leaves, restart, sweep, nudge, the telling of a session that was not told; every route through the
+real router with each kind of caller; the command against a real listener; briefs and guide), tests in terminals (end to end
+through its fake CLIs: the brief in argv and pasted, a first prompt that is a command, the pre-allowed tools, moved and
+restarted sessions, the withheld Enter and the echo of texts sent before, titles and History without the brief), platform and
+config; web unit tests (the lib, cache, stage, layout, the bubble's timeline, widget, commands, preferences, voices, render
+tests of figure, face and bubble, what loads with the app). A real browser: headless Chrome against a scratch instance running
+the real binary, with the tests' stand-in CLIs as sessions and a stand-in speech synthesizer in the page (Chrome's own engine
+only where named): the brief and the five allowed tools; every `workbench avatar` form as a real process; an agent token refused
+on `/api/avatar/**`, the master token on the device POSTs and the hook routes; caption, first voice choice by a real click, the
+preferred voice, `spoken` with its name, the mouth, Stop; a question answered by a click while the call waited, a timed-out one
+answered by typing and arriving framed; stand-in dictation; a permission dialog silencing the avatar; two avatars; both themes,
+the compact and phone forms; two tabs (only the visible one spoke; when it closed mid-line, the other said the next line); hide,
+show, reduced motion; 72 requests, none off the origin, no CSP violation or console error; Chrome's own speech engine (online
+voices only: a caption until they were allowed, then a line said and acknowledged `spoken`); the composer, the palette, giving
+an avatar later, a guest; a server restart (records and looks back, no transcript, restarted sessions told with `Again`).
+The walk and `workbench_start_session` with `avatar`: unit tests of `lib/roam.ts`, an end-to-end test of that start, and in a
+real browser three and eight figures walking, a meeting, a line said where the figure stands (its bubble
+inside the dock), a drag, a click and walking switched off (the column), with no page error and none of 53 observed rests on a
+control.
+
+**Not verified.** Sound leaving a loudspeaker (the browser's own speech engine was driven once in headless Chrome and reported
+the line spoken; nobody heard it); real dictation with a microphone (a stand-in recognizer was used); a real Claude Code reading
+the `permissions.allow` entries of its settings file and using the tools (the tests' stand-in for Claude Code was used); real
+Codex, Kimi Code, Gemini CLI and Aider sessions; a dev container session; Windows at run time (the server is type-checked for
+Windows only); Safari and iOS (speech needs a tap there, by design, but it was not tried).
+
+**Deferred on purpose.** Voices made by a command on the server; hands-free listening (a microphone that stays open); a pop-out
+window for the avatar; spoken attention announcements; a session changing where or whether avatars are shown; a rendered
+preview of its own drawing for the session.
 
 ## Third phase (2026-09-27): code intelligence, debugger, CLion VCS, Confluence authoring, push, approvals, local history
 

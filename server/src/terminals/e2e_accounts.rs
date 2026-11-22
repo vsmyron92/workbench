@@ -475,6 +475,129 @@ async fn notes_only_moves_no_conversation_and_a_bad_setting_is_refused() {
     }
 }
 
+// ---------------------------------------------------------------- avatars
+
+/// A session that continues on another account takes its avatar along. The new terminal says
+/// which one it came from, the avatar slice hands it that terminal's avatar, and what the new
+/// session is told and may call unasked follows what that avatar is now: not what the old
+/// session was started with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_that_moves_to_another_account_takes_its_avatar_along() {
+    use crate::avatar::session::{Call, design, gate};
+    use crate::avatar::{BriefVariant, Carried, Via, active, carried};
+    use super::e2e::avatar_brief;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _addr, pid, accts, codex_log) = transfer_accounts(dir.path()).await;
+    // The avatar slice's own background work: it follows the terminals as they are created.
+    crate::avatar::start(&state).await;
+    let t = &state.terminals;
+    let now = crate::util::now_ms;
+    let allowed = format!("ALLOW {}", crate::avatar::PREALLOWED.join(" "));
+    let (moved_brief, first_brief) = (avatar_brief(BriefVariant::Moved, Via::Tools, false), avatar_brief(BriefVariant::First, Via::Tools, false));
+    // A session on the first account, with the Avatar option or without, once it is up.
+    let start = |avatar: bool| {
+        let (state, req) = (state.clone(), super::agent::AgentRequest { avatar: avatar.then_some(true), ..ask(&pid, Some("claude")) });
+        async move {
+            let info = state.terminals.spawn_agent(&state, req).await.unwrap();
+            wait_long("the session", 10, || agent_of(&state, &info.id).state == AgentState::Idle).await;
+            if avatar {
+                wait_long("its avatar", 10, || active(&state, &info.id)).await;
+            }
+            info
+        }
+    };
+    // What the second account's sessions were started with, in the order they were started.
+    let on_b = |prefix: &str| log_lines(&accts[1].log, prefix);
+    let avatar_of = |id: &str| crate::avatar::store::get(&state, id);
+
+    // 1. It drew its look: the new session keeps it, is told so, and may use the tools at once.
+    let a = start(true).await;
+    let pass = gate(&state, &a.id, Call::Design, Via::Tools, now()).unwrap();
+    design(&state, &pass, &json!({ "name": "Pip", "svg": "<svg viewBox='0 0 200 200'><g id='body'><circle cx='100' cy='110' r='50' fill='#ffcc00'/></g></svg>" }), now()).unwrap();
+    assert_eq!(carried(&state, &a.id), Some(Carried { on: true, designed: true }));
+    let moved = t.switch_account(&state, &a.id, Some("claude-b"), None).await.unwrap();
+    assert_eq!((moved.meta["movedFrom"].as_str(), &moved.meta["avatar"]), (Some(a.id.as_str()), &json!(true)));
+    assert_eq!(t.info(&a.id).unwrap().meta["movedTo"], moved.id.as_str());
+    assert!(moved.title.ends_with("· claude-b") && !moved.title.contains("avatar"), "{}", moved.title);
+    wait_long("its start", 10, || on_b("ARGS ").len() == 1).await;
+    let args = on_b("ARGS ")[0].clone();
+    assert!(args.contains("git status") && args.ends_with(&format!("instead of starting over. /  / {moved_brief}")), "{args}");
+    assert!(moved_brief.contains("continues with the avatar it already had") && moved_brief.contains("Do not design a new look"), "{moved_brief}");
+    assert_eq!(on_b("ALLOW"), [allowed.clone()]);
+    wait_long("the avatar to move", 10, || active(&state, &moved.id)).await;
+    let (old, new) = (avatar_of(&a.id).unwrap(), avatar_of(&moved.id).unwrap());
+    assert_eq!((new.name.as_str(), new.designed, new.on), ("Pip", true, true));
+    assert!(new.look.is_some() && new.look == old.look, "the look came along");
+
+    // 2. It has not drawn one yet, and moves to another CLI: every kind can have an avatar. The
+    // new session is told to draw its own, below what it is told of the work, in its command line.
+    let b = start(true).await;
+    assert_eq!(carried(&state, &b.id), Some(Carried { on: true, designed: false }));
+    let moved = t.switch_account(&state, &b.id, Some("codex-x"), None).await.unwrap();
+    assert_eq!((moved.meta["movedFrom"].as_str(), &moved.meta["avatar"]), (Some(b.id.as_str()), &json!(true)));
+    wait_long("codex to start", 10, || std::fs::read_to_string(&codex_log).is_ok_and(|l| l.contains(crate::avatar::BRIEF_MARK))).await;
+    let line = std::fs::read_to_string(&codex_log).unwrap();
+    assert!(line.contains(&format!("instead of starting over.\n\n{first_brief}\n")), "{line}");
+    wait_long("the avatar to move to the other CLI", 10, || active(&state, &moved.id)).await;
+    assert!(!avatar_of(&moved.id).unwrap().designed);
+
+    // 3. The user turned it off: the new session is told nothing and nothing is allowed
+    // unasked, though the option goes along with the launch. The avatar arrives turned off.
+    let c = start(true).await;
+    crate::avatar::device::turn_off(&state, &c.id, now()).unwrap();
+    assert_eq!(carried(&state, &c.id), Some(Carried { on: false, designed: false }));
+    let moved = t.switch_account(&state, &c.id, Some("claude-b"), None).await.unwrap();
+    assert_eq!((moved.meta["movedFrom"].as_str(), &moved.meta["avatar"]), (Some(c.id.as_str()), &json!(true)));
+    wait_long("the start without a word of it", 10, || on_b("ARGS ").len() == 2).await;
+    assert!(on_b("ARGS ")[1].ends_with("instead of starting over.") && !on_b("ARGS ")[1].contains(crate::avatar::BRIEF_MARK), "{:?}", on_b("ARGS "));
+    assert_eq!(on_b("ALLOW")[1], "ALLOW <unset>");
+    wait_long("the avatar that is off to move", 10, || avatar_of(&moved.id).is_ok()).await;
+    assert!(!avatar_of(&moved.id).unwrap().on && !active(&state, &moved.id));
+
+    // 4. A device gave it one after its start: the option was never asked for, and the new
+    // session has an avatar all the same.
+    let d = start(false).await;
+    crate::avatar::device::turn_on(&state, &d.id, now()).unwrap();
+    let moved = t.switch_account(&state, &d.id, Some("claude-b"), None).await.unwrap();
+    assert_eq!((moved.meta["movedFrom"].as_str(), moved.meta.get("avatar")), (Some(d.id.as_str()), None));
+    wait_long("the start with the avatar it was given", 10, || on_b("ARGS ").len() == 3).await;
+    assert!(on_b("ARGS ")[2].ends_with(&format!("instead of starting over. /  / {first_brief}")), "{:?}", on_b("ARGS "));
+    assert_eq!(on_b("ALLOW")[2], allowed);
+    wait_long("the given avatar to move", 10, || active(&state, &moved.id)).await;
+
+    // 5. It never had one: nothing changes for it but the note of where it came from.
+    let e = start(false).await;
+    assert_eq!(carried(&state, &e.id), None);
+    let moved = t.switch_account(&state, &e.id, Some("claude-b"), None).await.unwrap();
+    assert_eq!((moved.meta["movedFrom"].as_str(), moved.meta.get("avatar")), (Some(e.id.as_str()), None));
+    wait_long("the plain start", 10, || on_b("ARGS ").len() == 4).await;
+    assert!(!on_b("ARGS ")[3].contains(crate::avatar::BRIEF_MARK), "{:?}", on_b("ARGS "));
+    assert_eq!(on_b("ALLOW")[3], "ALLOW <unset>");
+
+    // 6. A new session that falls over to the next account at its start keeps the option too.
+    t.usage.mark_limited("claude", Some(now() + 3_600_000), "session limit reached", now());
+    let g = t.spawn_agent(&state, super::agent::AgentRequest { avatar: Some(true), prompt: Some("fix it".into()), ..ask(&pid, Some("claude")) }).await.unwrap();
+    assert_eq!((provider_of(&state, &g.id).as_str(), &g.meta["avatar"], g.meta["failover"]["from"].as_str(), g.title.as_str()), ("claude-b", &json!(true), Some("claude"), "fix it"));
+    wait_long("the session that fell over", 10, || on_b("ARGS ").len() == 5).await;
+    assert!(on_b("ARGS ")[4].ends_with(&format!(" -- fix it /  / {first_brief}")), "{:?}", on_b("ARGS "));
+    assert_eq!(on_b("ALLOW")[4], allowed);
+    t.usage.clear_limited("claude", now());
+
+    // 7. Avatars were switched off in Settings since the session started: it still moves (the
+    // option is not asked for again, which would refuse the start), and takes no avatar along.
+    let f = start(true).await;
+    state.config.write().avatar.enabled = Some(false);
+    assert_eq!(carried(&state, &f.id), None);
+    let moved = t.switch_account(&state, &f.id, Some("claude-b"), None).await.unwrap();
+    assert_eq!((moved.meta["movedFrom"].as_str(), moved.meta.get("avatar")), (Some(f.id.as_str()), None));
+    wait_long("the move while avatars are off", 10, || on_b("ARGS ").len() == 6).await;
+    assert!(!on_b("ARGS ")[5].contains(crate::avatar::BRIEF_MARK), "{:?}", on_b("ARGS "));
+    assert_eq!(on_b("ALLOW")[5], "ALLOW <unset>");
+    for i in t.list() {
+        let _ = t.kill(&i.id).await;
+    }
+}
+
 // ---------------------------------------------------------------- hosted APIs
 
 use crate::config::global::ApiConfig;

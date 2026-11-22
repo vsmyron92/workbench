@@ -1,5 +1,106 @@
 # Changelog
 
+## 0.23.0 - 2026-11-20
+
+Avatars: an agent session can have a live character of its own that walks about the Workbench window. The
+session draws it, says the short version of its work through it, asks you questions there and takes your
+answer, and the figure shows the session's state. By default a session takes one when it first uses one,
+you can turn any of them off, and no browser speaks until you choose voice there. See `docs/avatar.md`.
+
+- **A live avatar for a session.** A session gets one with its first avatar call, or you give it one:
+  tick **Avatar** among the new-session composer's options (after Ultracode, for every CLI), or give a
+  running session one later with **Avatar: Give This Session an Avatar** in the palette or from the status
+  bar's avatar widget. A session given one is told in its first prompt (or in a pasted message when it
+  gets the avatar later), draws its look, name and voice in one or two calls, about half a minute and a
+  few thousand tokens, and greets you. A first prompt that is a command of its CLI (it starts with `/` or
+  `!`) goes in alone, and the session is told once it is idle. Its tab and card show an **Avatar** badge.
+  It keeps its avatar across a restart, a new conversation and a move to another account. Turning an
+  avatar off pastes nothing into the session; turning it on again tells the session, once.
+- **Walking about.** In the desktop layout the figures walk about the workspace window's dock (never over
+  the agents column or the tool windows), rest where nothing you press or type into is under them (or
+  stand at home, in their column or where you dropped them, when there is no such place, and visit only
+  each other there), now and then visit and greet each other (not while their session works), look at one
+  that speaks and cheer for one that finishes. A figure stands still while it speaks, asks or needs you,
+  and for a pointer near it unless it stands on something you use; it stays small under the pointer and
+  grows when its bubble opens; two open bubbles never cover each other. Up to eight walk. With **Walk
+  around** off (Settings or the avatar's menu) or **Reduce motion**, they stand in a column of up to four
+  instead, with **Move to …** and **Reset position**. Only the character is seen, with no box around it.
+- **What a session does with it.** Five MCP tools, for Claude Code anywhere and Codex on the host:
+  `avatar_design` draws and rigs it (a strict SVG subset, plus JSON for its rig, animations, mouth and
+  voice), `avatar_say` says one or two plain sentences, `avatar_ask` asks a question with up to four
+  choices and waits for the answer, `avatar_act` plays a gesture, `avatar_status` reads it back with the
+  authoring guide. Workbench's built-in breathing, blinking, gaze and gestures move any drawing that names
+  its body, head, eyes, pupils and arms; a look's own `walk` and `greet` take the place of the built-in
+  hop and wave. A glow around the figure and its tooltip show the session's state in the words and
+  colours of its tab. Claude Code may call the five tools without a permission request when it starts with
+  its avatar on (`permissions.allow` in its settings file, which changes only at its next start).
+- **Hearing it.** Captions always. Voice is off until you choose it in a browser (**Hear it** or
+  **Captions only** under the first line), and uses that browser's own voices. Online voices are used only
+  after **Allow online voices**, which says that what an avatar says is then sent to the browser maker's
+  speech service. Of all your tabs and devices one says a line aloud (a tab in view, the one used last),
+  and no tab while a dictation listens in it. **Stop** is in the bubble and the menus; **Test voice**,
+  speed and volume are in Settings; **Reduce motion** is in both.
+- **Answering it.** A question shows its choices and a reply box for typed or dictated text (the browser's
+  speech recognition; nothing is sent until you press Enter or Send). The answer goes to the call that
+  waits for it; once the session stopped waiting, it is typed into the session as a prompt that starts
+  with `[via avatar, …]`. The same box sends a message to the session at any time. A question no window
+  showed within 8 seconds becomes a notification.
+- **Who may do what.** An avatar belongs to its session: a session takes one itself only while
+  `[avatar] sessions = "any"` (the default; `"asked"` leaves it to you), never turns on one you turned off,
+  and cannot answer for you; its tools and hook routes reach only its own avatar. Replies, dismissing,
+  turning on and off, resetting and telling the server a line was heard are for signed-in devices only.
+  The drawing is untrusted: the server reads it into a closed, bounded tree, and the browser builds the
+  figure from that tree alone, in a fixed, clipped box that is not drawn itself, below Workbench's menus
+  and never over the agents column. Text is one plain line with the session's
+  secrets masked, also where a refusal quotes it. The avatar never shows or answers a permission request,
+  and says nothing while one is open. What is typed into a session is your words or the choice you clicked
+  in a fixed frame, nothing else the session wrote. Every size, count, rate and wait has a limit.
+- **Status bar, palette and Settings.** A status-bar widget counts the avatars shown, shows whether they
+  speak or are hidden, and lists the project's sessions to give an avatar or turn one off. The palette has
+  seven *Avatar* commands. **Settings › Avatar** sets which sessions may have one (`[avatar]` in
+  `config.toml`: Off, When I give them one, Whenever they want, the default; a repository cannot set it)
+  and, per browser, showing, voice, online voices, Test voice, speed, volume, walking and motion. The
+  phone's More tab has Show avatars and Voice.
+- **For CLIs without Workbench's tools.** Kimi Code, Gemini CLI, Aider, custom CLIs and Codex in a dev
+  container drive their avatar with a command: `workbench avatar guide | status | design | say | ask | act`
+  on the host (it sends the session's token only to this computer), and `curl` against
+  `/api/hooks/avatar/<session>/…` in a dev container, with the token read from standard input, never on a
+  command line. Such a CLI may ask you before it runs the command unless you allow it; the composer says
+  so.
+- **An optional skill.** `workbench-avatar` teaches an agent to draw, rig and speak through its avatar; it
+  has a session take one itself only when you ask it to use one. As with Workbench's other skills, it is
+  installed only when you press **Install**.
+
+What changed for existing behaviour:
+
+- **A prompt is no longer submitted into a dialog that opened while it was pasted.** When Workbench pastes
+  text into a chosen session (an avatar's answer, a prompt sent to that session) and a dialog opens in the
+  pause before the Enter, the Enter is held back and the request answers "a dialog opened while your text
+  was being pasted: it is in the session's input box, not sent". For CLIs other than Claude Code this is
+  read off the screen, where the echo of the texts Workbench typed there (a clicked choice "Yes, proceed")
+  does not count as a dialog, and a dialog beside it does.
+- **Sessions starting sessions.** `workbench_start_session` takes `avatar: true`: the new session starts
+  with a live avatar, told of it with its prompt as with the composer's option. It is refused, and nothing
+  is started, under `[avatar] sessions = "asked"`, while avatars are switched off, and when you turned the
+  calling session's own avatar off.
+- **MCP.** The server's instructions say "this agent session" instead of "this Claude Code session". Tools
+  that only do something for you to see or hear are listed as neither read-only nor destructive. A
+  successful `avatar_say` or `avatar_act` call stays out of the Activity view (failures are recorded), and
+  the argument summary and the error of every agent tool call there are masked with the session's secrets
+  before they are cut.
+- **Toasts.** A session whose avatar is on screen in a window no longer gets a "finished" toast there: the
+  avatar shows it.
+
+Not verified: that sound leaves a loudspeaker (the browser's own speech engine was driven once in headless
+Chrome and reported the line spoken; nobody heard it); dictation with a real microphone (a stand-in
+recognizer was used); a real Claude Code reading the `permissions.allow` entries of its settings file and
+using the tools (the tests' stand-in for Claude Code was used); real Codex, Kimi Code, Gemini CLI and Aider
+sessions; a session in a dev container; Windows at run time (the server is type-checked for Windows only);
+Safari and iOS (speech needs a tap there, by design, but it was not tried). Deferred on purpose: voices made
+by a command on the server, hands-free listening, a pop-out window for the avatar, spoken attention
+announcements, a session changing where or whether avatars are shown, and a rendered preview of its own
+drawing for the session.
+
 ## 0.22.0 - 2026-11-15
 
 DeepSeek support grows up: Codex can use it, its 1M-token window is used, its cache savings and cost

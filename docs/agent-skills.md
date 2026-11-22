@@ -132,6 +132,7 @@ them and in which order.
 | `workbench-data-capture` | put a capture into the data viewer and read statistics back |
 | `workbench-debug-session` | drive the debugger: start or attach, breakpoints, steps, registers, firmware on a probe |
 | `workbench-project-setup` | write a project's `.workbench.toml` (runs, environments, debug launches, data sources) without guessing keys Workbench ignores, and show what belongs in your machine-only files for you to paste (it never writes those) |
+| `workbench-avatar` | give its live avatar a character that reads at small sizes and moves from roles and pivots, speak and ask through it at the right moments, and know what each answer and refusal means; it has a session use an avatar it was started with or given, and take one itself only when you ask it to use one (its first call gives it one), and only where sessions may (`[avatar] sessions = "any"`, the default; never with `sessions = "asked"`) |
 
 They are embedded in Workbench and **never installed unless you ask**. Open one to read all
 its files first, then **Install** it for a Claude Code or Codex account (the two CLIs that

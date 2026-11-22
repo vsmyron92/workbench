@@ -8,6 +8,7 @@ import { subscribe } from '@/api/events'
 import { qk, useTerminals } from '@/api/queries'
 import type { AgentState, PendingPermission, TerminalInfo } from '@/api/types'
 import { toast, toastError } from '@/shell/actions'
+import { avatarShows } from '@/shell/avatarBridge'
 import { useUi } from '@/state/store'
 import { Button, Field, Input, Loading, Modal, Select } from '@/ui'
 import { openTerminal, switchAccount, terminalsApi, useAgentDefaults, type AgentDefaults, type ProviderInfo } from './api'
@@ -149,13 +150,47 @@ export function AccountNotifier({ children }: { children?: ReactNode }) {
   return <>{children}</>
 }
 
-interface Attention {
+/** `agent.attention`: a session wants the user. */
+export interface Attention {
   terminalId: string
   state: AgentState
   message: string
   title: string
   /** A permission request Workbench can answer (Claude Code). */
   permission?: PendingPermission | null
+}
+
+/** What an `agent.attention` event becomes in this window: a toast, or nothing (see `AttentionNotifier`). */
+export function attentionToast(a: Attention) {
+  const open = () => openTerminal({ id: a.terminalId, title: a.title })
+  if (document.visibilityState !== 'visible') return
+  if (isTerminalVisible(a.terminalId)) return
+  const p = a.permission
+  if (p && a.state === 'needs_permission' && !hasPermissionToast(p.id)) {
+    const { lead, code, tail } = summaryParts(p.summary)
+    const allow = { label: 'Allow', variant: 'primary' as const, run: () => void answerPermission(a.terminalId, p, { decision: 'allow' }) }
+    const deny = { label: 'Deny', run: () => void answerPermission(a.terminalId, p, { decision: 'deny' }) }
+    // One tap allows only what the toast shows whole: otherwise read it first.
+    const oneTap = oneTapAllow(p)
+    const toastId = toast('warning', `${a.title} asks for permission`, {
+      detail: !oneTap
+        ? `${[lead, code, tail].filter(Boolean).join(' ')} — open it to read the whole request before allowing.`
+        : code !== null
+          ? lead
+          : p.summary,
+      code: oneTap && (code !== null || !summaryShowsAll(p)) ? glanceText(p) : undefined,
+      timeout: 0,
+      actions: oneTap ? [allow, deny, { label: 'Open', run: open }] : [deny, { label: 'Open to review', run: open }],
+    })
+    notePermissionToast(p.id, toastId, a.terminalId, p.since)
+    return
+  }
+  if (p) return
+  if (a.state === 'idle') {
+    // Its avatar is on screen here and shows that the turn is over: the toast would say it twice.
+    if (avatarShows(a.terminalId)) return
+    toast('success', `${a.title} finished`, { detail: a.message, action: { label: 'Open', run: open } })
+  } else toast(a.state === 'error' ? 'error' : 'warning', `${a.title}: ${a.message}`, { action: { label: 'Open', run: open }, timeout: 9000 })
 }
 
 /**
@@ -166,38 +201,13 @@ interface Attention {
  *
  * A permission request's toast has Allow / Deny and stays until it is answered, or
  * settled elsewhere (the terminal, a phone, a timeout): then it goes away by itself.
+ *
+ * A session whose avatar is on screen keeps every toast but "finished": the avatar shows
+ * that itself (`shell/avatarBridge.ts`). What waits for an answer is always told here.
  */
 export function AttentionNotifier({ children }: { children?: ReactNode }) {
   useEffect(() => {
-    const offAttention = subscribe('agent.attention', (ev) => {
-      const a = ev.data as Attention
-      const open = () => openTerminal({ id: a.terminalId, title: a.title })
-      if (document.visibilityState !== 'visible') return
-      if (isTerminalVisible(a.terminalId)) return
-      const p = a.permission
-      if (p && a.state === 'needs_permission' && !hasPermissionToast(p.id)) {
-        const { lead, code, tail } = summaryParts(p.summary)
-        const allow = { label: 'Allow', variant: 'primary' as const, run: () => void answerPermission(a.terminalId, p, { decision: 'allow' }) }
-        const deny = { label: 'Deny', run: () => void answerPermission(a.terminalId, p, { decision: 'deny' }) }
-        // One tap allows only what the toast shows whole: otherwise read it first.
-        const oneTap = oneTapAllow(p)
-        const toastId = toast('warning', `${a.title} asks for permission`, {
-          detail: !oneTap
-            ? `${[lead, code, tail].filter(Boolean).join(' ')} — open it to read the whole request before allowing.`
-            : code !== null
-              ? lead
-              : p.summary,
-          code: oneTap && (code !== null || !summaryShowsAll(p)) ? glanceText(p) : undefined,
-          timeout: 0,
-          actions: oneTap ? [allow, deny, { label: 'Open', run: open }] : [deny, { label: 'Open to review', run: open }],
-        })
-        notePermissionToast(p.id, toastId, a.terminalId, p.since)
-        return
-      }
-      if (p) return
-      if (a.state === 'idle') toast('success', `${a.title} finished`, { detail: a.message, action: { label: 'Open', run: open } })
-      else toast(a.state === 'error' ? 'error' : 'warning', `${a.title}: ${a.message}`, { action: { label: 'Open', run: open }, timeout: 9000 })
-    })
+    const offAttention = subscribe('agent.attention', (ev) => attentionToast(ev.data as Attention))
     const offUpdated = subscribe('terminal.updated', (ev) => settlePermissionToasts(ev.data as TerminalInfo))
     const offExited = subscribe('terminal.exited', (ev) => settlePermissionToasts(ev.data as TerminalInfo))
     return () => {

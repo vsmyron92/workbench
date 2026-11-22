@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState, useSyncExternalStore } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { QueryCache, QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import { api, setUnauthorizedHandler, settleDeviceKey } from '@/api/client'
 import { installResync, startEvents } from '@/api/events'
@@ -6,7 +6,7 @@ import { loadHealth } from '@/api/health'
 import { installProjectsSync, qk } from '@/api/queries'
 import { resetUnknownRepo } from '@/api/repos'
 import { Login } from '@/shell/Login'
-import { desktopHeld, subscribeDesktopHold } from '@/shell/windowFit'
+import { useIsMobile } from '@/shell/windowFit'
 import { providers } from '@/shell/registry'
 import '@/state/store' // applies the theme preference to <html> before the first paint
 import { ErrorBoundary, ErrorBox, Loading } from '@/ui'
@@ -26,27 +26,6 @@ const queryClient = new QueryClient({
     queries: { staleTime: 30_000, refetchOnWindowFocus: false, retry: 1 },
   },
 })
-
-const mobileQuery = '(max-width: 768px), (pointer: coarse) and (max-width: 1024px)'
-function useIsMobile() {
-  return useSyncExternalStore(
-    (cb) => {
-      const m = matchMedia(mobileQuery)
-      m.addEventListener('change', cb)
-      const off = subscribeDesktopHold(cb)
-      return () => {
-        m.removeEventListener('change', cb)
-        off()
-      }
-    },
-    () => {
-      if (new URLSearchParams(location.search).has('mobile')) return true
-      if (!matchMedia(mobileQuery).matches) return false
-      // A desktop window narrowed by collapsing the workspace window stays the desktop layout.
-      return !(desktopHeld() && !matchMedia('(pointer: coarse)').matches)
-    },
-  )
-}
 
 function Authenticated() {
   const mobile = useIsMobile()

@@ -39,7 +39,8 @@ pub struct Switched {
 
 /// The values of a request that make sense for another account (`to`) when it replaces the
 /// one asked for (`from`). A model name belongs to one server, so it is dropped unless both
-/// are the vendor's; a permission mode belongs to one CLI.
+/// are the vendor's; a permission mode belongs to one CLI. The Avatar option stays whatever the
+/// CLI: every kind can have an avatar.
 pub fn carry_request(req: &mut AgentRequest, from: &Provider, to: &Provider) {
     let same_kind = from.kind == to.kind;
     if !same_kind || from.local.is_some() || to.local.is_some() {
@@ -366,9 +367,15 @@ impl Terminals {
             restricted: launch.restricted.then_some(true),
             // A preference, unlike `restricted`: a move to another CLI just leaves it behind (`carry_request`).
             ultracode: launch.ultracode.then_some(true),
+            // Every CLI can have an avatar, so the option goes along to any of them, unless avatars were
+            // switched off since (asking for one then would refuse the move).
+            avatar: (launch.avatar && crate::avatar::enabled(state)).then_some(true),
             add_dirs: launch.add_dirs.into_iter().chain(carried.add_dirs).collect(),
             resume: carried.resume,
             exact: true,
+            // The avatar itself follows the terminal, not the option: whatever this session's avatar is
+            // now (given by a device later, turned off, already drawn) is what the new session continues with.
+            moved_from: Some(id.to_string()),
             ..Default::default()
         };
         carry_request(&mut req, &from, &target);
@@ -550,6 +557,8 @@ mod tests {
             permission_mode: Some("plan".into()),
             remote_control: Some(true),
             ultracode: Some(true),
+            avatar: Some(true),
+            moved_from: Some("0a297845bc8b".into()),
             ..Default::default()
         };
         // Another subscription of the same CLI takes everything.
@@ -557,16 +566,24 @@ mod tests {
         carry_request(&mut r, &claude, &b);
         assert_eq!((r.model.as_deref(), r.effort.as_deref(), r.permission_mode.as_deref(), r.remote_control), (Some("opus"), Some("high"), Some("plan"), Some(true)));
         assert_eq!(r.ultracode, Some(true));
+        assert_eq!((r.avatar, r.moved_from.as_deref()), (Some(true), Some("0a297845bc8b")));
         // A local model has its own model, and no claude.ai to be remote controlled from.
         let mut r = asked();
         carry_request(&mut r, &claude, &local);
         assert_eq!((r.model, r.effort, r.permission_mode.as_deref(), r.remote_control), (None, None, Some("plan"), None));
         assert_eq!(r.ultracode, Some(true), "it is still Claude Code");
+        assert_eq!((r.avatar, r.moved_from.as_deref()), (Some(true), Some("0a297845bc8b")));
         // Another CLI takes none of it.
         let mut r = asked();
         carry_request(&mut r, &claude, &codex);
         assert_eq!((r.model, r.effort, r.permission_mode, r.remote_control), (None, None, None, None));
         assert_eq!(r.ultracode, None, "a move to another CLI leaves a preference behind instead of refusing, unlike restricted");
+        // An avatar is no CLI's own: the option, and the terminal the avatar comes from, go along to any of them.
+        assert_eq!((r.avatar, r.moved_from.as_deref()), (Some(true), Some("0a297845bc8b")));
+        // Not asked for stays not asked for.
+        let mut r = AgentRequest::default();
+        carry_request(&mut r, &claude, &codex);
+        assert_eq!((r.avatar, r.moved_from), (None, None));
     }
 
     #[test]

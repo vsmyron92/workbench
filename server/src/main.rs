@@ -19,6 +19,7 @@ mod util;
 // Feature slices. Each owns its module directory and its `web/src/features/<slice>/`.
 mod apps;
 mod atlassian;
+mod avatar;
 mod data;
 mod db;
 mod debug;
@@ -70,6 +71,9 @@ enum Command {
     /// Claude Code status line helper: reads the status JSON on stdin, reports it
     /// to the server and prints a compact line.
     Statusline,
+    // Inside a hosted session whose CLI has no Workbench tools (avatar::cli).
+    #[command(about = avatar::ABOUT)]
+    Avatar(avatar::AvatarArgs),
     // Linux: a systemd user service; Windows: a sign-in entry (platform::service).
     #[command(about = platform::service::ABOUT)]
     Service(platform::service::ServiceArgs),
@@ -98,6 +102,7 @@ fn main() -> anyhow::Result<()> {
         Command::Askpass { prompt } => git::cli_askpass(prompt.as_deref().unwrap_or("")),
         Command::GitEditor { mode, dir, file } => git::cli_git_editor(&mode, &dir, &file),
         Command::Statusline => terminals::cli_statusline(),
+        Command::Avatar(args) => avatar::cli(args),
         Command::Service(args) => platform::service::cli(args),
         Command::Update(args) => platform::update::cli(args),
     }

@@ -1,12 +1,13 @@
 // The 'settings' panel: section navigation on the left, one section at a time.
 
 import { useEffect, type ComponentType } from 'react'
-import { AlertTriangle, Bell, Bot, Cable, CircleArrowUp, FileCode, FolderGit2, KeyRound, MonitorSmartphone, Palette, Plug } from 'lucide-react'
+import { AlertTriangle, Bell, Bot, Cable, CircleArrowUp, FileCode, FolderGit2, KeyRound, MonitorSmartphone, Palette, Plug, Smile } from 'lucide-react'
 import type { PanelProps } from '@/shell/types'
 import { Badge } from '@/ui'
 import { useSecrets, useSettings, useUpdate } from './api'
 import { restartText } from './lib'
 import { AgentsSection } from './sections/Agents'
+import { AvatarSection } from './sections/Avatar'
 import { GeneralSection } from './sections/General'
 import { IntegrationsSection } from './sections/Integrations'
 import { McpSection } from './sections/Mcp'
@@ -22,6 +23,8 @@ export const SECTIONS: { id: string; label: string; icon: ComponentType<{ size?:
   { id: 'general', label: 'General', icon: Palette },
   { id: 'projects', label: 'Projects', icon: FolderGit2 },
   { id: 'agents', label: 'Agents', icon: Bot },
+  // The same face as the status bar's widget.
+  { id: 'avatar', label: 'Avatar', icon: Smile },
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'secrets', label: 'Secrets', icon: KeyRound },
   { id: 'remote', label: 'Remote access', icon: MonitorSmartphone },
@@ -58,6 +61,9 @@ export function SettingsPanel({ params, setParams, setTitle }: PanelProps<{ sect
       break
     case 'agents':
       body = <AgentsSection onGoto={go} />
+      break
+    case 'avatar':
+      body = <AvatarSection />
       break
     case 'integrations':
       body = <IntegrationsSection onGoto={go} />

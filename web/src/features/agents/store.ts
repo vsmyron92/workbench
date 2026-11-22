@@ -1,5 +1,7 @@
 // Client state of the agents feature: dialogs, selected tabs, which terminals are on
 // screen (to avoid toasting about a session the user is looking at).
+//
+// Contract module for the avatar feature: `useAgentsUi`, read only (`columnTab`, `mobileTerminal`).
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
@@ -34,6 +36,11 @@ interface AgentsUi {
   composerFocus: number
   /** The provider the composer used last (the next session starts with it). */
   lastProvider: string | null
+  /**
+   * The composer's Avatar control as it was left: on, the next session gets a live avatar.
+   * Every composer (the home tab, the dialog, the phone) shows and changes this one value.
+   */
+  lastAvatar: boolean
   /** The provider tab of the history list. */
   historyProvider: string | null
   /** Phone: the terminal shown full screen, if any. */
@@ -48,6 +55,7 @@ interface AgentsUi {
   setBottomTab: (project: string, terminalId: string | null) => void
   focusComposer: () => void
   setLastProvider: (id: string) => void
+  setLastAvatar: (on: boolean) => void
   setHistoryProvider: (id: string) => void
   setMobileTerminal: (id: string | null) => void
   openDialog: (d: AgentsUi['dialog']) => void
@@ -63,6 +71,7 @@ export const useAgentsUi = create<AgentsUi>()(
       bottomTab: {},
       composerFocus: 0,
       lastProvider: null,
+      lastAvatar: false,
       historyProvider: null,
       mobileTerminal: null,
       dialog: null,
@@ -93,6 +102,7 @@ export const useAgentsUi = create<AgentsUi>()(
         set((s) => (s.bottomTab[project] === terminalId ? s : { bottomTab: { ...s.bottomTab, [project]: terminalId } })),
       focusComposer: () => set((s) => ({ composerFocus: s.composerFocus + 1 })),
       setLastProvider: (lastProvider) => set({ lastProvider }),
+      setLastAvatar: (lastAvatar) => set({ lastAvatar }),
       setHistoryProvider: (historyProvider) => set({ historyProvider }),
       setMobileTerminal: (mobileTerminal) => set({ mobileTerminal }),
       openDialog: (dialog) => set({ dialog }),
@@ -106,6 +116,7 @@ export const useAgentsUi = create<AgentsUi>()(
         bottomTerminals: s.bottomTerminals,
         bottomTab: s.bottomTab,
         lastProvider: s.lastProvider,
+        lastAvatar: s.lastAvatar,
         historyProvider: s.historyProvider,
       }),
     },

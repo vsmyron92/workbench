@@ -148,6 +148,12 @@ export interface GlobalConfig {
   push?: { subject?: string | null; extra_endpoint_hosts?: string[] }
   /** Updates: the daily look, and the GitHub repository (and API) releases come from. */
   update?: { check?: boolean; repo?: string | null; api?: string | null }
+  /**
+   * Avatars of agent sessions (server/src/avatar AvatarConfig). Absent, or a key absent: the default.
+   * `enabled` (default true): false, no session has an avatar. `sessions` (default `any`): a session
+   * has one when the user gave it one, or with `any` whenever it uses one.
+   */
+  avatar?: { enabled?: boolean | null; sessions?: 'asked' | 'any' | null } | null
   extra_roots: string[]
   secrets: Record<string, SecretRef>
 }

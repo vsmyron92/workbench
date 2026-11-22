@@ -14,6 +14,8 @@ Settings (Ctrl+,) covers the everyday choices, and saves them into
 - **Secrets:** every secret reference, whether it resolves, and a fix for token files
   others can read.
 - **Remote access** and **Notifications:** see [remote access](remote-access.md).
+- **Avatar:** which sessions may show a live avatar, and, kept in that browser only, whether
+  avatars are shown, walk about and are heard there (see [avatars](avatar.md)).
 - **Raw config:** the whole file, validated before it is saved.
 
 ## Keep secrets where they are
@@ -216,6 +218,33 @@ installed as Rust's adapter (CodeLLDB's `codelldb` has to be on `PATH`, or set
 [debug.default_adapter]
 rust = "lldb-dap"                  # or "codelldb"
 ```
+
+## Avatars
+
+Which agent sessions may have a live [avatar](avatar.md) is `[avatar]` in `config.toml`, the
+same choice as **Settings › Avatar › Sessions may show an avatar**:
+
+```toml
+[avatar]
+enabled = true                   # false: no session has an avatar, and every avatar call is refused
+sessions = "any"                 # "any": any session that uses one; "asked": only sessions you give one
+```
+
+Both keys are optional, and without the table you get the defaults shown. With
+`enabled = false` the value of `sessions` does not matter. With `"any"` (**Whenever they want**)
+a session gets one the first time it draws, says, asks or plays a gesture, and may start another
+session with one (`workbench_start_session` with `avatar`); you can still turn it off for each
+session, and the session never turns it on again. With `sessions = "asked"` (**When I give them
+one**) a session gets an avatar when it is started with the composer's **Avatar** option or you
+give it one later (sessions that have one already keep it until you turn it off for each), and a
+session that tries to start another with one is refused. Settings
+writes `sessions = "asked"` for that choice and nothing for the default. A change applies without
+a restart.
+
+Workbench reads `[avatar]` only from `config.toml`: a repository's `.workbench.toml` and the
+machine overlays have no such table, so a repository can neither give its sessions avatars nor
+take them away. How avatars are shown and heard (show, voice, online voices, speed, volume,
+walking, reduced motion) is not in any file: each browser keeps its own choice.
 
 ## Change with an agent
 

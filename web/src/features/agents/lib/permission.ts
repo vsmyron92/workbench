@@ -1,5 +1,7 @@
 // Pure helpers for permission requests answered from Workbench (Claude Code sessions,
 // server/src/terminals/permission.rs). No React — covered by permission.test.ts.
+//
+// Contract module for the avatar feature: `pendingOf`.
 
 import type { PendingPermission, TerminalInfo } from '@/api/types'
 import { isRunning } from './sessions'

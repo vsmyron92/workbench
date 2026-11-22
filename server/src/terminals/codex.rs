@@ -12,7 +12,7 @@
 //!   `last_agent_message` and an optional `error`), `turn_aborted`, `token_count`.
 //!   `user_message` / `agent_message` are persisted in the default ("legacy") history mode.
 //!   Approval requests and errors are *not* persisted: the session watcher recognizes
-//!   Codex's dialogs on its screen instead (`providers::dialog_on_screen`).
+//!   Codex's dialogs on its screen instead (`providers::dialog_beside`).
 //! * Lines are parsed leniently: unknown or malformed ones are ignored, never guessed.
 //!
 //! Which rollout belongs to which hosted session: candidates are files created after the

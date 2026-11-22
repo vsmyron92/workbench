@@ -90,7 +90,33 @@ pub struct McpTool {
     /// Tools that change remote state (post a comment, edit a page) set this so the
     /// UI can show what agents did.
     pub mutating: bool,
+    /// Set by [`McpTool::acts`]: the tool does something for the user to see or hear and
+    /// changes no remote state. It is advertised as neither read-only nor destructive.
+    pub acts: bool,
+    /// Set by [`McpTool::quiet`]: its successful calls are not recorded in the Activity
+    /// view; its failures are.
+    pub quiet: bool,
     pub handler: ToolHandler,
+}
+
+impl McpTool {
+    /// The tool does something for the user to see or hear (it speaks, it plays a gesture)
+    /// but changes no remote state: `readOnlyHint: false`, `destructiveHint: false`. A
+    /// client that runs read-only calls side by side then runs these one after the other,
+    /// in the order the agent made them.
+    pub fn acts(mut self) -> Self {
+        self.acts = true;
+        self
+    }
+
+    /// For a tool an agent calls many times in a row with little to tell (a line said, a
+    /// gesture played): a call that succeeds stays out of the Activity ring and emits no
+    /// `mcp.call`, so it does not push everything else out of view. A call that fails is
+    /// recorded like any other.
+    pub fn quiet(mut self) -> Self {
+        self.quiet = true;
+        self
+    }
 }
 
 impl std::fmt::Debug for McpTool {
@@ -99,7 +125,8 @@ impl std::fmt::Debug for McpTool {
     }
 }
 
-/// Build a tool from an async closure.
+/// Build a tool from an async closure. The value takes the optional traits as builder
+/// calls: `tool(…).acts()`, `tool(…).quiet()`.
 pub fn tool<F, Fut>(name: &str, description: &str, input_schema: Value, mutating: bool, f: F) -> McpTool
 where
     F: Fn(AppState, McpCtx, Value) -> Fut + Send + Sync + 'static,
@@ -110,6 +137,8 @@ where
         description: description.to_string(),
         input_schema,
         mutating,
+        acts: false,
+        quiet: false,
         handler: Arc::new(move |s, c, v| Box::pin(f(s, c, v))),
     }
 }
@@ -129,6 +158,7 @@ pub fn all_tools() -> Vec<McpTool> {
     v.extend(crate::lsp::mcp_tools());
     v.extend(crate::debug::mcp_tools());
     v.extend(crate::data::mcp_tools());
+    v.extend(crate::avatar::mcp_tools());
     v.extend(crate::platform::mcp_tools());
     v
 }

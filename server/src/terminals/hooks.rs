@@ -51,6 +51,15 @@ pub struct AgentRt {
     pub screen_dialog: Option<(AgentState, AgentState)>,
     /// Checks in a row that no longer saw `screen_dialog` (a redraw can hide it briefly).
     pub dialog_misses: u8,
+    /// The texts Workbench last pasted or typed into the session, oldest first
+    /// (`Terminals::note_sent`). The screen shows each in the input box and, once it was sent, in
+    /// the history above, where it stays while the next ones go in: that echo is no dialog, though
+    /// it names one's wording; a dialog beside it is (`Terminals::screen_dialog`). Kept past their
+    /// turns, up to `PASTES_KEPT` of them, until the next start.
+    pub pasted: std::collections::VecDeque<String>,
+    /// The prompt the session was started with is still on its way (`deliver_later`) while this
+    /// can be upgraded: what `ask` pastes waits for it, so nothing goes in before it.
+    pub first_prompt: Option<std::sync::Weak<()>>,
     /// Codex and Kimi: a turn ended in this process (Codex: its rollout said so; Kimi:
     /// output flowed and stopped). `ask` without a terminal only picks such a session:
     /// right after startup a trust or login dialog may be up.

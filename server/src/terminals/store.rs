@@ -30,6 +30,10 @@ pub struct AgentLaunch {
     /// Claude Code's ultracode: Claude plans a workflow of subagents for each substantive task, at the
     /// session's effort level (`"ultracode": true` in the session's settings). Costs far more tokens.
     pub ultracode: bool,
+    /// The session was started with the Avatar option (`meta.avatar`): the avatar slice makes its
+    /// record from that. Whether it has an avatar now is that record's to say (`avatar::active`: a
+    /// device may have given it one later, or turned it off), never this.
+    pub avatar: bool,
     pub add_dirs: Vec<String>,
 }
 

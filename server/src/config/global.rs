@@ -46,6 +46,9 @@ pub struct GlobalConfig {
     /// Updates: the daily look for a newer release, and where releases come from.
     #[serde(skip_serializing_if = "is_default")]
     pub update: crate::platform::update::UpdateConfig,
+    /// Avatars of agent sessions: whether sessions may have one, and which.
+    #[serde(skip_serializing_if = "is_default")]
+    pub avatar: crate::avatar::AvatarConfig,
     /// Directories outside any project that the editor may open read-only
     /// (Claude scratchpads, `~/.claude`). Project roots are always allowed.
     pub extra_roots: Vec<String>,
@@ -450,5 +453,33 @@ mod tests {
         // Configs without providers are unchanged by them.
         let plain = toml::to_string_pretty(&GlobalConfig::default()).unwrap();
         assert!(!plain.contains("providers") && !plain.contains("default_provider"), "{plain}");
+    }
+
+    #[test]
+    fn the_avatar_section_round_trips_and_the_default_config_holds_none() {
+        use crate::avatar::{AvatarConfig, Sessions};
+        let plain = toml::to_string_pretty(&GlobalConfig::default()).unwrap();
+        assert!(!plain.contains("avatar"), "{plain}");
+        assert_eq!(GlobalConfig::default().avatar, AvatarConfig { enabled: None, sessions: None });
+
+        let cfg: GlobalConfig = toml::from_str("[avatar]\nenabled = false\nsessions = \"any\"\n").unwrap();
+        assert_eq!(cfg.avatar, AvatarConfig { enabled: Some(false), sessions: Some(Sessions::Any) });
+        let written = toml::to_string_pretty(&cfg).unwrap();
+        assert!(written.contains("[avatar]") && written.contains("enabled = false") && written.contains("sessions = \"any\""), "{written}");
+        assert_eq!(toml::from_str::<GlobalConfig>(&written).unwrap(), cfg, "{written}");
+
+        // One key alone: the other is not written, so nothing is pinned to today's default.
+        let cfg: GlobalConfig = toml::from_str("[avatar]\nsessions = \"asked\"\n").unwrap();
+        assert_eq!(cfg.avatar, AvatarConfig { enabled: None, sessions: Some(Sessions::Asked) });
+        let written = toml::to_string_pretty(&cfg).unwrap();
+        let section = toml::from_str::<toml::Value>(&written).unwrap()["avatar"].clone();
+        assert_eq!(section.as_table().unwrap().keys().collect::<Vec<_>>(), ["sessions"], "{written}");
+        assert_eq!(toml::from_str::<GlobalConfig>(&written).unwrap(), cfg, "{written}");
+        // An empty section is the default, and is not written back.
+        let cfg: GlobalConfig = toml::from_str("[avatar]\n").unwrap();
+        assert_eq!(cfg.avatar, AvatarConfig::default());
+        assert!(!toml::to_string_pretty(&cfg).unwrap().contains("avatar"));
+        // Only the two ways a session gets an avatar are a value of `sessions`.
+        assert!(toml::from_str::<GlobalConfig>("[avatar]\nsessions = \"always\"\n").is_err());
     }
 }

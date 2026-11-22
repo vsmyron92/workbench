@@ -36,6 +36,12 @@ separate installations, with your own accounts, and are not bundled with Workben
   Kimi Code can use in the project (personal, project, plugin and built-in skills), where each
   comes from, what they cost every session and which need a look, and offers optional skills
   that teach an agent to use Workbench ([agent skills](docs/agent-skills.md)).
+- **An avatar for a session.** A session with a live avatar draws its own small animated
+  character, which walks about the workspace window and meets the others, says the short version
+  of its work aloud or as captions, asks you questions you answer by click, typing or voice, and
+  shows the session's state. By default a session takes one when it wants one; you can turn any of
+  them off, or give them only to the sessions you choose. Voice and online voices are off until you
+  choose them in each browser ([avatars](docs/avatar.md)).
 - **Version control you can see.** Line staging and partial commits, changelists, the
   shelf, interactive rebase, bisect and a log graph, all without leaving the window.
 - **CI and reviews.** GitLab merge requests, pipelines, job logs and failed tests;
@@ -175,7 +181,8 @@ package.json, Python, Go, CMake, Gradle, Maven, Make, compose files, Unity, .NET
 more; you add or override them in `.workbench.toml` or a machine-local overlay. See
 [customization](docs/customization.md), [working with agents](docs/agents.md),
 [embedded debugging](docs/embedded-debugging.md), the [data viewer](docs/data-viewer.md),
-[agent skills](docs/agent-skills.md), [your phone and remote access](docs/remote-access.md) and the
+[agent skills](docs/agent-skills.md), [avatars](docs/avatar.md),
+[your phone and remote access](docs/remote-access.md) and the
 [keyboard shortcuts](docs/keyboard-shortcuts.md).
 
 Developed and tested on Linux (x86_64). The UI runs in any current browser, phones

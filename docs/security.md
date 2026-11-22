@@ -47,6 +47,65 @@ model is in [the architecture](ARCHITECTURE.md#security-model).
   the session may post samples with the session's own token; it can only write that
   session's project.
 
+## Avatars
+
+A session's [avatar](avatar.md) is drawn and worded by the session, so everything it sends is
+untrusted:
+
+- **The drawing never reaches the page as markup.** The server reads the session's SVG into a
+  closed, typed, bounded tree of shapes and stores only that; scripts, styles, images, links and
+  anything that reaches outside the drawing are refused. The browser builds the figure from that
+  tree with Workbench's own tables of elements and attributes, inside a fixed, clipped box of at
+  most 132 pixels (the box itself is not drawn), below Workbench's menus, dialogs and toasts and
+  never over the agents column; walking figures keep to the middle of the workspace window.
+  Flashing is limited (colour and opacity changes at least 0.17 seconds apart), and a figure that
+  costs too much to draw is held still.
+- **Text is one line of plain text.** A line, a question, a choice, the avatar's name and the
+  words in its drawing lose line breaks and control characters, have the session's secrets
+  masked, and are shown as text, never as Markdown or links. A refusal that quotes what the
+  session sent masks it as well, and so does the Activity view's record of a failed tool call.
+  The session's identity (its CLI, title and project) is shown by Workbench; the agent's own
+  name follows in quotation marks.
+- **An avatar belongs to one session.** Its tools act only on the calling session's own avatar
+  and take no session id; the hook routes under `/api/hooks/avatar/<session>` accept only that
+  session's own agent token, and refuse the master token.
+- **It is your choice.** By default (`[avatar] sessions = "any"` in `config.toml`) a session
+  takes an avatar with its first avatar call and may start another session with one; with
+  `sessions = "asked"` a session gets one only when you start it with the Avatar option or give
+  it one (those that have one already keep it until you turn each off), and a session that tries
+  to start another with one is refused. You can turn any session's avatar off, and the session
+  never turns it on again, nor starts another session with the `avatar` argument. That refusal
+  concerns the argument only: under `"any"` a session it starts without one may still take one
+  itself. The master token is yours: a session started with it and the Avatar option has an
+  avatar, as one started from the composer. `enabled = false` turns every avatar off. A
+  repository cannot set this.
+- **Only your devices answer.** Replying, dismissing a question, turning an avatar on or off,
+  resetting its look and telling the server that a line was heard are for signed-in devices
+  only: the master token is refused there, and so are agent tokens. Nothing a session sends
+  through its avatar is typed into a session by itself. What a reply pastes is a fixed frame, the
+  question's id and your own words, or the choice you clicked: no other text of the session's.
+  The only other text pasted is Workbench's own brief, when a session is told of its avatar (at
+  once when you give it one or turn it on, else when it is next idle).
+- **It never touches permission requests.** It shows no Allow or Deny, its choices look unlike a
+  permission request, and no reply goes to one. While a session waits for a permission or an
+  answer its avatar says and asks nothing. A reply is never typed into a session that shows a
+  dialog or is still starting, and the Enter after a paste is held back when a dialog opened
+  meanwhile (the echo of what Workbench typed there does not count as a dialog; a dialog beside
+  it does).
+- **Sound is yours to choose, per browser.** Captions always work; voice is off until you choose
+  it with a click. Online browser voices are used only after you allowed them, in a question that
+  says that what an avatar says is then sent to the browser maker's speech service. Nothing is
+  said in a tab while a dictation listens in that tab, and dictation starts only when you press
+  the microphone button; dictated text is sent only when you send it.
+- **Claude Code may call the avatar tools without asking** when it starts with its avatar on:
+  Workbench adds the five `mcp__workbench__avatar_*` rules to the settings file it starts the
+  session with, and none for a session without an avatar (they change at the session's next
+  start). CLIs without Workbench's tools run `workbench avatar`, which sends the session's token
+  only to this computer; in a dev container `curl` reads it from standard input, so it is on no
+  command line.
+- **Everything is bounded:** the size of a drawing and of every text, lines and calls a minute,
+  waits, sessions with an avatar. A refused call changes nothing and says which limit it met.
+
 ## What repositories can and cannot do
 
 A repository's own files (`.workbench.toml`, detected configuration, `devcontainer.json`)

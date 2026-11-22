@@ -967,12 +967,103 @@ const GEMINI_DIALOGS: &[(&str, bool)] = &[
 static YES_NO: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)\[y(es)?/n(o)?\]|\(y(es)?/n(o)?\)|\(y\)es/\(n\)o").unwrap());
 
+/// What `screen` alone says (`dialog_beside` with nothing sent), for tests.
+#[cfg(test)]
+pub fn dialog_on_screen(kind: ProviderKind, screen: &str) -> Option<(super::AgentState, &'static str)> {
+    dialog_beside(kind, screen, &[])
+}
+
+/// A text sent at least this long is also no dialog where a line of the screen holds it whole
+/// (`dialog_beside`): a CLI or its model that writes the text back ("Working on: …"). A shorter
+/// one ("yes", "1") could stand inside a dialog's own wording.
+const QUOTED_TEXT_MIN: usize = 16;
+
+/// A line of the screen without its frame: white space and the sides of a box (Gemini CLI draws
+/// its input in one), and then also without a prompt marker before it (`>`, `›`, `❯`).
+fn bare(line: &str) -> (&str, &str) {
+    let framed = line.trim().trim_matches(['│', '┃', '║']).trim();
+    (framed, framed.strip_prefix(['>', '›', '❯']).map_or(framed, str::trim_start))
+}
+
+/// Which of `lines` are the echo of a text in `sent`, in the input box or in the history above it.
+/// An echo is a run of lines each of which stands whole in the text, one after the other, with
+/// nothing but white space between them there (a long text wraps over several lines; blank lines
+/// count for nothing). Each text has one echo: of its runs on the screen the longest, the topmost
+/// of equal ones. A dialog drawn below the echo of a text that quotes or copies it is not taken
+/// for a second echo.
+fn echoes(lines: &[&str], sent: &[&str]) -> Vec<bool> {
+    let mut echo = vec![false; lines.len()];
+    for text in sent {
+        // The run that starts at `start`, whose first line ends at `at` in the text: its bytes and lines.
+        let run = |echo: &[bool], start: usize, mut at: usize, first: usize| {
+            let (mut bytes, mut run) = (first, vec![start]);
+            for (j, line) in lines.iter().enumerate().skip(start + 1) {
+                if echo[j] {
+                    break;
+                }
+                let (framed, prompt) = bare(line);
+                if prompt.is_empty() {
+                    continue;
+                }
+                let rest = text[at..].trim_start();
+                let Some(form) = [framed, prompt].into_iter().find(|f| rest.starts_with(f)) else { break };
+                at = text.len() - rest.len() + form.len();
+                bytes += form.len();
+                run.push(j);
+            }
+            (bytes, run)
+        };
+        let mut best: (usize, Vec<usize>) = (0, Vec::new());
+        for (start, line) in lines.iter().enumerate() {
+            let (framed, prompt) = bare(line);
+            if echo[start] || prompt.is_empty() {
+                continue;
+            }
+            // A few places of the text where the line may begin its echo: one of them is.
+            for form in if framed == prompt { vec![framed] } else { vec![framed, prompt] } {
+                for (at, _) in text.match_indices(form).take(4) {
+                    let found = run(&echo, start, at + form.len(), form.len());
+                    if found.0 > best.0 {
+                        best = found;
+                    }
+                }
+            }
+        }
+        for i in best.1 {
+            echo[i] = true;
+        }
+    }
+    echo
+}
+
 /// A dialog of the kind's CLI on `screen` (the bottom of the visible screen): the state it
 /// puts the session in (`NeedsPermission` for approvals, `NeedsInput` otherwise) and what
 /// to tell the user. Claude Code reports its dialogs through hooks: always `None`.
-pub fn dialog_on_screen(kind: ProviderKind, screen: &str) -> Option<(super::AgentState, &'static str)> {
+///
+/// `sent` are the texts Workbench pasted or typed into the session last: each stands in its input
+/// box or, once sent, in its history. Their echo (`echoes`) is no sign of a dialog, though it
+/// names one's wording (a choice named "Yes, proceed" that the user clicked), and neither is a
+/// line that holds a whole text of some length (`QUOTED_TEXT_MIN`) beside other words. Only
+/// that is left out: a dialog's wording anywhere else on the screen is a dialog, whatever the
+/// texts said. Where a dialog is told by the screen's last line alone (Aider, custom CLIs), that
+/// line is an echo only when all of it stands in a text, not when its yes/no mark alone does.
+pub fn dialog_beside(kind: ProviderKind, screen: &str, sent: &[&str]) -> Option<(super::AgentState, &'static str)> {
     use super::AgentState::{NeedsInput, NeedsPermission};
-    let known = |list: &[(&str, bool)]| list.iter().filter(|(t, _)| screen.contains(t)).map(|(_, p)| *p).reduce(|a, b| a || b);
+    let lines: Vec<&str> = screen.lines().collect();
+    let echo = echoes(&lines, sent);
+    let quoted: Vec<&str> = sent.iter().map(|t| t.trim()).filter(|t| t.len() >= QUOTED_TEXT_MIN && !t.contains('\n')).collect();
+    // The screen without the echoes, a line break where a text stood inside a line: no dialog's
+    // wording spans a line break.
+    let mut rest = String::with_capacity(screen.len());
+    for line in lines.iter().zip(&echo).filter(|(_, e)| !**e).map(|(l, _)| *l) {
+        rest.push_str(&quoted.iter().fold(line.to_string(), |l, t| l.replace(t, "\n")));
+        rest.push('\n');
+    }
+    let known = |list: &[(&str, bool)]| list.iter().filter(|(t, _)| rest.contains(t)).map(|(_, p)| *p).reduce(|a, b| a || b);
+    let asks_on_last_line = || {
+        let last = lines.iter().rposition(|l| !l.trim().is_empty())?;
+        (!echo[last] && YES_NO.is_match(lines[last])).then_some(())
+    };
     match kind {
         ProviderKind::Claude => None,
         ProviderKind::Codex => known(CODEX_DIALOGS).map(|p| {
@@ -985,14 +1076,8 @@ pub fn dialog_on_screen(kind: ProviderKind, screen: &str) -> Option<(super::Agen
             if p { (NeedsPermission, "Gemini asks for approval — answer in the terminal") } else { (NeedsInput, "Gemini asks a question — answer in the terminal") }
         }),
         // Aider's confirmations (`Run shell command? (Y)es/(N)o [Yes]:`) end its last line.
-        ProviderKind::Aider => {
-            let last = screen.lines().rev().find(|l| !l.trim().is_empty())?;
-            YES_NO.is_match(last).then_some((NeedsInput, "Aider asks for confirmation — answer in the terminal"))
-        }
-        ProviderKind::Custom => {
-            let last = screen.lines().rev().find(|l| !l.trim().is_empty())?;
-            YES_NO.is_match(last).then_some((NeedsInput, "The agent asks a yes/no question — answer in the terminal"))
-        }
+        ProviderKind::Aider => asks_on_last_line().map(|()| (NeedsInput, "Aider asks for confirmation — answer in the terminal")),
+        ProviderKind::Custom => asks_on_last_line().map(|()| (NeedsInput, "The agent asks a yes/no question — answer in the terminal")),
     }
 }
 
@@ -1368,7 +1453,9 @@ pub fn local_setup(p: &Provider, model: Option<&str>) -> Result<Option<LocalSetu
 
 // ---------------------------------------------------------------- what the UI needs
 
-/// `GET /api/agents/defaults` → `providers[]`.
+/// `GET /api/agents/defaults` → `providers[]`. What follows from the provider alone: the route
+/// adds its usage, and what Settings decide of an avatar (`supports.avatar`, `avatarVia`,
+/// `avatarViaContainer`).
 pub fn describe(p: &Provider, available: Option<&PathBuf>) -> Value {
     let k = p.kind;
     let caps = p.api.as_ref().and_then(|a| super::models::caps_for(&a.service, p.model.as_deref().unwrap_or("")));
@@ -1763,6 +1850,80 @@ mod tests {
         assert!(dialog_on_screen(ProviderKind::Custom, "Overwrite? [y/N] y\ndone\n> ").is_none());
         // Claude Code's dialogs come through hooks.
         assert!(dialog_on_screen(ProviderKind::Claude, approval).is_none());
+    }
+
+    #[test]
+    fn text_just_pasted_into_a_session_is_not_taken_for_its_dialog() {
+        use crate::terminals::AgentState::{NeedsInput, NeedsPermission};
+        // What the user clicked on an avatar reaches the session as text that names the choice.
+        let typed = "[via avatar, answer with avatar_say] Answer to question Qk3f9-2: choice 1, \"Yes, proceed\"";
+        let echoed = format!("• Done: fix the build\n› {typed}");
+        assert_eq!(dialog_on_screen(ProviderKind::Codex, &echoed).map(|d| d.0), Some(NeedsPermission), "the screen alone reads as a dialog");
+        assert!(dialog_beside(ProviderKind::Codex, &echoed, &[typed]).is_none(), "its echo is none");
+        // A dialog that opened beside it is still one: it says more than the text does.
+        let overlay = format!("{echoed}\nWould you like to run the following command?\n\n  $ rm -rf ./build\n\n› 1. Yes, just this once (y)\n  2. No, and tell Codex what to do differently (esc)\n");
+        assert_eq!(dialog_beside(ProviderKind::Codex, &overlay, &[typed]).map(|d| d.0), Some(NeedsPermission));
+        assert_eq!(dialog_beside(ProviderKind::Codex, &format!("{echoed}\nTrust this folder?"), &[typed]).map(|d| d.0), Some(NeedsInput));
+        // Text that says nothing of a dialog changes nothing, and neither does none.
+        for kind in [ProviderKind::Codex, ProviderKind::Kimi, ProviderKind::Gemini, ProviderKind::Aider, ProviderKind::Custom, ProviderKind::Claude] {
+            for screen in [overlay.as_str(), echoed.as_str(), "  ▶ 1. Approve once\n  ↑/↓ select · ↵ confirm", "Allow execution of: make?\n ● 1. Allow once", "Overwrite? [y/N]", "> "] {
+                assert_eq!(dialog_beside(kind, screen, &[]), dialog_on_screen(kind, screen), "{kind:?} {screen:?}");
+                assert_eq!(dialog_beside(kind, screen, &["fix the failing test"]), dialog_on_screen(kind, screen), "{kind:?} {screen:?}");
+            }
+        }
+        // Kimi Code and Gemini CLI: the same rule, with their own wording.
+        assert!(dialog_beside(ProviderKind::Kimi, "> pick \"Approve once\" please", &["pick \"Approve once\" please"]).is_none());
+        assert_eq!(dialog_beside(ProviderKind::Kimi, "> pick \"Approve once\" please\n  2. Approve for this session", &["pick \"Approve once\" please"]).map(|d| d.0), Some(NeedsPermission));
+        assert!(dialog_beside(ProviderKind::Gemini, ">   Allow once, then", &["Allow once, then"]).is_none());
+        assert_eq!(dialog_beside(ProviderKind::Gemini, ">   Allow once, then\n │ Waiting for user confirmation", &["Allow once, then"]).map(|d| d.0), Some(NeedsPermission));
+        // Aider and custom CLIs are told by their last line alone. A question printed before the
+        // text is still seen, also when the text itself reads like one; the text's own line is not.
+        for kind in [ProviderKind::Aider, ProviderKind::Custom] {
+            assert_eq!(dialog_beside(kind, "Overwrite? [y/N] go on with the tests", &["go on with the tests"]).map(|d| d.0), Some(NeedsInput), "{kind:?}");
+            assert!(dialog_beside(kind, "> shall I answer (y/n) here", &["shall I answer (y/n) here"]).is_none(), "{kind:?}");
+            assert_eq!(dialog_beside(kind, "Overwrite? [y/N] shall I answer (y/n) here", &["shall I answer (y/n) here"]).map(|d| d.0), Some(NeedsInput), "{kind:?}");
+            assert!(dialog_beside(kind, "> go on with the tests", &["go on with the tests"]).is_none(), "{kind:?}");
+            // The text is remembered after its turn (`AgentRt::pasted`): a confirmation that comes up
+            // later is seen all the same, though the text read like one.
+            let later = "> add a [y/N] prompt to delete\nDone: add a [y/N] prompt to delete\nRun shell command? (Y)es/(N)o [Yes]:";
+            assert_eq!(dialog_beside(kind, later, &["add a [y/N] prompt to delete"]).map(|d| d.0), Some(NeedsInput), "{kind:?}");
+            assert!(dialog_beside(kind, "> add a [y/N] prompt to delete", &["add a [y/N] prompt to delete"]).is_none(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_text_sent_before_hides_its_echo_and_no_dialog_beside_it() {
+        use crate::terminals::AgentState::{NeedsInput, NeedsPermission};
+        // Aider and custom CLIs: a text that names a yes/no mark went in turns ago, and a real
+        // confirmation ends with that mark now, below the text's echo or with the echo gone.
+        for kind in [ProviderKind::Aider, ProviderKind::Custom] {
+            for (sent, asks) in [
+                ("make the script ask [y/N] before deleting", "Delete 3 files? [y/N]"),
+                ("print (y/n) after each question", "Overwrite config.toml? (y/n) "),
+                ("answer every (Y)es/(N)o [Yes]: with yes", "Run shell command? (Y)es/(N)o [Yes]:"),
+            ] {
+                for screen in [format!("> {sent}\nDone.\n{asks}"), asks.to_string()] {
+                    assert_eq!(dialog_beside(kind, &screen, &[sent]).map(|d| d.0), Some(NeedsInput), "{kind:?} {screen:?}");
+                }
+            }
+        }
+        // Codex: the user pasted a copy of an approval dialog into a prompt. Its echo is none, and
+        // a real dialog drawn below it is one, though the copy holds every word of it.
+        let copy = "Would you like to run the following command?\n\n  $ make deploy\n\n› 1. Yes, just this once (y)\n  2. No, and tell Codex what to do differently (esc)";
+        let echo = copy.lines().enumerate().map(|(i, l)| if i == 0 { format!("› {l}") } else { format!("  {l}") }).collect::<Vec<_>>().join("\n");
+        assert!(dialog_beside(ProviderKind::Codex, &echo, &[copy]).is_none(), "{echo}");
+        let below = format!("{echo}\n• Ran make deploy\n\n{copy}\n");
+        assert_eq!(dialog_beside(ProviderKind::Codex, &below, &[copy]).map(|d| d.0), Some(NeedsPermission), "{below}");
+        // An echo wrapped over several lines is one, and so is a line that writes a whole text
+        // back beside other words; a short text cuts nothing out of a dialog's own line.
+        let typed = "[via avatar, answer with avatar_say] Answer to question Qk3f9-2: choice 1, \"Yes, proceed\"";
+        let wrapped = "› [via avatar, answer with avatar_say] Answer to\n  question Qk3f9-2: choice 1, \"Yes,\n  proceed\"";
+        assert!(dialog_beside(ProviderKind::Codex, wrapped, &[typed]).is_none(), "{wrapped}");
+        assert!(dialog_beside(ProviderKind::Codex, &format!("{wrapped}\n• Done: {typed}\n› "), &[typed]).is_none());
+        let real = "› 1. Yes, proceed\n  2. No, and tell Codex what to do differently (esc)";
+        for sent in [&["Yes, proceed"][..], &["Yes, proceed", "yes"], &[typed, "fix the build"]] {
+            assert_eq!(dialog_beside(ProviderKind::Codex, real, sent).map(|d| d.0), Some(NeedsPermission), "{sent:?}");
+        }
     }
 
     #[test]

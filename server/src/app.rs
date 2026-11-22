@@ -21,7 +21,7 @@ use crate::error::ApiError;
 use crate::events::EventBus;
 use crate::projects::{Project, ProjectRegistry};
 use crate::secrets::{Secret, SecretStore};
-use crate::{apps, atlassian, auth, data, db, debug, devcontainer, events, files, git, github, gitlab, lsp, platform, projects, skills, spa, terminals, util, workspace};
+use crate::{apps, atlassian, auth, avatar, data, db, debug, devcontainer, events, files, git, github, gitlab, lsp, platform, projects, skills, spa, terminals, util, workspace};
 
 #[derive(Clone)]
 pub struct AppState(Arc<Inner>);
@@ -63,6 +63,7 @@ pub struct Inner {
     pub db: db::DbState,
     pub data: data::DataState,
     pub skills: skills::SkillsState,
+    pub avatar: avatar::AvatarState,
 }
 
 impl AppState {
@@ -99,6 +100,7 @@ impl AppState {
             db: db::DbState::default(),
             data: data::DataState::default(),
             skills: skills::SkillsState::default(),
+            avatar: avatar::AvatarState::default(),
         }));
         state.projects.reload(&state).await;
         Ok(state)
@@ -215,6 +217,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(db::router())
         .merge(data::router())
         .merge(skills::router())
+        .merge(avatar::router())
         .merge(platform::router());
 
     let router = Router::new()
@@ -233,6 +236,8 @@ pub fn build_router(state: AppState) -> Router {
 /// Start background work (watchers, pollers, session restore).
 pub async fn start_background(state: &AppState) {
     terminals::start(state).await;
+    // Right after the terminals it follows: it reads its records against them and then listens.
+    avatar::start(state).await;
     files::start(state).await;
     git::start(state).await;
     gitlab::start(state).await;
@@ -256,6 +261,8 @@ pub async fn shutdown(state: &AppState) {
     devcontainer::shutdown(state).await;
     db::shutdown(state).await;
     data::shutdown(state).await;
+    // Before the terminals stop: calls that wait for the user's answer return.
+    avatar::shutdown(state).await;
     terminals::shutdown(state).await;
     let _ = std::fs::remove_file(state.paths.data_dir.join("runtime.json"));
 }

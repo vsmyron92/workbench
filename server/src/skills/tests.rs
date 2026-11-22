@@ -996,7 +996,7 @@ const NOT_TOOLS: [&str; 2] = ["gitlab_api", "gitlab_shop"];
 /// Names that look like Workbench tools: a domain prefix, an underscore, a word, anywhere in the text. Code counts
 /// too: a misspelt name in an example call is as wrong as one in a sentence.
 fn tool_like(text: &str) -> Vec<String> {
-    const PREFIXES: [&str; 13] = ["workbench_", "workspace_", "data_", "debug_", "gitlab_", "github_", "run_", "env_", "code_", "files_", "confluence_", "jira_", "devcontainer_"];
+    const PREFIXES: [&str; 14] = ["workbench_", "workspace_", "data_", "debug_", "gitlab_", "github_", "run_", "env_", "code_", "files_", "confluence_", "jira_", "devcontainer_", "avatar_"];
     text.split(|c: char| !(c.is_ascii_lowercase() || c == '_'))
         // Claude Code's own spelling of a tool: `mcp__workbench__<name>`.
         .map(|w| w.strip_prefix("mcp__workbench__").unwrap_or(w))
@@ -1063,6 +1063,74 @@ fn every_toml_example_in_the_bundled_skills_parses_as_the_file_it_belongs_to() {
         }
     }
     assert!(seen > 0, "the project-setup skill carries TOML examples");
+}
+
+/// The ```json fences of a Markdown text.
+fn json_fences(text: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut cur: Option<String> = None;
+    for line in text.lines() {
+        match (&mut cur, line.trim_end()) {
+            (None, "```json") => cur = Some(String::new()),
+            (Some(buf), "```") => out.push(std::mem::take(buf)),
+            (Some(buf), l) => {
+                buf.push_str(l);
+                buf.push('\n');
+            }
+            _ => {}
+        }
+        if line.trim_end() == "```" {
+            cur = None;
+        }
+    }
+    out
+}
+
+/// The keys only a design call has: a JSON example that holds one of them is a design call (the
+/// arguments of say, ask, act and status have none of them).
+const DESIGN_ONLY: [&str; 8] = ["svg", "pivots", "roles", "animations", "states", "mouth", "gaze", "keep"];
+
+/// A design the avatar skill shows is one a session may send as it stands: the validator accepts it
+/// without a refusal and without a single warning, as it does the guide's own example. A call
+/// without svg changes a design, as a later avatar_design call does: it is merged into the last
+/// complete design before it in the same file or, where none comes before it, into the one it
+/// speaks of below (designing.md shows walk and greet for the dragon of its example), and the
+/// merged design passes the same way. Every JSON example of the skill is strict JSON.
+#[test]
+fn every_design_in_the_avatar_skill_is_accepted_without_a_warning() {
+    let skill = catalog::find("workbench-avatar").expect("skills/workbench-avatar is bundled");
+    let (mut designs, mut changes) = (0, 0);
+    for f in &skill.files {
+        let mut calls = vec![];
+        for fence in json_fences(std::str::from_utf8(&f.data).unwrap()) {
+            let value: Value = serde_json::from_str(&fence).unwrap_or_else(|e| panic!("{}: this JSON example does not parse: {e}\n{fence}", f.path));
+            if value.as_object().is_some_and(|o| DESIGN_ONLY.iter().any(|key| o.contains_key(*key))) {
+                calls.push(value);
+            }
+        }
+        let complete = |call: &Value| call.as_object().is_some_and(|o| o.contains_key("svg"));
+        // Each complete design of the file as it is stored, with its place among the calls.
+        let mut stored = vec![];
+        for (at, call) in calls.iter().enumerate().filter(|(_, call)| complete(*call)) {
+            designs += 1;
+            stored.push((at, design_accepted(&f.path, None, call).design));
+        }
+        for (at, call) in calls.iter().enumerate().filter(|(_, call)| !complete(*call)) {
+            changes += 1;
+            let (_, base) = stored.iter().rev().find(|(before, _)| *before < at).or_else(|| stored.first()).unwrap_or_else(|| panic!("{}: a design call without svg changes a design, and the file shows none:\n{call}", f.path));
+            design_accepted(&f.path, Some(base), call);
+        }
+    }
+    assert!(designs > 0, "the avatar skill carries a complete design");
+    assert!(changes > 0, "the avatar skill shows a call without svg (walk and greet)");
+}
+
+/// The design call `call` of the skill's file `path`, applied to `current` as avatar_design applies
+/// it: accepted, and without a warning.
+fn design_accepted(path: &str, current: Option<&crate::avatar::look::Design>, call: &Value) -> crate::avatar::look::Applied {
+    let applied = crate::avatar::look::apply(current, call).unwrap_or_else(|problems| panic!("{path}: the design is refused:\n{}\n{call}", crate::avatar::look::message(&problems)));
+    assert!(applied.warnings.is_empty(), "{path}: the design has warnings:\n{}\n{call}", applied.warnings.join("\n"));
+    applied
 }
 
 #[test]

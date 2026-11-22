@@ -6,7 +6,7 @@
 //! and resume.
 //!
 //! CONTRACT — other slices call these; keep the signatures:
-//! `Terminals::{spawn, spawn_redacted, respawn_redacted, info, list, kill, write, send_text, subscribe_output, exit_watch, screen_text}`,
+//! `Terminals::{spawn, spawn_redacted, respawn_redacted, info, list, kill, write, send_text, subscribe_output, exit_watch, screen_text, redact_text}`,
 //! the `SpawnSpec`/`TerminalInfo`/`AgentInfo`/`ExitInfo` types, `start`, `shutdown`,
 //! `router`, `mcp_tools`, `cli_statusline`. Routes: `/api/terminals/**`, `/api/agents/**`,
 //! `/api/hooks/**` (see docs/ARCHITECTURE.md).
@@ -81,6 +81,7 @@ use crate::events::EventBus;
 use crate::secrets::Secret;
 use crate::util;
 
+pub use agent::PASTED_NOT_SENT;
 pub use permission::{PendingPermission, wait_secs as permission_wait_secs};
 pub use providers::ProviderKind;
 pub use routes::router;
@@ -708,6 +709,16 @@ impl Terminals {
         Some(text)
     }
 
+    /// `text` of a session with its secrets masked (••••••), as permission details are: what
+    /// looks like a credential (`permission::redact_patterns`), then the secret values the
+    /// session was started with. For text another slice shows or speaks on the session's
+    /// behalf. The answer depends on `text` alone; an unknown terminal's text comes back unchanged.
+    pub fn redact_text(&self, terminal_id: &str, text: &str) -> String {
+        let Some(entry) = self.get(terminal_id) else { return text.to_string() };
+        let secrets = entry.redact.lock().clone();
+        crate::secrets::redact(&permission::redact_patterns(text), &secrets)
+    }
+
     // ------------------------------------------------------------ registry helpers
 
     pub(crate) fn get(&self, id: &str) -> Option<Arc<Entry>> {
@@ -1259,6 +1270,7 @@ impl Terminals {
         let _g = entry.input_lock.lock().await;
         let pty = entry.running_pty().ok_or_else(|| ApiError::conflict("the terminal is not running"))?;
         entry.look_for_permission_dialog();
+        self.note_sent(&entry, text);
         let payload = if paste {
             input::paste_payload(text, entry.screen.bracketed_paste())
         } else {
@@ -1751,6 +1763,37 @@ pub(crate) fn test_agent() -> AgentInfo {
 }
 
 #[cfg(test)]
+impl Terminals {
+    /// A stand-in agent session for other slices' tests: a record with status running, an idle
+    /// Claude Code agent and no process (nothing is launched or announced for it).
+    pub(crate) fn insert_test_agent(&self, project_id: Option<&str>, meta: Value) -> TerminalInfo {
+        let info = TerminalInfo {
+            id: new_id(),
+            kind: TerminalKind::Agent,
+            title: "test agent".into(),
+            project_id: project_id.map(str::to_string),
+            cwd: std::env::temp_dir().display().to_string(),
+            argv: vec![],
+            status: TerminalStatus::Running,
+            exit: None,
+            created_at: util::now_ms(),
+            last_output_at: 0,
+            cols: DEFAULT_COLS,
+            rows: DEFAULT_ROWS,
+            open: true,
+            pinned: false,
+            color: None,
+            order: self.next_order(),
+            agent: Some(AgentInfo { state: AgentState::Idle, ..test_agent() }),
+            meta: if meta.is_null() { json!({}) } else { meta },
+            lingering: 0,
+        };
+        let rec = store::Record { info, launch: None, title_locked: true, transcript_path: None, was_running: false, aider_history: None };
+        self.insert(rec, AGENT_SCROLLBACK).info()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1825,6 +1868,27 @@ mod tests {
         assert_ne!(g(Command, json!({ "env": "prod", "action": "deploy" })), g(Command, json!({ "env": "staging", "action": "deploy" })));
         assert_eq!(g(Shell, json!({})), None);
         assert_eq!(g(Agent, json!({})), None);
+    }
+
+    #[test]
+    fn a_sessions_text_is_masked_like_its_permission_details() {
+        let t = Terminals::default();
+        let info = t.insert_test_agent(None, json!({}));
+        // The stand-in is a running agent session without a process.
+        assert_eq!((info.kind, info.status, info.agent.as_ref().map(|a| a.state)), (TerminalKind::Agent, TerminalStatus::Running, Some(AgentState::Idle)));
+        assert!(valid_id(&info.id) && t.get(&info.id).unwrap().running_pty().is_none());
+        t.get(&info.id).unwrap().redact.lock().push(Secret::from_value("hunter2hunter2".into()));
+
+        // The secret values the session was started with, and what looks like a credential.
+        assert_eq!(t.redact_text(&info.id, "the key is hunter2hunter2, twice hunter2hunter2"), "the key is ••••••, twice ••••••");
+        assert_eq!(t.redact_text(&info.id, "run it with --token abcdef123456 now"), "run it with --token •••••• now");
+        assert_eq!(t.redact_text(&info.id, "PASSWORD=opensesame and hunter2hunter2"), "PASSWORD=•••••• and ••••••");
+        assert_eq!(t.redact_text(&info.id, "nothing to hide here"), "nothing to hide here");
+        // It answers from the text alone, and what is masked stays as it is when it passes again.
+        let once = t.redact_text(&info.id, "PASSWORD=opensesame and hunter2hunter2");
+        assert_eq!(t.redact_text(&info.id, &once), once);
+        // An unknown terminal: unchanged.
+        assert_eq!(t.redact_text("nope", "--token abcdef123456 hunter2hunter2"), "--token abcdef123456 hunter2hunter2");
     }
 
     #[test]

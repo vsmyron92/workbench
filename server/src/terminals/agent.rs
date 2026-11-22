@@ -3,6 +3,11 @@
 //! transcript tail, Codex's rollout tail, the output-activity heuristic for Kimi and
 //! custom CLIs), `ask`, Remote Control servers, restore on start, and the history /
 //! live-session listings.
+//!
+//! A session with an avatar (the avatar slice) is told of it here: the brief joins the prompt
+//! its CLI is started with (`brief_at_start`, `with_brief`; on a restart `brief_at_restart`,
+//! `told_again`), Claude Code is allowed the avatar tools unasked (`launch_settings`), and no
+//! title or History row shows a word of the brief (`own_prompt`).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -11,6 +16,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use bytes::Bytes;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -29,6 +35,7 @@ use super::{
     gemini, kimi, new_id, pty, resolve_cwd, store,
 };
 use crate::app::AppState;
+use crate::avatar::BriefVariant;
 use crate::config::global::AgentsConfig;
 use crate::error::ApiError;
 use crate::projects::Project;
@@ -78,6 +85,10 @@ pub struct AgentRequest {
     /// Claude Code's ultracode (see `AgentLaunch::ultracode`). A request only: never a default, and never
     /// asked for by a session that starts another (`workbench_start_session` has no such option).
     pub ultracode: Option<bool>,
+    /// The session gets a live avatar (see `AgentLaunch::avatar`). A request only: never a default, and
+    /// never asked for by `ask`. A session that starts another may ask for it where sessions may take
+    /// one themselves (`workbench_start_session`). Refused while avatars are switched off.
+    pub avatar: Option<bool>,
     pub resume: Option<String>,
     pub fork: bool,
     pub add_dirs: Vec<String>,
@@ -93,6 +104,10 @@ pub struct AgentRequest {
     /// start is then held to `Terminals::check_spawn`. Not part of the REST body.
     #[serde(skip)]
     pub spawned_by: Option<String>,
+    /// The terminal whose session this one continues on another account (`switch_account`). It
+    /// becomes `meta.movedFrom`, so that terminal's avatar moves along. Not part of the REST body.
+    #[serde(skip)]
+    pub moved_from: Option<String>,
 }
 
 /// How many sessions deep agents may start each other: a session you started (depth 0)
@@ -234,9 +249,17 @@ pub fn session_settings(hook_url: &str, token: &str, helper: Option<&str>, statu
 
 /// What a session's launch options add to its settings file: ultracode turns on with the key, at whatever
 /// effort level the session runs at (Claude Code 2.1.284 and later; before that it ran the session at `xhigh`).
-pub fn launch_settings(settings: &mut Value, l: &AgentLaunch) {
+///
+/// `avatar`: the session drives an avatar. Its five tools are allowed without a permission request
+/// (`permissions.allow`, one rule per tool: `avatar::PREALLOWED`), so a line it says or a question it asks
+/// never stops it for an approval. Rules from every settings file add up: the user's own allow and deny
+/// lists still apply, and a session without an avatar gets no `permissions` key at all.
+pub fn launch_settings(settings: &mut Value, l: &AgentLaunch, avatar: bool) {
     if l.ultracode {
         settings["ultracode"] = Value::Bool(true);
+    }
+    if avatar {
+        settings["permissions"] = json!({ "allow": crate::avatar::PREALLOWED });
     }
 }
 
@@ -440,6 +463,8 @@ pub fn resolve_launch(provider: &Provider, cfg: &AgentsConfig, project: &Project
         remote_control: claude && provider.local.is_none() && provider.api.is_none() && req.remote_control.unwrap_or(pa.remote_control || cfg.remote_control),
         restricted,
         ultracode,
+        // Every CLI can have an avatar (with Workbench's tools, or with a command it runs): no kind refuses it.
+        avatar: req.avatar == Some(true),
         add_dirs,
     })
 }
@@ -506,6 +531,19 @@ pub fn input_refusal(s: AgentState) -> Option<&'static str> {
 
 /// Rows at the bottom of the visible screen where a CLI's dialogs are looked for.
 const DIALOG_ROWS: usize = 16;
+/// How many of the texts Workbench put into a session are remembered as echoes on its screen
+/// (`AgentRt::pasted`): more than these rows show, each with the answer below it.
+const PASTES_KEPT: usize = 8;
+/// What they may hold together; the newest is kept whole whatever its size.
+const PASTED_BYTES: usize = 256 * 1024;
+/// How long a text `ask` pastes into a session waits for the session's first prompt to go in
+/// (`deliver_later`, which pastes it a moment after the session is up).
+const FIRST_PROMPT_WAIT: Duration = Duration::from_secs(10);
+/// The refusal of a text whose Enter was withheld because a dialog opened while it was pasted
+/// (`send_prompt`): unlike every other refusal of `ask`, the text went in and stands in the
+/// session's input box. The avatar slice tells it apart, so that a brief left there is not pasted
+/// a second time.
+pub const PASTED_NOT_SENT: &str = "a dialog opened while your text was being pasted: it is in the session's input box, not sent";
 /// How long an initial prompt waits for a session to take input (a trust prompt the user
 /// has not answered yet, say) before it is dropped.
 const DELIVER_MAX: Duration = Duration::from_secs(600);
@@ -559,14 +597,173 @@ fn is_batch(command: &Path) -> bool {
     util::os::exe::classify(command.to_path_buf()).kind == util::os::exe::Kind::Batch
 }
 
-/// An initial prompt goes into argv unless it is huge or must not be submitted, or the
+/// Whether an initial prompt goes into argv: unless it is huge or must not be submitted, or the
 /// command is a batch file (`batch`) and cmd.exe could read the prompt as commands of its
-/// own (`util::os::exe::batch_args_safe`): it is pasted then.
+/// own (`util::os::exe::batch_args_safe`).
+fn fits_argv(prompt: &str, submit: bool, batch: bool) -> bool {
+    prompt.len() <= MAX_ARGV_PROMPT && submit && (!batch || util::os::exe::batch_args_safe(&[prompt]))
+}
+
+/// An initial prompt goes into argv when it fits there (`fits_argv`); it is pasted otherwise.
 fn split_prompt(prompt: Option<String>, submit: bool, batch: bool) -> (Option<String>, Option<String>) {
     match prompt {
-        Some(p) if p.len() <= MAX_ARGV_PROMPT && submit && (!batch || util::os::exe::batch_args_safe(&[&p])) => (Some(p), None),
+        Some(p) if fits_argv(&p, submit, batch) => (Some(p), None),
         Some(p) => (None, Some(p)),
         None => (None, None),
+    }
+}
+
+// ---------------------------------------------------------------- the session's avatar
+
+/// Which brief a session that starts now is given (`None`: none), and with it whether Claude
+/// Code may call the avatar tools without asking. `asked`: it is started with the Avatar option.
+/// `carried`: it continues the session of another terminal, which has an avatar
+/// (`avatar::carried`). After a session was created its avatar's record is the truth, not the
+/// option: a session that moves keeps the look it drew, draws one when it has none yet, and is
+/// told nothing when the user turned that avatar off.
+fn brief_at_start(asked: bool, carried: Option<crate::avatar::Carried>) -> Option<BriefVariant> {
+    match carried {
+        Some(c) if !c.on => None,
+        Some(c) if c.designed => Some(BriefVariant::Moved),
+        Some(_) => Some(BriefVariant::First),
+        None => asked.then_some(BriefVariant::First),
+    }
+}
+
+/// The avatar brief for a session of `kind` (`avatar::session_brief`): how it drives its avatar
+/// follows from its CLI and from where it runs (`avatar::via_for`), and the commands it is shown
+/// are written for the host's shell (a dev container's is POSIX whatever the host is).
+fn avatar_brief(variant: BriefVariant, kind: ProviderKind, in_container: bool, whole: bool) -> String {
+    crate::avatar::session_brief(&crate::avatar::Brief {
+        variant,
+        via: crate::avatar::via_for(kind, in_container),
+        in_container,
+        shell: util::os::shell::Dialect::HOST,
+        whole,
+    })
+}
+
+/// Whether a new session's first prompt travels in its command line: Claude Code's, and Codex's
+/// on the host, when it fits there (`fits_argv`; a dev container's command is never a batch
+/// file). Every other session has it pasted once its CLI is up (`launch_agent`).
+fn prompt_in_argv(kind: ProviderKind, in_container: bool, batch: bool, prompt: &str) -> bool {
+    let takes = kind.prompt_in_argv() && !(kind == ProviderKind::Codex && in_container);
+    takes && fits_argv(prompt, true, batch && !in_container)
+}
+
+/// A session's first prompt with its avatar brief (`brief(whole)`). Without a prompt of the
+/// user's the brief is the whole prompt: it then says what to do now and comes wrapped in
+/// `avatar::BRIEF_TAGS`. After the user's prompt it stands below a blank line where the prompt
+/// travels in the command line (`in_argv` says whether that text does), and one space behind it
+/// where the prompt is pasted: a line break in a paste submits what stands before it in a CLI
+/// without bracketed paste.
+fn with_brief(prompt: Option<String>, brief: impl Fn(bool) -> String, in_argv: impl Fn(&str) -> bool) -> String {
+    let Some(prompt) = prompt else { return brief(true) };
+    let brief = brief(false);
+    let below = format!("{prompt}\n\n{brief}");
+    if in_argv(&below) { below } else { format!("{prompt} {brief}") }
+}
+
+/// Whether a prompt is a command of the session's CLI (`/add src/main.py` for Aider, `/fix-issue
+/// 123` for Claude Code) or a line for its shell (`!make test`: Aider's alias of `/run`, Gemini
+/// CLI's and Claude Code's shell mode): after leading white space it starts with `/` or `!`. The
+/// CLI takes all of such a prompt for the command and its arguments. Asked of every CLI alike: a
+/// prompt taken for a command that is none only has its brief come at the session's first idle.
+fn is_cli_command(prompt: &str) -> bool {
+    prompt.trim_start().starts_with(['/', '!'])
+}
+
+/// The first prompt a new session is started with, for the brief of its avatar (`brief`, from
+/// `brief_at_start`), and whether the brief waits (`true`). It joins the user's prompt
+/// (`with_brief`) unless that prompt is a command of the CLI (`is_cli_command`), whose arguments
+/// it would become: the session then starts with the user's prompt alone, and the avatar slice
+/// tells it of its avatar once it is idle (`"avatarBrief": "later"` in the terminal's meta).
+fn first_prompt(prompt: Option<String>, brief: Option<BriefVariant>, kind: ProviderKind, in_container: bool, batch: bool) -> (Option<String>, bool) {
+    match brief {
+        Some(_) if prompt.as_deref().is_some_and(is_cli_command) => (prompt, true),
+        Some(variant) => (Some(with_brief(prompt, |whole| avatar_brief(variant, kind, in_container, whole), |text| prompt_in_argv(kind, in_container, batch, text))), false),
+        None => (prompt, false),
+    }
+}
+
+/// Which brief a conversation that starts anew on a restart is given (`None`: none, and nothing
+/// is allowed unasked). `own`: the avatar of the session's own terminal as it is now, when it is
+/// on (`avatar::active`). The session is told that it still has it and to keep its look; one
+/// that never drew a look is told of the avatar as at its start, and draws one.
+fn brief_at_restart(own: Option<crate::avatar::Carried>) -> Option<BriefVariant> {
+    let own = own.filter(|a| a.on)?;
+    Some(if own.designed { BriefVariant::Again } else { BriefVariant::First })
+}
+
+/// The first prompt of a restart whose conversation is a new one, for a session whose avatar is
+/// on (`again`, from `brief_at_restart`): that conversation has not heard of the avatar, so the
+/// brief is its whole prompt. A CLI without conversations to resume starts a new one at every
+/// restart; one that resumes by id does when it finds nothing to resume (the session was closed
+/// before its first turn).
+fn told_again(prompt: Option<String>, again: Option<BriefVariant>, kind: ProviderKind, in_container: bool) -> Option<String> {
+    match (prompt, again) {
+        (None, Some(variant)) => Some(avatar_brief(variant, kind, in_container, true)),
+        (prompt, _) => prompt,
+    }
+}
+
+/// How the briefs begin after `avatar::BRIEF_MARK`, one opening per variant (`avatar::session_brief`:
+/// `First`, `Given`, `Moved`, `Again`). The mark is Workbench's only where one of these follows it.
+const BRIEF_OPENINGS: [&str; 4] = [
+    "This session has a live avatar",
+    "The user just gave this session a live avatar",
+    "This session continues with the avatar it already had",
+    "This session still has its live avatar",
+];
+
+/// What of a session's prompt is the user's own, for a title or a History row: the avatar brief
+/// Workbench put after it, or gave the session as its whole prompt, is left out (`None`: the
+/// brief was all of it). `text` may be the prompt cut short, as History reads it: a brief cut
+/// off within its first words goes as well. The mark counts only where Workbench puts it: at the
+/// start, after white space or after the opening tag, followed by how a brief begins
+/// (`BRIEF_OPENINGS`) or by the start of that cut off with '…'. A prompt that quotes the mark
+/// anywhere else keeps every word.
+fn own_prompt(text: &str) -> Option<&str> {
+    let mark = crate::avatar::BRIEF_MARK;
+    let placed = |before: &str| before.is_empty() || before.ends_with(char::is_whitespace) || before.ends_with(crate::avatar::BRIEF_TAGS.0);
+    let opens = |after: &str| {
+        let begins = after.strip_prefix(' ').is_some_and(|a| BRIEF_OPENINGS.iter().any(|o| a.starts_with(o)));
+        let cut = after.strip_suffix('…').is_some_and(|a| a.is_empty() || a.strip_prefix(' ').is_some_and(|a| BRIEF_OPENINGS.iter().any(|o| o.starts_with(a))));
+        begins || cut
+    };
+    let own = match text.match_indices(mark).map(|(at, _)| at).find(|&at| placed(&text[..at]) && opens(&text[at + mark.len()..])) {
+        Some(at) => &text[..at],
+        None => {
+            // "fix the build [Workbench av…": the cut fell inside the mark.
+            let cut = text.strip_suffix('…').and_then(|t| (1..mark.len()).rev().find_map(|n| t.strip_suffix(&mark[..n])));
+            match cut.filter(|own| placed(own)) {
+                Some(own) => own,
+                None => return Some(text),
+            }
+        }
+    };
+    let own = own.trim_end();
+    let own = own.strip_suffix(crate::avatar::BRIEF_TAGS.0).unwrap_or(own).trim_end();
+    (!own.is_empty()).then_some(own)
+}
+
+/// Asks the avatar slice about a session (`avatar::active`, `avatar::carried`) on a blocking
+/// thread: on first use it reads the stored avatars from disk. It asks this slice for terminal
+/// infos meanwhile, so no terminal's record is locked by the caller. `None`: no answer.
+async fn ask_avatars<T: Send + 'static>(state: &AppState, ask: impl FnOnce(&AppState) -> T + Send + 'static) -> Option<T> {
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || ask(&state)).await.ok()
+}
+
+/// A start begins a conversation (`new`, as the launch found): when it is a restart's,
+/// the avatar slice learns whether that conversation was told of the avatar (`told`), so that one
+/// that was not is told when the avatar is next on and the session idle, and one that was is not
+/// told again (`avatar::conversation_started`). A first start is the avatar slice's to see
+/// (`terminal.created`). Asked before the process starts, with no record locked.
+async fn new_conversation(state: &AppState, entry: &Entry, restarted: bool, new: bool, told: bool) {
+    if restarted && new {
+        let id = entry.id.clone();
+        ask_avatars(state, move |s| crate::avatar::conversation_started(s, &id, told)).await;
     }
 }
 
@@ -602,6 +799,15 @@ struct Prepared {
     local: Option<providers::LocalSetup>,
     /// The provider uses a hosted API with a key (`[agents.providers.<name>.api]`).
     api: Option<providers::ApiSetup>,
+    /// The session drives an avatar: it starts with one, or its avatar is on (`avatar::active`).
+    /// Claude Code may then call the avatar tools without asking (`launch_settings`).
+    avatar: bool,
+    /// A restart of a session whose avatar is on: when the conversation it starts is a new one,
+    /// that conversation is told of the avatar with this brief (`told_again`).
+    again: Option<BriefVariant>,
+    /// The terminal's conversation continues (a restart or a restore): when the one this start
+    /// begins is new, the avatar slice learns whether it was told (`new_conversation`).
+    restarted: bool,
 }
 
 /// A Codex session's rollout, as the watcher follows it.
@@ -644,6 +850,10 @@ impl Terminals {
         let cwd = resolve_cwd(&project.root, req.cwd.as_deref())?;
         let cfg = state.config.read().agents.clone();
         let mut provider = find_provider(&cfg, req.provider.as_deref())?;
+        // Settings can switch avatars off: asking for one then is said, not ignored.
+        if req.avatar == Some(true) && !crate::avatar::enabled(state) {
+            return Err(ApiError::bad_request(crate::avatar::session::SWITCHED_OFF));
+        }
         // A new session runs on the first account of its fallback list that is not at its
         // usage limit; a resumed one stays where its conversation is.
         let mut switched = None;
@@ -687,15 +897,12 @@ impl Terminals {
             self.check_spawn(state, parent, &project.id, &provider, &launch)?;
         }
         // In the dev container, the CLI must exist there; on the host, here.
-        let container = if req.in_container {
+        let (container, command) = if req.in_container {
             crate::devcontainer::require_supported()?;
             let (t, _) = crate::devcontainer::agent_command(state, &project.id, &provider.command).await.map_err(ApiError::conflict)?;
-            Some(t)
+            (Some(t), None)
         } else {
-            if resolve_command(&provider.command).is_none() {
-                return Err(missing_command(&provider));
-            }
-            None
+            (None, Some(resolve_command(&provider.command).ok_or_else(|| missing_command(&provider))?))
         };
         let cont = match (&req.resume, req.fork) {
             (Some(r), true) => Continue::Fork(r.clone()),
@@ -719,6 +926,20 @@ impl Terminals {
                 provider.label.clone()
             }
         });
+        // The session's avatar. One that moves here from another terminal follows what that terminal's
+        // avatar is now (`brief_at_start`); asked before this terminal exists, with no record locked.
+        let carried = match req.moved_from.clone() {
+            Some(old) => ask_avatars(state, move |s| crate::avatar::carried(s, &old)).await.flatten(),
+            None => None,
+        };
+        let brief = brief_at_start(launch.avatar, carried);
+        // The brief joins the prompt the CLI is started with and nothing else: the title above, the
+        // launch's name and what History shows of the session are the user's own words (`own_prompt`).
+        // A command of the CLI goes in alone, and the session is told later (`first_prompt`). What
+        // Claude Code may call unasked follows from `brief` all the same.
+        let in_container = container.is_some();
+        let batch = command.as_deref().is_some_and(is_batch);
+        let (first_prompt, brief_later) = first_prompt(prompt, brief, kind, in_container, batch);
         let (cols, rows) = pty::clamp_size(req.cols.unwrap_or(120), req.rows.unwrap_or(32));
         let now = util::now_ms();
         let id = new_id();
@@ -782,6 +1003,19 @@ impl Terminals {
                 if launch.ultracode {
                     m["ultracode"] = json!(true);
                 }
+                // Started with the Avatar option: the avatar slice makes the session's record from this
+                // (`terminal.created` carries it), and the tab can say so.
+                if launch.avatar {
+                    m["avatar"] = json!(true);
+                }
+                // Its first prompt went in without the brief: the avatar slice tells it once it is idle.
+                if brief_later {
+                    m["avatarBrief"] = json!("later");
+                }
+                // The terminal whose session this one continues: its avatar moves along.
+                if let Some(old) = &req.moved_from {
+                    m["movedFrom"] = json!(old);
+                }
                 m
             },
             lingering: 0,
@@ -800,7 +1034,7 @@ impl Terminals {
             self.announce_failover(&entry, &provider, s);
         }
         let _l = entry.lifecycle.lock().await;
-        self.launch_agent(state, &entry, cont, prompt, true, false).await?;
+        self.launch_agent(state, &entry, cont, first_prompt, true, false, brief).await?;
         Ok(entry.info())
     }
 
@@ -889,10 +1123,18 @@ impl Terminals {
             r.info.agent.as_ref().map(|a| (a.provider, a.session_id.clone())).unwrap_or_default()
         };
         let cont = if kind.resumes() && providers::valid_session_id(kind, &session_id) { Continue::Resume(session_id) } else { Continue::New };
-        self.launch_agent(state, entry, cont, None, true, true).await
+        // Whether the session has an avatar now is its record's to say, not the option it was started
+        // with: a device may have given it one since, or turned it off. With one, Claude Code may call
+        // its tools without asking as before, and a conversation that starts anew is told of it
+        // (`brief_at_restart`; `told_again`, where the launch knows whether the conversation is new).
+        let id = entry.id.clone();
+        let own = ask_avatars(state, move |s| crate::avatar::active(s, &id).then(|| crate::avatar::carried(s, &id)).flatten()).await.flatten();
+        self.launch_agent(state, entry, cont, None, true, true, brief_at_restart(own)).await
     }
 
-    /// `restarted`: the terminal's conversation continues (a restart or a restore).
+    /// `restarted`: the terminal's conversation continues (a restart or a restore). `avatar`: the
+    /// session drives an avatar, and this is the brief of this start (`Prepared::avatar`, `Prepared::again`).
+    #[allow(clippy::too_many_arguments)]
     async fn launch_agent(
         &self,
         state: &AppState,
@@ -901,9 +1143,10 @@ impl Terminals {
         prompt: Option<String>,
         submit_prompt: bool,
         restarted: bool,
+        avatar: Option<BriefVariant>,
     ) -> Result<(), ApiError> {
         let launched = async {
-            let prep = self.prepare_launch(state, entry).await?;
+            let prep = self.prepare_launch(state, entry, avatar, restarted).await?;
             match prep.provider.kind {
                 ProviderKind::Claude => self.launch_claude(state, entry, prep, cont, prompt, submit_prompt).await,
                 // Codex's rollout lives in the container: in one, it is followed like a
@@ -925,7 +1168,7 @@ impl Terminals {
     }
 
     /// The provider, command, environment, agent token and directories of a launch.
-    async fn prepare_launch(&self, state: &AppState, entry: &Arc<Entry>) -> Result<Prepared, ApiError> {
+    async fn prepare_launch(&self, state: &AppState, entry: &Arc<Entry>, avatar: Option<BriefVariant>, restarted: bool) -> Result<Prepared, ApiError> {
         let (cwd, launch, project_id, in_container) = {
             let r = entry.rec.lock();
             (PathBuf::from(&r.info.cwd), r.launch.clone().unwrap_or_default(), r.info.project_id.clone(), super::in_container(&r.info))
@@ -1014,7 +1257,8 @@ impl Terminals {
                 }
             }
         }
-        Ok(Prepared { cwd, launch, project, provider, command, env, dir, token, add_dirs, container, local, api })
+        // A first start carries its brief in its prompt already (`spawn_agent`).
+        Ok(Prepared { cwd, launch, project, provider, command, env, dir, token, add_dirs, container, local, api, avatar: avatar.is_some(), again: avatar.filter(|_| restarted), restarted })
     }
 
     async fn launch_claude(
@@ -1039,7 +1283,7 @@ impl Terminals {
         if prep.container.is_some() {
             return self.launch_claude_in_container(state, entry, prep, session, prompt, submit_prompt).await;
         }
-        let Prepared { cwd, mut launch, project, provider, command, mut env, dir, token, add_dirs, .. } = prep;
+        let Prepared { cwd, mut launch, project, provider, command, mut env, dir, token, add_dirs, avatar, again, restarted, .. } = prep;
         // The Workspace folders go on the command line only; the record keeps the choice.
         launch.add_dirs = add_dirs;
         let cfg = state.config.read().agents.clone();
@@ -1063,6 +1307,9 @@ impl Terminals {
                 (other, p)
             }
         };
+        let new = matches!(session, SessionArg::New(_));
+        new_conversation(state, entry, restarted, new, prompt.is_none() && again.is_some()).await;
+        let prompt = told_again(prompt, again.filter(|_| new), ProviderKind::Claude, false);
         // Tail from the end of what exists now, so old turns are not replayed. A fork's
         // new file starts with copied history: skip whatever it holds when it appears.
         let start_offset = match &session {
@@ -1083,7 +1330,7 @@ impl Terminals {
         };
         let base = state.local_base_url();
         let mut settings = session_settings(&format!("{base}/api/hooks/claude/{}", entry.id), &token, helper.as_deref(), statusline, permission_wait(&cfg));
-        launch_settings(&mut settings, &launch);
+        launch_settings(&mut settings, &launch, avatar);
         if let Some(m) = shared_memory_dir(&provider, &claude_dir, &cwd, &env) {
             settings["autoMemoryDirectory"] = Value::String(m.to_string_lossy().into_owned());
         }
@@ -1158,7 +1405,7 @@ impl Terminals {
         prompt: Option<String>,
         submit_prompt: bool,
     ) -> Result<(), ApiError> {
-        let Prepared { cwd, mut launch, provider, command, mut env, dir, token, add_dirs, container, .. } = prep;
+        let Prepared { cwd, mut launch, provider, command, mut env, dir, token, add_dirs, container, avatar, again, restarted, .. } = prep;
         let t = container.ok_or_else(|| ApiError::internal("no container"))?;
         let pid = t.project_id.clone();
         launch.add_dirs = add_dirs;
@@ -1181,6 +1428,9 @@ impl Terminals {
             }
             other => other,
         };
+        let new = matches!(session, SessionArg::New(_));
+        new_conversation(state, entry, restarted, new, prompt.is_none() && again.is_some()).await;
+        let prompt = told_again(prompt, again.filter(|_| new), ProviderKind::Claude, true);
         let files_dir = format!("/tmp/workbench-session-{}", entry.id);
         let settings_path = format!("{files_dir}/claude-settings.json");
         let mcp_path = format!("{files_dir}/mcp.json");
@@ -1191,7 +1441,7 @@ impl Terminals {
         });
         let wait = permission_wait(&state.config.read().agents);
         let mut settings = session_settings(&format!("{base}/api/hooks/claude/{}", entry.id), &token, session_start.as_deref(), false, wait);
-        launch_settings(&mut settings, &launch);
+        launch_settings(&mut settings, &launch, avatar);
         if session_start.is_none() {
             if let Some(h) = settings.get_mut("hooks").and_then(Value::as_object_mut) {
                 h.remove("SessionStart");
@@ -1247,7 +1497,7 @@ impl Terminals {
         prompt: Option<String>,
         submit_prompt: bool,
     ) -> Result<(), ApiError> {
-        let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, local, api, .. } = prep;
+        let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, local, api, again, restarted, .. } = prep;
         let home = codex::codex_home(env_value(&env, "CODEX_HOME").as_deref());
         share_memory(&provider, &env).await;
         let features = self.codex_features(&command).await;
@@ -1270,6 +1520,9 @@ impl Terminals {
             }
             other => (other, None),
         };
+        let new = cont == Continue::New;
+        new_conversation(state, entry, restarted, new, prompt.is_none() && again.is_some()).await;
+        let prompt = told_again(prompt, again.filter(|_| new), ProviderKind::Codex, false);
         let fork_of = match &cont {
             Continue::Fork(from) => Some(from.clone()),
             _ => None,
@@ -1368,7 +1621,7 @@ impl Terminals {
         submit_prompt: bool,
         restarted: bool,
     ) -> Result<(), ApiError> {
-        let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, container, local, api, .. } = prep;
+        let Prepared { cwd, launch, provider, command, mut env, token, add_dirs, container, local, api, again, .. } = prep;
         let kind = provider.kind;
         if container.is_none() {
             share_memory(&provider, &env).await;
@@ -1393,6 +1646,12 @@ impl Terminals {
             }
             _ => (Continue::New, String::new()),
         };
+        // Aider has no conversations to resume, but it may restore the chat history it wrote for
+        // the session: that conversation goes on, and has heard of the avatar.
+        let restores = kind == ProviderKind::Aider && self.aider_restore(entry, &cwd, restarted).await;
+        let new = cont == Continue::New && !restores;
+        new_conversation(state, entry, restarted, new, prompt.is_none() && again.is_some()).await;
+        let prompt = told_again(prompt, again.filter(|_| new), kind, container.is_some());
         // Aider names the server in the model (`ollama_chat/qwen3`).
         let model = api.as_ref().and_then(|a| a.model.as_deref()).or(local.as_ref().map(|l| l.model.as_str())).or(launch.model.as_deref());
         let args = LaunchArgs {
@@ -1408,7 +1667,7 @@ impl Terminals {
         let argv = match kind {
             ProviderKind::Kimi => providers::kimi_argv(&command, &cont, &args),
             ProviderKind::Gemini => providers::gemini_argv(&command, &cont, &session_id, &args),
-            ProviderKind::Aider => providers::aider_argv(&command, self.aider_restore(entry, &cwd, restarted).await, &args),
+            ProviderKind::Aider => providers::aider_argv(&command, restores, &args),
             _ => providers::custom_argv(&command, &args),
         };
         let home = (kind == ProviderKind::Kimi).then(|| kimi::kimi_home(env_value(&env, "KIMI_CODE_HOME").as_deref()));
@@ -1675,10 +1934,11 @@ impl Terminals {
         let mut new_title = None;
         let out = {
             let Some(agent) = rec.info.agent.as_mut() else { return };
-            // Untitled sessions take their first prompt as title.
+            // Untitled sessions take their first prompt as title: the user's own words, without the
+            // avatar brief that may follow them.
             if agent.title.is_none() && !title_locked {
                 let first = events.iter().find_map(|e| match e {
-                    codex::Event::UserMessage(m) if !codex::injected(m) => Some(title_from_prompt(m)),
+                    codex::Event::UserMessage(m) if !codex::injected(m) => own_prompt(m).map(title_from_prompt),
                     _ => None,
                 });
                 if let Some(t) = first.filter(|t| !t.is_empty()) {
@@ -1716,14 +1976,31 @@ impl Terminals {
     }
 
     /// A dialog of a Codex, Kimi, Gemini, Aider or custom CLI on the session's screen right now (Claude
-    /// Code's dialogs come through hooks).
+    /// Code's dialogs come through hooks). The texts Workbench itself put into the session last
+    /// (`AgentRt::pasted`) are no dialog where the screen shows their echo (`providers::dialog_beside`):
+    /// a dialog beside them is one, whatever they said.
     pub(crate) fn screen_dialog(&self, entry: &Entry) -> Option<(AgentState, &'static str)> {
         let kind = entry.rec.lock().info.agent.as_ref()?.provider;
         if kind == ProviderKind::Claude {
             return None;
         }
         let text = pty::visible_text(&mut entry.screen.mirror(), DIALOG_ROWS);
-        providers::dialog_on_screen(kind, &text)
+        let pasted = entry.rt.lock().pasted.clone();
+        let sent: Vec<&str> = pasted.iter().map(String::as_str).collect();
+        providers::dialog_beside(kind, &text, &sent)
+    }
+
+    /// Notes the text Workbench is about to paste or type into an agent session (`AgentRt::pasted`),
+    /// before it goes in: a look at the screen in between already sees its echo.
+    pub(super) fn note_sent(&self, entry: &Entry, text: &str) {
+        if entry.kind() != TerminalKind::Agent || text.is_empty() {
+            return;
+        }
+        let mut rt = entry.rt.lock();
+        rt.pasted.push_back(text.to_string());
+        while rt.pasted.len() > PASTES_KEPT || (rt.pasted.len() > 1 && rt.pasted.iter().map(String::len).sum::<usize>() > PASTED_BYTES) {
+            rt.pasted.pop_front();
+        }
     }
 
     /// Why text must not be typed into this agent session now (`None`: it may, and always
@@ -2339,6 +2616,39 @@ impl Terminals {
             .map(|(_, e)| e)
     }
 
+    /// Paste a prompt into an agent session and press Enter, as `send_text` does, but never into a
+    /// dialog that opened meanwhile: after the pause that follows every paste `dialog` is asked, and
+    /// when it says yes nothing is pressed (409 `conflict`, [`PASTED_NOT_SENT`]). The Enter that
+    /// submits a prompt would pick the dialog's highlighted choice ("Yes, proceed"). The text stays
+    /// where the paste put it.
+    async fn send_prompt(&self, entry: &Arc<Entry>, text: &str, submit: bool, dialog: impl Fn() -> bool) -> Result<(), ApiError> {
+        if text.len() > super::input::MAX_TEXT {
+            return Err(ApiError::bad_request("text is too long (1 MB max)"));
+        }
+        // Held from the paste to the Enter: no other programmatic send comes in between.
+        let _g = entry.input_lock.lock().await;
+        let pty = entry.running_pty().ok_or_else(|| ApiError::conflict("the terminal is not running"))?;
+        entry.look_for_permission_dialog();
+        self.note_sent(entry, text);
+        let payload = super::input::paste_payload(text, entry.screen.bracketed_paste());
+        if !payload.is_empty() {
+            pty.write_wait(Bytes::from(payload)).await.map_err(ApiError::conflict)?;
+        }
+        if submit {
+            // TUIs (and paste guards) can swallow an Enter that arrives with the paste.
+            let delay = entry.provider().map_or(300, ProviderKind::submit_delay_ms);
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            if !entry.pty.lock().as_ref().is_some_and(|p| Arc::ptr_eq(p, &pty)) {
+                return Err(ApiError::conflict("the terminal is not running"));
+            }
+            if dialog() {
+                return Err(ApiError::conflict(PASTED_NOT_SENT));
+            }
+            pty.write_wait(Bytes::from_static(b"\r")).await.map_err(ApiError::conflict)?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn ask(&self, state: &AppState, req: AskRequest) -> Result<TerminalInfo, ApiError> {
         let prompt = req.prompt.trim().to_string();
         if prompt.is_empty() {
@@ -2361,6 +2671,12 @@ impl Terminals {
             if showing() {
                 return Err(refused());
             }
+            // Nothing goes in before the prompt the session was started with. That one is pasted a
+            // moment after the session is up (`deliver_later`): a text sent at its first idle (the
+            // avatar slice telling a session of its avatar) waits for it.
+            if !first_prompt_in(&e, FIRST_PROMPT_WAIT).await {
+                return Err(ApiError::conflict("that session's first prompt has not gone in yet; try again in a moment"));
+            }
             if !e.wait_typing_pause(Duration::from_millis(2500), Duration::from_secs(8)).await {
                 return Err(ApiError::conflict("you are typing in that session; try again in a moment"));
             }
@@ -2368,7 +2684,16 @@ impl Terminals {
             if showing() {
                 return Err(refused());
             }
-            self.send_text(tid, &prompt, submit).await?;
+            // And it may open one while the text is on its way: the Enter is pressed only when it did
+            // not. Claude Code reports its dialogs, so its state is asked again. The other CLIs are
+            // read off their screen, which by then shows the text as well: what of a dialog's wording
+            // stands in the text itself (a choice named "Yes, proceed"), or in the texts sent before
+            // it that the history above still shows, is their echo, not a dialog (`screen_dialog`).
+            let opened = || match e.provider() {
+                Some(ProviderKind::Claude) | None => showing(),
+                Some(_) => self.screen_dialog(&e).is_some(),
+            };
+            self.send_prompt(&e, &prompt, submit, opened).await?;
             return Ok(e.info());
         }
         let pid = req.project_id.clone().filter(|p| !p.is_empty()).ok_or_else(|| ApiError::bad_request("projectId is required"))?;
@@ -2538,15 +2863,20 @@ impl Terminals {
         let st = state.clone();
         let root = project.root.clone();
         let join = |e: tokio::task::JoinError| ApiError::internal(e.to_string());
+        // A prompt as a row shows it: the user's own words, never the avatar brief that followed them.
+        fn own(prompt: Option<String>) -> Option<String> {
+            prompt.as_deref().and_then(own_prompt).map(str::to_string)
+        }
         let mut rows: Vec<HistoryEntry> = match provider.kind {
             ProviderKind::Claude => {
                 let dir = transcript::project_dir(&transcript::claude_dir(env_dir("CLAUDE_CONFIG_DIR").as_deref()), &root);
                 let rows = tokio::task::spawn_blocking(move || st.terminals.history.lock().list(&dir, limit)).await.map_err(join)?;
                 rows.into_iter()
                     .map(|(id, last, size, s)| {
-                        let title = s.ai_title.clone().or_else(|| s.first_prompt.clone()).unwrap_or_else(|| "(untitled session)".into());
+                        let first_prompt = own(s.first_prompt);
+                        let title = s.ai_title.clone().or_else(|| first_prompt.clone()).unwrap_or_else(|| "(untitled session)".into());
                         HistoryEntry {
-                            first_prompt: s.first_prompt.filter(|p| *p != title),
+                            first_prompt: first_prompt.filter(|p| *p != title),
                             title,
                             id,
                             last_activity: last,
@@ -2563,7 +2893,7 @@ impl Terminals {
                 let rows = tokio::task::spawn_blocking(move || st.terminals.codex_history.lock().list(&home, &root, limit)).await.map_err(join)?;
                 rows.into_iter()
                     .map(|(s, last, size)| HistoryEntry {
-                        title: s.first_prompt.clone().unwrap_or_else(|| "(untitled session)".into()),
+                        title: own(s.first_prompt).unwrap_or_else(|| "(untitled session)".into()),
                         id: s.id,
                         last_activity: last,
                         size_bytes: size,
@@ -2586,9 +2916,10 @@ impl Terminals {
                         .take(400)
                         .map(|e| {
                             let s = kimi::summarize(&home, e);
-                            let title = s.title.clone().or_else(|| s.last_prompt.clone()).unwrap_or_else(|| "(untitled session)".into());
+                            let last_prompt = own(s.last_prompt);
+                            let title = own(s.title).or_else(|| last_prompt.clone()).unwrap_or_else(|| "(untitled session)".into());
                             HistoryEntry {
-                                first_prompt: s.last_prompt.filter(|p| *p != title),
+                                first_prompt: last_prompt.filter(|p| *p != title),
                                 title,
                                 id: s.id,
                                 last_activity: s.updated_at.unwrap_or(0),
@@ -2609,7 +2940,7 @@ impl Terminals {
                     gemini::list(&dir, &root, limit)
                         .into_iter()
                         .map(|s| HistoryEntry {
-                            title: s.first_prompt.clone().unwrap_or_else(|| "(untitled session)".into()),
+                            title: own(s.first_prompt).unwrap_or_else(|| "(untitled session)".into()),
                             id: s.id,
                             last_activity: s.last_activity,
                             size_bytes: s.size,
@@ -2844,14 +3175,34 @@ async fn read_new_lines(path: &Path, offset: &mut Option<u64>, lines: &mut LineB
     out
 }
 
+/// Waits up to `max` for the prompt the session was started with to go in (`AgentRt::first_prompt`);
+/// false: it is still on its way.
+async fn first_prompt_in(entry: &Entry, max: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + max;
+    loop {
+        let on_its_way = entry.rt.lock().first_prompt.as_ref().is_some_and(|w| w.strong_count() > 0);
+        if !on_its_way {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Paste a prompt into a session once it is up (Claude: its SessionStart hook; Codex,
 /// Kimi and custom CLIs: the first quiet spell after startup), and never into a dialog:
 /// while one shows (a trust prompt nobody answered yet, whose highlighted choice the
 /// Enter would pick), it waits for as long as the process runs, up to `DELIVER_MAX`.
+/// Until it went in, or was given up, what `ask` pastes waits for it (`AgentRt::first_prompt`).
 fn deliver_later(state: &AppState, entry: &Arc<Entry>, prompt: String, submit: bool) {
     let Some(pty) = entry.running_pty() else { return };
     let (state, entry) = (state.clone(), entry.clone());
+    let on_its_way = Arc::new(());
+    entry.rt.lock().first_prompt = Some(Arc::downgrade(&on_its_way));
     tokio::spawn(async move {
+        let _on_its_way = on_its_way;
         let _ = tokio::time::timeout(Duration::from_secs(60), entry.started.notified()).await;
         // Give the input box a moment to mount.
         tokio::time::sleep(Duration::from_millis(800)).await;
@@ -3155,6 +3506,7 @@ mod tests {
             remote_control: true,
             restricted: false,
             ultracode: false,
+            avatar: false,
             add_dirs: vec!["/tmp/x".into()],
         }
     }
@@ -3301,10 +3653,10 @@ mod tests {
         let a = build_argv("claude", &SessionArg::New("u".into()), s, m, &l, None);
         assert!(a.windows(2).any(|w| w == ["--effort", "max"]) && !a.iter().any(|x| x.contains("ultracode")), "{a:?}");
         let mut on = session_settings("u", "t", None, false, None);
-        launch_settings(&mut on, &l);
+        launch_settings(&mut on, &l, false);
         assert_eq!(on["ultracode"], true);
         let mut off = session_settings("u", "t", None, false, None);
-        launch_settings(&mut off, &AgentLaunch::default());
+        launch_settings(&mut off, &AgentLaunch::default(), false);
         assert!(off.get("ultracode").is_none(), "off is the absence of the key, so the user's own setting applies");
 
         let dir = tempfile::tempdir().unwrap();
@@ -3324,6 +3676,283 @@ mod tests {
         // A launch from before the option has none.
         let old: AgentLaunch = serde_json::from_str(r#"{"effort":"high","restricted":false,"addDirs":[]}"#).unwrap();
         assert!(!old.ultracode);
+    }
+
+    #[test]
+    fn the_avatar_option_is_kept_for_every_kind_and_refuses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = project(dir.path(), "");
+        let c = cfg("[agents.providers.codex]\nmodel = \"gpt-5.5\"\n[agents.providers.mycli]\ncommand = \"mycli\"\n");
+        let prov = |id: &str| providers::find(&c, Some(id)).unwrap();
+        let ask = AgentRequest { avatar: Some(true), ..Default::default() };
+        // Every CLI can have an avatar: no kind refuses the option, and nothing else of the launch changes with it.
+        for id in ["claude", "codex", "kimi", "gemini", "aider", "mycli"] {
+            let with = resolve_launch(&prov(id), &c, &p, &ask).unwrap();
+            let without = resolve_launch(&prov(id), &c, &p, &AgentRequest::default()).unwrap();
+            assert!(with.avatar && !without.avatar, "{id}");
+            assert_eq!(AgentLaunch { avatar: false, ..with }, without, "{id}");
+        }
+        // Never a default, and `false` is the same as not asking.
+        assert!(!resolve_launch(&prov("claude"), &c, &p, &AgentRequest { avatar: Some(false), ..Default::default() }).unwrap().avatar);
+        // It combines with the other options of a session, and is neither a flag nor the session's name.
+        let all = AgentRequest { avatar: Some(true), ultracode: Some(true), restricted: Some(true), permission_mode: Some("plan".into()), prompt: Some("fix the build".into()), ..Default::default() };
+        let l = resolve_launch(&prov("claude"), &c, &p, &all).unwrap();
+        assert!(l.avatar && l.ultracode && l.restricted && l.name.is_none());
+        let (s, m) = (Path::new("/d/s.json"), Path::new("/d/m.json"));
+        let argv = build_argv("claude", &SessionArg::New("u".into()), s, m, &l, None);
+        assert!(!argv.iter().any(|a| a.to_lowercase().contains("avatar")), "{argv:?}");
+        // It is kept with the launch (a restart and a restore read it), and a launch from before the option has none.
+        let saved = serde_json::to_value(&l).unwrap();
+        assert_eq!(saved["avatar"], true);
+        assert_eq!(serde_json::from_value::<AgentLaunch>(saved).unwrap(), l);
+        let old: AgentLaunch = serde_json::from_str(r#"{"effort":"high","restricted":false,"ultracode":true,"addDirs":[]}"#).unwrap();
+        assert!(!old.avatar && old.ultracode);
+        // The option is part of a request's body; the terminal a session moves from is not.
+        let body: AgentRequest = serde_json::from_value(json!({ "projectId": "p", "avatar": true, "movedFrom": "abc123abc123", "moved_from": "abc123abc123" })).unwrap();
+        assert_eq!((body.avatar, body.moved_from), (Some(true), None));
+        assert_eq!(serde_json::from_value::<AgentRequest>(json!({ "projectId": "p" })).unwrap().avatar, None);
+    }
+
+    #[test]
+    fn the_avatar_tools_are_allowed_unasked_only_for_a_session_that_drives_an_avatar() {
+        let mut with = session_settings("u", "t", None, false, None);
+        launch_settings(&mut with, &AgentLaunch::default(), true);
+        assert_eq!(
+            with["permissions"],
+            json!({ "allow": ["mcp__workbench__avatar_status", "mcp__workbench__avatar_design", "mcp__workbench__avatar_say", "mcp__workbench__avatar_ask", "mcp__workbench__avatar_act"] })
+        );
+        // One rule per avatar tool and nothing wider: no other Workbench tool, no pattern, nothing denied or to ask about.
+        let allow: Vec<&str> = with["permissions"]["allow"].as_array().unwrap().iter().map(|rule| rule.as_str().unwrap()).collect();
+        assert_eq!(allow, crate::avatar::PREALLOWED);
+        assert!(allow.iter().all(|rule| rule.starts_with("mcp__workbench__avatar_") && !rule.contains(['*', '(', ' '])), "{allow:?}");
+        // The rest of the settings is what every session gets.
+        let plain = session_settings("u", "t", None, false, None);
+        with.as_object_mut().unwrap().remove("permissions");
+        assert_eq!(with, plain);
+
+        // A session that drives no avatar gets no such entry, whatever it was started with: after
+        // a session was created its avatar's record decides, not the option (the user may have
+        // turned the avatar off).
+        for l in [AgentLaunch::default(), AgentLaunch { avatar: true, ..Default::default() }, AgentLaunch { ultracode: true, ..Default::default() }] {
+            let mut without = session_settings("u", "t", None, false, None);
+            launch_settings(&mut without, &l, false);
+            assert!(without.get("permissions").is_none(), "{l:?}");
+            assert!(!without.to_string().contains("avatar"), "{without}");
+        }
+        // With ultracode both are there.
+        let mut both = session_settings("u", "t", None, false, None);
+        launch_settings(&mut both, &AgentLaunch { ultracode: true, avatar: true, ..Default::default() }, true);
+        assert_eq!((&both["ultracode"], both["permissions"]["allow"].as_array().map(Vec::len)), (&json!(true), Some(5)));
+    }
+
+    #[test]
+    fn a_session_is_briefed_by_what_its_avatar_is_now() {
+        use crate::avatar::Carried;
+        // A fresh start: the option decides.
+        assert_eq!(brief_at_start(true, None), Some(BriefVariant::First));
+        assert_eq!(brief_at_start(false, None), None);
+        // A session that moves here follows the avatar of the terminal it comes from, whatever it
+        // was started with: it keeps a look it drew, draws one when it has none, and is told
+        // nothing when the user turned the avatar off.
+        for asked in [false, true] {
+            assert_eq!(brief_at_start(asked, Some(Carried { on: true, designed: true })), Some(BriefVariant::Moved), "{asked}");
+            assert_eq!(brief_at_start(asked, Some(Carried { on: true, designed: false })), Some(BriefVariant::First), "{asked}");
+            assert_eq!(brief_at_start(asked, Some(Carried { on: false, designed: true })), None, "{asked}");
+            assert_eq!(brief_at_start(asked, Some(Carried { on: false, designed: false })), None, "{asked}");
+        }
+    }
+
+    #[test]
+    fn a_first_prompt_travels_in_the_command_line_where_the_launch_puts_it_there() {
+        use ProviderKind::*;
+        assert!(prompt_in_argv(Claude, false, false, "p") && prompt_in_argv(Claude, true, false, "p") && prompt_in_argv(Codex, false, false, "p"));
+        // Codex in a dev container is started like a plain CLI, and every other CLI has its prompt pasted.
+        assert!(!prompt_in_argv(Codex, true, false, "p"));
+        for kind in [Kimi, Gemini, Aider, Custom] {
+            assert!(!prompt_in_argv(kind, false, false, "p") && !prompt_in_argv(kind, true, false, "p"), "{kind:?}");
+        }
+        // As `split_prompt` decides: a huge prompt is pasted, and so is one a batch file's cmd.exe
+        // would read again (Windows). A line break is such a thing: a brief never stands below a
+        // prompt there. A dev container's command is no batch file.
+        let huge = "x".repeat(MAX_ARGV_PROMPT + 1);
+        assert!(!prompt_in_argv(Claude, false, false, &huge) && prompt_in_argv(Claude, false, false, &huge[1..]));
+        assert!(prompt_in_argv(Claude, false, true, "fix the build") && !prompt_in_argv(Claude, false, true, "fix\n\nthe build") && !prompt_in_argv(Claude, false, true, "50% done"));
+        assert!(prompt_in_argv(Claude, true, true, "fix\n\nthe build"));
+        for prompt in ["p", "fix\n\nthe build", "a | b", huge.as_str()] {
+            for batch in [false, true] {
+                assert_eq!(prompt_in_argv(Codex, false, batch, prompt), split_prompt(Some(prompt.to_string()), true, batch).0.is_some(), "{batch} {:?}", &prompt[..prompt.len().min(20)]);
+            }
+        }
+    }
+
+    #[test]
+    fn the_brief_joins_a_prompt_by_how_the_prompt_travels() {
+        let brief = |whole: bool| if whole { "<workbench-avatar>[Workbench avatar] B. Start now.</workbench-avatar>".to_string() } else { "[Workbench avatar] B.".to_string() };
+        // In the command line: below a blank line.
+        assert_eq!(with_brief(Some("fix the build".into()), brief, |_| true), "fix the build\n\n[Workbench avatar] B.");
+        // Pasted: one space behind it, so that no line break submits the first part by itself.
+        assert_eq!(with_brief(Some("fix the build".into()), brief, |_| false), "fix the build [Workbench avatar] B.");
+        // Without a prompt of the user's the brief is the whole prompt, in the form that says so, however it travels.
+        for in_argv in [true, false] {
+            assert_eq!(with_brief(None, brief, |_| in_argv), "<workbench-avatar>[Workbench avatar] B. Start now.</workbench-avatar>");
+        }
+        // How it travels is asked of the text that would travel.
+        let asked = std::cell::RefCell::new(vec![]);
+        with_brief(Some("p".into()), brief, |text| {
+            asked.borrow_mut().push(text.to_string());
+            true
+        });
+        assert_eq!(*asked.borrow(), ["p\n\n[Workbench avatar] B."]);
+
+        // The real briefs. Claude Code anywhere and Codex on the host drive the avatar with
+        // Workbench's tools and take the prompt in the command line.
+        let joined = |kind: ProviderKind, in_container: bool, batch: bool, prompt: Option<&str>| {
+            with_brief(prompt.map(str::to_string), |whole| avatar_brief(BriefVariant::First, kind, in_container, whole), |text| prompt_in_argv(kind, in_container, batch, text))
+        };
+        let tools = avatar_brief(BriefVariant::First, ProviderKind::Claude, false, false);
+        assert!(tools.starts_with("[Workbench avatar] This session has a live avatar") && tools.contains("avatar_status") && !tools.contains('\n'));
+        for (kind, in_container) in [(ProviderKind::Claude, false), (ProviderKind::Claude, true), (ProviderKind::Codex, false)] {
+            assert_eq!(joined(kind, in_container, false, Some("fix it")), format!("fix it\n\n{tools}"), "{kind:?} {in_container}");
+        }
+        // A batch file (Windows) never gets a line break in its arguments: one space there too.
+        assert_eq!(joined(ProviderKind::Claude, false, true, Some("fix it")), format!("fix it {tools}"));
+        // Codex in a dev container and every CLI without Workbench's tools: pasted, on one line,
+        // with the command that drives the avatar there.
+        let inside = joined(ProviderKind::Codex, true, false, Some("fix it"));
+        assert!(inside.starts_with("fix it [Workbench avatar] ") && inside.contains("curl") && !inside.contains('\n') && !inside.contains("avatar_status"), "{inside}");
+        for kind in [ProviderKind::Kimi, ProviderKind::Gemini, ProviderKind::Aider, ProviderKind::Custom] {
+            let pasted = joined(kind, false, false, Some("fix it"));
+            assert!(pasted.starts_with("fix it [Workbench avatar] ") && pasted.contains(" avatar guide`") && !pasted.contains('\n') && !pasted.contains("avatar_status"), "{kind:?}: {pasted}");
+        }
+        // The brief is there once, and when it is the whole prompt it comes wrapped and says what to do now.
+        for kind in [ProviderKind::Claude, ProviderKind::Codex, ProviderKind::Custom] {
+            assert_eq!(joined(kind, false, false, Some("fix it")).matches(crate::avatar::BRIEF_MARK).count(), 1, "{kind:?}");
+            let whole = joined(kind, false, false, None);
+            assert!(whole.starts_with("<workbench-avatar>[Workbench avatar] ") && whole.ends_with("</workbench-avatar>") && whole.contains("Start now:"), "{kind:?}: {whole}");
+            assert_eq!(whole.matches(crate::avatar::BRIEF_MARK).count(), 1);
+        }
+        // A restart with a new conversation is told that it still has its avatar, not to draw one.
+        let again = avatar_brief(BriefVariant::Again, ProviderKind::Custom, false, true);
+        assert!(again.starts_with("<workbench-avatar>[Workbench avatar] This session still has its live avatar") && again.contains("Do not design a new look"), "{again}");
+    }
+
+    #[test]
+    fn a_restart_tells_a_new_conversation_of_the_avatar_and_no_other() {
+        use crate::avatar::Carried;
+        // What a restart tells a conversation that starts anew follows the avatar as it is now:
+        // on with a look of its own, it still has it; on without one, it is told as at a first
+        // start and draws one; off or none, nothing.
+        assert_eq!(brief_at_restart(Some(Carried { on: true, designed: true })), Some(BriefVariant::Again));
+        assert_eq!(brief_at_restart(Some(Carried { on: true, designed: false })), Some(BriefVariant::First));
+        assert_eq!(brief_at_restart(Some(Carried { on: false, designed: true })), None);
+        assert_eq!(brief_at_restart(Some(Carried { on: false, designed: false })), None);
+        assert_eq!(brief_at_restart(None), None);
+
+        let whole = |variant: BriefVariant, kind: ProviderKind, inside: bool| avatar_brief(variant, kind, inside, true);
+        // The brief is the whole prompt, in the words for the session's CLI and its place.
+        for variant in [BriefVariant::Again, BriefVariant::First] {
+            assert_eq!(told_again(None, Some(variant), ProviderKind::Claude, false), Some(whole(variant, ProviderKind::Claude, false)));
+            assert_eq!(told_again(None, Some(variant), ProviderKind::Custom, false), Some(whole(variant, ProviderKind::Custom, false)));
+            assert_eq!(told_again(None, Some(variant), ProviderKind::Codex, true), Some(whole(variant, ProviderKind::Codex, true)));
+        }
+        let again = |kind: ProviderKind, inside: bool| whole(BriefVariant::Again, kind, inside);
+        assert!(again(ProviderKind::Claude, false).contains("avatar_status") && again(ProviderKind::Custom, false).contains(" avatar guide`") && again(ProviderKind::Codex, true).contains("curl"));
+        assert!(again(ProviderKind::Claude, false).contains("Do not design a new look") && whole(BriefVariant::First, ProviderKind::Claude, false).contains("design your own character"));
+        // A conversation that is resumed has heard of it, and a session without an avatar hears nothing.
+        assert_eq!(told_again(None, None, ProviderKind::Claude, false), None);
+        // A start carries its own prompt, with its own brief: it stays as it is.
+        assert_eq!(told_again(Some("fix it".into()), Some(BriefVariant::Again), ProviderKind::Claude, false).as_deref(), Some("fix it"));
+        assert_eq!(told_again(Some("fix it".into()), None, ProviderKind::Claude, false).as_deref(), Some("fix it"));
+    }
+
+    #[test]
+    fn a_first_prompt_that_is_a_command_of_the_cli_goes_alone_and_the_brief_waits() {
+        use ProviderKind::*;
+        for kind in [Claude, Codex, Kimi, Gemini, Aider, Custom] {
+            // A command and its arguments, as the user wrote them; the avatar slice tells the session later.
+            // A line for the CLI's shell too (Aider's and Gemini CLI's `!`, Claude Code's bash mode):
+            // the brief would become part of the shell command.
+            for prompt in ["/add src/main.py", "  /fix-issue 123", "\n/model", "!make test", "  !ls -la"] {
+                assert_eq!(first_prompt(Some(prompt.into()), Some(BriefVariant::First), kind, false, false), (Some(prompt.to_string()), true), "{kind:?} {prompt:?}");
+            }
+            // Any other prompt carries the brief as before, and so does none.
+            let joined = first_prompt(Some("fix src/main.rs /tmp".into()), Some(BriefVariant::First), kind, false, false);
+            assert_eq!(joined, (Some(with_brief(Some("fix src/main.rs /tmp".into()), |w| avatar_brief(BriefVariant::First, kind, false, w), |t| prompt_in_argv(kind, false, false, t))), false), "{kind:?}");
+            assert_eq!(first_prompt(None, Some(BriefVariant::First), kind, false, false), (Some(avatar_brief(BriefVariant::First, kind, false, true)), false), "{kind:?}");
+            // Without an avatar nothing waits.
+            assert_eq!(first_prompt(Some("/add src/main.py".into()), None, kind, false, false), (Some("/add src/main.py".to_string()), false));
+            assert_eq!(first_prompt(None, None, kind, false, false), (None, false));
+        }
+        // A session that moves here with its avatar starts the same way.
+        assert_eq!(first_prompt(Some("/compact".into()), Some(BriefVariant::Moved), Claude, false, false), (Some("/compact".to_string()), true));
+    }
+
+    #[test]
+    fn titles_and_history_rows_show_the_users_own_prompt_never_the_brief() {
+        let brief = avatar_brief(BriefVariant::First, ProviderKind::Claude, false, false);
+        let whole = avatar_brief(BriefVariant::First, ProviderKind::Custom, false, true);
+        // After the user's prompt, however it was joined.
+        assert_eq!(own_prompt(&format!("fix the build\n\n{brief}")), Some("fix the build"));
+        assert_eq!(own_prompt(&format!("fix the build {brief}")), Some("fix the build"));
+        assert_eq!(own_prompt(&format!("fix the build\n\n{brief}")).map(title_from_prompt).as_deref(), Some("fix the build"));
+        // The brief alone is nothing of the user's: wrapped as the whole prompt, or bare.
+        assert_eq!(own_prompt(&whole), None);
+        assert_eq!(own_prompt(&brief), None);
+        assert_eq!(own_prompt(&avatar_brief(BriefVariant::Given, ProviderKind::Claude, false, true)), None);
+        // A prompt without one is untouched.
+        for prompt in ["fix the build", "see [1] and [Work in progress]", "a < b > c", "what does [this] do…", "tidy up …", "x[W…"] {
+            assert_eq!(own_prompt(prompt), Some(prompt));
+        }
+        // As History reads a prompt: one line, cut short. Wherever the cut falls, no word of the
+        // brief is left, and a cut inside the user's own words stays as it is.
+        for (joined, max) in [(format!("fix the build\n\n{brief}"), 140), (format!("fix the build {brief}"), 140), (format!("fix the build {brief}"), 200)] {
+            assert_eq!(own_prompt(&transcript::clean_line(&joined, max)), Some("fix the build"));
+        }
+        for max in 2..80 {
+            let line = transcript::clean_line(&format!("fix the build\n\n{brief}"), max);
+            let own = own_prompt(&line).unwrap_or_default();
+            let words = own.trim_end_matches('…').trim_end();
+            assert!("fix the build".starts_with(words) && !own.contains('['), "{max}: {line:?} gave {own:?}");
+            if max <= 13 {
+                assert_eq!(own, line, "a cut inside the user's own words");
+            }
+            if max >= 17 {
+                assert_eq!(own, "fix the build", "{max}: {line:?}");
+            }
+        }
+        assert_eq!(own_prompt(&transcript::clean_line(&whole, 140)), None);
+
+        // The mark alone is no brief: a prompt that quotes it keeps every word, whether or not the
+        // session has an avatar. Only where Workbench puts a brief is the prompt cut: at the start,
+        // after white space or after the opening tag, followed by how a brief begins.
+        for prompt in [
+            "[Workbench avatar] briefs are too long, shorten them in brief.rs",
+            "fix [Workbench avatar] wording",
+            "fix the [Workbench avatar] mark: This session has a live avatar is too long",
+            "see x[Workbench avatar] This session has a live avatar",
+            "[Workbench avatar]",
+        ] {
+            assert_eq!(own_prompt(prompt), Some(prompt), "{prompt:?}");
+            let cut = transcript::clean_line(prompt, 30);
+            assert_eq!(own_prompt(&cut), Some(cut.as_str()), "{prompt:?}");
+        }
+        // Cut short where no brief begins, it stays as well.
+        assert_eq!(own_prompt("the [Workbench avatar] This session is slow…"), Some("the [Workbench avatar] This session is slow…"));
+        // Every brief there is begins as `BRIEF_OPENINGS` says, and is cut out wherever it stands
+        // and wherever History cuts it short.
+        for variant in [BriefVariant::First, BriefVariant::Given, BriefVariant::Moved, BriefVariant::Again] {
+            for (kind, in_container) in [(ProviderKind::Claude, false), (ProviderKind::Custom, false), (ProviderKind::Codex, true)] {
+                let after = avatar_brief(variant, kind, in_container, false);
+                let alone = avatar_brief(variant, kind, in_container, true);
+                assert_eq!((own_prompt(&after), own_prompt(&alone)), (None, None), "{variant:?} {kind:?} {in_container}");
+                assert_eq!(own_prompt(&format!("fix the build {after}")), Some("fix the build"), "{variant:?} {kind:?}");
+                assert_eq!(own_prompt(&format!("fix the build\n\n{after}")), Some("fix the build"), "{variant:?} {kind:?}");
+                for max in 17..80 {
+                    let line = transcript::clean_line(&format!("fix the build {after}"), max);
+                    assert_eq!(own_prompt(&line), Some("fix the build"), "{variant:?} {max}: {line:?}");
+                }
+            }
+        }
     }
 
     #[test]

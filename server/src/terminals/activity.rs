@@ -2,7 +2,7 @@
 //! *working* while output keeps flowing, *idle* after a quiet spell. It never claims a
 //! finished answer is unread and never asks for attention: a quiet terminal may just as
 //! well be waiting on a question. (The dialogs Workbench knows are recognized on screen
-//! separately, `providers::dialog_on_screen`.)
+//! separately, `providers::dialog_beside`.)
 //!
 //! What does not count as the agent working:
 //! * the echo of the user's own typing (output right after a keystroke);

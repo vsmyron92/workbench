@@ -48,6 +48,10 @@ answer_permissions = true          # show Allow / For session / Deny in Workbenc
 [agents.providers.mytool]          # any other CLI
 command = "mytool --flag"
 
+[avatar]
+enabled = true                     # false: no session has an avatar
+sessions = "any"                   # "any": any session that uses one; "asked": sessions you give one
+
 [gitlab]
 host = "gitlab.com"
 
