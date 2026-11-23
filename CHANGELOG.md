@@ -39,27 +39,34 @@ you can turn any of them off, and no browser speaks until you choose voice there
 - **What a drawing may hold.** Shapes, groups and a few short texts, `use` copies of a part of the same
   drawing, gradients, clip paths, masks, filters (blur, drop shadow, offset, flood, colour matrix,
   composite, blend, merge, morphology, turbulence, displacement map; 8 steps per filter, 8 filters) and
-  dashed lines. `parents` let a part follow another part's motion without being drawn inside it, so it
-  keeps its place in front or behind (64 at most). `drives` tie where the figure looks, its speech, how
-  fast it walks, which way it turns and whether you drag it to the session's own parts (16 at most), for
-  a head that turns to the pointer or a side view while it walks; colours and opacities follow only the
-  walk, the turn and a drag, which change slowly, in two values (three along the turn). Animations add
-  skew, dash offset and fill and stroke opacity, and the eases `inBack`, `inOutBack`, `outElastic`,
-  `outBounce` and cubic beziers; colours and opacities never step, spring or bounce. A look with a drive on
+  dashed lines. `parents` let a part move exactly as if it were drawn inside another part without being
+  nested in it, so it keeps its place in front or behind (64 at most). `drives` tie where the figure
+  looks, its speech, how fast it walks, which way it turns and whether you drag it to the session's own
+  parts (16 at most), for a head that turns to the pointer or a side view while it walks; colours and
+  opacities follow only the walk, the turn and a drag, which change slowly, in two values (three along the
+  turn). Animations add skew, dash offset and fill and stroke opacity, and the eases `inBack`,
+  `inOutBack`, `outElastic`, `outBounce` and cubic beziers; colours and opacities never step, spring or
+  bounce. Nothing flashes, whatever the motion adds up to: the browser holds a colour, an opacity, or the
+  movement of a large part until it may turn back, at most three flashes a second. A look with a drive on
   its turn gets no lean from the walk, one with a drive on its pace or its own `walk` no hop. The still
   faces (top bar, phone, status bar) show the look at rest with its drives at rest, so a side view that
-  shows only while the figure walks is hidden there. A drawing that would cost too much to draw (heavy
-  filters, many masked, clipped or half-transparent groups, a filter on a stretched part, very fine
-  dashes) is refused, since the browser would pay that cost on every frame.
+  shows only while the figure walks is hidden there. A design call draws the new look before it stores it:
+  one that cannot be drawn at rest (heavy filters, many masked, clipped or half-transparent groups, a
+  filter on a stretched part, a shape drawn far too large, very fine dashes, or a drawing that does not
+  finish within its memory and time) is refused, since the browser would pay that cost on every frame, and
+  the answer says what drawing costs.
 - **A session sees what it drew.** It cannot see your browser, so `avatar_design` answers with a picture:
   the figure on the light and the dark panel, and under each at its resting size and as a face.
   `avatar_status` draws more on request: the figure at rest or in a pose (inside one of its own
-  animations, or under where it looks, its speech, its walk, its turn and a drag), or one of its own
-  animations as a row of up to eight moments. Workbench draws the pictures on the server from the stored
-  look, read again as untrusted data, with nothing outside it resolved (the `resvg` renderer, about 3 MB
-  more in the Workbench program), two at a time for all sessions, and none for an avatar you turned off.
-  The guide a session reads tells it to design in two or three calls and
-  to look at the picture in between.
+  animations, under where it looks, its speech, its walk, its turn and a drag, or close up on one part),
+  or one of its own animations as a row of up to eight moments, also under a pose's inputs. Workbench
+  draws the pictures from the stored look, read again as untrusted data, with nothing outside it resolved
+  (the `resvg` renderer, about 3 MB more in the Workbench program), and never in the server itself: each
+  picture is drawn by the Workbench program started again for it, which limits its own memory (1 GiB) and
+  processor time (6 seconds) and is killed after 8 seconds or when its caller goes away, so whatever a
+  look does to the renderer loses one picture. Two are drawn at a time for all sessions and one at a time
+  for each, and none for an avatar you turned off. The guide a session reads tells it to design in two or
+  three calls and to look at the picture in between.
 - **Hearing it.** Captions always. Voice is off until you choose it in a browser (**Hear it** or
   **Captions only** under the first line), and uses that browser's own voices. Online voices are used only
   after **Allow online voices**, which says that what an avatar says is then sent to the browser maker's
@@ -90,9 +97,10 @@ you can turn any of them off, and no browser speaks until you choose voice there
 - **For CLIs without Workbench's tools.** Kimi Code, Gemini CLI, Aider, custom CLIs and Codex in a dev
   container drive their avatar with a command: `workbench avatar guide | status | design | picture | say |
   ask | act` on the host (it sends the session's token only to this computer; `picture` writes a PNG to
-  the file it names, else to the system's temporary directory, and prints where), and `curl` against `/api/hooks/avatar/<session>/…` in a dev container (`picture`
-  answers the PNG), with the token read from standard input, never on a command line. Such a CLI may ask
-  you before it runs the command unless you allow it; the composer says so.
+  the file it names, else to a new file in the system's temporary directory, and prints where), and `curl`
+  against `/api/hooks/avatar/<session>/…` in a dev container (`picture` answers the PNG), with the token
+  read from standard input, never on a command line. Such a CLI may ask you before it runs the command
+  unless you allow it; the composer says so.
 - **An optional skill.** `workbench-avatar` teaches an agent to draw, rig and speak through its avatar; it
   has a session take one itself only when you ask it to use one. As with Workbench's other skills, it is
   installed only when you press **Install**.
@@ -121,12 +129,15 @@ What changed for existing behaviour:
 Not verified: that sound leaves a loudspeaker (the browser's own speech engine was driven once in headless
 Chrome and reported the line spoken; nobody heard it); dictation with a real microphone (a stand-in
 recognizer was used); a real Claude Code reading the `permissions.allow` entries of its settings file and
-using the tools (the tests' stand-in for Claude Code was used); real Codex, Kimi Code, Gemini CLI and Aider
-sessions; a real model looking at the pictures of its avatar (the tests check the PNG and the image
+using the tools (the tests' stand-in for Claude Code was used); real Codex, Kimi Code, Gemini CLI and
+Aider sessions; a real model looking at the pictures of its avatar (the tests check the PNG and the image
 blocks, not what a model makes of them); a session in a dev container; Windows at run time (the server is
-type-checked for Windows only); Safari and iOS (speech needs a tap there, by design, but it was not
-tried). Deferred on purpose: voices made by a command on the server, hands-free listening, a pop-out window
-for the avatar, spoken attention announcements, and a session changing where or whether avatars are shown.
+type-checked for Windows only; there the process a picture is drawn in is only waited for and killed, it
+cannot limit its own memory and time); two opacities that cancel out on one part or down its tree, and two
+colours whose blend dips in brightness, which the flash limit does not see; Safari and iOS (speech needs a
+tap there, by design, but it was not tried). Deferred on purpose: voices made by a command on the server,
+hands-free listening, a pop-out window for the avatar, spoken attention announcements, and a session
+changing where or whether avatars are shown.
 
 ## 0.22.0 - 2026-11-15
 

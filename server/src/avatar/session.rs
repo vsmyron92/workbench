@@ -27,7 +27,7 @@ use super::store::{
     MAX_CHOICE_CHARS, MAX_CHOICES, MAX_LINES, MAX_NAME_CHARS, MAX_PENDING_LINES, MAX_REPLY_CHARS, MAX_SAY_CHARS, MAX_WAIT_HOOK_SECS, MAX_WAIT_TOOL_SECS, OpenAsk, Outcome, Reason, Record, ReplyVia, SAY_PER_MINUTE,
     SAY_WAIT_EXTRA_SECS, SAY_WAIT_SOFT_MS, SPEECH_CHARS_PER_SEC, STATUS_LINES, STATUS_PER_MINUTE, Speaker, UNSEEN_SECS, Windows, emit_act, emit_ask, emit_changed, emit_say, ensure_loaded, next_id, running_agent, save,
 };
-use super::{Sessions, Via, preview, text};
+use super::{Sessions, Via, draw, preview, text};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
 use crate::terminals::AgentState;
@@ -78,6 +78,11 @@ pub fn not_a_session() -> ApiError {
 
 fn too_many(message: impl Into<String>) -> ApiError {
     ApiError::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", message)
+}
+
+/// The refusal for a call that would have to wait too long for something all sessions share.
+pub(super) fn too_busy(message: impl Into<String>) -> ApiError {
+    too_many(message)
 }
 
 pub(super) fn not_pending(message: impl Into<String>) -> ApiError {
@@ -369,30 +374,63 @@ pub struct Designed {
     /// The answer: the name, the parts where they are, the animations, usage, the built-in
     /// motion that applies, what was kept or cleared, the warnings ("Not drawn: …" first).
     pub text: String,
+    /// The avatar has a look of its own now: there is something to show the session.
+    pub drawn: bool,
 }
 
-/// Designs or changes the session's avatar from the arguments of `avatar_design` (the rules of
-/// `look::apply`). A refused call changes nothing and lists what to fix.
-///
-/// The arguments are validated against the design the avatar has at that moment, and applied to
-/// it, one call after the other: `designing` is held from reading the design to storing the new
-/// one. The store lock itself is free while the validator works, since masking the design's text
-/// asks the terminals slice for the session's secrets.
-pub fn design(state: &AppState, pass: &Pass, args: &Value, now: i64) -> ApiResult<Designed> {
-    pass.is_for(Call::Design)?;
-    let tid = pass.tid.as_str();
-    let _one_at_a_time = state.avatar.designing.lock();
-    let current: Design = on_record(&mut state.avatar.inner.lock().records, tid)?.design.clone();
-    let mask = |s: &str| state.terminals.redact_text(tid, s);
-    let applied = look::apply_masked(Some(&current), args, &mask).map_err(|problems| ApiError::bad_request(format!("{}\nNothing was changed.", look::message(&problems))))?;
-    // A look that costs too much to draw is not stored: the browser would pay for it on every
-    // frame, and the session could not be shown it.
-    if let Some(look) = applied.design.look.as_ref().filter(|look| current.look.as_ref() != Some(*look)) {
-        preview::affordable(&serde_json::to_value(look)?).map_err(|why| ApiError::bad_request(format!("{}\nNothing was changed.", mask(&why))))?;
+/// A design call that passed the validator and is not stored yet.
+#[derive(Debug, Clone)]
+pub struct Checked {
+    applied: Applied,
+    /// The design the call was applied to: it is stored only over this one.
+    base: Design,
+}
+
+impl Checked {
+    /// The look to draw before the design is stored: the new look, where it differs from the
+    /// stored one. A look that cannot be drawn is not stored (the browser would pay for it on
+    /// every frame, and the session could not be shown it).
+    pub fn to_draw(&self) -> Option<&Look> {
+        self.applied.design.look.as_ref().filter(|look| self.base.look.as_ref() != Some(*look))
     }
 
+    /// Whether the call leaves the artwork as it is stored (it changed the rig, the motion or
+    /// nothing of the look): then what is wrong with drawing it was wrong before the call.
+    pub fn same_artwork(&self) -> bool {
+        match (&self.applied.design.look, &self.base.look) {
+            (Some(new), Some(old)) => new.nodes == old.nodes && new.view_box == old.view_box,
+            _ => false,
+        }
+    }
+}
+
+/// The first step of a design call: the arguments of `avatar_design` validated against the
+/// design the avatar has now and applied to it (the rules of `look::apply`), without storing
+/// anything. A refused call lists what to fix. No lock is held when this returns: the validator
+/// masks the design's text, which asks the terminals slice for the session's secrets.
+pub fn design_check(state: &AppState, pass: &Pass, args: &Value) -> ApiResult<Checked> {
+    pass.is_for(Call::Design)?;
+    let tid = pass.tid.as_str();
+    let base: Design = on_record(&mut state.avatar.inner.lock().records, tid)?.design.clone();
+    let mask = |s: &str| state.terminals.redact_text(tid, s);
+    let applied = look::apply_masked(Some(&base), args, &mask).map_err(|problems| ApiError::bad_request(format!("{}\nNothing was changed.", look::message(&problems))))?;
+    Ok(Checked { applied, base })
+}
+
+/// The design changed between the two steps of a call (another call of the same session).
+pub const CHANGED_MEANWHILE: &str = "The avatar's design was changed by another call while this one was checked: send this call again.\nNothing was changed.";
+
+/// The second step: the checked design is stored, when the avatar still has the design the call
+/// was applied to.
+pub fn design_store(state: &AppState, pass: &Pass, checked: &Checked, now: i64) -> ApiResult<Designed> {
+    pass.is_for(Call::Design)?;
+    let tid = pass.tid.as_str();
+    let applied = &checked.applied;
     let mut guard = state.avatar.inner.lock();
     let rec = on_record(&mut guard.records, tid)?;
+    if rec.design != checked.base {
+        return Err(ApiError::conflict(CHANGED_MEANWHILE));
+    }
     let changed = rec.design != applied.design;
     if changed {
         rec.design = applied.design.clone();
@@ -401,11 +439,21 @@ pub fn design(state: &AppState, pass: &Pass, args: &Value, now: i64) -> ApiResul
         if rec.held.as_ref().is_some_and(|held| !playable(rec.design.look.as_ref(), &held.name)) {
             rec.held = None;
         }
+        // Nor does a gesture that waited its turn go out against a look it was not checked for.
+        rec.act_queued = None;
         rec.touch(now);
         save(state, tid, rec);
         emit_changed(state, tid, rec);
     }
-    Ok(Designed { revision: rec.revision, text: design_answer(rec, &applied, changed) })
+    Ok(Designed { revision: rec.revision, text: design_answer(rec, applied, changed), drawn: rec.design.look.is_some() })
+}
+
+/// Both steps at once, without drawing the look in between: for tests of what a design call
+/// stores. The tool and the hook route draw the look between the steps (`tools::design`).
+#[cfg(test)]
+pub fn design(state: &AppState, pass: &Pass, args: &Value, now: i64) -> ApiResult<Designed> {
+    let checked = design_check(state, pass, args)?;
+    design_store(state, pass, &checked, now)
 }
 
 fn kib(bytes: usize) -> String {
@@ -1310,9 +1358,12 @@ pub struct Status {
 }
 
 impl Status {
-    /// The answer as JSON text, `note` first.
+    /// The answer as JSON text, `note` first. With the stored design in it the JSON is written
+    /// without white space: set out line by line, a large design would be several times its
+    /// size and be cut off by what a tool may answer.
     pub fn text(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
+        let whole = self.avatar.as_ref().is_some_and(|avatar| avatar.design.is_some());
+        if whole { serde_json::to_string(self) } else { serde_json::to_string_pretty(self) }.unwrap_or_default()
     }
 }
 
@@ -1537,8 +1588,8 @@ pub const NO_LOOK_TO_DRAW: &str = "There is no look of your own to draw yet: thi
 pub enum PictureRequest {
     /// The figure in one pose, on the light and on the dark panel.
     Sheet(preview::Pose),
-    /// Moments of one of its own animations, in a row.
-    Strip { animation: String, frames: usize },
+    /// Moments of one of its own animations, in a row, with these inputs held.
+    Strip { animation: String, frames: usize, inputs: preview::Inputs },
 }
 
 impl PictureRequest {
@@ -1549,63 +1600,111 @@ impl PictureRequest {
 
     /// From `{picture?, pose?, frames?, count?}` beside whatever else the call takes (the caller
     /// has checked its keys). `picture: true` is the look at rest, `pose` the look in that pose,
-    /// `frames` a strip of that animation with `count` moments. `None`: no picture was asked for.
+    /// `frames` a strip of that animation with `count` moments, and with `pose` beside it the
+    /// pose's inputs held for every moment. `None`: no picture was asked for.
+    ///
+    /// What the session wrote is masked before the renderer sees it, so a sentence of the
+    /// renderer that quotes a name never quotes a piece of a secret.
     pub fn parse(args: &Value, mask: &dyn Fn(&str) -> String) -> ApiResult<Option<PictureRequest>> {
         let Some(o) = args.as_object() else { return Ok(None) };
         let wanted = flag_of(o, "picture")?.unwrap_or(false);
         let frames = text_of(o, "frames")?;
         let count = number_of(o, "count")?;
-        let pose = o.get("pose").filter(|v| !v.is_null());
-        if let Some(animation) = frames {
-            if pose.is_some() {
-                return Err(ApiError::bad_request("frames and pose are two pictures: ask for one of them in a call"));
+        let pose = match o.get("pose").filter(|v| !v.is_null()) {
+            None => None,
+            Some(pose) => {
+                let keys = fields(pose, "pose", &preview::POSE_KEYS, mask)?;
+                let mut masked = keys.clone();
+                for key in ["animation", "zoom"] {
+                    if let Some(Value::String(name)) = keys.get(key) {
+                        masked.insert(key.to_string(), Value::String(mask(name)));
+                    }
+                }
+                Some(Value::Object(masked))
             }
+        };
+        if let Some(animation) = frames {
             let frames = match count {
                 None => preview::STRIP_FRAMES_DEFAULT,
                 Some(n) if n.fract() == 0.0 && (preview::STRIP_FRAMES_MIN as f64..=preview::STRIP_FRAMES_MAX as f64).contains(&n) => n as usize,
                 Some(_) => return Err(ApiError::bad_request(format!("count is a whole number from {} to {}: how many moments of the animation to draw", preview::STRIP_FRAMES_MIN, preview::STRIP_FRAMES_MAX))),
             };
-            return Ok(Some(PictureRequest::Strip { animation, frames }));
+            let inputs = match &pose {
+                None => preview::Inputs::default(),
+                Some(pose) if ["animation", "at", "zoom"].iter().any(|key| pose.get(*key).is_some_and(|v| !v.is_null())) => {
+                    return Err(ApiError::bad_request("with frames, a pose holds inputs only (lookX, lookY, mouth, pace, turn, held): the animation is the one frames names"));
+                }
+                Some(pose) => preview::Inputs::from_json(pose).map_err(|why| ApiError::bad_request(mask(&why)))?,
+            };
+            return Ok(Some(PictureRequest::Strip { animation: mask(&animation), frames, inputs }));
         }
         if count.is_some() {
             return Err(ApiError::bad_request("count says how many moments of an animation to draw: name the animation with frames"));
         }
         match pose {
-            Some(pose) => Ok(Some(PictureRequest::Sheet(preview::Pose::from_json(pose).map_err(|why| ApiError::bad_request(mask(&why)))?))),
+            Some(pose) => Ok(Some(PictureRequest::Sheet(preview::Pose::from_json(&pose).map_err(|why| ApiError::bad_request(mask(&why)))?))),
             None => Ok(wanted.then(PictureRequest::rest)),
         }
     }
 
     /// What the picture shows, for the text beside it: nothing is written in the picture itself.
     pub fn caption(&self) -> String {
+        const SMALL: &str = "under each, at rest: at its resting size and as a face";
         match self {
             PictureRequest::Sheet(pose) if *pose == preview::Pose::default() => "Picture: your avatar at rest, on the light panel and on the dark one; under each, at its resting size and as a face.".to_string(),
-            PictureRequest::Sheet(_) => "Picture: your avatar in that pose, on the light panel and on the dark one; under each, at rest: at its resting size and as a face.".to_string(),
-            PictureRequest::Strip { animation, frames } => format!("Picture: {frames} moments of {animation}, from its start on the left to its end on the right."),
+            PictureRequest::Sheet(pose) => match &pose.zoom {
+                Some(part) => format!("Picture: a closer look at {part} in that pose, on the light panel and on the dark one; {SMALL}."),
+                None => format!("Picture: your avatar in that pose, on the light panel and on the dark one; {SMALL}."),
+            },
+            PictureRequest::Strip { animation, frames, inputs } => {
+                let held = if *inputs == preview::Inputs::default() { "" } else { ", with those inputs held" };
+                format!("Picture: {frames} moments of {animation}, from its start on the left to its end on the right{held}. A track that has played holds its last keyframe to the end, as in a gesture.")
+            }
+        }
+    }
+
+    /// What the renderer is asked for.
+    pub fn want(&self) -> draw::Want {
+        match self {
+            PictureRequest::Sheet(pose) => draw::Want::Sheet(pose.clone()),
+            PictureRequest::Strip { animation, frames, inputs } => draw::Want::Strip { animation: animation.clone(), frames: *frames, inputs: *inputs },
         }
     }
 }
 
-/// The picture a session asked for of its own avatar, as a PNG. Drawing is CPU work: call this on
-/// a blocking thread. A session whose avatar has the default look has nothing of its own to see.
-pub fn picture(state: &AppState, tid: &str, req: &PictureRequest) -> ApiResult<Vec<u8>> {
+/// The look a picture of the session's avatar is drawn from, as the browser is sent it. A
+/// session without a look of its own has nothing to see yet; one whose avatar the user turned
+/// off is not shown it either.
+pub fn picture_look(state: &AppState, tid: &str) -> ApiResult<Value> {
     // The look is copied out: nothing is drawn under the store's lock.
     let look: Option<Look> = {
         let inner = state.avatar.inner.lock();
-        let rec = inner.records.get(tid).ok_or_else(|| ApiError::conflict(NO_AVATAR))?;
-        // An avatar the user turned off is not drawn for its session either.
+        let Some(rec) = inner.records.get(tid) else {
+            // Where sessions take an avatar themselves, one that has none yet only has to draw.
+            let any = super::sessions(state) == Sessions::Any;
+            return Err(ApiError::conflict(if any { NO_LOOK_TO_DRAW } else { NO_AVATAR }));
+        };
         if !rec.on {
             return Err(ApiError::conflict(TURNED_OFF));
         }
         rec.design.look.clone()
     };
     let look = look.ok_or_else(|| ApiError::conflict(NO_LOOK_TO_DRAW))?;
-    let look = serde_json::to_value(&look)?;
-    let drawn = match req {
-        PictureRequest::Sheet(pose) => preview::sheet(&look, pose),
-        PictureRequest::Strip { animation, frames } => preview::strip(&look, animation, *frames),
-    };
-    drawn.map_err(|why| ApiError::bad_request(state.terminals.redact_text(tid, &why)))
+    Ok(serde_json::to_value(&look)?)
+}
+
+/// What a design answer and a picture say about what drawing the look costs, when it is worth
+/// a word: a session cannot see that a filter is dear.
+pub fn cost_line(spent: preview::Spent) -> Option<String> {
+    (spent.filters >= 1.0 || spent.layers >= 1.0).then(|| {
+        format!(
+            "Drawing cost: about {:.0} of {:.0} filter passes and {:.0} of {:.0} layers (every filtered, masked, clipped or half-transparent group is a layer; the browser pays this again on each frame such a part moves).",
+            spent.filters.ceil(),
+            preview::FILTER_WORK,
+            spent.layers.ceil(),
+            preview::LAYER_WORK
+        )
+    })
 }
 
 // ---------------------------------------------------------------- reading arguments

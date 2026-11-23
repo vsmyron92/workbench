@@ -634,6 +634,41 @@ describe('checkLook on animations', () => {
     expect(fade(0.34)).not.toBeNull()
   })
 
+  it('wants a loop’s paint to end on the value it starts with', () => {
+    // Where a loop starts again its last keyframe meets its first: no time apart at all.
+    const looped = (target: unknown, prop: string, values: unknown[]) =>
+      checked((l) => {
+        ;(l.animations as Record<string, Json>).a = { duration: 2, loop: true, tracks: [{ target, prop, values }] }
+      })
+    expect(looped('cheek', 'opacity', [0.9, 0])).toBeNull()
+    expect(looped('cheek', 'fill', ['#ffffff', '#000000'])).toBeNull()
+    expect(looped('cheek', 'stroke', ['#ffffff', '#000000', '#fffffe'])).toBeNull()
+    expect(looped('cheek', 'opacity', [0.9, 0.2, 0.899])).toBeNull()
+    expect(looped('cheek', 'fillOpacity', [0.8, 0.2, 0.5])).toBeNull()
+    // Ending as it began, in any spelling of the value.
+    expect(looped('cheek', 'opacity', [0.9, 0, 0.9])).not.toBeNull()
+    expect(looped('cheek', 'opacity', [0.5, 0.5])).not.toBeNull()
+    expect(looped('cheek', 'opacity', [0.5, 0.2, 0.5004])).not.toBeNull()
+    expect(looped('cheek', 'fill', ['#FF0000', '#0000ff', '#ff0000ff'])).not.toBeNull()
+    expect(looped('cheek', 'opacity', [null, 0.2, null])).not.toBeNull()
+    // null is each target's own value: it closes the loop only with that value, on every target, where it can be told.
+    expect(looped('cheek', 'fill', ['#ff7a93', '#ff0000', null])).not.toBeNull()
+    expect(looped('cheek', 'fill', ['#ff7a94', '#ff0000', null])).toBeNull()
+    expect(looped('cheek', 'fillOpacity', [null, 0.2, 0.8])).not.toBeNull()
+    expect(looped('cheek', 'opacity', [null, 0.2, 1])).not.toBeNull()
+    expect(looped('shadow', 'opacity', [null, 0.2, 1])).toBeNull()
+    expect(looped('shadow', 'opacity', [0.25, 0.9, null])).not.toBeNull()
+    expect(looped(['shadow', 'cheek'], 'opacity', [null, 0.2, 0.25])).toBeNull()
+    // A paint it inherits, a gradient: its own value cannot be told here, so the server's word stands.
+    expect(looped('torso', 'fill', ['#ffffff', '#000000', null])).not.toBeNull()
+    expect(looped('mouth', 'stroke', [null, '#000000', '#ffffff'])).not.toBeNull()
+    // A one-shot or a recurring animation may end elsewhere: it fades out.
+    expect(checked((l) => void ((l.animations as Record<string, Json>).a = { duration: 2, tracks: [{ target: 'cheek', prop: 'opacity', values: [0.9, 0] }] }))).not.toBeNull()
+    // What does not flash may jump where a loop starts again.
+    expect(looped('armR', 'rotate', [0, 360])).not.toBeNull()
+    expect(looped('cheek', 'r', [6, 9])).not.toBeNull()
+  })
+
   it('keeps every other keyframe pair 0.04 s apart', () => {
     expect(checked((l) => void (animation(l, 'hop').duration = 0.1))).toBeNull()
     expect(checked((l) => void (animation(l, 'hop').duration = 0.2))).not.toBeNull()
@@ -695,6 +730,10 @@ describe('lookElements', () => {
     expect(markup).toContain('&lt;img src=x onerror=alert(1)&gt; **b**')
     expect(markup).not.toContain('<img')
     expectOnlyAllowed(markup, 'p-')
+    // Its own size, or the one the server measured its box with when it sets none.
+    expect(markup).toContain('font-size="12"')
+    const unsized = checked((l) => void delete attrsOf(l, 'label').fontSize) as Look
+    expect(render(unsized)).toContain('font-size="16"')
   })
 
   it('keeps to the tables on a hostile but valid look', () => {
@@ -764,7 +803,8 @@ describe('lookElements', () => {
     const markup = render(hostile, 'h-')
     const found = expectOnlyAllowed(markup, 'h-')
     expect([...found.tags].sort()).toEqual(['circle', 'g', 'path', 'svg', 'text'])
-    expect([...found.attrs].sort()).toEqual(['id'])
+    // A text that sets no size is given the one the server measured it with.
+    expect([...found.attrs].sort()).toEqual(['font-size', 'id'])
     expect(found.ids).toEqual(['h-ok'])
     for (const word of ['script', 'onload', 'onclick', 'style', 'class', 'href', 'javascript', 'example.invalid', 'iframe', 'alert']) expect(markup, word).not.toContain(word)
     expect(lookElements(null as unknown as Look, 'p-')).toEqual([])
@@ -797,7 +837,7 @@ describe('lookElements', () => {
 
   it('stops at the limits whatever it is given', () => {
     const wordy = { viewBox: [0, 0, 200, 200], nodes: [{ tag: 'text', text: 'x'.repeat(5000) }, { tag: 'text', text: '😀'.repeat(60) }] } as unknown as Look
-    expect(render(wordy)).toBe(`<svg><text>${'x'.repeat(LIMITS.textChars)}</text><text>${'😀'.repeat(LIMITS.textChars)}</text></svg>`)
+    expect(render(wordy)).toBe(`<svg><text font-size="16">${'x'.repeat(LIMITS.textChars)}</text><text font-size="16">${'😀'.repeat(LIMITS.textChars)}</text></svg>`)
     const many = { viewBox: [0, 0, 200, 200], nodes: Array.from({ length: 2000 }, () => ({ tag: 'circle' })) } as unknown as Look
     expect(render(many).split('<circle').length - 1).toBe(LIMITS.elements)
     let deep: LookNode = { tag: 'g' }
@@ -944,6 +984,11 @@ describe('the geometry of a look', () => {
     const wide = checkLook({ viewBox: [0, 0, 400, 100], nodes: [{ tag: 'g', id: 'h', box: [150, 10, 100, 80] }], roles: { head: 'h' } }) as Look
     expect(faceViewBox(wide)).toEqual([150, 0, 100, 100])
     expect(faceViewBox(defaultLook('t1'))[2]).toBeLessThan(200)
+    // Never tighter than a tenth of the viewBox's smaller side: a dot of a head is not blown up.
+    const dot = checked((l) => void (find(l, 'head').box = [99, 99, 2, 2])) as Look
+    expect(faceViewBox(dot)).toEqual([90, 88, 20, 20])
+    const tall = checkLook({ viewBox: [0, 0, 100, 400], nodes: [{ tag: 'g', id: 'h', box: [50, 50, 1, 1] }], roles: { head: 'h' } }) as Look
+    expect(faceViewBox(tall)).toEqual([45.5, 45.5, 10, 10])
   })
 
   it('reads transforms as numbers', () => {

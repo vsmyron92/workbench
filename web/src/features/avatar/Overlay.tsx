@@ -38,7 +38,7 @@ import { EMPTY, HOVER_DWELL_MS, NO_DRAFT, armGuard, askChanged, askedToHear, cli
 import type { FigureHandle, WalkInputs } from './lib/engine'
 import { EDGE_PX, SIDE_EDGE_PX, bubbleShift, corner, defaultAnchor, dragStarts, dragged, layoutMode, panelPlace, panelTop, phoneFace, place, smallFigures, storedAnchor, toStored, type Anchor, type Corner, type Placement } from './lib/layout'
 import { drivesOn } from './lib/look'
-import { attend, claimOf, feetBounds, gazeToward, newWorld, placePost, postFor, samplePoints, step, walkFeel, type Box, type Cue, type Obstacle, type Point, type Post, type Walker, type World } from './lib/roam'
+import { attend, claimOf, feetBounds, gazeToward, newWalkLoop, newWorld, placePost, postFor, samplePoints, step, walkFeel, walkLoopStep, type Box, type Cue, type Obstacle, type Point, type Post, type Walker, type WalkLoop, type World } from './lib/roam'
 import type { SpeakPrefs } from './lib/speech'
 import { DESIGNING_MS, figures, front, isDesigning, mostUrgent, presented, seenAfter, transcript, unseen, type Candidate, type Staged } from './lib/stage'
 import { avatarState, type Ask, type AvatarInfo, type AvatarState, type DriveInput, type Line } from './lib/types'
@@ -569,8 +569,8 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
   const roamLooks = useRef(new Map<string, readonly [number, number]>())
   /** What each figure's last step tells the drives of its look: how fast it walks, which way it faces, whether it is dragged. */
   const walkInputs = useRef(new Map<string, WalkInputs>())
-  /** The figures that play a walk of their own design now, and until when one that just played another gesture does not start it. */
-  const ownWalk = useRef(new Set<string>())
+  /** The walk loop of each figure's own design (playing or not, since when it stands, when it stopped), and until when one that just played another gesture does not start it. */
+  const ownWalk = useRef(new Map<string, WalkLoop>())
   const gestured = useRef(new Map<string, number>())
   /** The area the posts were found in: when it changes they are found again. */
   const postsArea = useRef('')
@@ -1138,15 +1138,22 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
       const b = bodies.get(id)
       if (!b) continue
       const handle = handles.current.get(id)
-      if (b.walking && !ownWalk.current.has(id)) {
-        // A looping `walk` of its own design replaces the hop, unless the session holds a gesture or the figure plays another one just now.
+      let loop = ownWalk.current.get(id)
+      if (!loop) {
+        loop = newWalkLoop()
+        ownWalk.current.set(id, loop)
+      }
+      // A looping `walk` of its own design replaces the hop, unless the session holds a gesture or the figure plays another one just now.
+      // It runs on through a short stand, and does not start again at once (lib/roam.ts, `walkLoopStep`).
+      const next = walkLoopStep(loop, b.walking, clock())
+      if (next === 'start') {
         const free = castByIdRef.current.get(id)?.record.held == null && clock() >= (gestured.current.get(id) ?? 0)
-        if (handle && free && designedAs(id, 'walk')?.loop && handle.play('walk', 'loop')) ownWalk.current.add(id)
-      } else if (!b.walking && ownWalk.current.delete(id)) {
+        if (handle && free && designedAs(id, 'walk')?.loop && handle.play('walk', 'loop')) loop.playing = true
+      } else if (next === 'stop') {
         handle?.stop('walk')
       }
       // A walk of its own, or a drive on its pace, replaces the hop; a drive on which way it faces replaces the lean.
-      const hop = ownWalk.current.has(id) || drivenBy(id, 'pace') ? 0 : -b.hop * HOP_PX
+      const hop = loop.playing || drivenBy(id, 'pace') ? 0 : -b.hop * HOP_PX
       const lean = drivenBy(id, 'turn') ? 0 : b.lean * LEAN_DEG
       // Whole pixels while it stands, so that the text of its bubble is sharp; fractions while it walks, so that it glides.
       const [x, y] = b.walking ? [b.x.toFixed(1), b.y.toFixed(1)] : [String(Math.round(b.x)), String(Math.round(b.y))]
@@ -1221,9 +1228,10 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
       random: Math.random,
       quiet: quietAt,
     })
-    // What the step tells each look's drives: how far it really went, the side it walks to or faces, a drag.
+    // What the step tells each look's drives: how far it really went (over the last steps), the side it walks to or faces, a drag.
+    const told = new Map(walkInputs.current)
     walkInputs.current.clear()
-    for (const [id, b] of world.current.bodies) walkInputs.current.set(id, walkFeel(b, before.get(id) ?? null, dt, world.current.bodies, drag?.id === id))
+    for (const [id, b] of world.current.bodies) walkInputs.current.set(id, walkFeel(b, before.get(id) ?? null, dt, world.current.bodies, drag?.id === id, told.get(id)?.pace ?? null))
     showWalk()
     for (const cue of world.current.cues.splice(0)) playCue(cue)
     // One that reached the place its bubble has room at: the bubble is measured again where it stands now.
@@ -1262,7 +1270,7 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
   // Walking ended (the switch, reduced motion, the compact layout): the next walk begins in the column again.
   useEffect(() => {
     if (roaming) return
-    for (const id of ownWalk.current) handles.current.get(id)?.stop('walk')
+    for (const [id, loop] of ownWalk.current) if (loop.playing) handles.current.get(id)?.stop('walk')
     world.current = newWorld()
     for (const kept of [posts, written, roamLooks, walkInputs]) kept.current.clear()
     ownWalk.current.clear()
@@ -1604,8 +1612,8 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     const work = { ...walkArea, bottom: Math.max(walkArea.top, walkArea.bottom - UNDER_PX) }
     const onStage = new Set(visible)
     // What is kept per figure is kept for the figures on stage only: one that comes back starts afresh.
-    for (const kept of [posts.current, written.current, lastStates.current, gestured.current]) for (const id of kept.keys()) if (!onStage.has(id)) kept.delete(id)
-    for (const kept of [posted.current, ownWalk.current]) for (const id of kept) if (!onStage.has(id)) kept.delete(id)
+    for (const kept of [posts.current, written.current, lastStates.current, gestured.current, ownWalk.current]) for (const id of kept.keys()) if (!onStage.has(id)) kept.delete(id)
+    for (const id of posted.current) if (!onStage.has(id)) posted.current.delete(id)
     // The area changed (a tool window opened, the window was resized): where the bubbles have room is found again.
     const area = `${walkArea.left} ${walkArea.top} ${walkArea.right} ${walkArea.bottom}`
     if (postsArea.current !== area) {

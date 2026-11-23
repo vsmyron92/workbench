@@ -71,8 +71,10 @@ with one the words "Designing its look…". When its own look arrives the figure
 The session does not see your browser, so Workbench shows it what it drew: each drawing is
 answered with a picture of the figure on a light and on a dark panel, at its resting size and as
 a face, and with the size and place of every part. A session corrects what looks wrong with a
-call or two more, and may ask for more pictures: one of its animations as a row of moments, or
-the figure as it looks towards the pointer, turns, speaks or is held.
+call or two more, and may ask for more pictures: one of its animations as a row of moments, the
+figure as it looks towards the pointer, turns, speaks or is held, or one part close up. A drawing
+that cannot be drawn at rest is refused before it reaches your screen, and the answer says what
+drawing the look costs.
 
 Claude Code is allowed the five avatar tools without a permission request while its avatar is
 on (Workbench writes them into the `permissions.allow` list of the settings file it gives the
@@ -445,10 +447,11 @@ choose it:
 - **A question nobody saw** becomes a notification with the project, the session's title and the
   question (at most 200 characters): on this computer's desktop and, if you set up push, through
   the browsers' push services.
-- **Pictures of the avatar** are drawn by Workbench on this computer, from the stored look, and
-  go only to the session that asked: in its tool's answer (and from there to its model service,
-  like any tool answer), or into a file its command writes (in the system's temporary directory
-  unless it names another). None is drawn for an avatar you turned off.
+- **Pictures of the avatar** are drawn by Workbench on this computer, from the stored look, in a
+  process of their own with limited memory and time, and go only to the session that asked: in
+  its tool's answer (and from there to its model service, like any tool answer), or into a file
+  its command writes (a new one in the system's temporary directory unless it names another).
+  None is drawn for an avatar you turned off.
 
 Workbench keeps one file per avatar in its data folder, `avatar/<session id>.json` under
 `~/.local/share/workbench` (readable only by you): whether it is on, its name, look and voice, how
@@ -468,10 +471,10 @@ says so while **Avatar** is ticked:
   `ask <text> [--choice c]… [--no-free-text] [--wait <seconds>]`, `ask --again <id>`,
   `ask --cancel`, `act <name> [--mode once|hold|loop] [--times n]`, `act --stop <name|all>`,
   `picture [<file.png>] [--frames <animation> [--count n]] [--pose <file|->]` (writes a picture
-  of the avatar to that file, or to the system's temporary directory, and prints where, for a
-  session that can open an image). It works only inside an
-  agent session: it reads the session's `WORKBENCH_URL`, `WORKBENCH_TERMINAL_ID` and
-  `WORKBENCH_AGENT_TOKEN`, and sends the token only to this computer.
+  of the avatar to that file, or to a new one in the system's temporary directory, and prints
+  where, for a session that can open an image; with both flags, the moments under the pose's
+  inputs). It works only inside an agent session: it reads the session's `WORKBENCH_URL`,
+  `WORKBENCH_TERMINAL_ID` and `WORKBENCH_AGENT_TOKEN`, and sends the token only to this computer.
   Exit status 0 means done, 1 refused or no answer (the reason is on standard error), 2 nothing
   was sent.
 - **In a dev container**, where that program does not exist, `curl` against
@@ -500,10 +503,12 @@ tool call and gets the same answer.
   row.
 - A drawing is at most 32 KiB of artwork with 300 elements (a repeated part counts with what it
   repeats), 8 filters of 8 steps each, 32 animations of 16 tracks of 16 keyframes, 64 parts
-  that move with another, 16 drives, and 256 KiB for the whole call. A drawing that would cost
-  too much to draw on every frame (heavy filters, many masked, clipped or half-transparent
-  groups, a filter on a stretched part, very fine dashes) is refused, and so is a picture of a
-  pose that would.
+  that move with another, 16 drives, and 256 KiB for the whole call. A drawing is drawn before
+  it is stored, and one that cannot be drawn at rest is refused: one that would cost too much on
+  every frame (heavy filters, many masked, clipped or half-transparent groups, a filter on a
+  stretched part, a shape drawn far too large, very fine dashes), or that does not finish within
+  the memory (1 GiB) and the processor time (6 seconds) a picture may take. Two pictures are
+  drawn at a time for all sessions and one at a time for each.
 - At most 64 sessions, running or in the history, have an avatar (none is taken away). Giving
   one more, or a session taking one itself, is refused with a message (`avatar_status` of a
   session without one then says that none is to be had), and a session started with one (the
@@ -513,10 +518,11 @@ tool call and gets the same answer.
   bar (40 on a phone), eight walking figures, or four in the column. Colour and opacity changes
   are at least 0.17 seconds apart and never jump, spring or bounce, and they follow only how
   fast a figure walks, which way it turns and whether you drag it, which change slowly, in at
-  most two or three steps, never the pointer or the speech; a
-  figure's animations are drawn at 30 frames a second at most (its walk across the window
-  follows the screen's rate), and a figure that takes too long to draw is held still in its rest
-  pose.
+  most two or three steps, never the pointer or the speech. Whatever a figure's motion adds up
+  to, no colour, opacity or movement of a large part turns back more often than three flashes a
+  second allow: the figure holds it until it may turn. A figure's animations are drawn at 30
+  frames a second at most (its walk across the window follows the screen's rate), and a figure
+  that takes too long to draw is held still in its rest pose.
 
 ## Troubleshooting
 
@@ -578,10 +584,13 @@ avatar` command. Its terminal shows what it tried, and the refusal it got, if an
 - Real Codex, Kimi Code, Gemini CLI and Aider sessions.
 - A real model looking at the pictures of its avatar: the tests check the PNG and the image
   blocks the tools send, not what a model makes of them. The picture follows the browser's pose
-  rules but is drawn by another renderer, with the system's sans-serif font for text (a
-  character that font lacks is left out of the picture).
+  rules but is drawn by another renderer, with the system's sans-serif font and a few to fall
+  back on for text (a character none of them has is drawn as a box in the picture).
 - A session in a dev container.
-- Windows at run time: the server is type-checked for Windows only.
+- Windows at run time: the server is type-checked for Windows only. There the process a picture
+  is drawn in is only waited for and killed; it cannot limit its own memory or time.
+- Two opacities that cancel out on one part or down its tree, and two colours whose blend dips
+  in brightness: the flash limit does not see them.
 - Safari and iOS: speech needs a tap there, by design, but it was not tried.
 
 ## Not in this release

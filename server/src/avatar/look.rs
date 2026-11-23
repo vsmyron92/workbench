@@ -3611,7 +3611,7 @@ impl Svg<'_, '_, '_> {
                 };
                 match n {
                     Some(n) if fits(n) => put(node, AttrValue::Num(Num::new(n))),
-                    Some(_) => self.bad(&key, place, format!("{lead}{} is out of range", self.q(raw.trim())), if user_space { "a coordinate near the viewBox" } else { "a share of the painted box, such as 0.5 or 50%" }),
+                    Some(_) => self.bad(&key, place, format!("{lead}{} is out of range", self.q(raw.trim())), if user_space { "a coordinate near the viewBox" } else { "a share of the painted box, such as 0.5 or 50%, at most 1000%" }),
                     None => self.bad(&key, place, format!("{lead}{} is not a number", self.q(raw.trim())), "a number or a percentage"),
                 }
             }
@@ -4295,7 +4295,13 @@ impl<'a> Check<'a> {
         match self.ix.by_id.get(id) {
             Some(entry) if entry.part => Some(entry),
             Some(entry) => {
-                out.problems.add(&format!("not-part {id}"), at, format!("{id} is a {}, or inside defs", entry.node.tag.name()), "what moves is a g, a shape, a text or a use that is drawn");
+                // A shape that could move, were it drawn: it stands where nothing moves.
+                let kept = matches!(entry.node.tag, Tag::G | Tag::Text | Tag::Use) || entry.node.tag.is_shape();
+                if kept {
+                    out.problems.add(&format!("not-part {id}"), at, format!("{id} stands inside defs, a mask or a clipPath, where nothing moves"), "move the masked or clipped part, or the use that repeats it");
+                } else {
+                    out.problems.add(&format!("not-part {id}"), at, format!("{id} is a {}, or inside defs", entry.node.tag.name()), "what moves is a g, a shape, a text or a use that is drawn");
+                }
                 None
             }
             None => {
@@ -6697,7 +6703,7 @@ mod tests {
 
         has(&refused(None, figure(json!({ "pivots": { "elbow": [1, 2] } }))), "target \"elbow\" not found (at pivots.elbow): ids are body, belly, head, face, eyes, pupil, mouth, arm, cane, label");
         has(&refused(None, figure(json!({ "pivots": { "sky": [1, 2] } }))), "sky is a linearGradient, or inside defs (at pivots.sky): what moves is a g, a shape, a text or a use that is drawn");
-        has(&refused(None, figure(json!({ "pivots": { "pane": [1, 2] } }))), "pane is a circle, or inside defs");
+        has(&refused(None, figure(json!({ "pivots": { "pane": [1, 2] } }))), "pane stands inside defs, a mask or a clipPath, where nothing moves (at pivots.pane): move the masked or clipped part, or the use that repeats it");
         has(&refused(None, figure(json!({ "pivots": { "arm": [1] } }))), "a pivot is a list: [x, y], in the coordinates the part is drawn in");
         has(&refused(None, figure(json!({ "pivots": { "arm": "top" } }))), "a pivot is a string");
         has(&refused(None, figure(json!({ "pivots": { "arm": [1, "2"] } }))), "a pivot is a list");
@@ -6785,7 +6791,7 @@ mod tests {
         let bad = |track: Value| refused(None, tracks(json!([track])));
         has(&bad(json!({ "target": "arm_r", "prop": "rotate", "values": [0, 1] })), "target \"arm_r\" not found (at animations.a.tracks[0]): ids are body, belly, head, face, eyes, pupil, mouth, arm, cane, label");
         has(&bad(json!({ "target": "sky", "prop": "opacity", "values": [0, 1] })), "sky is a linearGradient, or inside defs: what moves is a g, a shape, a text or a use that is drawn");
-        has(&bad(json!({ "target": "pane", "prop": "opacity", "values": [0, 1] })), "pane is a circle, or inside defs");
+        has(&bad(json!({ "target": "pane", "prop": "opacity", "values": [0, 1] })), "pane stands inside defs, a mask or a clipPath, where nothing moves (at animations.a.tracks[0]): move the masked or clipped part");
         has(&bad(json!({ "target": "window", "prop": "opacity", "values": [0, 1] })), "window is a clipPath, or inside defs");
         has(&bad(json!({ "target": "arm", "prop": "d", "values": ["M0 0L1 1", "M0 0L2 2"] })), "arm is a rect and has no d: d is a prop of path");
         has(&bad(json!({ "target": "arm", "prop": "r", "values": [1, 2] })), "arm is a rect and has no r: r is a prop of circle");
@@ -8483,11 +8489,13 @@ mod tests {
         };
         // Neither the clip path nor a shape inside it is a part: nothing names it.
         for id in ["cp", "pane", "bar"] {
-            has(&refused(None, with(json!({ "pivots": { id: [1, 2] } }))), "or inside defs");
-            has(&refused(None, with(json!({ "roles": { "head": id } }))), "or inside defs");
-            has(&refused(None, with(json!({ "animations": { "a": { "duration": 1, "tracks": [{ "target": id, "prop": "opacity", "values": [0, 1] }] } } }))), "or inside defs");
-            has(&refused(None, with(json!({ "animations": { "a": { "duration": 1, "tracks": [{ "target": ["c", id], "prop": "translateX", "values": [0, 1] }] } } }))), "or inside defs");
-            has(&refused(None, with(json!({ "mouth": { "target": id, "prop": "scaleY", "open": 2 } }))), "or inside defs");
+            // The clip path is no part at all; a shape inside it stands where nothing moves.
+            let why = if id == "cp" { "or inside defs" } else { "stands inside defs, a mask or a clipPath, where nothing moves" };
+            has(&refused(None, with(json!({ "pivots": { id: [1, 2] } }))), why);
+            has(&refused(None, with(json!({ "roles": { "head": id } }))), why);
+            has(&refused(None, with(json!({ "animations": { "a": { "duration": 1, "tracks": [{ "target": id, "prop": "opacity", "values": [0, 1] }] } } }))), why);
+            has(&refused(None, with(json!({ "animations": { "a": { "duration": 1, "tracks": [{ "target": ["c", id], "prop": "translateX", "values": [0, 1] }] } } }))), why);
+            has(&refused(None, with(json!({ "mouth": { "target": id, "prop": "scaleY", "open": 2 } }))), why);
         }
         for (inner, why) in [
             ("<defs><clipPath id='a'><clipPath id='b'><circle r='5'/></clipPath></clipPath></defs><circle r='5'/>", "svg: <clipPath> inside <clipPath>"),
@@ -10308,7 +10316,7 @@ mod tests {
         assert_eq!((bbox(&look, "body"), bbox(&look, "m")), ([50.0, 50.0, 100.0, 100.0], [1.0, 1.0, 100.0, 199.0]));
         assert_eq!(round_trip(&look), look);
         // What a mask holds is not a part.
-        has(&refused(None, json!({ "svg": to_svg(&look), "pivots": { "window": [1, 1] } })), "window is a rect, or inside defs");
+        has(&refused(None, json!({ "svg": to_svg(&look), "pivots": { "window": [1, 1] } })), "window stands inside defs, a mask or a clipPath, where nothing moves");
 
         for (inner, why) in [
             ("<mask id='m'><circle r='5'/></mask><circle r='5'/>", "svg: <mask> inside <svg>: masks and filters belong inside defs"),
@@ -10328,7 +10336,7 @@ mod tests {
             ("<circle r='5' mask='url(#m) red'/>", "svg: mask \"url(#m) red\""),
             ("<defs><mask id='m' mask-type='colour'/></defs><circle r='5'/>", "one of luminance, alpha"),
             ("<defs><mask id='m' maskUnits='pixels'/></defs><circle r='5'/>", "one of userSpaceOnUse, objectBoundingBox"),
-            ("<defs><mask id='m' width='-5%'/></defs><circle r='5'/>", "svg: width \"-5%\" is out of range: a share of the painted box, such as 0.5 or 50%"),
+            ("<defs><mask id='m' width='-5%'/></defs><circle r='5'/>", "svg: width \"-5%\" is out of range: a share of the painted box, such as 0.5 or 50%, at most 1000%"),
             ("<defs><mask id='m' maskUnits='userSpaceOnUse' x='99999'/></defs><circle r='5'/>", "svg: x \"99999\" is out of range: a coordinate near the viewBox"),
             ("<defs><mask id='m' fill='red'/></defs><circle r='5'/>", "\"fill\" is not an attribute of <mask>"),
             ("<defs><mask id='m' transform='scale(2)'/></defs><circle r='5'/>", "\"transform\" is not an attribute of <mask>"),
@@ -10606,7 +10614,7 @@ mod tests {
             (json!({ "body": "head" }), "head is inside body (at parents.body): a part cannot move with what it holds"),
             (json!({ "arm": "arm" }), "arm moves with itself (at parents.arm): a part moves with another part"),
             (json!({ "arm": "sky" }), "sky is a linearGradient, or inside defs (at parents.arm)"),
-            (json!({ "pane": "arm" }), "pane is a circle, or inside defs (at parents.pane)"),
+            (json!({ "pane": "arm" }), "pane stands inside defs, a mask or a clipPath, where nothing moves (at parents.pane)"),
             (json!({ "nowhere": "arm" }), "target \"nowhere\" not found (at parents.nowhere)"),
             (json!({ "arm": "elsewhere" }), "target \"elsewhere\" not found (at parents.arm)"),
             (json!({ "arm": 5 }), "a parent is a number (at parents.arm): the id of the part it moves with"),

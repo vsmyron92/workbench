@@ -94,7 +94,7 @@ fn posed(look: &Value, pose: &Pose) -> (Vec<Option<Matrix>>, HashMap<String, Vec
 }
 
 fn at(name: &str, progress: f64) -> Pose {
-    Pose { animation: Some((name.to_string(), progress)), inputs: Inputs::default() }
+    Pose { animation: Some((name.to_string(), progress)), inputs: Inputs::default(), zoom: None }
 }
 
 fn close(a: Matrix, b: Matrix) -> bool {
@@ -182,7 +182,7 @@ fn what_does_not_fit_the_tables_is_never_written() {
     assert_eq!(
         body,
         "<circle r='5'/><circle r='5'/><circle id='ok' r='5'/><circle r='6'/><use x='1'/><use href='#ok'/>\
-         <text x='1' font-family='sans-serif'>&lt;/text&gt;&lt;script&gt;alert('x')&lt;/script&gt;</text><path/><rect height='10'/>\
+         <text x='1' font-size='16' font-family='sans-serif'>&lt;/text&gt;&lt;script&gt;alert('x')&lt;/script&gt;</text><path/><rect height='10'/>\
          <defs><filter id='f'><feGaussianBlur/><feTurbulence baseFrequency='0.05'/><feOffset dx='0' dy='0'/></filter></defs>"
     );
     // A clip-path that names a circle, not a clipPath, is left out; so is a gradient that is not there.
@@ -362,8 +362,8 @@ fn a_loop_follows_its_phase_and_a_one_shot_its_delay() {
     let (t, _, ids) = posed(&look, &at("move", 0.75));
     assert_matrix(t[ids["arm"]], translate(5.0, 0.0));
     // A one-shot runs for its duration and its longest delay: 1 + 1 s. At 0.25 of that (0.5 s) the
-    // delayed track has not started; at 0.5 (1 s) the first is at its last keyframe; at 0.75
-    // (1.5 s) it has played and is at rest again, as in the browser.
+    // delayed track has not started; at 0.5 (1 s) the first is at its last keyframe, and it
+    // holds it to the end of the run, as a gesture does in the browser.
     let look = square(json!({ "duration": 1, "tracks": [
         { "target": "arm", "prop": "translateX", "values": [0, 10] },
         { "target": "arm", "prop": "translateY", "values": [0, 10], "delay": 1 }
@@ -373,9 +373,9 @@ fn a_loop_follows_its_phase_and_a_one_shot_its_delay() {
     let (t, _, ids) = posed(&look, &at("move", 0.5));
     assert_matrix(t[ids["arm"]], translate(10.0, 0.0));
     let (t, _, ids) = posed(&look, &at("move", 0.75));
-    assert_matrix(t[ids["arm"]], translate(0.0, 5.0));
+    assert_matrix(t[ids["arm"]], translate(10.0, 5.0));
     let (t, _, ids) = posed(&look, &at("move", 1.0));
-    assert_matrix(t[ids["arm"]], translate(0.0, 10.0));
+    assert_matrix(t[ids["arm"]], translate(10.0, 10.0));
 }
 
 /// `spin` turns a quarter about (50, 50) with `holder` in it; `hand` sits in a group moved by
@@ -426,6 +426,40 @@ fn a_chain_of_two_carries_the_middle_parts_own_motion() {
     // finger: D(hand) = W(hand)·R(hand)⁻¹ = [0 1 -1 0 100 15]·translate(-10 0): the turn and hand's
     // step of 5 along x, which the turn carries down along y.
     assert_matrix(t[ids["finger"]], [0.0, 1.0, -1.0, 0.0, 100.0, 5.0]);
+}
+
+/// A part follows its parent as if it were drawn inside it: what moves a group that holds them
+/// both moves the part once, not twice, and a mirror of that group does not undo itself.
+#[test]
+fn a_part_and_its_parent_inside_one_moving_group_move_once() {
+    let look = json!({
+        "viewBox": [0, 0, 200, 200],
+        "nodes": [ { "tag": "g", "id": "grp", "box": [60, 60, 50, 50], "children": [
+            { "tag": "rect", "id": "child", "attrs": { "x": 60, "y": 60, "width": 20, "height": 20 }, "box": [60, 60, 20, 20] },
+            { "tag": "rect", "id": "par", "attrs": { "x": 90, "y": 90, "width": 20, "height": 20 }, "box": [90, 90, 20, 20] }
+        ] } ],
+        "pivots": { "grp": [100, 100] }, "roles": {}, "states": {}, "mouth": [], "gaze": null, "animations": {},
+        "parents": { "child": "par" },
+        "drives": [
+            { "input": "lookX", "target": "grp", "prop": "translateX", "values": [-40, 0, 40] },
+            { "input": "turn", "target": "grp", "prop": "scaleX", "values": [-1, 1, 1] },
+            { "input": "held", "target": "par", "prop": "translateY", "values": [0, 10] }
+        ]
+    });
+    let with = |inputs: Inputs| posed(&look, &Pose { inputs, ..Pose::default() });
+    // The group moves 40 to the right: the part goes along inside it, and is given nothing more.
+    let (t, _, ids) = with(Inputs { look_x: 1.0, ..Inputs::default() });
+    assert_matrix(t[ids["grp"]], translate(40.0, 0.0));
+    assert_matrix(t[ids["child"]].or(Some(IDENTITY)), IDENTITY);
+    // The group mirrored about x = 100: the part is mirrored with it, once.
+    let (t, _, ids) = with(Inputs { turn: -1.0, ..Inputs::default() });
+    assert_matrix(t[ids["grp"]], [-1.0, 0.0, 0.0, 1.0, 200.0, 0.0]);
+    assert_matrix(t[ids["child"]].or(Some(IDENTITY)), IDENTITY);
+    // The parent's own step is the part's too, also inside the mirrored and moved group.
+    let (t, _, ids) = with(Inputs { held: 1.0, ..Inputs::default() });
+    assert_matrix(t[ids["child"]], translate(0.0, 10.0));
+    let (t, _, ids) = with(Inputs { held: 1.0, turn: -1.0, look_x: 1.0, ..Inputs::default() });
+    assert_matrix(t[ids["child"]], translate(0.0, 10.0));
 }
 
 #[test]
@@ -491,7 +525,7 @@ fn a_drive_at_three_input_positions() {
         { "input": "held", "target": "arm", "prop": "opacity", "values": [null, 0.5] },
         { "input": "lookX", "target": "arm", "prop": "scaleX", "values": [0.5, 1, 2] }
     ]);
-    let pose = |turn: f64, pace: f64, held: f64, look_x: f64| Pose { animation: None, inputs: Inputs { turn, pace, held, look_x, ..Inputs::default() } };
+    let pose = |turn: f64, pace: f64, held: f64, look_x: f64| Pose { animation: None, inputs: Inputs { turn, pace, held, look_x, ..Inputs::default() }, zoom: None };
     // turn -1 (position 0), 0 (0.5), 1 (1).
     for (turn, angle) in [(-1.0, -30.0), (0.0, 0.0), (1.0, 30.0), (0.5, 15.0)] {
         let (t, _, ids) = posed(&look, &pose(turn, 0.0, 0.0, 0.0));
@@ -513,7 +547,7 @@ fn a_drive_at_three_input_positions() {
     // The animation comes first, the drive is added to it.
     let mut both = look.clone();
     both["animations"]["move"]["tracks"] = json!([ { "target": "arm", "prop": "rotate", "values": [0, 10] } ]);
-    let (t, _, ids) = posed(&both, &Pose { animation: Some(("move".into(), 1.0)), inputs: Inputs { turn: 1.0, ..Inputs::default() } });
+    let (t, _, ids) = posed(&both, &Pose { animation: Some(("move".into(), 1.0)), inputs: Inputs { turn: 1.0, ..Inputs::default() }, zoom: None });
     assert_matrix(t[ids["arm"]], about(50.0, 40.0, rotate(40.0)));
 }
 
@@ -533,14 +567,14 @@ fn the_mouth_and_the_gaze_come_last() {
             { "target": "pupils", "prop": "scaleY", "open": 2, "closed": 1 }
         ]
     });
-    let speaking = Pose { animation: None, inputs: Inputs { mouth: Some(0.5), look_x: 1.0, look_y: 0.0, ..Inputs::default() } };
+    let speaking = Pose { animation: None, inputs: Inputs { mouth: Some(0.5), look_x: 1.0, look_y: 0.0, ..Inputs::default() }, zoom: None };
     let (t, set, ids) = posed(&look, &speaking);
     assert_eq!(set["mouth"], vec![("d", "M 80 120 Q 100 135 120 120".to_string())]);
     assert_eq!(set["jaw"], vec![("ry", "8".to_string())]);
     // The gaze: 3% of the width (6) to the right, after the mouth's scale about the box's centre.
     assert_matrix(t[ids["pupils"]], mul(translate(6.0, 0.0), about(100.0, 80.0, scale(1.0, 1.5))));
     // Without a line the mouth entries are not applied; a vector longer than 1 is cut to 1.
-    let looking = Pose { animation: None, inputs: Inputs { look_x: 1.0, look_y: 1.0, ..Inputs::default() } };
+    let looking = Pose { animation: None, inputs: Inputs { look_x: 1.0, look_y: 1.0, ..Inputs::default() }, zoom: None };
     let (t, set, ids) = posed(&look, &looking);
     assert!(set.is_empty());
     let k = 6.0 / 2f64.sqrt();
@@ -550,7 +584,7 @@ fn the_mouth_and_the_gaze_come_last() {
     still["gaze"] = json!(0);
     assert_eq!(posed(&still, &looking).0[ids["pupils"]], None);
     still["gaze"] = json!(50);
-    assert_matrix(posed(&still, &Pose { animation: None, inputs: Inputs { look_x: -1.0, ..Inputs::default() } }).0[ids["pupils"]], translate(-10.0, 0.0));
+    assert_matrix(posed(&still, &Pose { animation: None, inputs: Inputs { look_x: -1.0, ..Inputs::default() }, zoom: None }).0[ids["pupils"]], translate(-10.0, 0.0));
 }
 
 #[test]
@@ -720,11 +754,21 @@ fn a_strip_has_its_frames_and_they_differ() {
 fn the_example_looks_render() {
     // What the validator stores is what the renderer reads: turned, the third example shows its drives.
     let facing = decode(&sheet(&hoot(), &Pose::default()).unwrap());
-    let turned = decode(&sheet(&hoot(), &Pose { animation: None, inputs: Inputs { turn: 1.0, pace: 1.0, ..Inputs::default() } }).unwrap());
+    let turned = decode(&sheet(&hoot(), &Pose { animation: None, inputs: Inputs { turn: 1.0, pace: 1.0, ..Inputs::default() }, zoom: None }).unwrap());
     assert_ne!(facing.data(), turned.data(), "a turn and a pace show");
+    // A strip holds the inputs it is given: the walk is seen in the view that shows it.
+    let walking = draw_strip(&hoot(), "walk", 4, &Inputs { turn: 1.0, pace: 1.0, ..Inputs::default() }).unwrap();
+    assert_ne!(walking.png, strip(&hoot(), "walk", 4).unwrap());
+    // A closer look at one part is another picture of the same size; a part that is not there is said.
+    let close = decode(&sheet(&hoot(), &Pose { zoom: Some("head".into()), ..Pose::default() }).unwrap());
+    assert!(close.width() == facing.width() && close.data() != facing.data());
+    assert_eq!(sheet(&hoot(), &Pose { zoom: Some("nose".into()), ..Pose::default() }).unwrap_err(), "zoom names \"nose\", which is no part of this look with a box: name the id of a part that is drawn");
+    // What drawing it cost travels with the picture: the owl's shadow filter is worth a word.
+    let spent = draw_sheet(&hoot(), &Pose::default()).unwrap().spent;
+    assert!(spent.filters > 1.0 && spent.filters < FILTER_WORK && spent.layers > 0.0, "{spent:?}");
     for look in [pip(), tock(), hoot()] {
         let rest = decode(&sheet(&look, &Pose::default()).unwrap());
-        let speaking = decode(&sheet(&look, &Pose { animation: None, inputs: Inputs { mouth: Some(1.0), look_x: 1.0, ..Inputs::default() } }).unwrap());
+        let speaking = decode(&sheet(&look, &Pose { animation: None, inputs: Inputs { mouth: Some(1.0), look_x: 1.0, ..Inputs::default() }, zoom: None }).unwrap());
         assert_ne!(rest.data(), speaking.data(), "an open mouth and a look aside show");
         let first = look["animations"].as_object().unwrap().keys().next().unwrap().clone();
         let p = decode(&strip(&look, &first, STRIP_FRAMES_DEFAULT).unwrap());
@@ -760,7 +804,7 @@ fn the_face_is_the_square_around_the_head() {
 fn the_newer_format_shows_in_the_picture() {
     let look = gadget();
     let rest = decode(&sheet(&look, &Pose::default()).unwrap());
-    let turned = decode(&sheet(&look, &Pose { animation: None, inputs: Inputs { turn: 1.0, ..Inputs::default() } }).unwrap());
+    let turned = decode(&sheet(&look, &Pose { animation: None, inputs: Inputs { turn: 1.0, ..Inputs::default() }, zoom: None }).unwrap());
     assert_ne!(rest.data(), turned.data());
     // The bulb follows the head (a parent) as the body leans: at rest its glow is over the cord at
     // x = 100; turned to the right it is moved right.
@@ -800,6 +844,87 @@ fn filters_beyond_the_budget_are_refused_with_a_sentence() {
     one["nodes"][0]["children"][0]["children"].as_array_mut().unwrap().truncate(2);
     sheet(&one, &Pose::default()).unwrap();
     affordable(&one).unwrap();
+}
+
+/// What the browsers draw and the renderer's parser would change: a saturation beyond 0 … 1 is
+/// written as the matrix it stands for, a morphology with one radius of 0 works along the other.
+#[test]
+fn a_saturation_beyond_its_range_and_a_morphology_along_one_axis_are_written_as_the_browser_draws_them() {
+    let filter = |primitive: Value| {
+        let look = json!({ "viewBox": [0, 0, 200, 200], "nodes": [
+            { "tag": "defs", "children": [ { "tag": "filter", "id": "f", "children": [primitive] } ] },
+            { "tag": "rect", "attrs": { "x": 20, "y": 20, "width": 160, "height": 160, "fill": "#cc3366", "filterRef": "f" } }
+        ] });
+        let model = Model::read(&look).unwrap();
+        let body = model.body(&model.pose(&Pose::default()).unwrap());
+        sheet(&look, &Pose::default()).unwrap();
+        body
+    };
+    let within = filter(json!({ "tag": "feColorMatrix", "attrs": { "type": "saturate", "values": "0.3" } }));
+    assert!(within.contains("<feColorMatrix type='saturate' values='0.3'/>"), "{within}");
+    let beyond = filter(json!({ "tag": "feColorMatrix", "attrs": { "type": "saturate", "values": "2" } }));
+    assert!(beyond.contains("<feColorMatrix type='matrix' values='1.787 -0.715 -0.072 0 0 -0.213 1.285 -0.072 0 0 -0.213 -0.715 1.928 0 0 0 0 0 1 0'/>"), "{beyond}");
+    let below = filter(json!({ "tag": "feColorMatrix", "attrs": { "type": "saturate", "values": "-1" } }));
+    assert!(below.contains("type='matrix' values='-0.574 1.43 0.144 0 0"), "{below}");
+    let hue = filter(json!({ "tag": "feColorMatrix", "attrs": { "type": "hueRotate", "values": "400" } }));
+    assert!(hue.contains("type='hueRotate' values='400'"), "{hue}");
+    // Morphology: both radii in two passes, one radius alone in one, none at all leaves the input.
+    let both = filter(json!({ "tag": "feMorphology", "attrs": { "operator": "dilate", "radius": "3 2" } }));
+    assert_eq!(both.matches("<feMorphology").count(), 2, "{both}");
+    let across = filter(json!({ "tag": "feMorphology", "attrs": { "operator": "dilate", "radius": "3 0" } }));
+    assert!(across.matches("<feMorphology").count() == 1 && across.contains("radius='3 0.0001'") && !across.contains("feOffset"), "{across}");
+    let down = filter(json!({ "tag": "feMorphology", "attrs": { "operator": "erode", "radius": "0 2" } }));
+    assert!(down.contains("operator='erode' radius='0.0001 2'"), "{down}");
+    let none = filter(json!({ "tag": "feMorphology", "attrs": { "radius": "0" } }));
+    assert!(none.contains("<feOffset dx='0' dy='0'/>") && !none.contains("feMorphology"), "{none}");
+}
+
+/// An ease that overshoots takes no size below nothing.
+#[test]
+fn a_size_never_goes_below_nothing() {
+    let look = json!({
+        "viewBox": [0, 0, 100, 100],
+        "nodes": [ { "tag": "circle", "id": "dot", "attrs": { "cx": 50, "cy": 50, "r": 10, "stroke": "#000000", "strokeWidth": 4 }, "box": [40, 40, 20, 20] } ],
+        "pivots": {}, "roles": {}, "states": {}, "mouth": [], "gaze": null,
+        "animations": { "shrink": { "duration": 1, "ease": [0.3, 3, 0.7, 3], "tracks": [
+            { "target": "dot", "prop": "strokeWidth", "values": [4, 0] },
+            { "target": "dot", "prop": "r", "values": [10, 0] },
+            { "target": "dot", "prop": "strokeDashoffset", "values": [0, -5] }
+        ] } }
+    });
+    let (_, set, _) = posed(&look, &at("shrink", 0.5));
+    let value = |name: &str| set["dot"].iter().find(|(n, _)| *n == name).map(|(_, v)| v.parse::<f64>().unwrap()).unwrap();
+    assert_eq!((value("stroke-width"), value("r")), (0.0, 0.0));
+    // What may be negative overshoots freely.
+    assert!(value("stroke-dashoffset") < -5.0, "{}", value("stroke-dashoffset"));
+}
+
+/// A head that is a dot does not make the face a microscope, and what a look draws far beyond
+/// the picture is refused in a sentence instead of being stroked for minutes.
+#[test]
+fn a_face_is_never_a_microscope_and_strokes_far_beyond_the_picture_are_refused() {
+    let look = json!({ "viewBox": [0, 0, 4096, 4096], "nodes": [
+        { "tag": "path", "id": "body", "attrs": { "d": "M400 400 C 1200 3600 2800 3600 3600 400", "fill": "none", "stroke": "#000000", "strokeWidth": 40 }, "box": [400, 400, 3200, 2400] },
+        { "tag": "circle", "id": "head", "attrs": { "cx": 2048, "cy": 1000, "r": 0.001, "fill": "#000000" }, "box": [2047.999, 999.999, 0.002, 0.002] }
+    ], "pivots": {}, "roles": { "body": "body", "head": "head" }, "animations": {}, "states": {}, "mouth": [], "gaze": null });
+    let model = Model::read(&look).unwrap();
+    assert_eq!(model.face_view()[2], 409.6, "a tenth of the viewBox at the least");
+    let started = std::time::Instant::now();
+    sheet(&look, &Pose::default()).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+
+    // A curve inside a group scaled a million times over: its stroke would be cut without end.
+    let far = json!({ "viewBox": [0, 0, 16, 16], "nodes": [ { "tag": "g", "id": "g", "attrs": { "transform": "scale(1000) scale(1000) translate(-0.5 -0.5)" }, "children": [
+        { "tag": "path", "attrs": { "d": "M0 0 C 0.2 0.9 0.8 0.9 1 0", "fill": "none", "stroke": "#000000", "strokeWidth": 0.01 } }
+    ] } ] });
+    let started = std::time::Instant::now();
+    let err = sheet(&far, &Pose::default()).unwrap_err();
+    assert!(err.starts_with("a stroked shape or a text reaches about ") && err.ends_with("draw it at the size of the figure"), "{err}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "refused before drawing");
+    // Scales that multiply beyond what can be written at all are said, not left out.
+    let beyond = json!({ "viewBox": [0, 0, 200, 200], "nodes": [ { "tag": "rect", "id": "r", "attrs": { "transform": "scale(1000) scale(1000) scale(1000) translate(-0.001 -0.001)", "x": 0, "y": 0, "width": 0.001, "height": 0.001, "fill": "#000000" } } ] });
+    let err = sheet(&beyond, &Pose::default()).unwrap_err();
+    assert!(err.starts_with("a part is scaled beyond what can be drawn"), "{err}");
 }
 
 /// resvg draws a filtered group at the scale of its transform alone and turns the finished layer:
@@ -911,13 +1036,13 @@ fn a_pose_as_a_call_writes_it() {
     assert_eq!(Pose::from_json(&json!({})).unwrap(), Pose::default());
     assert_eq!(
         Pose::from_json(&json!({ "animation": "hop", "lookX": -1, "mouth": 0.4, "turn": 0.5, "pace": 1, "held": 0 })).unwrap(),
-        Pose { animation: Some(("hop".into(), 0.5)), inputs: Inputs { look_x: -1.0, look_y: 0.0, mouth: Some(0.4), pace: 1.0, turn: 0.5, held: 0.0 } }
+        Pose { animation: Some(("hop".into(), 0.5)), inputs: Inputs { look_x: -1.0, look_y: 0.0, mouth: Some(0.4), pace: 1.0, turn: 0.5, held: 0.0 }, zoom: None }
     );
     assert_eq!(Pose::from_json(&json!({ "animation": "hop", "at": 1 })).unwrap().animation, Some(("hop".into(), 1.0)));
     assert_eq!(Pose::from_json(&json!({ "lookX": 2 })).unwrap_err(), "lookX in a pose is a number from -1 to 1");
     assert_eq!(Pose::from_json(&json!({ "mouth": "open" })).unwrap_err(), "mouth in a pose is a number from 0 to 1");
     assert_eq!(Pose::from_json(&json!({ "at": 0.5 })).unwrap_err(), "at in a pose says how far into its animation: name the animation too");
-    assert_eq!(Pose::from_json(&json!({ "frame": 2 })).unwrap_err(), "a pose takes animation, at, lookX, lookY, mouth, pace, turn and held, not \"frame\"");
+    assert_eq!(Pose::from_json(&json!({ "frame": 2 })).unwrap_err(), "a pose takes animation, at, lookX, lookY, mouth, pace, turn, held and zoom, not \"frame\"");
     assert_eq!(Pose::from_json(&json!({ "animation": 3 })).unwrap_err(), "animation in a pose is the name of one of the look's own animations");
 }
 
@@ -945,15 +1070,15 @@ fn write_the_pictures() {
     write("pip-rest", timed(&|| sheet(&pip(), &Pose::default())));
     write("pip-rest-again", timed(&|| sheet(&pip(), &Pose::default())));
     write("pip-hop", timed(&|| strip(&pip(), "hop", 6)));
-    write("pip-speaking", timed(&|| sheet(&pip(), &Pose { animation: None, inputs: Inputs { mouth: Some(1.0), look_x: 1.0, ..Inputs::default() } })));
+    write("pip-speaking", timed(&|| sheet(&pip(), &Pose { animation: None, inputs: Inputs { mouth: Some(1.0), look_x: 1.0, ..Inputs::default() }, zoom: None })));
     write("tock-rest", timed(&|| sheet(&tock(), &Pose::default())));
     write("tock-flip", timed(&|| strip(&tock(), "flip", 6)));
-    write("tock-speaking", timed(&|| sheet(&tock(), &Pose { animation: None, inputs: Inputs { mouth: Some(1.0), look_x: 1.0, ..Inputs::default() } })));
+    write("tock-speaking", timed(&|| sheet(&tock(), &Pose { animation: None, inputs: Inputs { mouth: Some(1.0), look_x: 1.0, ..Inputs::default() }, zoom: None })));
     write("hoot-rest", timed(&|| sheet(&hoot(), &Pose::default())));
-    write("hoot-turned", timed(&|| sheet(&hoot(), &Pose { animation: None, inputs: Inputs { turn: 1.0, pace: 1.0, look_x: 1.0, ..Inputs::default() } })));
+    write("hoot-turned", timed(&|| sheet(&hoot(), &Pose { animation: None, inputs: Inputs { turn: 1.0, pace: 1.0, look_x: 1.0, ..Inputs::default() }, zoom: None })));
     write("hoot-walk", timed(&|| strip(&hoot(), "walk", 6)));
     write("gadget-rest", timed(&|| sheet(&gadget(), &Pose::default())));
-    write("gadget-turned", timed(&|| sheet(&gadget(), &Pose { animation: None, inputs: Inputs { turn: 1.0, ..Inputs::default() } })));
+    write("gadget-turned", timed(&|| sheet(&gadget(), &Pose { animation: None, inputs: Inputs { turn: 1.0, ..Inputs::default() }, zoom: None })));
     write("gadget-pop", timed(&|| strip(&gadget(), "pop", 5)));
 }
 
@@ -973,7 +1098,7 @@ fn whatever_the_check_lets_through_is_drawn_within_bounds() {
     let scales = ["1", "2", "0.5", "10", "0.1", "100", "0.01", "1000", "0.001", "-1", "-30"];
     let (mut drawn, mut refused, mut slowest) = (0, 0, std::time::Duration::ZERO);
     for round in 0..rounds {
-        let mut transform = |pick: &mut dyn FnMut(usize) -> usize| {
+        let transform = |pick: &mut dyn FnMut(usize) -> usize| {
             let mut ops = Vec::new();
             for _ in 0..pick(4) {
                 ops.push(match pick(5) {

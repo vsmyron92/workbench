@@ -74,6 +74,10 @@ enum Command {
     // Inside a hosted session whose CLI has no Workbench tools (avatar::cli).
     #[command(about = avatar::ABOUT)]
     Avatar(avatar::AvatarArgs),
+    // The process a picture of an avatar is drawn in: started by the server itself, with the
+    // look on standard input (avatar::draw).
+    #[command(name = avatar::DRAW_COMMAND, hide = true)]
+    AvatarDraw,
     // Linux: a systemd user service; Windows: a sign-in entry (platform::service).
     #[command(about = platform::service::ABOUT)]
     Service(platform::service::ServiceArgs),
@@ -103,6 +107,7 @@ fn main() -> anyhow::Result<()> {
         Command::GitEditor { mode, dir, file } => git::cli_git_editor(&mode, &dir, &file),
         Command::Statusline => terminals::cli_statusline(),
         Command::Avatar(args) => avatar::cli(args),
+        Command::AvatarDraw => avatar::draw_child(),
         Command::Service(args) => platform::service::cli(args),
         Command::Update(args) => platform::update::cli(args),
     }

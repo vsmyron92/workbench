@@ -844,7 +844,7 @@ const present = (value: unknown): boolean => value !== undefined && value !== nu
 // means the look did not come through it.
 const NOT_PLAIN = /[\p{Cc}\p{Zl}\p{Zp}؜‎‏‪-‮⁦-⁩]/u
 
-/** Where an element with an id sits, for the rules of `use` and `parents`. */
+/** Where an element with an id sits, for the rules of `use` and `parents`, and its own attributes, for the rule of a loop's paint. */
 interface Placed {
   tag: Tag
   /** Inside a clip path, a mask or a filter: nothing may `use` it. */
@@ -855,6 +855,7 @@ interface Placed {
   size: number
   /** It is a `use` or holds one. */
   holdsUse: boolean
+  attrs: Readonly<Record<string, string | number>> | undefined
 }
 
 interface Walk {
@@ -1044,7 +1045,7 @@ function checkNode(value: unknown, parent: Tag | 'root', depth: number, around: 
     if (children.length > 0) node.children = children
   }
   if (tag === 'filter') checkFilter(node, w)
-  if (id !== null) w.placed.set(id, { tag, sealed: around.inClip || around.inMask || around.inFilter, ancestors: around.ancestors, size: w.elements - first, holdsUse: w.uses > usesBefore })
+  if (id !== null) w.placed.set(id, { tag, sealed: around.inClip || around.inMask || around.inFilter, ancestors: around.ancestors, size: w.elements - first, holdsUse: w.uses > usesBefore, attrs })
   return node
 }
 
@@ -1173,7 +1174,53 @@ interface AnimationContext {
   duration: number
   times: number[] | undefined
   ease: Ease | Ease[] | undefined
+  loop: boolean
   w: Walk
+}
+
+/** Two opacities this close are one (values are stored to three decimals; the server's own tolerance). */
+const SAME_OPACITY = 0.0005
+
+/** Whether two keyframes of a paint are the same value: equal numbers, or equal colours however they are spelled. */
+function samePaint(a: number | string, b: number | string): boolean {
+  if (typeof a === 'number' && typeof b === 'number') return Math.abs(a - b) < SAME_OPACITY
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  const x = parseHex(a)
+  const y = parseHex(b)
+  return x !== null && y !== null && x.every((n, i) => n === y[i])
+}
+
+/**
+ * A part's own value of a paint prop, where it can be told from the element alone (as the
+ * server tells it): its opacity (1 when it sets none), the fill or stroke opacity or the
+ * colour it sets itself. undefined: it cannot be told (it is inherited, a gradient, a token,
+ * `none`, a percentage).
+ */
+function ownPaint(attrs: Readonly<Record<string, string | number>> | undefined, prop: Prop): number | string | undefined {
+  const value = attrs !== undefined && Object.hasOwn(attrs, prop) ? attrs[prop] : undefined
+  if (prop === 'opacity') return value === undefined ? 1 : typeof value === 'number' ? value : undefined
+  if (prop === 'fillOpacity' || prop === 'strokeOpacity') return typeof value === 'number' ? value : undefined
+  return typeof value === 'string' && value.startsWith('#') ? value : undefined
+}
+
+/**
+ * Flash safety for a loop: where it starts again its last keyframe meets its first with no
+ * time between them, so a paint track ends on the value it starts with. null is each
+ * target's own value: against a keyframe it closes the loop when every target's own value is
+ * that keyframe, or cannot be told here.
+ */
+function closesLoop(prop: Prop, values: readonly (number | string | null)[], targets: readonly string[], w: Walk): boolean {
+  const first = values[0]
+  const last = values[values.length - 1]
+  if (first === null || last === null) {
+    const key = first ?? last
+    if (key === null) return true
+    return targets.every((id) => {
+      const own = ownPaint(w.placed.get(id)?.attrs, prop)
+      return own === undefined || samePaint(own, key)
+    })
+  }
+  return samePaint(first, last)
 }
 
 function checkTrack(value: unknown, ctx: AnimationContext): Track {
@@ -1231,6 +1278,7 @@ function checkTrack(value: unknown, ctx: AnimationContext): Track {
     if ((times[i] - times[i - 1]) * ctx.duration < least) return off()
   }
   if (paint && !steadyEases(trackEases(track, ctx))) return off()
+  if (paint && ctx.loop && !closesLoop(prop, values, typeof target === 'string' ? [target] : target, ctx.w)) return off()
   return track
 }
 
@@ -1288,7 +1336,7 @@ function checkAnimation(value: unknown, w: Walk): Animation {
   if (animation.loop === true && animation.every) return off()
   if (present(timesValue)) animation.times = checkTimes(timesValue, null)
   if (present(easeValue)) animation.ease = checkEase(easeValue, null)
-  const ctx: AnimationContext = { duration: animation.duration, times: animation.times, ease: animation.ease, w }
+  const ctx: AnimationContext = { duration: animation.duration, times: animation.times, ease: animation.ease, loop: animation.loop === true, w }
   const tracks = list(tracksValue, 1, LIMITS.tracks)
   for (let i = 0; i < tracks.length; i++) animation.tracks.push(checkTrack(tracks[i], ctx))
   return animation
@@ -1603,6 +1651,9 @@ export function drivesOn(look: Look, input: DriveInput): boolean {
 
 type SvgProps = { [name: string]: string | number }
 
+/** The font size of a `text` that sets none, in viewBox units: the size the server's box of a text assumes. */
+const TEXT_SIZE = 16
+
 /**
  * The prefix as `lookElements` prints it: letters, digits, "_" and "-" only, at most 32
  * characters (React's `useId` gives ":r1:"). Ids and references are printed with it, so two
@@ -1729,6 +1780,8 @@ function renderNodes(nodes: unknown, parent: Tag | 'root', inMask: boolean, dept
     d.left -= cost
     const props = nodeProps(node, tag, d, i)
     if (tag === 'text') {
+      // The size the server measured its box with, written out: else it would inherit whatever the page's style sheet says.
+      if (props.fontSize === undefined) props.fontSize = TEXT_SIZE
       // A text node, and never more of it than a checked look could hold.
       const text = typeof node.text === 'string' ? node.text : ''
       out.push(createElement(tag, props, text.length > LIMITS.textChars ? Array.from(text.slice(0, LIMITS.textChars * 2)).slice(0, LIMITS.textChars).join('') : text))
@@ -1818,15 +1871,19 @@ export function viewBoxOf(look: Look): Box {
   return [0, 0, 200, 200]
 }
 
+/** A face is never cropped tighter than this share of the viewBox's smaller side (a tiny head would show a few pixels blown up). */
+const FACE_LEAST = 0.1
+
 /**
  * What a small face shows: a square around the head role's box with a tenth added on each
- * side, kept inside the viewBox; the whole viewBox when the look names no head.
+ * side, at least a tenth of the viewBox's smaller side, kept inside the viewBox; the whole
+ * viewBox when the look names no head.
  */
 export function faceViewBox(look: Look): [number, number, number, number] {
   const view = viewBoxOf(look)
   const head = rootBox(look, look?.roles?.head)
   if (!head || head[2] <= 0 || head[3] <= 0) return view
-  const side = Math.min(Math.max(head[2], head[3]) * 1.2, view[2], view[3])
+  const side = Math.min(Math.max(Math.max(head[2], head[3]) * 1.2, FACE_LEAST * Math.min(view[2], view[3])), view[2], view[3])
   if (!(side > 0)) return view
   const clamp = (centre: number, from: number, length: number) => Math.min(Math.max(centre - side / 2, from), from + length - side)
   const x = clamp(head[0] + head[2] / 2, view[0], view[2])

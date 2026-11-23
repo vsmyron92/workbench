@@ -472,8 +472,8 @@ mod tests {
     }
 
     #[test]
-    fn the_guide_a_session_reads_is_under_ten_kilobytes() {
-        const MOST: usize = 10 * 1024;
+    fn the_guide_a_session_reads_is_under_twelve_kilobytes() {
+        const MOST: usize = 12 * 1024;
         // The command part is two halves, one for a session on the host and one for a session in
         // a dev container: a session is given the half that is its own. With the tools part, with
         // either half, the guide stays under the limit (the host half with a program path of

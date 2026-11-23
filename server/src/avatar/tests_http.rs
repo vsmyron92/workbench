@@ -1178,7 +1178,7 @@ async fn the_curl_forms_a_dev_container_session_is_given_work_as_they_are_writte
     std::fs::write(dir.path().join("picture.json"), "{\"frames\": \"hop\", \"count\": 3}").unwrap();
     let mut outputs = vec![guide.clone()];
     // The picture goes into its file: the call itself prints nothing.
-    for (form, expected) in forms.iter().zip(["Saved as revision 1, named Dot.", "{\"lineId\":\"L", "{\"answered\":false,\"reason\":\"timeout\",\"askId\":\"Q", "{\"ok\":true,\"note\":\"Playing hop.\"}", "{\n  \"note\": \"You have a live avatar: ", ""]) {
+    for (form, expected) in forms.iter().zip(["Saved as revision 1, named Dot.", "{\"lineId\":\"L", "{\"answered\":false,\"reason\":\"timeout\",\"askId\":\"Q", "{\"ok\":true,\"note\":\"Playing hop.\"}", "{\"note\":\"You have a live avatar: ", ""]) {
         let (code, out, err) = sh(form.clone()).await;
         assert_eq!((code, err.as_str()), (Some(0), ""), "{form}\n{out}");
         assert!(out.starts_with(expected), "{form}\nprinted: {out}");
@@ -1188,8 +1188,8 @@ async fn the_curl_forms_a_dev_container_session_is_given_work_as_they_are_writte
     let avatar = e.avatar(&tid);
     assert_eq!((avatar.designed, avatar.name.as_str(), avatar.via), (true, "Dot", Via::Command));
     assert_eq!(avatar.lines.iter().map(|l| (l.text.as_str(), l.gesture.as_deref())).collect::<Vec<_>>(), [("One short line.", Some("hop")), ("Deploy now?", None)]);
-    assert!(outputs[5].contains("\"design\": {"), "status with look=1 brings the stored design: {}", outputs[5]);
-    let picture = std::fs::read(dir.path().join("avatar.png")).expect("the picture was written into TMPDIR");
+    assert!(outputs[5].contains("\"design\":{"), "status with look=1 brings the stored design: {}", outputs[5]);
+    let picture = std::fs::read(dir.path().join(format!("avatar-{tid}.png"))).expect("the picture was written into TMPDIR, under the session's own name");
     assert!(picture.starts_with(b"\x89PNG\r\n\x1a\n") && outputs[6].is_empty(), "{} bytes", picture.len());
 
     // A refusal: curl ends with a failure and still prints what Workbench said.
@@ -1224,11 +1224,21 @@ async fn a_session_is_shown_what_it_drew() {
         Err(e) => panic!("refused: {}", e.message),
     };
     let refused = |output: ApiResult<ToolOutput>| output.err().expect("refused").message;
+    // A status whose picture could not be drawn: the reason first, then the status all the same.
+    let unpictured = |output: ApiResult<ToolOutput>| match output {
+        Ok(ToolOutput::Text(text)) => {
+            let (why, status) = text.split_once('\n').expect("the reason, then the status");
+            assert!(status.starts_with('{') && status.contains("\"note\""), "{status}");
+            why.strip_prefix("No picture: ").unwrap_or_else(|| panic!("no reason: {why}")).to_string()
+        }
+        Ok(_) => panic!("a picture"),
+        Err(e) => panic!("refused: {}", e.message),
+    };
 
     // Nothing of its own to see yet: a design call that draws nothing brings no picture, and a
-    // picture that is asked for is refused with what to do.
+    // status that asks for one says what to do and is a status all the same.
     assert!(matches!(out("avatar_design", json!({ "name": "Dot" })).await, Ok(ToolOutput::Text(_))));
-    assert_eq!(refused(out("avatar_status", json!({ "picture": true })).await), session::NO_LOOK_TO_DRAW);
+    assert_eq!(unpictured(out("avatar_status", json!({ "picture": true })).await), session::NO_LOOK_TO_DRAW);
 
     // A design answer carries the look at rest, and says what the picture shows.
     let (text, png) = pictured(out("avatar_design", figure()).await);
@@ -1236,30 +1246,43 @@ async fn a_session_is_shown_what_it_drew() {
     assert_eq!(png.len(), 1);
     let sheet = png_size(&png[0]);
     assert!(sheet.0 > 2 * preview::SHEET_FIGURE_PX && sheet.1 > preview::SHEET_FIGURE_PX, "{sheet:?}");
+    // A call that leaves the look as it is (a name) shows it again; nothing was drawn twice for it.
+    let (text, again) = pictured(out("avatar_design", json!({ "name": "Dotty" })).await);
+    assert!(text.contains("named Dotty") && again[0] == png[0], "{text}");
 
-    // The status shows it again, in a pose, or one of its animations as a row of moments.
+    // The status shows it again, in a pose, close up, or one of its animations as a row of
+    // moments: what the picture shows comes first, then the status.
     let (text, png) = pictured(out("avatar_status", json!({ "picture": true })).await);
-    assert!(text.contains("\"designed\": true") && text.ends_with("at its resting size and as a face."), "{text}");
+    assert!(text.starts_with("Picture: your avatar at rest") && text.contains("\"designed\": true"), "{text}");
     assert_eq!(png_size(&png[0]), sheet);
-    let (text, posed) = pictured(out("avatar_status", json!({ "pose": { "animation": "hop", "at": 0.5, "mouth": 1, "lookX": 1 } })).await);
-    assert!(text.contains("Picture: your avatar in that pose"), "{text}");
+    let (text, posed) = pictured(out("avatar_status", json!({ "picture": true, "pose": { "animation": "hop", "at": 0.5, "mouth": 1, "lookX": 1 } })).await);
+    assert!(text.starts_with("Picture: your avatar in that pose"), "{text}");
     assert!(png_size(&posed[0]) == sheet && posed[0] != png[0], "a pose is another picture");
+    let (text, close) = pictured(out("avatar_status", json!({ "pose": { "zoom": "eyes" } })).await);
+    assert!(text.starts_with("Picture: a closer look at eyes in that pose"), "{text}");
+    assert!(png_size(&close[0]) == sheet && close[0] != png[0], "a closer look is another picture");
     let (text, strip) = pictured(out("avatar_status", json!({ "frames": "hop", "count": 3 })).await);
-    assert!(text.ends_with("Picture: 3 moments of hop, from its start on the left to its end on the right."), "{text}");
+    assert!(text.starts_with("Picture: 3 moments of hop, from its start on the left to its end on the right. A track that has played holds"), "{text}");
     assert_eq!(png_size(&strip[0]).1, preview::STRIP_FRAME_PX);
     assert!(png_size(&strip[0]).0 >= 3 * preview::STRIP_FRAME_PX);
     let (_, six) = pictured(out("avatar_status", json!({ "frames": "hop" })).await);
     assert!(png_size(&six[0]).0 >= 6 * preview::STRIP_FRAME_PX);
+    // A strip takes the inputs of a pose: a walk that shows only turned is seen turned.
+    let (text, _) = pictured(out("avatar_status", json!({ "frames": "hop", "count": 3, "pose": { "mouth": 1, "lookX": -1 } })).await);
+    assert!(text.contains("with those inputs held"), "{text}");
 
-    // What cannot be drawn is said in a sentence.
+    // A picture that cannot be drawn is said in a sentence, and the status comes all the same.
+    for (args, words) in [(json!({ "frames": "breathe" }), "built-in"), (json!({ "frames": "wink" }), "no animation \"wink\""), (json!({ "pose": { "zoom": "nose" } }), "zoom names \"nose\"")] {
+        let said = unpictured(out("avatar_status", args.clone()).await);
+        assert!(said.contains(words), "{args}: {said}");
+    }
+    // What is wrong with the call itself refuses it.
     for (args, words) in [
-        (json!({ "frames": "breathe" }), "built-in"),
-        (json!({ "frames": "wink" }), "no animation \"wink\""),
         (json!({ "frames": "hop", "count": 9 }), "count is a whole number from 2 to 8"),
-        (json!({ "frames": "hop", "pose": {} }), "two pictures"),
+        (json!({ "frames": "hop", "pose": { "animation": "hop" } }), "with frames, a pose holds inputs only"),
         (json!({ "count": 3 }), "name the animation with frames"),
         (json!({ "pose": { "turn": 5 } }), "turn in a pose is a number from -1 to 1"),
-        (json!({ "pose": { "spin": 1 } }), "a pose takes"),
+        (json!({ "pose": { "spin": 1 } }), "pose has no spin"),
         (json!({ "picture": "yes" }), "picture is a string"),
     ] {
         let said = refused(out("avatar_status", args.clone()).await);
@@ -1269,7 +1292,7 @@ async fn a_session_is_shown_what_it_drew() {
     assert!(matches!(out("avatar_status", json!({})).await, Ok(ToolOutput::Text(_))));
 
     // A look that would cost too much to draw is not stored: the browser would pay for it on
-    // every frame. (This one asks the renderer for a layer larger than memory.)
+    // every frame. (The first asks the renderer for a layer larger than memory.)
     let before = e.avatar(&tid).revision;
     let heavy = json!({ "svg": "<svg viewBox='0 0 200 200'><defs><filter id='f' filterUnits='userSpaceOnUse' x='-400' y='-400' width='800' height='800'><feOffset dx='1' dy='1'/></filter></defs><g id='g' transform='translate(100 100) scale(1000 0.001) rotate(45)' filter='url(#f)'><circle cx='0' cy='0' r='0.01' fill='#3366cc'/></g></svg>" });
     let said = refused(out("avatar_design", heavy).await);
@@ -1278,10 +1301,44 @@ async fn a_session_is_shown_what_it_drew() {
     let said = refused(out("avatar_design", many).await);
     assert!(said.starts_with("this look's filters cost too much to draw (about ") && said.ends_with("\nNothing was changed."), "{said}");
     assert_eq!(e.avatar(&tid).revision, before);
+    // What a filter costs is said beside the picture, so a session can tell before it is too much.
+    let soft = json!({ "svg": "<svg viewBox='0 0 200 200'><defs><filter id='f'><feDropShadow dx='2' dy='3' stdDeviation='3'/></filter></defs><g id='body' filter='url(#f)'><circle id='face' cx='100' cy='100' r='60' fill='#3366cc'/></g></svg>" });
+    let (text, _) = pictured(out("avatar_design", soft).await);
+    assert!(text.contains("\nDrawing cost: about ") && text.contains(" of 60 filter passes and "), "{text}");
 
     // An avatar the user turned off is not drawn for its session either.
     turn_off(&e.state, &tid, now_ms()).unwrap();
-    assert_eq!(refused(out("avatar_status", json!({ "picture": true })).await), TURNED_OFF);
+    assert_eq!(unpictured(out("avatar_status", json!({ "picture": true })).await), TURNED_OFF);
+}
+
+/// Where sessions take an avatar themselves, one that has none yet is told to draw, not that it
+/// has no avatar; where the user gives them, it is told that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_picture_before_the_first_call_says_what_to_do() {
+    let e = super::tests::env_with(|config| config.avatar.sessions = Some(crate::avatar::Sessions::Any)).await;
+    let tid = e.agent(json!({}));
+    let asked = call(&e, &tid, "avatar_status", json!({ "guide": true, "picture": true })).await.unwrap();
+    assert!(asked.starts_with(&format!("No picture: {}\n# Your avatar", session::NO_LOOK_TO_DRAW)), "{}", &asked[..asked.len().min(300)]);
+    let e = env().await;
+    let tid = e.agent(json!({}));
+    let asked = call(&e, &tid, "avatar_status", json!({ "picture": true })).await.unwrap();
+    assert!(asked.starts_with(&format!("No picture: {NO_AVATAR}\n")), "{asked}");
+}
+
+/// A sentence of the renderer quotes what the session wrote: no piece of a secret is in it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_picture_refusal_holds_no_piece_of_a_secret() {
+    let e = env().await;
+    let tid = e.with_avatar();
+    let secret = "Kq9vX2mL".repeat(7);
+    e.state.terminals.get(&tid).unwrap().redact.lock().push(crate::secrets::Secret::from_value(secret.clone()));
+    call(&e, &tid, "avatar_design", figure()).await.unwrap();
+    for args in [json!({ "frames": secret }), json!({ "pose": { "animation": secret } }), json!({ "pose": { "zoom": secret } })] {
+        let said = call(&e, &tid, "avatar_status", args).await.unwrap();
+        assert!(said.starts_with("No picture: ") && !said.contains(&secret[..12]), "{}", &said[..said.len().min(200)]);
+    }
+    let refused = call(&e, &tid, "avatar_status", json!({ "pose": { secret.as_str(): 1 } })).await.unwrap_err();
+    assert!(!refused.message.contains(&secret[..12]), "{}", refused.message);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1379,7 +1436,7 @@ async fn the_command_drives_the_avatar_like_the_tools_do() {
     assert!(code == 0 && out.contains("in that pose"), "{out}");
     // Without a name the picture goes to the temporary directory, and the command says where.
     let (code, out, _) = ran(run(&["picture"], "").await);
-    let written = std::env::temp_dir().join("workbench-avatar-rest.png");
+    let written = std::env::temp_dir().join(format!("workbench-avatar-{tid}-rest.png"));
     assert!(code == 0 && out.starts_with(&format!("Picture written to {}: your avatar at rest", written.display())), "{out}");
     assert!(std::fs::read(&written).unwrap().starts_with(b"\x89PNG"));
     let _ = std::fs::remove_file(&written);

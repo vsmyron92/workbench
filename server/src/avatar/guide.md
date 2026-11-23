@@ -1,6 +1,6 @@
 # Your avatar
 
-You draw it blind, then you see it: every design answer carries a picture (on the light and the dark panel; large, at its resting size, and as a face) and lists each part's box and pivot. Look, then fix what is off.
+You draw it blind, then you see it: a picture of what you drew (on the light and the dark panel; large, at its resting size, and as a face), and the design answer lists each part's box and pivot. Look, then fix what is off.
 
 ## The stage
 
@@ -10,13 +10,15 @@ You draw for a square of 132 px (56 px at rest, 28 to 40 px as a face in a top b
 
 Drawn: g, path, circle, ellipse, rect, line, polyline, polygon, text, and use (href='#id' of a g, shape or text of this artwork, never of one that holds a use). In defs: linearGradient, radialGradient, clipPath, mask, filter, and shapes to use. A filter is built from feGaussianBlur, feDropShadow, feOffset, feFlood, feColorMatrix, feComposite, feBlend, feMerge, feMorphology, feTurbulence, feDisplacementMap: 8 per filter, 8 filters. Attribute values in single quotes.
 
-Refused: script, style, image, a, pattern, symbol, an href to anything but '#id', on… attributes, anything unknown. Dropped with a warning: class, animate…, font-family, transform-origin. Numbers stay within 4 times the viewBox, the pen of path data too (relative steps too); nothing passes 1,000,000 units through nested scales; a numeric font-weight is 100, 200 … 900. A filter is drawn again on every frame its part moves: a soft shadow under the figure is cheap, a blur on a swinging arm is not, and a look whose filters, masks and clips cost too much is refused. A filter's region is the part's box and a tenth around it: widen it (y='-100%' height='300%') where a blur would be cut off.
+Refused: script, style, image, a, pattern, symbol, an href to anything but '#id', on… attributes, and what the answer names. Dropped with a warning: class, animate…, font-family, transform-origin. Numbers stay within 4 times the viewBox, the pen of path data too (relative steps too); nothing passes 1,000,000 units through nested scales; a numeric font-weight is 100, 200 … 900. What stands inside defs, a mask or a clipPath never moves: move the part that is masked.
+
+A filter is drawn again on every frame its part moves: a soft shadow under the figure is cheap, a blur on a swinging arm is not. The design answer says what drawing costs, and a look that costs too much is refused. A filter's region is the part's box and a tenth around it: widen it (y='-100%' height='300%') where a blur would be cut off.
 
 ## The rig
 
-An id on every part that moves: a g, one shape, or a use. Nest what moves together (body > head > eyes > pupils); document order is depth. No transform attribute on parts you animate. `pivots` maps a part id to [x, y], the point it turns, skews and scales about.
+An id on every part that moves: a g, one shape, or a use (`all` and `none` are taken). Nest what moves together (body > head > eyes > pupils); document order is depth. A transform attribute on a moving part is kept and moves with it: it is simpler to draw the part where it stands, with no transform. `pivots` maps a part id to [x, y], the point it turns, skews and scales about.
 
-`parents` maps a part to the part it hangs on: {"tail": "body"}. The child follows everything that moves its parent without being nested in it, so it keeps its own depth: a far arm or a tail behind the body, a hat in front of everything.
+`parents` maps a part to the part it hangs on: {"tail": "body"}. The child moves as if it were drawn inside its parent, without being nested in it, so it keeps its own depth: a far arm or a tail behind the body, a hat in front of everything.
 
 `roles` (optional) maps body, head, eyes, pupils, armL, armR to part ids, and Workbench then moves them for you.
 
@@ -34,22 +36,23 @@ Every one of these names is yours to take: an animation you call breathe, blink,
 4. `loop: true` repeats, `every: [min, max]` restarts after a random pause, neither is a one-shot. `phase` (0..1) is for a loop's track, `delay` for a one-shot's.
 5. An animation plays where a state lists it or as a gesture. `states`: state to up to 6 names, yours or built-in, replacing that state's default.
 6. fill, stroke and opacity keyframes: 0.17 s apart or more, never step, outElastic, outBounce or a bezier that leaves 0..1, and in a loop the track ends on the value it starts with. d keyframes: the same commands with the same count of numbers as each other and as the element's own d.
+7. Nothing flashes: a colour, an opacity, and whatever moves a large part turn back at most about six times a second; faster, Workbench holds the value until it may turn.
 
 A blink is scaleY 1, 0.1, 1 in 0.18 s; loops of different durations never line up; a gesture is anticipation, action, overshoot, settle.
 
 ## Drives
 
-`drives` tie what happens to the avatar to your own parts: [{input, target, prop, values}]. Inputs: lookX, lookY (-1 … 1: where it looks, the pointer or the avatar it meets), mouth (0 … 1 while it speaks), pace (0 … 1 while it walks), turn (-1 walking or facing left … 1 right, 0 facing the user), held (0 … 1 while the user drags it). The values lie evenly across the input's range, or at `at` [0 … 1]: for lookX, lookY and turn the middle value is the rest.
+`drives` tie what happens to the avatar to your own parts: [{input, target, prop, values}]. Inputs: lookX, lookY (-1 … 1: where it looks, the pointer or the avatar it meets), mouth (0 … 1 while it speaks), pace (0 … 1 while it walks), turn (-1 walking or facing left … 1 right, 0 facing the user), held (0 … 1 while the user drags it). The values lie evenly across the input's range, or at `at` (rising, first 0 and last 1): for lookX, lookY and turn the middle value is the rest.
 
 - a head that turns to the pointer: {"input":"lookX","target":"head","prop":"rotate","values":[-8,0,8]}
-- a side view that shows while it walks: opacity [1,0,1] on the side view, [0,1,0] on the front view, input turn; scaleX [-1,1,1] mirrors it for the other way
+- a side view for walking: input turn, scaleX [-1,-1,0,1,1] at [0,0.4,0.5,0.6,1] on the side view (mirrored to the left, folded away facing the user) and [0,0,1,0,0] with the same `at` on the front view. Opacity along turn takes 3 values and always fades across the whole turn.
 - legs that dangle when it is picked up: input held, rotate [0,25]
 
-Colours and opacities take pace, turn and held only, with 2 values (3 along turn). `mouth`: {target, open} (a path morph from its own d to `open`) or {target, prop: "scaleY", open: 1.5} is the short form for the mouth; `gaze` for the pupils.
+Colours and opacities take pace, turn and held only, with 2 values (3 along turn). A drive on pace, or your own `walk`, replaces Workbench's hop; a drive on turn its lean. `mouth`: {target, open} (a path morph from its own d to `open`) or {target, prop: "scaleY", open: 1.5} is the short form for the mouth; `gaze` for the pupils.
 
 ## Seeing it
 
-`avatar_status` with `frames: "walk"` draws one of your animations as a strip of frames; with `picture: true` and `pose: {"turn": 1, "mouth": 1}` the figure under those inputs. Check every animation you wrote once.
+Beside the picture of the avatar at rest you can ask for: one of your animations as a row of moments (`frames`), also under inputs (a walk that shows only in the side view: `frames` with a pose of turn 1 and pace 1); a pose ({"turn": 1, "mouth": 1}, or inside an animation: {"animation": "greet", "at": 0.5}); and a closer look at one part ({"zoom": "mouth"}), since a mouth is a few pixels in the whole figure. Check every animation you wrote once. Pictures show your own animations and drives, not Workbench's motion (its breathing, its hop and lean).
 
 ## Example
 
@@ -74,7 +77,7 @@ Draw your own. Other plans:
 - plant: leaves as arms, a flower as head
 - lamp: the shade as head, a bulb that glows through a filter
 - crab: claws as arms, eyes on stalks
-- ghost: no legs, a hem that ripples, a mask for the fade
+- ghost: no legs, a hem that ripples, a mask that fades its lower edge
 
 Let the look fit this session's task.
 

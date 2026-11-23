@@ -223,7 +223,7 @@ export interface FigureProps {
   idPrefix: string
   /** The stage in CSS px (`FIGURE_PX`), at most 132. */
   size: number
-  /** The window's engine; null: the figure is drawn at rest. */
+  /** The window's engine; null: the figure is drawn at rest (with what its drives set at rest, as a still face). */
   engine: Engine | null
   state: AvatarState
   /** The user's switch or the system setting. */
@@ -266,10 +266,13 @@ function Bound({ look, own, idPrefix, size, engine, state, reducedMotion, mouth,
   latest.current = { state, reducedMotion, mouth, gaze, inputs, onHandle }
 
   useLayoutEffect(() => {
-    if (!engine) return
-    const now = latest.current
     const prefix = cleanIdPrefix(idPrefix)
-    const h = engine.attach(look, (id) => nodes.current.get(prefix + id) ?? null, { state: now.state, reducedMotion: now.reducedMotion, idPrefix })
+    const find = (id: string) => nodes.current.get(prefix + id) ?? null
+    // No engine (yet): it stands as a still face does, in what its drives set at rest. An
+    // engine that comes later starts from the artwork as it was rendered, so that is put back first.
+    if (!engine) return writeStill(look, find, idPrefix)
+    const now = latest.current
+    const h = engine.attach(look, find, { state: now.state, reducedMotion: now.reducedMotion, idPrefix })
     h.setMouth(now.mouth)
     h.setGaze(now.gaze)
     h.setInputs(now.inputs)

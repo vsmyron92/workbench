@@ -16,7 +16,9 @@
 //! into a closed, typed, bounded tree, its pivots, parents, roles, animations, drives, mouth,
 //! gaze and voice validated and normalised, boxes, the geometry lint; the wire types of a look;
 //! its limits), `preview` (a look drawn as a PNG in one pose or as moments of an animation, so a
-//! session sees what it drew: the stored look read again as untrusted data and rendered here),
+//! session sees what it drew: the stored look read again as untrusted data and rendered),
+//! `draw` (the process of its own that every picture is drawn in, with a limit on its memory and
+//! its time, so that no look can take the server down with the renderer),
 //! `store` (`AvatarState`: the records, their transcript, open question and leases in memory,
 //! the files under `data_dir/avatar/`, what terminal events do to them, the sweep), `session`
 //! (what a session may do with its own avatar: the gate, design, say, ask, act, status, and the
@@ -54,6 +56,7 @@ mod brief;
 mod cli;
 pub mod device;
 pub mod look;
+mod draw;
 mod preview;
 mod routes;
 pub mod session;
@@ -77,6 +80,8 @@ use crate::terminals::ProviderKind;
 // the brief out of titles and History rows.
 pub use brief::{BRIEF_MARK, BRIEF_TAGS, Brief, BriefVariant, PREALLOWED, session_brief};
 pub use cli::{ABOUT, AvatarArgs, cli};
+// `workbench avatar-draw`: the process a picture is drawn in (main.rs starts it).
+pub use draw::{COMMAND as DRAW_COMMAND, child as draw_child};
 pub use routes::router;
 pub use store::AvatarState;
 

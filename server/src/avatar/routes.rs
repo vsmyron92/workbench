@@ -268,7 +268,7 @@ async fn hook_design(State(state): State<AppState>, Path(tid): Path<String>, hea
     // of a design starts with.
     let artwork = media(&headers) == "image/svg+xml" || unmarked(&body).iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'<');
     let args = if artwork { json!({ "svg": text_of(&body, "the artwork")? }) } else { json_of(&body, "the design as a JSON object, or the artwork alone (it starts with <svg)")? };
-    Ok(plain(format!("{}\nTo see it, ask for a picture and open the file.", tools::design(&state, pass, args).await?.text)))
+    Ok(plain(tools::design(&state, pass, args).await?.text(false)))
 }
 
 /// A picture of the session's avatar as a PNG: the body is empty or `{}` for the look at rest,
@@ -277,10 +277,11 @@ async fn hook_picture(State(state): State<AppState>, Path(tid): Path<String>, he
     let pass = enter(&state, &tid, &headers, Call::Status)?;
     let mask = pass.mask(&state);
     let args = if body.iter().all(u8::is_ascii_whitespace) { json!({}) } else { json_of(&body, "{} for the avatar at rest, {\"pose\": {…}} or {\"frames\": \"<animation>\"}")? };
-    session::fields(&args, "picture", &["pose", "frames", "count"], &mask)?;
+    // `picture` is taken as the tool takes it: here it says nothing new.
+    session::fields(&args, "picture", &["picture", "pose", "frames", "count"], &mask)?;
     let wanted = PictureRequest::parse(&args, &mask)?.unwrap_or_else(PictureRequest::rest);
-    let png = tools::picture(&state, &tid, wanted).await?;
-    Ok(([(header::CONTENT_TYPE, "image/png")], png).into_response())
+    let picture = tools::picture(&state, &tid, wanted).await?;
+    Ok(([(header::CONTENT_TYPE, "image/png")], picture.png).into_response())
 }
 
 async fn hook_say(State(state): State<AppState>, Path(tid): Path<String>, headers: HeaderMap, uri: Uri, body: Bytes) -> ApiResult<Json<session::SayAnswer>> {

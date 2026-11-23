@@ -825,15 +825,24 @@ export interface WalkFeel {
 
 /** A way that leads more up or down than this to the side faces the viewer. */
 const SIDEWAYS = 0.25
+/**
+ * `pace` follows how far the figure went over about this long (an exponential average with
+ * this time constant): figures that push each other in a crowd go 1 and 0.3 of a stroll by
+ * turns from one step to the next, which is no change of pace to show.
+ */
+export const PACE_SMOOTH_MS = 250
+/** A smoothed pace this near what the step says is that. */
+const PACE_SETTLED = 0.001
 
 /**
  * What one step of the walk tells a figure's look: `pace`, how fast it really moved by itself
- * over the stroll speed (at most 1; 0 when it did not walk); `turn`, the side it walks to
- * (-1 left, 1 right; 0 for a way that leads mostly up or down), else the side of the avatar
- * it meets or visits, or of the guest coming to it, else 0; `held`, 1 while the user drags
- * it. `was`: where it stood before the step; `dt`: the time the step was given.
+ * over the stroll speed (at most 1; 0 when it did not walk), averaged over the last
+ * `PACE_SMOOTH_MS` when `lastPace` (what the step before told) is given; `turn`, the side it
+ * walks to (-1 left, 1 right; 0 for a way that leads mostly up or down), else the side of the
+ * avatar it meets or visits, or of the guest coming to it, else 0; `held`, 1 while the user
+ * drags it. `was`: where it stood before the step; `dt`: the time the step was given.
  */
-export function walkFeel(b: Body, was: Point | null, dt: number, bodies: ReadonlyMap<string, Body>, dragged: boolean): WalkFeel {
+export function walkFeel(b: Body, was: Point | null, dt: number, bodies: ReadonlyMap<string, Body>, dragged: boolean, lastPace: number | null = null): WalkFeel {
   if (dragged) return { pace: 0, turn: 0, held: 1 }
   const step = clamp(finite(dt, 0), 0, MAX_STEP_MS)
   let pace = 0
@@ -852,5 +861,54 @@ export function walkFeel(b: Body, was: Point | null, dt: number, bodies: Readonl
     const other = beside === null ? undefined : bodies.get(beside)
     if (other && Math.abs(other.x - b.x) > 0.5) turn = Math.sign(other.x - b.x)
   }
-  return { pace: finite(pace, 0), turn, held: 0 }
+  pace = finite(pace, 0)
+  if (lastPace !== null && Number.isFinite(lastPace)) {
+    const before = clamp(lastPace, 0, 1)
+    const smooth = before + (pace - before) * (1 - Math.exp(-step / PACE_SMOOTH_MS))
+    if (Math.abs(smooth - pace) >= PACE_SETTLED) pace = smooth
+  }
+  return { pace, turn, held: 0 }
+}
+
+// ---------------------------------------------------------------- a walk of its own design
+
+/**
+ * A figure's own `walk` loop runs on through a stand shorter than this, and does not start
+ * again sooner than this after it stopped: in a crowd a figure stands and walks by turns
+ * several times a second, and every start plays the loop from its first keyframe.
+ */
+export const WALK_LOOP_HOLD_MS = 340
+
+/** Where a figure's own walk loop is: whether it plays, since when the figure stands while it plays, when it last stopped. */
+export interface WalkLoop {
+  playing: boolean
+  stoodAt: number | null
+  stoppedAt: number
+}
+
+export function newWalkLoop(): WalkLoop {
+  return { playing: false, stoodAt: null, stoppedAt: Number.NEGATIVE_INFINITY }
+}
+
+/**
+ * What to do with a figure's own walk loop at this step: `start` it (it walks, the loop does
+ * not play, and it did not stop in the last `WALK_LOOP_HOLD_MS`; the caller marks it playing
+ * once it did start), `stop` it (it has stood that long while the loop played), or nothing.
+ * `loop` is changed in place.
+ */
+export function walkLoopStep(loop: WalkLoop, walking: boolean, now: number): 'start' | 'stop' | null {
+  if (walking) {
+    loop.stoodAt = null
+    return !loop.playing && now - loop.stoppedAt >= WALK_LOOP_HOLD_MS ? 'start' : null
+  }
+  if (!loop.playing) {
+    loop.stoodAt = null
+    return null
+  }
+  loop.stoodAt ??= now
+  if (now - loop.stoodAt < WALK_LOOP_HOLD_MS) return null
+  loop.playing = false
+  loop.stoodAt = null
+  loop.stoppedAt = now
+  return 'stop'
 }

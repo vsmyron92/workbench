@@ -622,6 +622,30 @@ describe('sample: what it writes', () => {
     const many = sample(huge, Array.from({ length: 400 }, () => clip('a')), 0)
     expect(many.has('dot')).toBe(false)
   })
+
+  it('never takes a radius, a width, a height or a stroke width below 0 where an ease overshoots; a dash offset may go there', () => {
+    // outBack overshoots by about 9% half-way: from 6 to 0 it reaches about -0.5.
+    const c = compiled(
+      rig({
+        shrink: {
+          duration: 1,
+          ease: 'outBack',
+          tracks: [
+            { target: 'dot', prop: 'r', values: [6, 0] },
+            { target: 'oval', prop: 'rx', values: [8, 0] },
+            { target: 'dot', prop: 'strokeWidth', values: [2, 0] },
+            { target: 'oval', prop: 'strokeDashoffset', values: [6, 0] },
+          ],
+        },
+      }),
+    )
+    const at = sample(c, [clip('shrink')], 500)
+    expect(at.get('dot')?.attrs.get('r')).toBe('0')
+    expect(at.get('dot')?.attrs.get('stroke-width')).toBe('0')
+    expect(at.get('oval')?.attrs.get('rx')).toBe('0')
+    expect(Number(at.get('oval')?.attrs.get('stroke-dashoffset'))).toBeLessThan(0)
+    expect(sample(c, [clip('shrink')], 100).get('dot')?.attrs.get('r')).not.toBe('0')
+  })
 })
 
 describe('createEngine', () => {
@@ -786,13 +810,33 @@ describe('createEngine', () => {
     expect(heavy.play('travel')).toBe(false)
   })
 
+  it('stands a frozen figure in what its drives set at rest, as a still face, and gives the artwork back on detach', () => {
+    const f = fakeFrames()
+    const engine = createEngine(f.host)
+    const look = rig({ travel: travel() }, { states: { idle: ['travel'] }, drives: [{ input: 'turn', target: 'oval', prop: 'opacity', values: [1, 0, 1] }] })
+    const handle = engine.attach(look, (id) => f.find(id), { state: 'idle', reducedMotion: false })
+    handle.setInputs(() => ({ turn: 1 }))
+    f.run(600)
+    expect(f.find('oval').attrs.get('opacity')).toBe('1')
+    f.find('dot').broken = true
+    f.run(80)
+    expect(handle.frozen()).toBe(true)
+    // Facing the viewer the side view is hidden: the pose a still face is drawn in.
+    expect(f.find('oval').attrs.get('opacity')).toBe('0')
+    f.find('dot').broken = false
+    handle.detach()
+    expect(f.find('oval').attrs.has('opacity')).toBe(false)
+    expect(f.find('dot').attrs.has('transform')).toBe(false)
+  })
+
   it('keeps an animation of both states running untouched, fades the others over 200 ms', () => {
     const f = fakeFrames()
     const engine = createEngine(f.host)
-    const look = clockLook({ up: steady('oval', 'translateY', -10), turn: steady('head', 'rotate', 20) }, { idle: ['travel', 'up'], working: ['travel', 'turn'] })
+    // Small parts: a large one (the head) would hold its turn back for REVERSAL_MS (see the limiter's tests).
+    const look = clockLook({ up: steady('oval', 'translateY', -10), turn: steady('eyes', 'rotate', 20) }, { idle: ['travel', 'up'], working: ['travel', 'turn'] })
     const handle = engine.attach(look, (id) => f.find(id), { state: 'idle', reducedMotion: false })
     const y = () => readTransform(f.nodes.get('oval')?.attrs.get('transform')).ty
-    const rot = () => readTransform(f.nodes.get('head')?.attrs.get('transform'), 'translate(0 -2)').rot
+    const rot = () => readTransform(f.nodes.get('eyes')?.attrs.get('transform')).rot
     f.run(1000)
     expect(y()).toBe(-10)
     expect(rot()).toBe(0)
@@ -1417,6 +1461,19 @@ describe('writeStill', () => {
     expect(writes).toEqual(['oval opacity=0'])
   })
 
+  it('gives back what puts the artwork back on what it wrote, for an engine that takes the figure over', () => {
+    const look = rig({}, { drives: [{ input: 'turn', target: 'oval', prop: 'opacity', values: [1, 0, 1] }, { input: 'pace', target: 'dot', prop: 'translateY', values: [3, 0] }] })
+    const { writes, find } = recorder()
+    const undo = writeStill(look, find, 'p-')
+    expect(writes).toEqual(['oval opacity=0', 'dot transform=translate(0 3)'])
+    writes.length = 0
+    undo()
+    expect(writes).toEqual(['oval -opacity', 'dot -transform'])
+    writes.length = 0
+    writeStill(rig(), find, 'p-')()
+    expect(writes).toEqual([])
+  })
+
   it('writes nothing for a look without drives: the artwork is its rest', () => {
     const { writes, find } = recorder()
     writeStill(rig({ sway: { duration: 1, loop: true, tracks: [{ target: 'dot', prop: 'rotate', values: [-3, 3, -3] }] } }), find, 'p-')
@@ -1488,6 +1545,132 @@ describe('sample: parents', () => {
     expect(through(readTransform(posed(c, ['lift', 'reach'], 'hand')).matrix, 1, 0)).toEqual([0, 11])
     expect(posed(c, ['reach'], 'hand')).toBe('matrix(1 0 0 1 10 0)')
     expect(posed(c, ['lift'], 'hand')).toBe('matrix(0 1 -1 0 0 0)')
+  })
+
+  describe('in a group that holds the parent', () => {
+    /** The matrix of a written transform (its correction, own transform and motion), and a point through it. */
+    const matrixOf = (text: string | undefined): readonly number[] => {
+      let m = [1, 0, 0, 1, 0, 0]
+      for (const call of (text ?? '').matchAll(/([a-zA-Z]+)\(([^)]*)\)/g)) {
+        const a = call[2].split(' ').map(Number)
+        let n = [1, 0, 0, 1, 0, 0]
+        if (call[1] === 'matrix') n = a
+        else if (call[1] === 'translate') n = [1, 0, 0, 1, a[0], a[1] ?? 0]
+        else if (call[1] === 'scale') n = [a[0], 0, 0, a[1] ?? a[0], 0, 0]
+        else if (call[1] === 'rotate') {
+          const r = (a[0] * Math.PI) / 180
+          const [cx, cy] = [a[1] ?? 0, a[2] ?? 0]
+          const [c, s] = [Math.cos(r), Math.sin(r)]
+          n = [c, s, -s, c, cx - c * cx + s * cy, cy - s * cx - c * cy]
+        } else throw new Error(`unexpected ${call[1]}`)
+        m = [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]]
+      }
+      return m
+    }
+    /** Where a point of a part is drawn in the viewBox: through what it is drawn in, outermost first, and its own transform. */
+    const world = (poses: Map<string, Pose>, ids: string[], x: number, y: number) => {
+      let p = [x, y]
+      for (const id of [...ids].reverse()) {
+        const [rx, ry] = through(matrixOf(poses.get(id)?.transform), p[0], p[1])
+        p = [Math.round(rx * 1e6) / 1e6 || 0, Math.round(ry * 1e6) / 1e6 || 0]
+      }
+      return p
+    }
+    const group = (moves: Animation, extra: Partial<Look> = {}): Compiled =>
+      compiled({
+        ...bones(
+          [
+            {
+              tag: 'g',
+              id: 'side',
+              box: [60, 60, 100, 80],
+              children: [
+                { tag: 'g', id: 'trunk', box: [80, 80, 40, 40] },
+                { tag: 'path', id: 'tail', attrs: { d: 'M 120 100 L 140 100' }, box: [120, 100, 20, 0] },
+              ],
+            },
+          ],
+          { tail: 'trunk' },
+          { moves, wag: hold('trunk', 'translateY', 7) },
+          { side: [100, 100] },
+        ),
+        ...extra,
+      })
+
+    it('moves a child once with a group that moves it and its parent: by the group’s motion and the parent’s own', () => {
+      const c = group(hold('side', 'rotate', 0), { drives: [{ input: 'pace', target: 'side', prop: 'translateX', values: [0, 50] }] })
+      const poses = sample(c, [clip('wag')], 0, { pace: 1 })
+      expect(poses.get('side')?.transform).toBe('translate(50 0)')
+      // P = translate(50 0) is in D(trunk) as well: C = P⁻¹·D·Rp = translate(0 7), the trunk's own motion.
+      expect(poses.get('tail')?.transform).toBe('matrix(1 0 0 1 0 7)')
+      expect(world(poses, ['side', 'tail'], 120, 100)).toEqual([170, 107])
+      expect(world(poses, ['side', 'trunk'], 100, 100)).toEqual([150, 107])
+      // The group alone: the tail goes with it and nothing more.
+      expect(sample(c, [], 0, { pace: 1 }).get('tail')?.transform).toBeUndefined()
+    })
+
+    it('keeps a child on its parent’s mirrored place when the group is mirrored about a pivot', () => {
+      const c = group(hold('side', 'scaleX', -1))
+      const still = sample(c, [clip('moves')], 0)
+      expect(still.get('side')?.transform).toBe('translate(100 100) scale(-1 1) translate(-100 -100)')
+      // The mirror holds both: nothing in front of the tail, which is drawn mirrored with the group.
+      expect(still.get('tail')?.transform).toBeUndefined()
+      expect(world(still, ['side', 'tail'], 120, 100)).toEqual([80, 100])
+      const wagging = sample(c, [clip('moves'), clip('wag')], 0)
+      expect(wagging.get('tail')?.transform).toBe('matrix(1 0 0 1 0 7)')
+      expect(world(wagging, ['side', 'tail'], 120, 100)).toEqual([80, 107])
+      expect(world(wagging, ['side', 'trunk'], 100, 100)).toEqual([100, 107])
+      const pushed = compiled({ ...c.look, animations: { moves: hold('side', 'scaleX', -1), push: hold('trunk', 'translateX', 10) } })
+      const poses = sample(pushed, [clip('moves'), clip('push')], 0)
+      // The trunk goes 10 to its right, which the mirror shows as 10 to the left; the tail with it.
+      expect(world(poses, ['side', 'trunk'], 100, 100)).toEqual([90, 100])
+      expect(world(poses, ['side', 'tail'], 120, 100)).toEqual([70, 100])
+    })
+
+    it('moves a child outside the group with all of what moves its parent, as before', () => {
+      const c = compiled(
+        bones(
+          [
+            { tag: 'g', id: 'side', box: [60, 60, 100, 80], children: [{ tag: 'g', id: 'trunk', box: [80, 80, 40, 40] }] },
+            { tag: 'path', id: 'tail', attrs: { d: 'M 120 100 L 140 100' }, box: [120, 100, 20, 0] },
+          ],
+          { tail: 'trunk' },
+          { wag: hold('trunk', 'translateY', 7) },
+        ),
+      )
+      const poses = sample(c, [clip('wag')], 0)
+      expect(poses.get('tail')?.transform).toBe('matrix(1 0 0 1 0 7)')
+      const driven = compiled({ ...c.look, drives: [{ input: 'pace', target: 'side', prop: 'translateX', values: [0, 50] }] })
+      expect(sample(driven, [clip('wag')], 0, { pace: 1 }).get('tail')?.transform).toBe('matrix(1 0 0 1 50 7)')
+    })
+
+    it('follows a chain of two inside a group that moves', () => {
+      const c = compiled({
+        ...bones(
+          [
+            {
+              tag: 'g',
+              id: 'arm',
+              box: [0, 0, 10, 10],
+              children: [
+                { tag: 'g', id: 'upper', box: [0, 0, 10, 10] },
+                { tag: 'g', id: 'fore', box: [0, 0, 10, 10] },
+                { tag: 'path', id: 'hand', attrs: { d: 'M 0 0 L 1 0' }, box: [0, 0, 1, 0] },
+              ],
+            },
+          ],
+          { fore: 'upper', hand: 'fore' },
+          { lift: hold('upper', 'rotate', 90), reach: hold('fore', 'translateX', 10) },
+          { upper: [0, 0] },
+        ),
+        drives: [{ input: 'pace', target: 'arm', prop: 'translateX', values: [0, 50] }],
+      })
+      const poses = sample(c, [clip('lift'), clip('reach')], 0, { pace: 1 })
+      // As without the group: the group's own motion is applied once, by the group.
+      expect(poses.get('fore')?.transform).toBe('matrix(0 1 -1 0 0 0) translate(10 0)')
+      expect(poses.get('hand')?.transform).toBe('matrix(0 1 -1 0 0 10)')
+      expect(world(poses, ['arm', 'hand'], 1, 0)).toEqual([50, 11])
+    })
   })
 
   it('works in the coordinates of the group the child is drawn in', () => {

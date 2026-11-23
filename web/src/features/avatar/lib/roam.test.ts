@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { APART_PX, AUDIENCE_PX, BUSY_REACH_PX, HELD_BACK_MS, HOME_PX, HURRY_PX_S, MAX_STEP_MS, MEET_GAP_PX, POST_GAP_PX, STROLL_PX_S, VISIT_PX_S, attend, claimOf, feetBounds, gazeToward, into, newWorld, placePost, postFor, samplePoints, step, walkFeel } from './roam'
+import { APART_PX, AUDIENCE_PX, BUSY_REACH_PX, HELD_BACK_MS, HOME_PX, HURRY_PX_S, MAX_STEP_MS, MEET_GAP_PX, PACE_SMOOTH_MS, POST_GAP_PX, STROLL_PX_S, VISIT_PX_S, WALK_LOOP_HOLD_MS, attend, claimOf, feetBounds, gazeToward, into, newWalkLoop, newWorld, placePost, postFor, samplePoints, step, walkFeel, walkLoopStep } from './roam'
 import type { Body, Box, Cue, Point, Post, StepInput, Walker, World } from './roam'
 
 /** A generator with a seed: the same walk every time. */
@@ -859,6 +859,45 @@ describe('what a walk tells the look', () => {
     expect(walkFeel(standing('h', 300, 300, { mode: 'meet', partner: 'g' }), null, 16, new Map([['g', standing('g', 300, 200)]]), false).turn).toBe(0)
   })
 
+  it('takes the pace over the last 250 ms when it is told the last one, so a crowd that pushes it does not flicker', () => {
+    expect(PACE_SMOOTH_MS).toBe(250)
+    const at = (x: number) => standing('a', x, 300, { mode: 'walk', walking: true, to: { x: 900, y: 300 } })
+    const full = (STROLL_PX_S * 16) / 1000
+    // From standing, a stroll: about 63% of the way after 250 ms, all of it after a while.
+    let pace = 0
+    let x = 100
+    for (let t = 0; t < 256; t += 16) {
+      pace = walkFeel(at(x + full), { x, y: 300 }, 16, none, false, pace).pace
+      x += full
+    }
+    expect(pace).toBeGreaterThan(0.6)
+    expect(pace).toBeLessThan(0.68)
+    for (let t = 0; t < 3000; t += 16) {
+      pace = walkFeel(at(x + full), { x, y: 300 }, 16, none, false, pace).pace
+      x += full
+    }
+    expect(pace).toBe(1)
+    // Pushed about: a full stroll and a third of one by turns, frame by frame. What it tells keeps within a few hundredths.
+    const told: number[] = []
+    for (let i = 0; i < 120; i++) {
+      const go = i % 2 === 0 ? full : full * 0.3
+      pace = walkFeel(at(x + go), { x, y: 300 }, 16, none, false, pace).pace
+      x += go
+      if (i >= 60) told.push(pace)
+    }
+    expect(Math.max(...told) - Math.min(...told)).toBeLessThan(0.05)
+    expect(Math.min(...told)).toBeGreaterThan(0.6)
+    // Standing still: down to 0 as smoothly, then 0 exactly.
+    const was = pace
+    pace = walkFeel(standing('a', x, 300), { x, y: 300 }, 16, none, false, pace).pace
+    expect(pace).toBeCloseTo(was * Math.exp(-16 / PACE_SMOOTH_MS), 9)
+    for (let t = 0; t < 3000; t += 16) pace = walkFeel(standing('a', x, 300), { x, y: 300 }, 16, none, false, pace).pace
+    expect(pace).toBe(0)
+    // Without what it told before, or with nonsense, it is the step alone; a drag is a drag at once.
+    expect(walkFeel(at(x + full), { x, y: 300 }, 16, none, false, Number.NaN).pace).toBeCloseTo(1, 9)
+    expect(walkFeel(at(x + full), { x, y: 300 }, 16, none, true, 1)).toEqual({ pace: 0, turn: 0, held: 1 })
+  })
+
   it('says it is held while the user drags it, and nothing else then', () => {
     expect(walkFeel(standing('a', 500, 300, { walking: true, to: { x: 900, y: 300 } }), { x: 100, y: 300 }, 16, none, true)).toEqual({ pace: 0, turn: 0, held: 1 })
   })
@@ -885,5 +924,43 @@ describe('what a walk tells the look', () => {
     }
     expect(stood).toBe(true)
     expect(walkedRight || walkedLeft).toBe(true)
+  })
+})
+
+describe('walkLoopStep', () => {
+  it('starts the loop of its own design when it walks, and stops it once it has stood 340 ms', () => {
+    expect(WALK_LOOP_HOLD_MS).toBe(340)
+    const loop = newWalkLoop()
+    expect(walkLoopStep(loop, false, 0)).toBeNull()
+    expect(walkLoopStep(loop, true, 100)).toBe('start')
+    // The caller marks it playing once it did start; until then it asks again.
+    expect(walkLoopStep(loop, true, 116)).toBe('start')
+    loop.playing = true
+    expect(walkLoopStep(loop, true, 132)).toBeNull()
+    expect(walkLoopStep(loop, false, 200)).toBeNull()
+    expect(walkLoopStep(loop, false, 539)).toBeNull()
+    expect(walkLoopStep(loop, false, 540)).toBe('stop')
+    expect(loop).toEqual({ playing: false, stoodAt: null, stoppedAt: 540 })
+    expect(walkLoopStep(loop, false, 600)).toBeNull()
+  })
+
+  it('runs on through a stand shorter than 340 ms, and does not start again within 340 ms of stopping', () => {
+    const loop = newWalkLoop()
+    walkLoopStep(loop, true, 0)
+    loop.playing = true
+    // A crowd: it stands and walks by turns, five times a second, for two seconds. The loop plays on.
+    const asked: string[] = []
+    for (let t = 16; t < 2000; t += 16) {
+      const next = walkLoopStep(loop, Math.floor(t / 100) % 2 === 0, t)
+      if (next) asked.push(next)
+    }
+    expect(asked).toEqual([])
+    expect(loop.playing).toBe(true)
+    // It stands long enough: stopped; walking again at once does not start it before 340 ms have passed.
+    let stopped = -1
+    for (let t = 2000; stopped < 0; t += 16) if (walkLoopStep(loop, false, t) === 'stop') stopped = t
+    expect(walkLoopStep(loop, true, stopped + 16)).toBeNull()
+    expect(walkLoopStep(loop, true, stopped + WALK_LOOP_HOLD_MS - 1)).toBeNull()
+    expect(walkLoopStep(loop, true, stopped + WALK_LOOP_HOLD_MS)).toBe('start')
   })
 })

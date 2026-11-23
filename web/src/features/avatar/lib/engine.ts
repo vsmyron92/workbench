@@ -6,10 +6,13 @@
 //   A value that does not fit its prop rejects the look.
 // - `sample` is pure: clips and inputs in, the pose of every part out. All of the animation
 //   rules live here (composition, weights, gestures over state animations, fades, drives,
-//   mouth, gaze, and the skeleton of `parents`).
+//   mouth, gaze, and the skeleton of `parents`). It is two pure steps: `accumulate` adds
+//   everything up into numbers per part, `settle` turns the numbers into what is written.
 // - `createEngine` runs one shared frame loop per window and writes poses to nodes. It
 //   counts visible time only, runs at most 30 frames a second, catches per figure, and
-//   freezes a figure whose frames cost too much.
+//   freezes a figure whose frames cost too much. Between the two steps of each frame it puts
+//   a limiter (`REVERSAL_MS`): whatever the tracks, gestures, drives and inputs make
+//   together, no channel it writes turns back more often than three flashes a second allow.
 //
 // The engine never measures the DOM and never writes a string from the look: everything it
 // writes is formatted here from finite numbers, plus a few literal words. The one thing it
@@ -26,6 +29,7 @@ import {
   LIMITS,
   MAX_CHAIN_LINKS,
   MORE_LIMITS,
+  boxThrough,
   cleanIdPrefix,
   fmt,
   formatPath,
@@ -52,7 +56,7 @@ import {
 } from './look'
 import type { IndexEntry, Matrix, PathShape, Rgba } from './look'
 import { DRIVE_INPUTS } from './types'
-import type { Animation, AvatarState, Bezier, Drive, DriveInput, Ease, Look, LookNode, MouthDrive, Prop, Track } from './types'
+import type { Animation, AvatarState, Bezier, Box, Drive, DriveInput, Ease, Look, LookNode, MouthDrive, Prop, Track } from './types'
 
 // ---------------------------------------------------------------- public shapes
 
@@ -152,7 +156,7 @@ export interface FigureHandle {
   /** `read` gives the figure's walk (`pace`, `turn`, `held`), read every frame; null or nothing given: all at rest. */
   setInputs(read: (() => WalkInputs | null) | null): void
   setReducedMotion(on: boolean): void
-  /** The figure stopped animating: its frames cost too much, or one of its nodes threw. It stays in its rest pose. */
+  /** The figure stopped animating: its frames cost too much, or one of its nodes threw. It stays in its rest pose, with what its drives set at rest (as a still face). */
   frozen(): boolean
   /** Puts every part back to the artwork's own values and leaves the loop. */
   detach(): void
@@ -192,7 +196,8 @@ export const BUDGET_FRAMES = 30
 /** A held or looping gesture ends by itself after this (the server's HOLD_MAX_SECS). */
 const HOLD_MAX_MS = 120_000
 const MAX_GESTURES = 6
-const GAZE_EASE_MS = 90
+/** The pupils follow where they are told to look with this time constant. */
+export const GAZE_EASE_MS = 90
 /** A correction of `parents` this close to the identity is none. */
 const NEAR_IDENTITY = 1e-9
 
@@ -272,6 +277,8 @@ interface Skeleton {
   parents: ReadonlyMap<string, string>
   /** Parent -> its rest world undone, R(Q)⁻¹; null when it cannot be undone (its children are left out). */
   restInverse: ReadonlyMap<string, Matrix | null>
+  /** Child -> where the element it is drawn in rests, Rp = S(A1)·…·S(An) (no motion). */
+  restOuter: ReadonlyMap<string, Matrix>
 }
 
 interface Full {
@@ -285,6 +292,8 @@ interface Full {
   mouth: readonly CMouth[]
   gazeTarget: string | null
   gazeTravel: number
+  /** The parts that can cover much of the figure (`largeParts`): the frame loop limits every channel of theirs, not only their paint. */
+  large: ReadonlySet<string>
   /** The pose with nothing playing: the artwork's own values, as the engine writes them back. */
   rest: ReadonlyMap<string, Pose>
 }
@@ -778,13 +787,18 @@ function compileSkeleton(b: Builder): Skeleton | null {
   if (names.length > MORE_LIMITS.parents) return misfit()
   const parents = new Map<string, string>()
   const restInverse = new Map<string, Matrix | null>()
+  const restOuter = new Map<string, Matrix>()
   for (const child of names) {
     const parent = own(given, child)
     if (!isId(child) || !isId(parent) || child === parent) return misfit()
     const q = partOf(b, parent)
-    targetOf(b, child).target.moves = true
+    const { target, entry } = targetOf(b, child)
+    target.moves = true
     parents.set(child, parent)
     if (!restInverse.has(parent)) restInverse.set(parent, invert(restWorld(q)))
+    let outer: Matrix = IDENTITY
+    for (const node of entry.ancestors) outer = multiply(outer, ownMatrix(node))
+    restOuter.set(child, outer)
   }
   for (const child of parents.keys()) {
     let at: string | undefined = child
@@ -794,7 +808,7 @@ function compileSkeleton(b: Builder): Skeleton | null {
       if (++links > MAX_CHAIN_LINKS) return misfit()
     }
   }
-  return { parents, restInverse }
+  return { parents, restInverse, restOuter }
 }
 
 function build(look: Look): Full {
@@ -848,8 +862,90 @@ function build(look: Look): Full {
     mouth,
     gazeTarget,
     gazeTravel: travel,
+    large: largeParts(b, anims, drives, mouth, skeleton),
     rest: new Map(),
   }
+}
+
+/** A part that covers this share of the viewBox or more, at the largest scale the look gives it, is large. */
+const LARGE_SHARE = 1 / 8
+/** Size props whose values, in a track, a drive or a mouth entry, make a part large when they reach this far, as shares of the viewBox width. */
+const FAR_REACH: ReadonlyMap<Prop, number> = new Map<Prop, number>([
+  ['r', 0.2],
+  ['rx', 0.2],
+  ['ry', 0.2],
+  ['strokeWidth', 0.2],
+  ['width', 0.35],
+  ['height', 0.35],
+])
+
+/**
+ * A part's rest box in the viewBox as it is painted: its box widened on every side by half
+ * the width of the stroke it is painted with (its own or what it inherits; none without a
+ * stroke). null when it has no box.
+ */
+function paintedBox(entry: IndexEntry): Box | null {
+  const box: unknown = entry.node.box
+  if (!Array.isArray(box) || box.length !== 4 || !box.every(isNum)) return null
+  const stroke = inherited(entry, ['stroke', 'strokeRef', 'strokeToken'])
+  const stroked = stroke !== null && !(stroke.key === 'stroke' && stroke.value === 'none')
+  const width = stroked ? (numeric(inherited(entry, ['strokeWidth'])?.value ?? 1) ?? 1) : 0
+  const half = Math.max(width, 0) / 2
+  const out = boxThrough(entry.matrix, [box[0] - half, box[1] - half, box[2] + 2 * half, box[3] + 2 * half])
+  return out.every((n) => Number.isFinite(n)) ? out : null
+}
+
+/**
+ * The parts whose motion could flash: those that cover an eighth of the viewBox or more, at
+ * the largest scale anything gives them (the largest absolute value of a scale keyframe, a
+ * scale drive's value or a scale mouth entry that names the part, an element it is drawn in,
+ * or a part of its `parents` chain or what that is drawn in; at least 1); those whose size
+ * props reach far in a track, a drive or a mouth entry (`FAR_REACH`); and those without a box.
+ * Eyes, pupils, a mouth and small limbs are small, so a blink and lip sync are not held back.
+ */
+function largeParts(b: Builder, anims: ReadonlyMap<string, CAnim>, drives: readonly CDrive[], mouth: readonly CMouth[], skeleton: Skeleton | null): Set<string> {
+  const [, , width, height] = viewBoxOf(b.look)
+  const scales = new Map<string, number>()
+  const far = new Set<string>()
+  const scaled = (id: string, v: number) => {
+    if (isNum(v)) scales.set(id, Math.max(scales.get(id) ?? 1, Math.abs(v)))
+  }
+  const read = (track: CTrack) => {
+    const scaling = track.channels.some((ch) => ch >= SCALE_FROM)
+    const reach = FAR_REACH.get(track.prop)
+    for (const [id, frames] of track.frames) {
+      if (scaling) for (const v of frames.nums) scaled(id, v)
+      if (reach !== undefined && frames.nums.some((v) => v >= reach * width)) far.add(id)
+    }
+  }
+  for (const anim of anims.values()) for (const track of anim.tracks) read(track)
+  for (const drive of drives) read(drive.track)
+  for (const m of mouth) {
+    if (m.kind === 'channel' && m.channels.some((ch) => ch >= SCALE_FROM)) {
+      scaled(m.target, m.closed)
+      scaled(m.target, m.open)
+    }
+    const reach = m.kind === 'attr' ? FAR_REACH.get(m.prop) : undefined
+    if (m.kind === 'attr' && reach !== undefined && Math.max(m.closed, m.open) >= reach * width) far.add(m.target)
+  }
+  const out = new Set<string>()
+  for (const id of b.targets.keys()) {
+    const entry = b.index.get(id)
+    const box = entry ? paintedBox(entry) : null
+    if (far.has(id) || !entry || !box) {
+      out.add(id)
+      continue
+    }
+    let most = 1
+    let at: string | undefined = id
+    for (let links = 0; at !== undefined && links <= MAX_CHAIN_LINKS; links++) {
+      const chain = b.index.get(at)
+      for (const node of chain ? chainOf(chain) : []) if (typeof node.id === 'string') most = Math.max(most, scales.get(node.id) ?? 1)
+      at = skeleton?.parents.get(at)
+    }
+    if (box[2] * box[3] * most * most >= width * height * LARGE_SHARE) out.add(id)
+  }
+  return out
 }
 
 /**
@@ -893,6 +989,9 @@ function lerpNums(a: readonly number[], b: readonly number[], t: number, shape: 
   return out
 }
 
+/** Sizes that an overshooting ease must not take below 0 (a negative radius or width is an error in SVG). A dash offset may be negative. */
+const NOT_NEGATIVE: ReadonlySet<Prop> = new Set<Prop>(['strokeWidth', 'r', 'rx', 'ry', 'width', 'height'])
+
 /** A track's value at progress `p` (0 to 1) for one target. */
 function valueAt(track: CTrack, frames: Frames, p: number): Abs | number {
   const times = track.times
@@ -910,7 +1009,8 @@ function valueAt(track: CTrack, frames: Frames, p: number): Abs | number {
     return { kind: 'd', v: lerpNums(frames.paths[i], frames.paths[i + 1], f, shape), shape }
   }
   const v = lerp(frames.nums[i], frames.nums[i + 1], f)
-  return track.kind === 'rel' ? v : { kind: 'num', v }
+  if (track.kind === 'rel') return v
+  return { kind: 'num', v: NOT_NEGATIVE.has(track.prop) && v < 0 ? 0 : v }
 }
 
 /** `over` laid on `under` with a weight: the animation started last wins, and fades take it there smoothly. */
@@ -934,8 +1034,8 @@ function mix(under: Abs | undefined, rest: Rest | undefined, over: Abs, w: numbe
 
 const frac = (n: number) => n - Math.floor(n)
 
-function absText(value: Abs): string | null {
-  if (value.kind === 'num') return fmt(value.v, 3)
+function absText(prop: Prop, value: Abs): string | null {
+  if (value.kind === 'num') return fmt(NOT_NEGATIVE.has(prop) && value.v < 0 ? 0 : value.v, 3)
   if (value.kind === 'colour') return colourText(value.v)
   return formatPath(value.shape, value.v)
 }
@@ -1025,9 +1125,14 @@ const nearIdentity = (m: Matrix): boolean => Math.abs(m[0] - 1) <= NEAR_IDENTITY
  * moves with its parent as if nested in it. With A1…An the elements around E, outermost
  * first, S its own transform, M its motion, T = S·M:
  *
- * - X(E) = T(E), and for a child of Q: X(E) = C·T(E) with C = P⁻¹·D(Q)·P,
- *   P = X(A1)·…·X(An) (where E's DOM parent is now), D(Q) = W(Q)·R(Q)⁻¹;
+ * - X(E) = T(E), and for a child of Q: X(E) = C·T(E) with C = P⁻¹·D(Q)·Rp,
+ *   P = X(A1)·…·X(An) (where E's DOM parent is now), Rp = S(A1)·…·S(An) (where it rests),
+ *   D(Q) = W(Q)·R(Q)⁻¹;
  * - W(E) = X(A1)·…·X(An)·X(E) (where it is now), R(E) = S(A1)·…·S(An)·S(E) (where it rests).
+ *
+ * So W(E) = D(Q)·Rp·T(E): E moves exactly as far as Q is from its rest, as if it were nested
+ * in Q. What moves E's DOM parent is in P and, when it holds Q as well, in D(Q) too; P⁻¹
+ * takes it out once, so a group that moves or mirrors both is applied once.
  *
  * null for a child whose matrices cannot be inverted, whose numbers are not finite, or
  * whose rig depends on itself through what it is nested in: it is left out of the frame.
@@ -1065,7 +1170,7 @@ function corrections(full: Full, skeleton: Skeleton, index: ReadonlyMap<string, 
     let c: Matrix | null = null
     if (entry && restInverse && pInverse) {
       const now = worldAt(chainOf(entry), entry.ancestors.length)
-      if (now) c = multiply(multiply(pInverse, multiply(now, restInverse)), outer)
+      if (now) c = multiply(multiply(pInverse, multiply(now, restInverse)), skeleton.restOuter.get(child) ?? IDENTITY)
     }
     if (c && !c.every((n) => Number.isFinite(n))) c = null
     found.set(child, c)
@@ -1107,11 +1212,21 @@ function corrections(full: Full, skeleton: Skeleton, index: ReadonlyMap<string, 
  *
  * A part whose numbers are not finite is left out of the result. A clip whose name means
  * nothing for the look is ignored.
+ *
+ * Two steps, each pure: `accumulate` adds everything up into numbers per part, `settle`
+ * turns those numbers into what is written. The frame loop limits the numbers between them.
  */
 export function sample(c: Compiled, clips: readonly Clip[], tMs: number, inputs?: SampleInputs | null, opts?: SampleOptions): Map<string, Pose> {
-  const out = new Map<string, Pose>()
   const full = FULL.get(c)
-  if (!full || !isNum(tMs)) return out
+  if (!full || !isNum(tMs)) return new Map()
+  return settle(full, c.look, accumulate(full, clips, tMs, inputs, opts))
+}
+
+/**
+ * Everything that applies at one moment, added up: per part its transform channels and the
+ * values of its absolute props. A part that nothing touches is not in the map (it is at rest).
+ */
+function accumulate(full: Full, clips: readonly Clip[], tMs: number, inputs?: SampleInputs | null, opts?: SampleOptions): Map<string, Acc> {
   const reduced = opts?.reducedMotion === true
   const accs = new Map<string, Acc>()
   const acc = (id: string): Acc => {
@@ -1272,12 +1387,21 @@ export function sample(c: Compiled, clips: readonly Clip[], tMs: number, inputs?
     a.ch[0] += gaze[0] * k
     a.ch[1] += gaze[1] * k
   }
+  return accs
+}
 
+/**
+ * The numbers of one moment as what is written: every part's transform (with the
+ * corrections of `parents`) and its absolute props as text. Every part the look can move
+ * gets a pose; one whose numbers are not finite is left out.
+ */
+function settle(full: Full, look: Look, accs: ReadonlyMap<string, Acc>): Map<string, Pose> {
+  const out = new Map<string, Pose>()
   // Every part's motion as it is written; with `parents` also as matrices, for the corrections of the children.
   const skeleton = full.skeleton
   const motions = new Map<string, Motion | null>()
   for (const [id, target] of full.targets) if (target.moves) motions.set(id, motionOf(target, accs.get(id)?.ch, skeleton !== null))
-  const fixes = skeleton ? corrections(full, skeleton, lookIndex(c.look), motions) : null
+  const fixes = skeleton ? corrections(full, skeleton, lookIndex(look), motions) : null
 
   // Every part the look can move gets a pose, so one that is no longer animated returns to the artwork's own values.
   for (const [id, target] of full.targets) {
@@ -1313,7 +1437,7 @@ export function sample(c: Compiled, clips: readonly Clip[], tMs: number, inputs?
         else pose.attrs.set(name, rest.text)
         continue
       }
-      const text = absText(value)
+      const text = absText(prop, value)
       if (text === null) sound = false
       else pose.attrs.set(name, text)
     }
@@ -1330,18 +1454,40 @@ export function sample(c: Compiled, clips: readonly Clip[], tMs: number, inputs?
  * artwork as it was rendered and nothing is written. A look with drives differs: a prop a
  * drive sets belongs to the drive (a side view that shows only while it walks is hidden at
  * rest), so those values are written once. `find` and `idPrefix` as for `Engine.attach`.
+ *
+ * Gives back what puts the artwork's own values back on the nodes it wrote, for a figure
+ * that an engine takes over (the engine starts from the artwork as it was rendered).
  */
-export function writeStill(look: Look, find: (id: string) => EngineNode | null, idPrefix: string): void {
+export function writeStill(look: Look, find: (id: string) => EngineNode | null, idPrefix: string): () => void {
   const compiled = compile(look)
   const full = compiled ? FULL.get(compiled) : undefined
-  if (!compiled || !full || full.drives.length === 0) return
+  if (!compiled || !full || full.drives.length === 0) return () => {}
   const prefix = cleanIdPrefix(idPrefix)
-  for (const [id, pose] of sample(compiled, [], 0, {})) {
-    const was = full.rest.get(id)
-    let node: EngineNode | null = null
+  const still = sample(compiled, [], 0, {})
+  const nodes = new Map<string, EngineNode>()
+  for (const id of still.keys()) {
     try {
-      node = find(id)
-      if (!node || typeof node.setAttribute !== 'function' || typeof node.removeAttribute !== 'function') continue
+      const node = find(id)
+      if (node && typeof node.setAttribute === 'function' && typeof node.removeAttribute === 'function') nodes.set(id, node)
+    } catch {
+      // A part it cannot find keeps the artwork's own values.
+    }
+  }
+  repose(nodes, full.rest, still, prefix)
+  return () => repose(nodes, still, full.rest, prefix)
+}
+
+/**
+ * Writes `to` on nodes that hold `from`, where the two differ. A paint that is a gradient in
+ * `to` is given its reference as it was rendered. One node that throws keeps what it has; the
+ * others are still posed.
+ */
+function repose(nodes: ReadonlyMap<string, EngineNode>, from: ReadonlyMap<string, Pose>, to: ReadonlyMap<string, Pose>, prefix: string): void {
+  for (const [id, pose] of to) {
+    const node = nodes.get(id)
+    if (!node) continue
+    const was = from.get(id)
+    try {
       if (pose.transform !== was?.transform) {
         if (pose.transform === undefined) node.removeAttribute('transform')
         else node.setAttribute('transform', pose.transform)
@@ -1351,11 +1497,161 @@ export function writeStill(look: Look, find: (id: string) => EngineNode | null, 
         if (value === null) node.removeAttribute(name)
         else node.setAttribute(name, value)
       }
-      // A paint that is a gradient at rest stays as it was rendered.
       for (const [name, ref] of pose.refs ?? []) if (!was?.refs?.has(name)) node.setAttribute(name, `url(#${prefix}${ref})`)
     } catch {
-      // One node that throws keeps the artwork's own values; the others are still posed.
+      // One node that throws keeps what it has; the others are still posed.
     }
+  }
+}
+
+// ---------------------------------------------------------------- the limiter
+
+/**
+ * The least time between two turns of one channel of what the frame loop writes.
+ *
+ * The validators keep each track's paint keyframes 0.17 s apart, but what flashes is what
+ * everything makes together: staggered tracks of one animation, a gesture played again and
+ * again, a drive whose input jitters, a mouth at syllable rate. So the frame loop limits what
+ * it writes, per part and channel: a change in the direction the channel last moved passes,
+ * and so does its first change; a change that turns it back passes only 150 ms or more after
+ * its last accepted turn, else the channel holds what it wrote last and takes the target as it
+ * is then once the time is up (one late change, not a ramp). Eight turns would need seven
+ * gaps of 150 ms, longer than a second, so no second holds more than seven turns, and between
+ * seven turns lie six complete changes: at most three complete back-and-forth flashes in any
+ * second, the usual threshold.
+ */
+export const REVERSAL_MS = 150
+/** A change this small is no change: rounding, not motion. */
+const STILL_DELTA = 1e-9
+
+/** Whether the frame loop limits every channel of this part of a compiled look, not only its paint (see `largeParts`). false for a part the look never moves or changes. */
+export function isLarge(c: Compiled, id: string): boolean {
+  return FULL.get(c)?.large.has(id) ?? false
+}
+
+/**
+ * One channel the frame loop limits: a transform channel of a part (`ch` 0 … 6), or an
+ * absolute prop of it (`ch` -1). Numbers are compared as a vector: one number, a colour's
+ * four channels (red, green and blue as shares of 255), or every number of path data.
+ */
+interface Lane {
+  id: string
+  ch: number
+  prop: Prop | null
+  rest: Rest | null
+  /** What was written last, as numbers; null: no value (a paint at rest in a gradient, `none`, an inherited colour). */
+  last: readonly number[] | null
+  /** The path data's structure along with `last`. */
+  shape: PathShape | null
+  /** How an absolute prop was written last; undefined: as the artwork's own value. */
+  written: Abs | undefined
+  /** The change accepted last; null: none yet, or the last one was to or from no value. */
+  step: readonly number[] | null
+  /** When it last turned back, or went to or from no value. */
+  turnAt: number
+}
+
+const unitColour = (c: Rgba): number[] => [c[0] / 255, c[1] / 255, c[2] / 255, c[3]]
+
+/** A lane's target in the numbers of one moment: as numbers, as it would be written, and its path structure. */
+function laneTarget(lane: Lane, accs: ReadonlyMap<string, Acc>): { nums: readonly number[] | null; abs: Abs | undefined; shape: PathShape | null } {
+  const a = accs.get(lane.id)
+  if (lane.prop === null) return { nums: [a ? a.ch[lane.ch] : REST_CHANNELS[lane.ch]], abs: undefined, shape: null }
+  const abs = a?.abs?.get(lane.prop)
+  if (abs) return { nums: abs.kind === 'num' ? [abs.v] : abs.kind === 'colour' ? unitColour(abs.v) : abs.v, abs, shape: abs.kind === 'd' ? abs.shape : null }
+  const rest = lane.rest
+  if (!rest) return { nums: null, abs: undefined, shape: null }
+  if (rest.kind === 'num') return { nums: [rest.value], abs: undefined, shape: null }
+  if (rest.kind === 'colour') return { nums: rest.rgba ? unitColour(rest.rgba) : null, abs: undefined, shape: null }
+  return { nums: rest.shape ? rest.nums : null, abs: undefined, shape: rest.shape }
+}
+
+/**
+ * The limiter of one figure: called with the numbers of each frame, before they are settled,
+ * it puts back what a lane held where the lane may not change yet. Its lanes: the paint
+ * (opacity, fill and stroke opacity, fill, stroke) of every part, and every other channel of
+ * the large ones (`largeParts`). It starts from the artwork's own values, which is what was
+ * rendered.
+ */
+function createLimiter(full: Full): (accs: Map<string, Acc>, now: number) => void {
+  const lanes: Lane[] = []
+  const none = new Map<string, Acc>()
+  for (const [id, target] of full.targets) {
+    const large = full.large.has(id)
+    if (large && target.moves) for (let ch = 0; ch < REST_CHANNELS.length; ch++) lanes.push({ id, ch, prop: null, rest: null, last: [REST_CHANNELS[ch]], shape: null, written: undefined, step: null, turnAt: Number.NEGATIVE_INFINITY })
+    for (const [prop, rest] of target.rest) {
+      if (!large && !isPaintProp(prop)) continue
+      const lane: Lane = { id, ch: -1, prop, rest, last: null, shape: null, written: undefined, step: null, turnAt: Number.NEGATIVE_INFINITY }
+      const at = laneTarget(lane, none)
+      lane.last = at.nums
+      lane.shape = at.shape
+      lanes.push(lane)
+    }
+  }
+
+  /** Whether the lane may take its target now; if so it is taken. */
+  const pass = (lane: Lane, accs: ReadonlyMap<string, Acc>, now: number): boolean => {
+    const next = laneTarget(lane, accs)
+    const take = (step: readonly number[] | null) => {
+      lane.last = next.nums
+      lane.shape = next.shape
+      lane.written = next.abs
+      lane.step = step
+    }
+    const last = lane.last
+    const sameShape = lane.shape === null ? next.shape === null : next.shape !== null && samePathShape(lane.shape, next.shape)
+    if (last === null || next.nums === null || last.length !== next.nums.length || !sameShape) {
+      if (last === null && next.nums === null) {
+        take(lane.step)
+        return true
+      }
+      // To or from no value, or to another structure of path: a change that may come once in REVERSAL_MS.
+      if (now - lane.turnAt < REVERSAL_MS) return false
+      lane.turnAt = now
+      take(null)
+      return true
+    }
+    const delta: number[] = []
+    let most = 0
+    let along = 0
+    for (let i = 0; i < last.length; i++) {
+      const d = next.nums[i] - last[i]
+      delta.push(d)
+      most = Math.max(most, Math.abs(d))
+      if (lane.step) along += d * (lane.step[i] ?? 0)
+    }
+    if (!(most > STILL_DELTA)) {
+      take(lane.step)
+      return true
+    }
+    if (lane.step === null || along >= 0) {
+      take(delta)
+      return true
+    }
+    // It turns back.
+    if (now - lane.turnAt < REVERSAL_MS) return false
+    lane.turnAt = now
+    take(delta)
+    return true
+  }
+
+  /** The lane's last value put back in place of its target. */
+  const hold = (lane: Lane, accs: Map<string, Acc>) => {
+    let a = accs.get(lane.id)
+    if (!a) {
+      a = { ch: [...REST_CHANNELS], abs: null }
+      accs.set(lane.id, a)
+    }
+    if (lane.prop === null) {
+      a.ch[lane.ch] = lane.last?.[0] ?? REST_CHANNELS[lane.ch]
+      return
+    }
+    if (lane.written === undefined) a.abs?.delete(lane.prop)
+    else (a.abs ??= new Map()).set(lane.prop, lane.written)
+  }
+
+  return (accs, now) => {
+    for (const lane of lanes) if (!pass(lane, accs, now)) hold(lane, accs)
   }
 }
 
@@ -1500,6 +1796,9 @@ export function createEngine(host: EngineHost): Engine {
       written.set(id, { transform: pose.transform, attrs })
     }
 
+    /** Between what the frame adds up and what it writes: what this figure writes cannot flash. */
+    const limit = createLimiter(full)
+
     const members = new Map<string, Member>()
     let gestures: Gesture[] = []
     let state: AvatarState | null = null
@@ -1520,6 +1819,8 @@ export function createEngine(host: EngineHost): Engine {
     let held = 0
     /** No more frames: detached, frozen, or the engine is gone. */
     let stopped = false
+    /** The artwork's own values were put back. */
+    let restored = false
     /** It stopped by itself: its frames cost too much, or one of them threw. */
     let froze = false
     let spent = 0
@@ -1684,7 +1985,10 @@ export function createEngine(host: EngineHost): Engine {
             }
           }
 
-          write(sample(compiled, clips, now, { mouth, gaze, pace, turn, held }, { reducedMotion: reduced }), false)
+          // Added up, limited (no channel turns back sooner than REVERSAL_MS after it last turned), written.
+          const numbers = accumulate(full, clips, now, { mouth, gaze, pace, turn, held }, { reducedMotion: reduced })
+          limit(numbers, now)
+          write(settle(full, compiled.look, numbers), false)
           cost = host.now() - t0
         } catch {
           // A figure that throws is taken out of the loop and stays static; the others go on.
@@ -1700,21 +2004,28 @@ export function createEngine(host: EngineHost): Engine {
         }
       },
       end() {
-        if (stopped) return
         stopped = true
+        if (restored) return
+        restored = true
         write(full.rest, true)
       },
     }
 
-    const leave = () => {
-      figure.end()
+    const out = () => {
       figures.delete(figure)
       if (figures.size === 0) halt()
     }
+    const leave = () => {
+      figure.end()
+      out()
+    }
+    // Frozen, it stands as a still face does: in what the drives set at rest. Detached, it is the artwork again.
     const freeze = () => {
       if (stopped) return
       froze = true
-      leave()
+      stopped = true
+      out()
+      write(sample(compiled, [], 0, {}), true)
     }
 
     const enter = (next: AvatarState, first: boolean) => {

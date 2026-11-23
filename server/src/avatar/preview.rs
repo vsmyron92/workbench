@@ -22,11 +22,13 @@
 //! one as if it were nested in it. The built-in animations are the browser's alone: a pose names
 //! the look's own animations only, and is told so for another name.
 //!
-//! Drawing is CPU work: callers run it on a blocking thread. A sheet of the example looks takes a
-//! few tens of milliseconds. Filters are the one thing whose cost does not follow the size of the
-//! look, so their work is estimated from the parsed tree before anything is drawn (a filter's
-//! region times what its primitives cost per pixel), and a look whose filters would take more than
-//! [`FILTER_WORK`] passes over a panel is answered with a sentence instead of a picture.
+//! Nothing here is called by the server itself: a picture is drawn in a process of its own
+//! (`draw`), which calls [`draw_sheet`] and [`draw_strip`] under a limit on its memory and its
+//! time. A sheet of the example looks takes a few tens of milliseconds. What a look costs beyond
+//! its size (layers, filters, dashes, strokes far beyond the picture) is estimated from the parsed
+//! tree before anything is drawn, and a look over the estimate is answered with a sentence that
+//! says what to change. The estimate is a first answer, not the bound: it mirrors another
+//! program's bookkeeping and has been wrong before. The bound is the process.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -49,6 +51,10 @@ pub const STRIP_FRAME_PX: u32 = 132;
 pub const STRIP_FRAMES_MIN: usize = 2;
 pub const STRIP_FRAMES_MAX: usize = 8;
 pub const STRIP_FRAMES_DEFAULT: usize = 6;
+/// The size of a text that names none (look.rs's box assumes it, and the browser writes it).
+const DEFAULT_FONT_SIZE: &str = "16";
+/// The least a face shows of the viewBox's smaller side (`faceViewBox` of look.ts has the same).
+const FACE_LEAST: f64 = 0.1;
 /// Pixels between two panels.
 const GAP_PX: u32 = 4;
 /// The row of small views under a big panel: the 56 px figure with this much room around it.
@@ -77,6 +83,10 @@ pub const FILTER_WORK: f64 = 60.0;
 /// How many layers the size of a panel a look may ask for: every group that is filtered, masked,
 /// clipped or not opaque is one, a mask or a clip one more.
 pub const LAYER_WORK: f64 = 60.0;
+/// How far a stroked shape or a text may reach, in widths of the panel it is drawn into. The
+/// stroker works to a tolerance that shrinks with the scale: far beyond the picture, every curve
+/// is cut to its recursion limit, and one picture takes minutes.
+const REACH_MOST: f64 = 400.0;
 /// The largest single layer, in panels. resvg keeps a layer within five panels each way, which
 /// a filter on a part that is squeezed one way and stretched the other gets around: such a look
 /// is not drawn.
@@ -134,10 +144,12 @@ pub struct Inputs {
 pub struct Pose {
     pub animation: Option<(String, f64)>,
     pub inputs: Inputs,
+    /// The id of a part to look at closely: the large views show the square around it.
+    pub zoom: Option<String>,
 }
 
 /// The keys of a pose as a call writes it.
-const POSE_KEYS: [&str; 8] = ["animation", "at", "lookX", "lookY", "mouth", "pace", "turn", "held"];
+pub const POSE_KEYS: [&str; 9] = ["animation", "at", "lookX", "lookY", "mouth", "pace", "turn", "held", "zoom"];
 
 impl Pose {
     /// A pose as a call writes it: `{animation?, at?, lookX?, lookY?, mouth?, pace?, turn?, held?}`.
@@ -145,10 +157,10 @@ impl Pose {
     /// sentence the session can act on.
     pub fn from_json(value: &Value) -> Result<Pose, String> {
         let Value::Object(map) = value else {
-            return Err("a pose is an object with animation, at, lookX, lookY, mouth, pace, turn and held".into());
+            return Err("a pose is an object with animation, at, lookX, lookY, mouth, pace, turn, held and zoom".into());
         };
         if let Some(key) = map.keys().find(|k| !POSE_KEYS.contains(&k.as_str())) {
-            return Err(format!("a pose takes animation, at, lookX, lookY, mouth, pace, turn and held, not {}", quote(key)));
+            return Err(format!("a pose takes animation, at, lookX, lookY, mouth, pace, turn, held and zoom, not {}", quote(key)));
         }
         let number = |key: &str, min: f64, max: f64| -> Result<Option<f64>, String> {
             match map.get(key) {
@@ -178,28 +190,87 @@ impl Pose {
             turn: number("turn", -1.0, 1.0)?.unwrap_or(0.0),
             held: number("held", 0.0, 1.0)?.unwrap_or(0.0),
         };
-        Ok(Pose { animation, inputs })
+        let zoom = match map.get("zoom") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(id)) => Some(id.clone()),
+            Some(_) => return Err("zoom in a pose is the id of the part to look at closely".into()),
+        };
+        Ok(Pose { animation, inputs, zoom })
+    }
+
+    /// The pose as a call writes it: what [`Pose::from_json`] reads back as the same pose.
+    pub fn to_json(&self) -> Value {
+        let mut map = self.inputs.to_json();
+        if let Some((name, at)) = &self.animation {
+            map.insert("animation".into(), Value::from(name.clone()));
+            map.insert("at".into(), Value::from(*at));
+        }
+        if let Some(id) = &self.zoom {
+            map.insert("zoom".into(), Value::from(id.clone()));
+        }
+        Value::Object(map)
+    }
+}
+
+impl Inputs {
+    /// The inputs as a pose writes them, those at rest left out.
+    pub fn to_json(&self) -> Map<String, Value> {
+        let mut map = Map::new();
+        for (key, value) in [("lookX", self.look_x), ("lookY", self.look_y), ("pace", self.pace), ("turn", self.turn), ("held", self.held)] {
+            if value != 0.0 {
+                map.insert(key.into(), Value::from(value));
+            }
+        }
+        if let Some(open) = self.mouth {
+            map.insert("mouth".into(), Value::from(open));
+        }
+        map
+    }
+
+    /// The inputs of a pose as a call writes it: its other keys are not looked at.
+    pub fn from_json(value: &Value) -> Result<Inputs, String> {
+        let mut only = Map::new();
+        if let Value::Object(map) = value {
+            for key in ["lookX", "lookY", "mouth", "pace", "turn", "held"] {
+                if let Some(v) = map.get(key) {
+                    only.insert(key.into(), v.clone());
+                }
+            }
+        }
+        Pose::from_json(&Value::Object(only)).map(|pose| pose.inputs)
     }
 }
 
 // ---------------------------------------------------------------- pictures
 
+/// A picture and what drawing it cost.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Picture {
+    pub png: Vec<u8>,
+    pub spent: Spent,
+}
+
 /// The look in `pose` at 264 px on the light panel (left) and on the dark panel (right), and under
 /// each, on the same panel, the figure as it rests at 56 px and its face at 40 px. One PNG, 532 by
-/// 332 pixels.
-pub fn sheet(look: &Value, pose: &Pose) -> Result<Vec<u8>, String> {
+/// 332 pixels. With `pose.zoom` the two large views show the square around that part instead of
+/// the whole figure.
+pub fn draw_sheet(look: &Value, pose: &Pose) -> Result<Picture, String> {
     let model = Model::read(look)?;
     let posed = model.body(&model.pose(pose)?);
     let rest = model.body(&model.pose(&Pose::default())?);
     let view = model.view;
     let face = model.face_view();
+    let close = match &pose.zoom {
+        Some(id) => model.zoom_view(id)?,
+        None => view,
+    };
 
     let width = 2 * SHEET_FIGURE_PX + GAP_PX;
     let height = SHEET_FIGURE_PX + GAP_PX + SMALL_ROW_PX;
     let mut canvas = canvas(width, height)?;
     for (column, theme) in [LIGHT, DARK].into_iter().enumerate() {
         let x = column as u32 * (SHEET_FIGURE_PX + GAP_PX);
-        let big = model.render(&posed, view, SHEET_FIGURE_PX, theme)?;
+        let big = model.render(&posed, close, SHEET_FIGURE_PX, theme)?;
         place(&mut canvas, x, 0, &big);
         let row = SHEET_FIGURE_PX + GAP_PX;
         fill(&mut canvas, x, row, SHEET_FIGURE_PX, SMALL_ROW_PX, theme.panel);
@@ -210,12 +281,20 @@ pub fn sheet(look: &Value, pose: &Pose) -> Result<Vec<u8>, String> {
         let head = model.render(&rest, face, FACE_PX, theme)?;
         place(&mut canvas, left + SMALL_FIGURE_PX + SMALL_GAP_PX, row + GAP_PX + (SMALL_FIGURE_PX - FACE_PX) / 2, &head);
     }
-    canvas.encode_png().map_err(|e| format!("the picture could not be encoded: {e}"))
+    let png = canvas.encode_png().map_err(|e| format!("the picture could not be encoded: {e}"))?;
+    Ok(Picture { png, spent: model.spent.get() })
+}
+
+/// [`draw_sheet`], the picture alone.
+#[cfg(test)]
+pub fn sheet(look: &Value, pose: &Pose) -> Result<Vec<u8>, String> {
+    draw_sheet(look, pose).map(|picture| picture.png)
 }
 
 /// Whether the look can be drawn at rest within what a picture may cost: `Err` is a sentence that
-/// says what to change. Nothing is drawn. A design call asks this before a look is stored, since
-/// what is too costly to draw here is too costly for the browser to draw on every frame.
+/// says what to change. Nothing is drawn. For the tests that hold documented examples to what a
+/// design call stores; a design call itself draws the look, in a process of its own.
+#[cfg(test)]
 pub fn affordable(look: &Value) -> Result<(), String> {
     let model = Model::read(look)?;
     let rest = model.body(&model.pose(&Pose::default())?);
@@ -229,7 +308,9 @@ pub fn affordable(look: &Value) -> Result<(), String> {
 /// `frames` moments (2 to 8) of the look's own `animation`, left to right, 132 px each on the light
 /// panel, at even moments of its run: a loop at i/n of its duration (the frame after the last would
 /// be the first again), a one-shot or a recurring one at i/(n-1), so the last frame is its end.
-pub fn strip(look: &Value, animation: &str, frames: usize) -> Result<Vec<u8>, String> {
+/// `inputs` hold for every moment: a walk that shows only in a side view is drawn with the turn
+/// and the pace that show it.
+pub fn draw_strip(look: &Value, animation: &str, frames: usize, inputs: &Inputs) -> Result<Picture, String> {
     if !(STRIP_FRAMES_MIN..=STRIP_FRAMES_MAX).contains(&frames) {
         return Err(format!("a strip has {STRIP_FRAMES_MIN} to {STRIP_FRAMES_MAX} frames"));
     }
@@ -239,12 +320,19 @@ pub fn strip(look: &Value, animation: &str, frames: usize) -> Result<Vec<u8>, St
     let mut canvas = canvas(width, STRIP_FRAME_PX)?;
     for i in 0..frames {
         let at = if looping { i as f64 / frames as f64 } else { i as f64 / (frames - 1) as f64 };
-        let pose = Pose { animation: Some((animation.to_string(), at)), inputs: Inputs::default() };
+        let pose = Pose { animation: Some((animation.to_string(), at)), inputs: *inputs, zoom: None };
         let body = model.body(&model.pose(&pose)?);
         let frame = model.render(&body, model.view, STRIP_FRAME_PX, LIGHT)?;
         place(&mut canvas, i as u32 * (STRIP_FRAME_PX + GAP_PX), 0, &frame);
     }
-    canvas.encode_png().map_err(|e| format!("the picture could not be encoded: {e}"))
+    let png = canvas.encode_png().map_err(|e| format!("the picture could not be encoded: {e}"))?;
+    Ok(Picture { png, spent: model.spent.get() })
+}
+
+/// [`draw_strip`] with every input at rest, the picture alone.
+#[cfg(test)]
+pub fn strip(look: &Value, animation: &str, frames: usize) -> Result<Vec<u8>, String> {
+    draw_strip(look, animation, frames, &Inputs::default()).map(|picture| picture.png)
 }
 
 fn canvas(width: u32, height: u32) -> Result<Pixmap, String> {
@@ -267,23 +355,42 @@ fn fill(canvas: &mut Pixmap, x: u32, y: u32, width: u32, height: u32, colour: [u
 
 // ---------------------------------------------------------------- drawing one panel
 
-/// The system's fonts, read once, for looks that have text.
+/// The fonts a picture's text is drawn with, read once, for looks that have text: the system's
+/// sans-serif family and a short list to fall back on. Every other font of the system is left
+/// out, so looking for a character no font has costs a few files, not all of them.
 static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
 
 /// Sans-serif families tried in turn when the system names none that is installed.
 const SANS: [&str; 10] = ["Noto Sans", "DejaVu Sans", "Liberation Sans", "Arial", "Helvetica", "Segoe UI", "Ubuntu", "Cantarell", "FreeSans", "Roboto"];
+
+/// Families a character is looked for in when the sans-serif family lacks it: symbols, arrows,
+/// mathematics, monochrome emoji, and one family for Chinese, Japanese and Korean.
+const FALLBACK: [&str; 12] = [
+    "DejaVu Sans", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Sans Symbols2", "Noto Sans Math", "Noto Emoji", "Symbola", "Segoe UI Symbol", "Noto Sans CJK SC", "Noto Sans CJK JP",
+    "Microsoft YaHei", "Arial Unicode MS",
+];
 
 fn fonts() -> Arc<usvg::fontdb::Database> {
     FONTS
         .get_or_init(|| {
             let mut db = usvg::fontdb::Database::new();
             db.load_system_fonts();
-            let installed = |name: &str| db.faces().any(|face| face.families.iter().any(|(family, _)| family == name));
+            let installed = |db: &usvg::fontdb::Database, name: &str| db.faces().any(|face| face.families.iter().any(|(family, _)| family == name));
             let named = db.family_name(&usvg::fontdb::Family::SansSerif).to_string();
             let chosen = std::iter::once(named)
                 .chain(SANS.iter().map(|s| s.to_string()))
-                .find(|name| installed(name))
+                .find(|name| installed(&db, name))
                 .or_else(|| db.faces().find_map(|face| face.families.first().map(|(family, _)| family.clone())));
+            // Keep the chosen family whole (its weights) and one upright regular face of each
+            // family to fall back on.
+            let keep = |face: &usvg::fontdb::FaceInfo| {
+                let of = |name: &str| face.families.iter().any(|(family, _)| family == name);
+                chosen.as_deref().is_some_and(of) || (FALLBACK.iter().any(|name| of(name)) && face.style == usvg::fontdb::Style::Normal && face.weight == usvg::fontdb::Weight::NORMAL)
+            };
+            let leave: Vec<usvg::fontdb::ID> = db.faces().filter(|face| !keep(face)).map(|face| face.id).collect();
+            for id in leave {
+                db.remove_face(id);
+            }
             // usvg falls back to the serif family: it is the sans-serif one here too.
             if let Some(name) = chosen {
                 db.set_sans_serif_family(name.clone());
@@ -307,9 +414,20 @@ fn options(text: bool) -> usvg::Options<'static> {
     if text {
         opt.fontdb = fonts();
     }
-    // A character the chosen font lacks is not looked for in every other font file of the
-    // system (that takes seconds per character): it is simply not drawn.
-    opt.font_resolver.select_fallback = Box::new(|_, _, _| None);
+    // A character the chosen font lacks is looked for in the few families kept beside it, once:
+    // what none of them has is drawn as an empty box (the browser has more fonts to ask).
+    let found: std::sync::Mutex<HashMap<char, Option<usvg::fontdb::ID>>> = std::sync::Mutex::new(HashMap::new());
+    let ask = usvg::FontResolver::default_fallback_selector();
+    opt.font_resolver.select_fallback = Box::new(move |c, used, db| {
+        if let Some(known) = found.lock().ok().and_then(|found| found.get(&c).copied()) {
+            return known.filter(|id| !used.contains(id));
+        }
+        let id = ask(c, used, db);
+        if let Ok(mut found) = found.lock() {
+            found.insert(c, id);
+        }
+        id
+    });
     opt
 }
 
@@ -319,19 +437,31 @@ impl Model<'_> {
         let tree = self.tree(body, view, size, theme)?;
         let mut pixmap = Pixmap::new(size, size).ok_or("the picture could not be made")?;
         pixmap.fill(Color::from_rgba8(theme.panel[0], theme.panel[1], theme.panel[2], 255));
-        resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut());
+        // The renderer is not ours: a size or a position it cannot work with must not end more
+        // than this one picture.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut()))).map_err(|_| NOT_DRAWABLE.to_string())?;
         Ok(pixmap)
     }
 
     /// The body parsed for a panel of `size` pixels, when drawing it stays within what a picture
     /// may cost; else a sentence that says what to change. Nothing is drawn here.
     fn tree(&self, body: &str, view: [f64; 4], size: u32, theme: Theme) -> Result<usvg::Tree, String> {
+        if self.unwritable.get() {
+            return Err("a part is scaled beyond what can be drawn (its scales and those of what holds it multiply past a thousand million): scale it less".to_string());
+        }
         let svg = document(body, view, size, theme.fg);
-        let tree = usvg::Tree::from_str(&svg, &options(self.has_text)).map_err(|e| format!("the look could not be drawn: {e}"))?;
+        let options = options(self.has_text);
+        let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| usvg::Tree::from_str(&svg, &options))).map_err(|_| NOT_DRAWABLE.to_string())?.map_err(|e| format!("the look could not be drawn: {e}"))?;
         let cost = Cost::of(&tree, size);
         let panel = f64::from(size) * f64::from(size);
         if cost.largest > LAYER_MOST * panel {
             return Err("a filter sits on a part that is stretched or skewed too far to draw: take the scale or skew off that part and off what holds it, or put the filter on a part that is not stretched".to_string());
+        }
+        if cost.reach > REACH_MOST * f64::from(size) {
+            return Err(format!(
+                "a stroked shape or a text reaches about {:.0} times the picture's width: it is drawn far too large (a tiny viewBox region, a head that is a dot, or scales that multiply): draw it at the size of the figure",
+                cost.reach / f64::from(size)
+            ));
         }
         if cost.filters > FILTER_WORK * panel {
             return Err(format!(
@@ -351,9 +481,14 @@ impl Model<'_> {
                 cost.dashes
             ));
         }
+        let spent = self.spent.get();
+        self.spent.set(Spent { filters: spent.filters.max(cost.filters / panel), layers: spent.layers.max(cost.layers / panel) });
         Ok(tree)
     }
 }
+
+/// The answer for a look the renderer itself gave up on.
+const NOT_DRAWABLE: &str = "this look cannot be drawn: a size or a position in it is beyond what the renderer can work with (a mask or a filter on a part that is nearly nothing wide, far from the figure)";
 
 /// The SVG document around a body: the panel's size, the part of the artwork shown, and the
 /// colour `currentColor` takes.
@@ -370,7 +505,8 @@ fn document(body: &str, view: [f64; 4], size: u32, fg: &str) -> String {
     out
 }
 
-/// What drawing a parsed tree costs beyond the size of the look: layers, filters and dashes.
+/// What drawing a parsed tree costs beyond the size of the look: layers, filters, dashes, and how
+/// far its strokes reach.
 #[derive(Debug, Default)]
 struct Cost {
     /// Pixels of the largest layer resvg would allocate for one group.
@@ -383,7 +519,14 @@ struct Cost {
     filters: f64,
     /// Dashes cut from the strokes: per dashed path, its length over the dash pattern.
     dashes: f64,
+    /// How far from the panel a stroked path or a text reaches, in pixels: the stroker cuts
+    /// curves ever finer with the scale they are drawn at, without an end in sight.
+    reach: f64,
 }
+
+/// A layer's room or box beyond this many pixels is not sized here: resvg works them out in
+/// 32-bit integers, which stop at their limits, and what it then allocates follows no rule.
+const LAYER_COORDINATES: f64 = 1e8;
 
 impl Cost {
     /// What drawing `tree` into a square panel of `size` pixels costs.
@@ -405,6 +548,11 @@ impl Cost {
     /// skew) is applied to the finished layer; the room is taken through the inverse of that rest.
     /// With a transform that squeezes one way and stretches the other, that inverse is enormous,
     /// and so is the layer: this is where a small look can ask for more memory than there is.
+    /// What is inside a layer is drawn shifted to the layer's corner, while the room stays where
+    /// it was: nested layers are sized with that shift.
+    ///
+    /// This is a first answer with a sentence, not the last line: the picture is drawn in a
+    /// process of its own with a limit on its memory and its time (`draw.rs`).
     fn add(&mut self, group: &usvg::Group, transform: Transform, room: Rect) {
         let transform = transform.pre_concat(group.transform());
         if !group.should_isolate() {
@@ -424,13 +572,20 @@ impl Cost {
             (transform, room)
         };
         let Some(bbox) = group.layer_bounding_box().and_then(|b| b.transform(inner)) else { return };
-        let width = (f64::from(bbox.right().min(room.right())) - f64::from(bbox.left().max(room.left()))).max(0.0).ceil() + 4.0;
-        let height = (f64::from(bbox.bottom().min(room.bottom())) - f64::from(bbox.top().max(room.top()))).max(0.0).ceil() + 4.0;
-        let pixels = width * height;
-        if !pixels.is_finite() {
+        let far = |r: [f32; 4]| r.iter().any(|v| !v.is_finite() || f64::from(v.abs()) > LAYER_COORDINATES);
+        if far([room.left(), room.top(), room.right(), room.bottom()]) || far([bbox.left(), bbox.top(), bbox.right(), bbox.bottom()]) {
             self.largest = f64::INFINITY;
             return;
         }
+        // The layer as resvg cuts it: whole pixels, two more on each side where nothing is
+        // filtered, and no further than the room.
+        let grow = if filtered { 0.0 } else { 2.0 };
+        let left = (f64::from(bbox.left()).floor() - grow).max(f64::from(room.left()).floor());
+        let top = (f64::from(bbox.top()).floor() - grow).max(f64::from(room.top()).floor());
+        let right = (f64::from(bbox.right()).ceil() + grow).min(f64::from(room.right()).ceil());
+        let bottom = (f64::from(bbox.bottom()).ceil() + grow).min(f64::from(room.bottom()).ceil());
+        let (width, height) = ((right - left).max(1.0), (bottom - top).max(1.0));
+        let pixels = width * height;
         self.largest = self.largest.max(pixels);
         // The layer itself, and one more for a mask and for a clip.
         self.layers += pixels * (1.0 + f64::from(u8::from(group.mask().is_some())) + f64::from(u8::from(group.clip_path().is_some())));
@@ -442,14 +597,16 @@ impl Cost {
                 }
             }
         }
+        // Inside the layer everything is drawn from the layer's corner.
+        let inside = Transform::from_translate(-(left as f32), -(top as f32)).pre_concat(inner);
         // What masks and clips draw is drawn again for every group they apply to.
         if let Some(mask) = group.mask() {
-            self.add(mask.root(), inner, room);
+            self.add(mask.root(), inside, room);
         }
         if let Some(clip) = group.clip_path() {
-            self.add(clip.root(), inner, room);
+            self.add(clip.root(), inside, room);
         }
-        self.children(group, inner, room);
+        self.children(group, inside, room);
     }
 
     fn children(&mut self, group: &usvg::Group, transform: Transform, room: Rect) {
@@ -457,11 +614,24 @@ impl Cost {
             match child {
                 usvg::Node::Group(g) => self.add(g, transform, room),
                 usvg::Node::Text(t) => self.add(t.flattened(), transform, room),
-                usvg::Node::Path(p) => self.dashes += dashes(p),
+                usvg::Node::Path(p) => {
+                    self.dashes += dashes(p);
+                    if p.stroke().is_some() {
+                        self.reach = self.reach.max(reach(p, transform));
+                    }
+                }
                 usvg::Node::Image(_) => {}
             }
         }
     }
+}
+
+/// How far a path lies from the panel's corner once it is drawn under `transform`, in pixels: the
+/// largest coordinate of its box there. Not a number: beyond everything.
+fn reach(path: &usvg::Path, transform: Transform) -> f64 {
+    let Some(b) = path.data().bounds().transform(transform) else { return f64::INFINITY };
+    let far = [b.left(), b.top(), b.right(), b.bottom()].into_iter().map(|v| f64::from(v.abs())).fold(0.0, f64::max);
+    if far.is_finite() { far } else { f64::INFINITY }
 }
 
 /// The dashes a path's stroke is cut into, at most what tiny-skia cuts one path into (beyond that
@@ -690,6 +860,20 @@ struct Model<'a> {
     /// Rest world matrix of each element: its ancestors' transforms and its own.
     rest_world: Vec<Matrix>,
     has_text: bool,
+    /// A pose held a transform beyond what can be written (scales that multiply past a thousand
+    /// million): set while a body is written.
+    unwritable: std::cell::Cell<bool>,
+    /// The most a panel of this picture cost, in panels: what a session is told beside it.
+    spent: std::cell::Cell<Spent>,
+}
+
+/// What drawing cost, as parts of what a picture may cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Spent {
+    /// Passes of a cheap filter primitive over the whole figure, of [`FILTER_WORK`].
+    pub filters: f64,
+    /// Layers the size of the figure, of [`LAYER_WORK`].
+    pub layers: f64,
 }
 
 impl<'a> Model<'a> {
@@ -699,7 +883,7 @@ impl<'a> Model<'a> {
         };
         let view = map.get("viewBox").and_then(numbers4).filter(|v| (VIEW_MIN..=VIEW_MAX).contains(&v[2]) && (VIEW_MIN..=VIEW_MAX).contains(&v[3]));
         let view = view.ok_or("the stored look has no sound viewBox and cannot be drawn")?;
-        let mut model = Model { look: map, view, els: vec![], roots: vec![], ids: HashMap::new(), rest_world: vec![], has_text: false };
+        let mut model = Model { look: map, view, els: vec![], roots: vec![], ids: HashMap::new(), rest_world: vec![], has_text: false, unwritable: std::cell::Cell::new(false), spent: std::cell::Cell::new(Spent::default()) };
         let mut budget = MAX_ELEMENTS;
         if let Some(nodes) = map.get("nodes").and_then(Value::as_array) {
             for node in nodes {
@@ -798,13 +982,32 @@ impl<'a> Model<'a> {
     fn face_view(&self) -> [f64; 4] {
         let view = self.view;
         let Some(head) = self.role("head").and_then(|i| self.root_box(i)).filter(|b| b[2] > 0.0 && b[3] > 0.0) else { return view };
-        let side = (head[2].max(head[3]) * 1.2).min(view[2]).min(view[3]);
+        // Never tighter than a tenth of the viewBox: a head that is a dot would otherwise be
+        // drawn at thousands of pixels a unit.
+        let side = (head[2].max(head[3]) * 1.2).max(FACE_LEAST * view[2].min(view[3])).min(view[2]).min(view[3]);
         if side.is_nan() || side <= 0.0 {
             return view;
         }
         let clamp = |centre: f64, from: f64, length: f64| (centre - side / 2.0).max(from).min(from + length - side);
         let round = |n: f64| (n * 1000.0).round() / 1000.0;
         [round(clamp(head[0] + head[2] / 2.0, view[0], view[2])), round(clamp(head[1] + head[3] / 2.0, view[1], view[3])), round(side), round(side)]
+    }
+
+    /// The square around a part, for a closer look: its rest box with a quarter added on each
+    /// side, at least a tenth of the viewBox's smaller side, kept inside the viewBox.
+    fn zoom_view(&self, id: &str) -> Result<[f64; 4], String> {
+        let view = self.view;
+        let part = self.ids.get(id).copied().filter(|i| self.els[*i].place == Place::Art);
+        let Some(b) = part.and_then(|i| self.root_box(i)) else {
+            return Err(format!("zoom names {}, which is no part of this look with a box: name the id of a part that is drawn", quote(id)));
+        };
+        let side = (b[2].max(b[3]) * 1.5).max(FACE_LEAST * view[2].min(view[3])).min(view[2]).min(view[3]);
+        if side.is_nan() || side <= 0.0 {
+            return Ok(view);
+        }
+        let clamp = |centre: f64, from: f64, length: f64| (centre - side / 2.0).max(from).min(from + length - side);
+        let round = |n: f64| (n * 1000.0).round() / 1000.0;
+        Ok([round(clamp(b[0] + b[2] / 2.0, view[0], view[2])), round(clamp(b[1] + b[3] / 2.0, view[1], view[3])), round(side), round(side)])
     }
 
     /// The point a part turns, skews and scales about, in its own coordinates: its pivot, else
@@ -1085,8 +1288,10 @@ impl<'a> Model<'a> {
         if el.tag.is_drawn() {
             // Nothing for the identity, as the engine writes nothing for it.
             if let Some(m) = posed.transform.get(i).copied().flatten().filter(|m| !close_to(*m, IDENTITY)) {
-                if let Some(text) = matrix_text(m) {
-                    attr(out, "transform", &text);
+                match matrix_text(m) {
+                    Some(text) => attr(out, "transform", &text),
+                    // Left out, the part would be drawn somewhere else than the browser draws it.
+                    None => self.unwritable.set(true),
                 }
             }
         }
@@ -1094,6 +1299,13 @@ impl<'a> Model<'a> {
         for (name, text) in set.into_iter().flatten() {
             attr(out, name, text);
             written.push(*name);
+        }
+        if el.tag == Tag::FeColorMatrix {
+            if let Some(values) = el.attrs.and_then(saturate_beyond) {
+                attr(out, "type", "matrix");
+                attr(out, "values", &values);
+                written.extend(["type", "values"]);
+            }
         }
         let (common, own) = specs(el.tag);
         for spec in common.iter().chain(own) {
@@ -1107,6 +1319,9 @@ impl<'a> Model<'a> {
             }
         }
         if el.tag == Tag::Text {
+            if !written.contains(&"font-size") {
+                attr(out, "font-size", DEFAULT_FONT_SIZE);
+            }
             attr(out, "font-family", "sans-serif");
             out.push('>');
             text_node(out, el.text.unwrap_or(""));
@@ -1128,7 +1343,8 @@ impl<'a> Model<'a> {
 
     /// `feMorphology` in two passes, one along x and one along y. A square's minimum or maximum is
     /// the column's of the row's, so the picture is the same, and the work per pixel follows the
-    /// radius instead of its square. A radius of 0 leaves the input as it is (Filter Effects 1).
+    /// radius instead of its square. Two radii of 0 leave the input as it is; with one, the
+    /// browsers work along the other axis alone, and so does this.
     fn write_morphology(&self, i: usize, out: &mut String, names: &mut usize) {
         let attrs = self.els[i].attrs;
         let get = |key: &str, kind: Kind| attrs.and_then(|a| a.get(key)).and_then(|v| self.value_text(i, kind, v));
@@ -1148,10 +1364,16 @@ impl<'a> Model<'a> {
                 attr(out, "in", input);
             }
         };
-        if rx <= 0.0 || ry <= 0.0 {
+        if rx <= 0.0 && ry <= 0.0 {
             open(out, "feOffset", input.as_deref());
             attr(out, "dx", "0");
             attr(out, "dy", "0");
+        } else if rx <= 0.0 || ry <= 0.0 {
+            // One radius of 0: the browsers work along the other axis alone.
+            open(out, "feMorphology", input.as_deref());
+            attr(out, "operator", &operator);
+            let radius = if ry <= 0.0 { format!("{} 0.0001", num(rx).unwrap_or_default()) } else { format!("0.0001 {}", num(ry).unwrap_or_default()) };
+            attr(out, "radius", &radius);
         } else {
             // A result name no look can give: theirs start with a letter.
             let between = format!("_m{names}");
@@ -1320,6 +1542,30 @@ fn quote(s: &str) -> String {
 
 fn finite(value: &Value) -> Option<f64> {
     value.as_f64().filter(|v| v.is_finite() && v.abs() <= NUM_MAX)
+}
+
+/// A `saturate` colour matrix whose amount lies outside 0 … 1, as the twenty numbers of the matrix
+/// it stands for. The browsers take such an amount as it is (above 1 the colours grow stronger,
+/// below 0 the hues turn over); usvg cuts it to 0 … 1, and does not touch a matrix.
+fn saturate_beyond(attrs: &Map<String, Value>) -> Option<String> {
+    if attrs.get("type").and_then(Value::as_str) != Some("saturate") {
+        return None;
+    }
+    let s = match attrs.get("values")? {
+        Value::String(text) => text.trim().parse::<f64>().ok()?,
+        other => finite(other)?,
+    };
+    if !s.is_finite() || (0.0..=1.0).contains(&s) {
+        return None;
+    }
+    let rows = [
+        [0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s, 0.0, 0.0],
+        [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s, 0.0, 0.0],
+        [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 0.0],
+    ];
+    let numbers: Option<Vec<String>> = rows.iter().flatten().map(|n| num(*n)).collect();
+    Some(numbers?.join(" "))
 }
 
 fn numbers4(value: &Value) -> Option<[f64; 4]> {
@@ -1762,6 +2008,11 @@ impl Prop {
         matches!(self, Prop::Scale | Prop::ScaleX | Prop::ScaleY)
     }
 
+    /// A size that is never negative: a stroke's width, a radius, a width, a height.
+    fn is_size(self) -> bool {
+        matches!(self, Prop::StrokeWidth | Prop::R | Prop::Rx | Prop::Ry | Prop::Width | Prop::Height)
+    }
+
     fn is_colour(self) -> bool {
         matches!(self, Prop::Fill | Prop::Stroke)
     }
@@ -2128,7 +2379,8 @@ impl<'a> Model<'a> {
 
     /// The animation as a state animation at `at` of its run: a loop over its duration (each track
     /// shifted by its `phase`), a one-shot or a recurring one over its duration and its longest
-    /// `delay`, a track at rest again once it has played.
+    /// `delay`, a track holding its last keyframe once it has played, as in a gesture. (In a
+    /// state's list the browser lets each track go back to rest when it ends.)
     fn play(&self, anim: &Anim<'_>, at: f64, accs: &mut HashMap<usize, Acc>) {
         let tracks: Vec<&Map<String, Value>> = anim.map.get("tracks").and_then(Value::as_array).into_iter().flatten().take(MAX_TRACKS).filter_map(Value::as_object).collect();
         let delay = |t: &Map<String, Value>| t.get("delay").and_then(finite).filter(|d| *d > 0.0).unwrap_or(0.0);
@@ -2140,9 +2392,10 @@ impl<'a> Model<'a> {
                 p - p.floor()
             } else {
                 let local = at * run - delay(track);
-                // Before its delay and after its last keyframe a track changes nothing: the
-                // browser lets a played track go back to rest.
-                if local < 0.0 || local > anim.duration * (1.0 + 1e-9) {
+                // Before its delay a track changes nothing; once it has played it holds its last
+                // keyframe until the whole run is over, as a gesture does (avatar_act, a line's
+                // gesture, a greeting: how a session's own one-shots are mostly played).
+                if local < 0.0 {
                     continue;
                 }
                 (local / anim.duration).min(1.0)
@@ -2267,6 +2520,9 @@ impl<'a> Model<'a> {
             _ => base,
         };
         let v = lerp(value(i), value(i + 1));
+        // An ease that overshoots takes no size below nothing (the browser would then draw the
+        // inherited stroke, or a circle for an ellipse).
+        let v = if keys.prop.is_size() { v.max(0.0) } else { v };
         Some(if relative { Got::Rel(v) } else { Got::Abs(Abs::Num(v)) })
     }
 
@@ -2492,8 +2748,10 @@ impl Frame<'_, '_> {
         self.model.els[i].own.unwrap_or(IDENTITY)
     }
 
-    /// `X(E)`: `T(E) = S(E)·M(E)`, and with a parent Q, `C·T(E)` where `C = P⁻¹·D(Q)·P`, `P` the
-    /// live world of E's DOM parent and `D(Q) = W(Q)·R(Q)⁻¹` how far Q is from where it rests.
+    /// `X(E)`: `T(E) = S(E)·M(E)`, and with a parent Q, `C·T(E)` where `C = P⁻¹·D(Q)·Rp`: `P` the
+    /// live world of E's DOM parent, `Rp` that parent's rest world, and `D(Q) = W(Q)·R(Q)⁻¹` how
+    /// far Q is from where it rests. So E's world is `D(Q)·Rp·T(E)`: E moves as if it were drawn
+    /// inside Q, and what moves the groups E is really drawn in does not move it a second time.
     fn x(&mut self, i: usize) -> Matrix {
         if let Some(m) = self.x[i] {
             return m;
@@ -2509,10 +2767,11 @@ impl Frame<'_, '_> {
             None => t,
             Some(q) => {
                 let p = self.parent_world(i);
+                let rp = self.model.els[i].parent.map_or(IDENTITY, |parent| self.model.rest_world[parent]);
                 let wq = self.world(q);
                 match (invert(p), invert(self.model.rest_world[q])) {
                     (Some(p_inv), Some(rq_inv)) => {
-                        let c = mul(p_inv, mul(mul(wq, rq_inv), p));
+                        let c = mul(p_inv, mul(mul(wq, rq_inv), rp));
                         if c.iter().all(|v| v.is_finite()) { mul(c, t) } else { self.rest(i) }
                     }
                     _ => self.rest(i),

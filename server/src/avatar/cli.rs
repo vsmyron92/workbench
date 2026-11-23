@@ -4,7 +4,8 @@
 //! `workbench avatar guide | status [--look] | say <text…> [--gesture g] [--lang l] [--wait] |
 //! ask <text…> [--choice c]… [--no-free-text] [--wait <seconds>] | ask --again <askId> |
 //! ask --cancel | act <name> [--mode once|hold|loop] [--times n] | act --stop <name|all> |
-//! design <file|-> | picture [<file.png>] [--frames <animation> [--count n]] [--pose <file|->]`.
+//! design <file|-> | picture [<file.png>] [--frames <animation> [--count n]] [--pose <file|->]`
+//! (with both, the strip is drawn with the pose's inputs held).
 //!
 //! It runs inside a hosted session and finds its Workbench the way the status line helper does:
 //! `WORKBENCH_URL`, `WORKBENCH_TERMINAL_ID` and `WORKBENCH_AGENT_TOKEN` from the session's
@@ -48,6 +49,8 @@ const WRITE: Duration = Duration::from_secs(10);
 const PATIENCE: Duration = Duration::from_secs(30);
 /// What a call that waits adds to its wait: the server may hold it a little longer.
 const MARGIN: u64 = 20;
+/// The most a pose file may hold: a pose is a few numbers.
+const MAX_POSE_BYTES: u64 = 64 * 1024;
 /// The longest answer read: a status with the stored design is well below it.
 const MAX_ANSWER: u64 = 4 * 1024 * 1024;
 
@@ -137,7 +140,7 @@ pub enum AvatarAction {
         /// With --frames: how many moments, 2 to 8 (default 6).
         #[arg(long)]
         count: Option<u32>,
-        /// A file with a pose as JSON, or - for standard input: {animation, at, lookX, lookY, turn, mouth, pace, held}.
+        /// A file with a pose as JSON, or - for standard input: {animation, at, lookX, lookY, turn, mouth, pace, held, zoom}. With --frames: its inputs are held in every moment.
         #[arg(long, value_name = "FILE")]
         pose: Option<String>,
     },
@@ -197,7 +200,34 @@ struct Call {
     patience: Duration,
     show: Show,
     /// Where a picture is written, and what it shows.
-    picture: Option<(String, String)>,
+    picture: Option<PictureFile>,
+}
+
+/// The file a picture goes into.
+struct PictureFile {
+    path: String,
+    /// What the picture shows, for the line the command prints.
+    shows: String,
+    /// The session named no file: the path is this command's own, in the temporary directory.
+    ours: bool,
+}
+
+impl PictureFile {
+    /// Writes the picture. A file the session named is written as any program writes a file.
+    /// The command's own file has a name anyone on this computer can guess, in a directory all
+    /// of them may write to: it is made anew every time (what stands there is removed, a link
+    /// as the link it is, and the new file is created only where nothing stands), so a link
+    /// somebody else put there never makes this command write to where it points.
+    fn write(&self, png: &[u8]) -> std::io::Result<()> {
+        if !self.ours {
+            return std::fs::write(&self.path, png);
+        }
+        match std::fs::remove_file(&self.path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        std::fs::OpenOptions::new().write(true).create_new(true).open(&self.path)?.write_all(png)
+    }
 }
 
 impl Call {
@@ -210,7 +240,7 @@ impl Call {
     }
 
     /// The call a form of the command makes. `Err`: the form is incomplete, or its file cannot be read.
-    fn of(action: AvatarAction, input: &mut dyn Read) -> Result<Call, String> {
+    fn of(action: AvatarAction, terminal: &str, input: &mut dyn Read) -> Result<Call, String> {
         Ok(match action {
             AvatarAction::Guide => Call::get("/guide"),
             AvatarAction::Status { look } => Call::get(if look { "/status?look=1" } else { "/status" }),
@@ -295,14 +325,16 @@ impl Call {
                 if file.as_deref().is_some_and(|f| f.trim().is_empty() || f == "-") {
                     return Err("picture writes a PNG file: name one, or name none and it goes to the temporary directory.".to_string());
                 }
-                // Out of the repository unless the session says where: one file per kind of picture.
+                // Out of the repository unless the session says where: one file per session and
+                // kind of picture, so no session is shown another's avatar.
+                let ours = file.is_none();
                 let file = file.unwrap_or_else(|| {
                     let kind = if frames.is_some() { "frames" } else if pose.is_some() { "pose" } else { "rest" };
-                    std::env::temp_dir().join(format!("workbench-avatar-{kind}.png")).to_string_lossy().into_owned()
+                    std::env::temp_dir().join(format!("workbench-avatar-{terminal}-{kind}.png")).to_string_lossy().into_owned()
                 });
                 let mut body = Map::new();
                 let shows = match (&frames, &pose) {
-                    (Some(_), Some(_)) => return Err("--frames and --pose are two pictures: ask for one of them.".to_string()),
+                    (Some(animation), Some(_)) => format!("moments of {animation}, from its start on the left to its end on the right, with the inputs of that pose held"),
                     (Some(animation), None) => format!("moments of {animation}, from its start on the left to its end on the right"),
                     (None, Some(_)) => "your avatar in that pose, on the light panel and on the dark one; under each, at rest: at its resting size and as a face".to_string(),
                     (None, None) => "your avatar at rest, on the light panel and on the dark one; under each, at its resting size and as a face".to_string(),
@@ -313,18 +345,25 @@ impl Call {
                 }
                 if let Some(pose) = pose {
                     let mut content = Vec::new();
-                    let most = 64 * 1024;
+                    // One byte more than a pose may have: enough to know that it is too large.
+                    let most = MAX_POSE_BYTES + 1;
                     let read = if pose == "-" {
                         input.take(most).read_to_end(&mut content).map_err(|e| format!("cannot read the pose from standard input: {e}"))
                     } else {
                         std::fs::File::open(&pose).and_then(|f| f.take(most).read_to_end(&mut content)).map_err(|e| format!("cannot read the pose file: {e}"))
                     };
                     read?;
+                    if content.len() as u64 > MAX_POSE_BYTES {
+                        return Err(format!("the pose is larger than {} KiB: nothing was sent.", MAX_POSE_BYTES / 1024));
+                    }
                     let value: Value = serde_json::from_slice(&utf8(content)?).map_err(|e| format!("the pose is not JSON ({e}): write an object such as {{\"turn\": 1, \"mouth\": 1}}."))?;
+                    if !value.is_object() {
+                        return Err("the pose is not a JSON object: write one such as {\"turn\": 1, \"mouth\": 1}.".to_string());
+                    }
                     body.insert("pose".into(), value);
                 }
                 let mut call = Call::post("/picture", Value::Object(body), Show::Picture);
-                call.picture = Some((file, shows));
+                call.picture = Some(PictureFile { path: file, shows, ours });
                 call
             }
         })
@@ -459,7 +498,7 @@ fn run(action: AvatarAction, session: Result<Session, String>, input: &mut dyn R
             return NOT_SENT;
         }
     };
-    let call = match Call::of(action, input) {
+    let call = match Call::of(action, &session.terminal, input) {
         Ok(call) => call,
         Err(why) => {
             let _ = writeln!(err, "{why}");
@@ -481,12 +520,13 @@ fn run(action: AvatarAction, session: Result<Session, String>, input: &mut dyn R
         let _ = writeln!(err, "{}", refusal(&answer));
         return REFUSED;
     }
-    if let (Show::Picture, Some((file, shows))) = (call.show, &call.picture) {
-        if let Err(e) = std::fs::write(file, &answer.body) {
-            let _ = writeln!(err, "cannot write the picture to {file}: {e}");
-            return NOT_SENT;
+    if let (Show::Picture, Some(picture)) = (call.show, &call.picture) {
+        if let Err(e) = picture.write(&answer.body) {
+            // The call was made and counted: this is not "nothing was sent".
+            let _ = writeln!(err, "the picture was drawn but cannot be written to {}: {e}. Name a file of your own: picture <file.png>.", picture.path);
+            return REFUSED;
         }
-        let _ = writeln!(out, "Picture written to {file}: {shows}. Open it and look.");
+        let _ = writeln!(out, "Picture written to {}: {}. Open it and look.", picture.path, picture.shows);
         return 0;
     }
     let text = String::from_utf8_lossy(&answer.body);
@@ -595,6 +635,38 @@ pub(super) mod tests {
         assert!(err.contains("cannot reach Workbench") && err.contains("work without the avatar") && !err.contains(TOKEN), "{err}");
     }
 
+    /// The command's own picture file has a name anyone can guess: a link somebody put there is
+    /// replaced, never followed, and a file the session named is written where it says.
+    #[cfg(unix)]
+    #[test]
+    fn the_commands_own_picture_file_is_made_anew_and_follows_no_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let (victim, link) = (dir.path().join("victim.txt"), dir.path().join("workbench-avatar-rest.png"));
+        std::fs::write(&victim, "not a picture").unwrap();
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        let ours = PictureFile { path: link.to_string_lossy().into_owned(), shows: String::new(), ours: true };
+        ours.write(b"\x89PNG one").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"not a picture", "what the link pointed to is untouched");
+        assert!(!std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&link).unwrap(), b"\x89PNG one");
+        // The next picture takes its place; a link that points nowhere is no way around either.
+        ours.write(b"\x89PNG two").unwrap();
+        assert_eq!(std::fs::read(&link).unwrap(), b"\x89PNG two");
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("nowhere.png"), &link).unwrap();
+        ours.write(b"\x89PNG three").unwrap();
+        assert!(!dir.path().join("nowhere.png").exists());
+        assert_eq!(std::fs::read(&link).unwrap(), b"\x89PNG three");
+        // A directory in its place cannot be replaced: the command says so and writes nothing.
+        std::fs::remove_file(&link).unwrap();
+        std::fs::create_dir(&link).unwrap();
+        assert!(ours.write(b"\x89PNG four").is_err());
+        // A file the session named is its own business: written through, as any program would.
+        let named = PictureFile { path: victim.to_string_lossy().into_owned(), shows: String::new(), ours: false };
+        named.write(b"\x89PNG five").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"\x89PNG five");
+    }
+
     #[test]
     fn a_form_that_is_incomplete_sends_nothing() {
         let env = [Some("http://127.0.0.1:9"), Some(TID), Some(TOKEN)];
@@ -619,7 +691,7 @@ pub(super) mod tests {
 
     #[test]
     fn each_form_makes_the_call_of_its_route() {
-        let call = |words: &[&str]| Call::of(parsed(words).unwrap(), &mut "{\"name\": \"Tin\"}".as_bytes()).unwrap_or_else(|why| panic!("{words:?}: {why}"));
+        let call = |words: &[&str]| Call::of(parsed(words).unwrap(), TID, &mut "{\"name\": \"Tin\"}".as_bytes()).unwrap_or_else(|why| panic!("{words:?}: {why}"));
         let body = |call: &Call| serde_json::from_slice::<Value>(&call.body.as_ref().unwrap().1).unwrap();
 
         let c = call(&["guide"]);
@@ -652,14 +724,14 @@ pub(super) mod tests {
         // A design is read from standard input or a file, as it is: JSON, or the artwork alone.
         let c = call(&["design", "-"]);
         assert_eq!((c.path.as_str(), c.body.as_ref().map(|(media, bytes)| (*media, bytes.as_slice()))), ("/design", Some(("application/json", "{\"name\": \"Tin\"}".as_bytes()))));
-        let c = Call::of(parsed(&["design", "-"]).unwrap(), &mut "\n <svg viewBox='0 0 200 200'/>".as_bytes()).unwrap();
+        let c = Call::of(parsed(&["design", "-"]).unwrap(), TID, &mut "\n <svg viewBox='0 0 200 200'/>".as_bytes()).unwrap();
         assert_eq!(c.body.as_ref().map(|(media, _)| *media), Some("image/svg+xml"));
     }
 
     #[test]
     fn a_design_file_is_read_in_the_encoding_a_shell_wrote_it_in() {
         let design = "{\"name\": \"Zo\u{eb}\"}";
-        let sent = |bytes: &[u8]| Call::of(parsed(&["design", "-"]).unwrap(), &mut &bytes[..]).map(|call| call.body.unwrap());
+        let sent = |bytes: &[u8]| Call::of(parsed(&["design", "-"]).unwrap(), TID, &mut &bytes[..]).map(|call| call.body.unwrap());
         // UTF-8 with a byte order mark, and UTF-16 in either order (what `>` writes in Windows PowerShell).
         let marked = [&[0xEF, 0xBB, 0xBF][..], design.as_bytes()].concat();
         let little: Vec<u8> = [0xFF, 0xFE].into_iter().chain(design.encode_utf16().flat_map(u16::to_le_bytes)).collect();
