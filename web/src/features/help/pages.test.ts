@@ -50,4 +50,11 @@ describe('help pages', () => {
       expect(searchPages(q).length, q).toBeGreaterThan(0)
     }
   })
+
+  it('has a page on avatars that the words a user would type find first', () => {
+    expect(PAGES.some((p) => p.slug === 'avatar' && p.title === 'Avatars')).toBe(true)
+    for (const q of ['avatar', 'avatars', 'online voices', 'hide all avatars']) {
+      expect(searchPages(q)[0]?.page.slug, q).toBe('avatar')
+    }
+  })
 })

@@ -1,0 +1,827 @@
+/* The avatar: figure, face and bubble. Colours come from theme tokens only. The artwork of a
+   session brings its own colours as data, and they stay inside the stage. */
+
+/* ---------------------------------------------------------------- the layer (rule 11) */
+/* Above everything in the shells, below the palette (800), popovers (850), modals (900), git
+   progress (940), toasts (950) and menus (1000). It takes no pointer itself. */
+.wb-av-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 700;
+  pointer-events: none;
+}
+.wb-av-layer .wb-av-figure,
+.wb-av-layer .wb-av-face,
+.wb-av-layer .wb-av-bubble {
+  pointer-events: auto;
+}
+
+/* ---------------------------------------------------------------- the stage */
+/* The app's own box around a session's artwork: a fixed size, clipped, and nothing to see of it:
+   no backdrop and no border, only the figure itself. The size comes from the component (56 px
+   at rest, 132 px active; 48 and 96 on the phone; 28 and 40 for a face) and is never more than
+   132 px (rule 12). */
+.wb-av-stage {
+  --wb-av-size: 56px;
+  display: block;
+  box-sizing: border-box;
+  width: var(--wb-av-size);
+  height: var(--wb-av-size);
+  max-width: 132px;
+  max-height: 132px;
+  overflow: hidden;
+  contain: strict;
+  isolation: isolate;
+  transition:
+    width 0.18s ease,
+    height 0.18s ease;
+}
+.wb-av-art {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  /* `currentColor` in a look is the theme's text colour, and its text is set in the app's font. */
+  color: var(--fg);
+  font-family: var(--font-ui);
+  /* A new look (the first design, a later one) fades in. */
+  animation: wb-av-appear 0.3s ease-out;
+}
+@keyframes wb-av-appear {
+  from {
+    opacity: 0;
+  }
+}
+
+/* ---------------------------------------------------------------- the ring */
+/* The session's state, in the colours of its tab and card; an avatar that speaks or listens
+   says that instead. It is no box: a glow around the figure's own outline. At rest the figure
+   has a thin line of the theme's text colour around it, so that it reads on a light panel and on
+   a dark one. How far the glow reaches tells the states apart where nothing moves (reduced
+   motion): it is faint while a session works, an error or an unread line has the glow, and a
+   session that needs the user or an avatar that speaks or listens has a wider second glow around
+   it. Listening shares its colour with an error, and speaking with an unread line. */
+.wb-av-figure,
+.wb-av-facemark {
+  --wb-av-size: 56px;
+  --wb-av-ring: color-mix(in srgb, var(--agent-idle) 60%, transparent);
+}
+.wb-av-figure.working,
+.wb-av-figure.starting,
+.wb-av-facemark.working,
+.wb-av-facemark.starting {
+  --wb-av-ring: var(--agent-working);
+}
+.wb-av-figure.attention,
+.wb-av-facemark.attention {
+  --wb-av-ring: var(--agent-attention);
+}
+.wb-av-figure.error,
+.wb-av-facemark.error {
+  --wb-av-ring: var(--agent-error);
+}
+.wb-av-figure.unread,
+.wb-av-facemark.unread,
+.wb-av-figure.speaking,
+.wb-av-facemark.speaking {
+  --wb-av-ring: var(--accent);
+}
+.wb-av-figure.listening,
+.wb-av-facemark.listening {
+  --wb-av-ring: var(--danger);
+}
+.wb-av-figure.exited,
+.wb-av-facemark.exited {
+  --wb-av-ring: var(--fg-subtle);
+}
+.wb-av-ring {
+  --wb-av-edge: drop-shadow(0 0 1px color-mix(in srgb, var(--fg) 45%, transparent));
+  --wb-av-glow: drop-shadow(0 0 4px var(--wb-av-ring));
+  --wb-av-halo: drop-shadow(0 0 8px color-mix(in srgb, var(--wb-av-ring) 70%, transparent));
+  display: block;
+  filter: var(--wb-av-edge);
+}
+/* A session that exited: its figure pales. */
+.wb-av-figure.exited .wb-av-ring,
+.wb-av-facemark.exited .wb-av-ring {
+  filter: var(--wb-av-edge) grayscale(0.8) opacity(0.6);
+}
+/* A session that works: a faint glow that comes and goes (and stays faint where motion is reduced). */
+.wb-av-figure.working .wb-av-ring,
+.wb-av-figure.starting .wb-av-ring,
+.wb-av-facemark.working .wb-av-ring,
+.wb-av-facemark.starting .wb-av-ring {
+  filter: var(--wb-av-edge) drop-shadow(0 0 2px var(--wb-av-ring));
+  animation: wb-av-glow 1.6s ease-in-out infinite;
+}
+/* A session that failed, and one with a line that was not read yet: the glow. */
+.wb-av-figure.error .wb-av-ring,
+.wb-av-facemark.error .wb-av-ring,
+.wb-av-figure.unread .wb-av-ring,
+.wb-av-facemark.unread .wb-av-ring {
+  filter: var(--wb-av-edge) var(--wb-av-glow);
+}
+/* A session that needs the user, and an avatar that speaks or listens: the glow and a wider one
+   around it. */
+.wb-av-figure.attention .wb-av-ring,
+.wb-av-facemark.attention .wb-av-ring,
+.wb-av-figure.speaking .wb-av-ring,
+.wb-av-facemark.speaking .wb-av-ring,
+.wb-av-figure.listening .wb-av-ring,
+.wb-av-facemark.listening .wb-av-ring {
+  filter: var(--wb-av-edge) var(--wb-av-glow) var(--wb-av-halo);
+}
+/* Listening also breathes. Where motion is reduced it stands still, and its wider glow tells it
+   from an error. */
+.wb-av-figure.listening .wb-av-ring,
+.wb-av-facemark.listening .wb-av-ring {
+  animation: wb-av-breathe 1.4s ease-in-out infinite;
+}
+@keyframes wb-av-glow {
+  50% {
+    filter: var(--wb-av-edge) var(--wb-av-glow);
+  }
+}
+@keyframes wb-av-breathe {
+  50% {
+    filter: var(--wb-av-edge);
+  }
+}
+
+/* ---------------------------------------------------------------- the figure */
+.wb-av-figure {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--fs-xs);
+  /* What is layered inside a figure (its controls) stays inside it. */
+  isolation: isolate;
+}
+.wb-av-figure-btn {
+  position: relative;
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 8px;
+  /* A tap on a touch screen flashes nothing: the square around the figure is not seen. */
+  -webkit-tap-highlight-color: transparent;
+}
+.wb-av-figure-btn:focus-visible,
+.wb-av-face:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+/* A line that was not seen yet: a dot at the figure's upper right. A resting figure is drawn
+   inside the middle 70% of its square (30..170 of a 200-unit viewBox), so the dot's centre is a
+   quarter of the way in from the top and from the right, where the outline of a round figure of
+   that size runs; the square's corner is far from the figure. */
+.wb-av-dot {
+  position: absolute;
+  top: calc(25% - 6px);
+  right: calc(25% - 6px);
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--bg);
+  background: var(--accent);
+  pointer-events: none;
+}
+.wb-av-label,
+.wb-av-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  box-sizing: border-box;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--fg-muted);
+  line-height: 14px;
+  white-space: nowrap;
+}
+/* What stands under a figure: its name, "Voice off", a note. Only the figure itself is seen at
+   rest: the name and the chip come with the large figure. "Designing its look…" is said all the
+   time, because the figure it stands under is not the session's own yet. */
+.wb-av-under {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+.wb-av-figure:not(.active) .wb-av-label:not(.designing),
+.wb-av-figure:not(.active) .wb-av-chip {
+  display: none;
+}
+/* It may be a little wider than the figure, without widening its box: figures of a group stay
+   in line whatever they are called. */
+.wb-av-label,
+.wb-av-chip,
+.wb-av-note {
+  margin-right: -11px;
+  margin-left: -11px;
+}
+.wb-av-label {
+  display: block;
+  max-width: calc(var(--wb-av-size) + 30px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* As in the bubble's header: the session's title gives way, the agent's name in quotation marks
+   after it stays as long as it can. */
+.wb-av-label-in {
+  display: flex;
+  gap: 3px;
+  min-width: 0;
+}
+.wb-av-label-title,
+.wb-av-label-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wb-av-label-title {
+  flex: 0 1 auto;
+  font-weight: 600;
+}
+.wb-av-label-name {
+  flex: 0 0 auto;
+  max-width: 55%;
+}
+/* The app's own words while a session draws its look: read in full, on two lines under a small figure. */
+.wb-av-label.designing {
+  height: auto;
+  padding: 1px 6px;
+  white-space: normal;
+  text-align: center;
+  line-height: 13px;
+}
+.wb-av-chip {
+  color: var(--fg-subtle);
+}
+.wb-av-chip svg {
+  flex: none;
+}
+/* Shown with the large figure only: there is no room for a sentence under a small one. */
+.wb-av-note {
+  display: none;
+  max-width: calc(var(--wb-av-size) + 30px);
+  color: var(--fg-subtle);
+  text-align: center;
+  line-height: 1.35;
+}
+.wb-av-figure.active .wb-av-note {
+  display: block;
+}
+/* Reply, open session, menu: on hover or focus. They lie over the figure's upper edge and take
+   no room, so nothing under the pointer moves when they come and go. */
+.wb-av-controls {
+  position: absolute;
+  top: -10px;
+  right: -8px;
+  z-index: 1;
+  display: none;
+  align-items: center;
+  gap: 1px;
+  padding: 1px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+}
+.wb-av-figure:hover .wb-av-controls,
+.wb-av-figure:focus-within .wb-av-controls {
+  display: flex;
+}
+
+/* ---------------------------------------------------------------- the face */
+.wb-av-face {
+  display: inline-flex;
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  border-radius: calc(var(--wb-av-size, 28px) * 0.22 + 3px);
+  -webkit-tap-highlight-color: transparent;
+}
+.wb-av-facemark {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+.wb-av-facemark .wb-av-stage {
+  transition: none;
+}
+/* A face is the look cropped to its head, and the crop cuts through the body below it: the lowest
+   quarter of the face fades out, so that no straight edge is drawn there. The edge line and the glow
+   are drawn around what the mask leaves (the filter is on the stage's parent), so they fade with it.
+   A mask takes only the alpha of its colour. */
+.wb-av-facemark .wb-av-stage:not(.wb-av-more) {
+  mask-image: linear-gradient(to bottom, var(--fg) 75%, transparent);
+}
+.wb-av-facemark .wb-av-dot {
+  top: -3px;
+  right: -3px;
+  width: 10px;
+  height: 10px;
+}
+/* How many: permission requests that wait (attention), or the avatars behind this one. */
+.wb-av-count {
+  position: absolute;
+  right: -5px;
+  bottom: -4px;
+  box-sizing: border-box;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  border: 1px solid var(--bg-panel);
+  background: var(--bg-hover);
+  color: var(--fg-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 13px;
+  text-align: center;
+  pointer-events: none;
+}
+.wb-av-count.attention {
+  background: var(--agent-attention);
+  color: var(--bg);
+}
+/* The "+n" chip: a stage with a number in place of a face, and the one stage with a box to see. */
+.wb-av-stage.wb-av-more {
+  border-radius: calc(var(--wb-av-size) * 0.22);
+  background: var(--bg-elevated);
+  box-shadow: inset 0 0 0 1px var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-muted);
+  font-size: max(10px, calc(var(--wb-av-size) * 0.3));
+  font-weight: 600;
+  user-select: none;
+}
+
+/* ---------------------------------------------------------------- the bubble */
+.wb-av-bubble {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-sizing: border-box;
+  width: min(300px, calc(100vw - 16px));
+  padding: 6px 10px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+  color: var(--fg);
+  font-size: var(--fs);
+  line-height: 1.45;
+  text-align: left;
+}
+/* It opened or changed by itself a moment ago: a click that was on its way to something else goes through. */
+.wb-av-bubble.through,
+.wb-av-layer .wb-av-bubble.through {
+  pointer-events: none;
+}
+/* And so does what takes the pointer by itself inside it: the figure of the compact panel. */
+.wb-av-layer .wb-av-bubble.through .wb-av-figure,
+.wb-av-layer .wb-av-bubble.through .wb-av-face {
+  pointer-events: none;
+}
+/* It opened or changed under a pointer that rests on it: it takes the pointer, so nothing under it
+   is clicked, but its controls do not act on it until the pointer has left or moved on (keys still
+   work). They look inactive meanwhile, the way a disabled button does. */
+.wb-av-bubble.hold button,
+.wb-av-bubble.hold textarea {
+  pointer-events: none;
+}
+.wb-av-bubble.hold .wb-btn,
+.wb-av-bubble.hold .wb-icon-btn,
+.wb-av-bubble.hold .wb-textarea {
+  opacity: 0.5;
+}
+.wb-av-bubble.tail-left::before,
+.wb-av-bubble.tail-right::before {
+  content: '';
+  position: absolute;
+  top: min(calc(18px - var(--wb-av-bubble-top, 0px)), calc(100% - 28px));
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  transform: rotate(45deg);
+}
+.wb-av-bubble.tail-left::before {
+  left: -6px;
+  border-top-color: transparent;
+  border-right-color: transparent;
+}
+.wb-av-bubble.tail-right::before {
+  right: -6px;
+  border-bottom-color: transparent;
+  border-left-color: transparent;
+}
+/* Who speaks: the app's own words first, the agent's name last. */
+.wb-av-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 24px;
+  font-size: var(--fs-sm);
+}
+.wb-av-title,
+.wb-av-project,
+.wb-av-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-av-title {
+  flex: 0 1 auto;
+  font-weight: 600;
+}
+.wb-av-project {
+  flex: 0 0 auto;
+  max-width: 28%;
+  color: var(--fg-subtle);
+}
+/* A name is short: it is read whole, and the title beside it gives way. */
+.wb-av-name {
+  flex: 0 0 auto;
+  max-width: 45%;
+  color: var(--fg-muted);
+}
+.wb-av-head-space {
+  flex: 1;
+}
+.wb-av-head .wb-btn,
+.wb-av-head .wb-icon-btn {
+  flex: none;
+}
+/* The agents views' provider tints. */
+.wb-av-picon {
+  flex: none;
+  color: var(--fg-muted);
+}
+.wb-av-picon.claude {
+  color: var(--vcs-modified);
+}
+.wb-av-picon.codex {
+  color: var(--success);
+}
+.wb-av-picon.kimi {
+  color: var(--vcs-renamed);
+}
+.wb-av-picon.gemini {
+  color: var(--important);
+}
+.wb-av-picon.aider {
+  color: var(--syn-meta);
+}
+.wb-av-main {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+}
+.wb-av-bubble-figure {
+  flex: none;
+}
+.wb-av-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  min-height: 0;
+}
+/* The line on screen: at most four lines of it; what is being said stays in view. */
+.wb-av-caption {
+  position: relative;
+  max-height: calc(4 * 1.45em);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.wb-av-said {
+  color: var(--fg-muted);
+}
+.wb-av-next {
+  color: var(--fg-subtle);
+}
+/* The last lines, for a bubble the user opened. */
+.wb-av-log {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 208px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.wb-av-line {
+  padding-left: 7px;
+  border-left: 2px solid transparent;
+  color: var(--fg-muted);
+}
+.wb-av-line.unseen,
+.wb-av-line.now {
+  color: var(--fg);
+}
+.wb-av-line.unseen {
+  border-left-color: var(--accent);
+}
+.wb-av-line.user {
+  align-self: flex-end;
+  max-width: 90%;
+  padding: 1px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--bg-hover);
+}
+.wb-av-who {
+  margin-right: 6px;
+  color: var(--fg-subtle);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+/* A question's choices. Their own look: never the permission card's buttons. */
+.wb-av-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.wb-av-question {
+  overflow-wrap: anywhere;
+}
+.wb-av-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wb-btn.wb-av-choice {
+  justify-content: flex-start;
+  height: auto;
+  min-height: 28px;
+  padding: 4px 12px;
+  border-radius: 14px;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-elevated));
+  white-space: normal;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.wb-btn.wb-av-choice:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.wb-btn.small.wb-av-dismiss {
+  align-self: flex-start;
+  color: var(--fg-muted);
+}
+.wb-av-reason,
+.wb-av-notice,
+.wb-av-where,
+.wb-av-blocked {
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+.wb-av-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+}
+.wb-av-notice.changed {
+  color: var(--warning);
+}
+.wb-av-notice.error {
+  color: var(--danger);
+}
+.wb-av-notice svg {
+  flex: none;
+  margin-top: 2px;
+}
+.wb-av-reply {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  min-width: 0;
+}
+.wb-av-reply .wb-spinner {
+  flex: none;
+  margin: 0 6px 7px;
+}
+.wb-textarea.wb-av-reply-text {
+  flex: 1;
+  min-width: 0;
+  min-height: 28px;
+  max-height: 96px;
+  padding: 3px 8px;
+  resize: none;
+  field-sizing: content;
+}
+.wb-textarea.wb-av-reply-text::placeholder {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Hear it, Captions only; the sentence about online voices; Click to hear. */
+.wb-av-voice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.wb-av-voice p {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+}
+/* A session that needs a decision: the app's own line, and the way to the session. */
+.wb-av-blocked {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.wb-av-blocked > span {
+  flex: 1;
+  min-width: 0;
+}
+.wb-av-blocked .wb-btn {
+  flex: none;
+}
+
+/* The compact form: a panel under the top bar (the overlay places it), the stage inside it. */
+.wb-av-bubble.panel {
+  width: auto;
+  max-height: 45dvh;
+}
+.wb-av-bubble.panel .wb-av-main {
+  overflow: hidden;
+}
+/* The panel cuts off what passes its edge. The figure has room there for the glow of its state,
+   and at its sides for the name under it, which may stand 11 px out on each side. */
+.wb-av-bubble.panel .wb-av-bubble-figure {
+  padding: 4px 11px;
+}
+.wb-av-bubble.panel .wb-av-body {
+  overflow-y: auto;
+}
+/* A touch screen has no hover: in the panel the figure's controls are always there, under it. */
+.wb-av-bubble.panel .wb-av-controls {
+  position: static;
+  display: flex;
+  margin-top: 3px;
+}
+
+/* ---------------------------------------------------------------- placing */
+/* Where things sit is the overlay's decision (it measures the windows); these say how. */
+
+/* The floating group of the wide layout: the avatars one under the other, so that the room
+   beside each of them is free for its bubble. The overlay sets its position. It hugs the
+   right edge of its place; with `left` (it was dragged to the left half) the left one. */
+.wb-av-group {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+.wb-av-group.left {
+  align-items: flex-start;
+}
+.wb-av-group.draggable .wb-av-figure-btn {
+  cursor: grab;
+  touch-action: none;
+}
+.wb-av-group.dragging .wb-av-figure-btn {
+  cursor: grabbing;
+}
+/* One avatar of the group: its figure, and its bubble beside it on the side with more room. */
+.wb-av-slot {
+  position: relative;
+  display: flex;
+}
+.wb-av-slot > .wb-av-bubble {
+  position: absolute;
+  /* The overlay moves it up (a negative length on the slot) where it would leave the workspace
+     window; its tail stays at the figure. */
+  top: var(--wb-av-bubble-top, 0px);
+}
+.wb-av-slot > .wb-av-bubble.tail-left {
+  left: calc(100% + 12px);
+}
+.wb-av-slot > .wb-av-bubble.tail-right {
+  right: calc(100% + 12px);
+}
+/* A figure that walks about: on the layer by itself, placed by the walk at the point between its
+   feet (the overlay writes its transform, its hop and its lean frame by frame). The layer orders
+   them: the large one above the others, one that is dragged above all. */
+.wb-av-slot.roam {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  will-change: transform;
+}
+.wb-av-slot.roam.active {
+  z-index: 2;
+}
+.wb-av-slot.roam.dragging {
+  z-index: 3;
+}
+/* The chip for the avatars behind it keeps the column's place while the others walk. It is drawn
+   above every walking figure, a large one at its post and a dragged one included, so that it can
+   always be seen and pressed. */
+.wb-av-slot.roam ~ .wb-av-group {
+  z-index: 4;
+}
+/* Its hop and its lean are written on the button itself, about the point between its feet. */
+.wb-av-slot.roam .wb-av-figure-btn {
+  cursor: grab;
+  touch-action: none;
+  transform-origin: 50% 100%;
+}
+.wb-av-slot.roam.dragging .wb-av-figure-btn {
+  cursor: grabbing;
+}
+/* What stands under it takes no room there (the figure's feet stay where they are when its name comes
+   up) and no pointer: it may hang over what is under the figure. */
+.wb-av-slot.roam .wb-av-under {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 50%;
+  width: max-content;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+/* A walking figure stays small under the pointer; its name comes up all the same. */
+.wb-av-slot.roam .wb-av-figure:not(.active):hover .wb-av-label:not(.designing),
+.wb-av-slot.roam .wb-av-figure:not(.active):focus-within .wb-av-label:not(.designing) {
+  display: block;
+}
+/* The compact panel's place: under the top bar, anchored to the top so the soft keyboard never
+   covers the reply box. The overlay sets where (`panelPlace`): from edge to edge on the phone,
+   under the face and at most 480 px wide in the desktop shell's top bar. */
+.wb-av-panel-place {
+  position: absolute;
+}
+
+/* ---------------------------------------------------------------- touch screens */
+@media (pointer: coarse) {
+  .wb-btn.wb-av-choice {
+    min-height: 36px;
+    padding: 6px 14px;
+  }
+  .wb-av-bubble .wb-btn.small {
+    height: 30px;
+    padding: 0 10px;
+  }
+  .wb-av-reply .wb-icon-btn,
+  .wb-av-head .wb-icon-btn {
+    width: 34px;
+    height: 34px;
+  }
+  .wb-textarea.wb-av-reply-text {
+    min-height: 34px;
+  }
+}
+
+/* ---------------------------------------------------------------- reduced motion */
+/* The system setting, and the user's own switch (the overlay sets `still` on the layer). The
+   engine holds the figures still by itself; this is for what the stylesheet moves. */
+@media (prefers-reduced-motion: reduce) {
+  .wb-av-stage {
+    transition: none;
+  }
+  .wb-av-art,
+  .wb-av-ring {
+    animation: none !important;
+  }
+}
+.wb-av-layer.still .wb-av-stage,
+.wb-av-still .wb-av-stage {
+  transition: none;
+}
+/* `wb-av-still` is the same switch for a face that sits outside the layer (the top bar). */
+.wb-av-layer.still .wb-av-art,
+.wb-av-layer.still .wb-av-ring,
+.wb-av-still .wb-av-art,
+.wb-av-still .wb-av-ring {
+  animation: none !important;
+}

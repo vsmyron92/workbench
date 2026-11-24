@@ -4,8 +4,8 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { qk } from '@/api/queries'
 import type { AgentProvider, TerminalInfo } from '@/api/types'
-import { openPanel, toastError } from '@/shell/actions'
-import { terminalPanelId } from './lib/sessions'
+import { openPanel, toast, toastError } from '@/shell/actions'
+import { noAvatarNote, terminalPanelId } from './lib/sessions'
 import { updateCachedTerminal } from './queryAccess'
 
 /** GET /api/agents/history?projectId=&provider= */
@@ -74,6 +74,10 @@ export interface ProviderInfo {
   /** hooks (Claude), rollout (Codex), activity (Kimi, custom: an estimate from output). */
   stateSource: 'hooks' | 'rollout' | 'activity'
   initialPrompt: 'argv' | 'paste'
+  /** How a session of this CLI drives its avatar: Workbench's tools, or the `workbench avatar` command where it has none. */
+  avatarVia: 'tools' | 'command'
+  /** The same for a session that runs in the project's dev container: Workbench's tools, or `curl` where it has none there. */
+  avatarViaContainer: 'tools' | 'command'
   supports: {
     resume: boolean
     fork: boolean
@@ -84,6 +88,8 @@ export interface ProviderInfo {
     restricted: boolean
     /** Claude Code's ultracode: a workflow of subagents for each substantive task, at the chosen effort. */
     ultracode: boolean
+    /** A session can be started with a live avatar: every CLI, unless avatars are switched off in Settings. */
+    avatar: boolean
     addDirs: boolean
     history: boolean
     /** Its permission requests can be answered from Workbench (Claude Code). */
@@ -148,6 +154,8 @@ export interface NewAgentRequest {
   remoteControl?: boolean
   restricted?: boolean
   ultracode?: boolean
+  /** The session gets a live avatar (the composer's Avatar control). Only ever sent as `true`. */
+  avatar?: boolean
   resume?: string
   fork?: boolean
   cwd?: string
@@ -245,6 +253,9 @@ export async function startAgent(req: NewAgentRequest): Promise<TerminalInfo | n
     const t = await terminalsApi.createAgent(req)
     updateCachedTerminal(t)
     openTerminal(t)
+    // Asked for with an avatar and started without one: the server says why.
+    const noAvatar = noAvatarNote(t)
+    if (noAvatar) toast('warning', noAvatar, { timeout: 9000 })
     return t
   } catch (e) {
     toastError(e, 'Could not start the session')

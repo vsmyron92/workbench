@@ -1,0 +1,7 @@
+{
+  "listen": {"duration":2.4,"ease":"inOut","loop":true,"tracks":[{"prop":"rotate","target":"head","values":[-5.0,-6.2,-5.0]}]},
+  "nod": {"duration":0.7,"ease":"inOut","tracks":[{"prop":"translateY","target":"head","values":[0.0,7.2,0.0,4.32,0.0]}]},
+  "shake": {"duration":0.8,"ease":"inOut","tracks":[{"prop":"translateX","target":"head","values":[0.0,-4.0,4.0,-2.8,2.0,0.0]}]},
+  "talk": {"duration":0.9,"ease":"inOut","loop":true,"tracks":[{"prop":"translateY","target":"head","values":[0.0,2.88,0.0,1.728,0.0]},{"prop":"rotate","target":"head","values":[0.0,1.2,0.0,-1.2,0.0]}]},
+  "think": {"duration":2.8,"ease":"inOut","loop":true,"times":[0.0,0.2,0.55,0.8,1.0],"tracks":[{"prop":"rotate","target":"head","values":[0.0,4.0,4.0,-2.5,0.0]}]}
+}

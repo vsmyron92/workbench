@@ -1,0 +1,36 @@
+{
+  "viewBox": [
+    0,
+    0,
+    200,
+    180
+  ],
+  "nodes": [
+    {
+      "tag": "line",
+      "id": "armL",
+      "attrs": {
+        "stroke": "#4a6a94",
+        "strokeWidth": 9,
+        "x1": 74,
+        "x2": 54,
+        "y1": 116,
+        "y2": 140
+      },
+      "box": [
+        54,
+        116,
+        20,
+        24
+      ]
+    }
+  ],
+  "pivots": {},
+  "roles": {
+    "armL": "armL"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": [],
+  "gaze": null
+}

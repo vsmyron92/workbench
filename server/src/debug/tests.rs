@@ -596,6 +596,7 @@ impl Env {
         match r {
             crate::mcp::ToolOutput::Json(v) => v,
             crate::mcp::ToolOutput::Text(t) => json!(t),
+            crate::mcp::ToolOutput::Images { text, .. } => json!(text),
         }
     }
 
@@ -1823,6 +1824,7 @@ impl Env {
         match (tool.handler)(self.state.clone(), ctx, args).await? {
             crate::mcp::ToolOutput::Json(v) => Ok(v),
             crate::mcp::ToolOutput::Text(t) => Ok(json!(t)),
+            crate::mcp::ToolOutput::Images { text, .. } => Ok(json!(text)),
         }
     }
 }

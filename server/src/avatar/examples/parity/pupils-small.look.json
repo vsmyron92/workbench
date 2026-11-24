@@ -1,0 +1,49 @@
+{
+  "viewBox": [
+    0,
+    0,
+    200,
+    200
+  ],
+  "nodes": [
+    {
+      "tag": "g",
+      "id": "pupils",
+      "attrs": {
+        "fill": "#274060"
+      },
+      "box": [
+        80,
+        71,
+        40,
+        8
+      ],
+      "children": [
+        {
+          "tag": "circle",
+          "attrs": {
+            "cx": 84,
+            "cy": 75,
+            "r": 4
+          }
+        },
+        {
+          "tag": "circle",
+          "attrs": {
+            "cx": 116,
+            "cy": 75,
+            "r": 4
+          }
+        }
+      ]
+    }
+  ],
+  "pivots": {},
+  "roles": {
+    "pupils": "pupils"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": [],
+  "gaze": 0.015
+}

@@ -69,7 +69,9 @@ pub fn mcp_tools() -> Vec<McpTool> {
              (`notify_when_idle` tells you when it is done); a name you chose is the only address Workbench can \
              hand you. The same CLI starts in your permission mode; it never runs without asking when you ask first, and its permission \
              requests go to the user like yours. Sessions may start sessions \
-             a few levels deep and only a few at a time. The prompt is all it knows of this conversation.",
+             a few levels deep and only a few at a time. The prompt is all it knows of this conversation. \
+             `avatar: true` gives it a live avatar of its own, which it draws itself; while too many sessions \
+             have one already it starts without one, and the answer's `avatar` says so.",
             json!({
                 "type": "object",
                 "properties": {
@@ -79,6 +81,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
                     "model": { "type": "string" },
                     "effort": { "type": "string" },
                     "cwd": { "type": "string", "description": "A folder inside the project, relative to its root (default: this session's folder)." },
+                    "avatar": { "type": "boolean", "description": "Give the new session a live avatar: it is told of it with its prompt, draws its own character and speaks through it. Refused where the user decides which sessions have one ([avatar] sessions = \"asked\"), while avatars are switched off in Settings, and when the user turned this session's own avatar off." },
                     "projectId": { "type": "string", "description": "Only this session's own project." }
                 },
                 "required": ["prompt"]
@@ -105,10 +108,27 @@ pub fn mcp_tools() -> Vec<McpTool> {
                 // A restricted session starts restricted Claude Code sessions; `check_spawn` refuses any other.
                 let restricted = state.terminals.is_restricted(parent.as_ref().map(|p| p.id.as_str()).unwrap_or(""))
                     && super::agent::find_provider(&state.config.read().agents, text("provider").as_deref()).is_ok_and(|p| p.kind == super::providers::ProviderKind::Claude);
+                // An avatar for the new session: where sessions may take one themselves it may be given
+                // one at its start; where the user decides, a session does not decide for the user.
+                // A value that is neither true nor false is refused: read as false, the session
+                // would start without the avatar its starter meant to give it, and nobody would know.
+                let avatar = match args.get("avatar") {
+                    None | Some(Value::Null) => false,
+                    Some(Value::Bool(given)) => *given,
+                    Some(_) => return Err(ApiError::bad_request("avatar is true or false")),
+                };
+                if avatar && crate::avatar::enabled(&state) && crate::avatar::sessions(&state) != crate::avatar::Sessions::Any {
+                    return Err(ApiError::conflict(crate::avatar::session::NOT_YOURS_TO_GIVE));
+                }
+                // Nor does a session whose own avatar the user turned off hand one to another.
+                if avatar && ctx.terminal_id.as_deref().and_then(|t| crate::avatar::carried(&state, t)).is_some_and(|own| !own.on) {
+                    return Err(ApiError::conflict(crate::avatar::session::NOT_WITH_YOURS_OFF));
+                }
                 let request = AgentRequest {
                     project_id: project.id.clone(),
                     provider: text("provider"),
                     permission_mode,
+                    avatar: avatar.then_some(true),
                     restricted: restricted.then_some(true),
                     cwd,
                     prompt: Some(prompt),
@@ -133,7 +153,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
                 } else {
                     "It runs on its own. Follow it with workbench_sessions and workbench_terminal_output.".to_string()
                 };
-                Ok(ToolOutput::Json(json!({
+                let mut out = json!({
                     "terminalId": info.id,
                     "title": info.title,
                     "project": info.project_id,
@@ -142,7 +162,12 @@ pub fn mcp_tools() -> Vec<McpTool> {
                     "permissionMode": agent.and_then(|a| a.permission_mode.clone()),
                     "limits": { "depth": MAX_SPAWN_DEPTH, "running": MAX_SPAWNED_RUNNING },
                     "next": next,
-                })))
+                });
+                // Asked for an avatar and started without one (no room): why.
+                if let Some(why) = info.meta.get("noAvatar") {
+                    out["avatar"] = why.clone();
+                }
+                Ok(ToolOutput::Json(out))
             },
         ),
         tool(

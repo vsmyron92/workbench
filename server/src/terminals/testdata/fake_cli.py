@@ -27,7 +27,10 @@
 #   how long a turn takes; FAKE_CODEX_LOG records the argv. FAKE_CODEX_APPROVAL=1: the
 #   first turn typed in asks to approve a command, the way codex 0.157's overlay does
 #   (nothing in the rollout), and logs `APPROVAL <answer line>`; like the real one,
-#   whatever line comes next answers it (an Enter approves).
+#   whatever line comes next answers it (an Enter approves). FAKE_CODEX_PASTE_APPROVAL=1:
+#   that overlay comes up the moment something is typed or pasted at the first prompt,
+#   before any Enter (a turn that asks while text is on its way in). The Enter that follows
+#   answers it and is logged as `APPROVAL <what was typed before it>`; that text is no turn.
 # kimi: the Kimi Code CLI. A new session appends `{"sessionId","sessionDir","workDir"}` to
 #   $KIMI_CODE_HOME/session_index.jsonl and writes `<sessionDir>/state.json`, like
 #   kimi-code 2.x; `--session <id>` resumes. Every input line is a turn that prints a
@@ -44,8 +47,8 @@
 # aider: aider (0.86.2). It logs its arguments to $FAKE_AIDER_LOG, prints aider's prompt,
 #   and asks `Run shell command? (Y)es/(N)o [Yes]:` for an input line starting with `!`;
 #   any other line is a short turn, which it appends to `.aider.chat.history.md` (as aider
-#   does, here in its directory). `--restore-chat-history` prints the first line of that
-#   file.
+#   does, here in its directory). Every line sent at its prompt is logged as `LINE <line>`.
+#   `--restore-chat-history` prints the first line of that file.
 
 import datetime
 import glob
@@ -256,6 +259,10 @@ def claude(args):
     hooks = loaded.get("hooks", {})
     # Claude Code's `ultracode` setting, which Workbench writes for a session started with it.
     log("FAKE_CLAUDE_LOG", "SETTINGS ultracode=" + str(loaded.get("ultracode", "<unset>")))
+    # The tools Workbench allows without a permission request (`permissions.allow`): the avatar
+    # tools of a session with an avatar. A session without one has no `permissions` at all.
+    permissions = loaded.get("permissions")
+    log("FAKE_CLAUDE_LOG", "ALLOW " + ("<unset>" if permissions is None else " ".join(permissions.get("allow", []))))
     # What the session was started with: its command line (a prompt may span lines), and the
     # environment that decides which account or model server it talks to.
     log("FAKE_CLAUDE_LOG", "ARGS " + " ".join(args).replace("\n", " / "))
@@ -377,6 +384,11 @@ def claude(args):
 # ---------------------------------------------------------------- codex
 
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# The approval overlay of codex 0.157.
+CODEX_APPROVAL = (
+    "Would you like to run the following command?\n\n  $ rm -rf ./build && git push --force\n\n"
+    "› 1. Yes, just this once (y)\n  2. No, and tell Codex what to do differently (esc)\n"
+)
 
 
 def codex(args):
@@ -426,10 +438,7 @@ def codex(args):
         emit({"timestamp": ts(), "type": "event_msg", "payload": {"type": "task_started", "turn_id": t}})
         out(f"\033[2m• Working on: {text}\033[0m\n")
         if approval:
-            out(
-                "Would you like to run the following command?\n\n  $ rm -rf ./build && git push --force\n\n"
-                "› 1. Yes, just this once (y)\n  2. No, and tell Codex what to do differently (esc)\n"
-            )
+            out(CODEX_APPROVAL)
             answer = unpaste(term.line() or "")
             log("FAKE_CODEX_LOG", f"APPROVAL {answer}")
             # The overlay goes away (six lines and the echoed answer).
@@ -450,6 +459,21 @@ def codex(args):
         turn(prompt)
     out("› ")
     ask = bool(os.environ.get("FAKE_CODEX_APPROVAL"))
+    if os.environ.get("FAKE_CODEX_PASTE_APPROVAL"):
+        # The first key that arrives, typed or pasted, brings the overlay up at once; what
+        # comes with it is read key by key, and nothing but a line break answers.
+        k = term.key()
+        while k is not None and k in "\r\n":
+            k = term.key()
+        if k is not None:
+            out("\n" + CODEX_APPROVAL)
+            typed = k
+            while (k := term.key()) is not None and k not in "\r\n":
+                typed += k
+            if k is not None:
+                log("FAKE_CODEX_LOG", f"APPROVAL {unpaste(typed)}")
+                # The overlay goes away.
+                out("\033[2J\033[H✔ Answered\n› ")
     while (line := term.line()) is not None:
         line = unpaste(line)
         if line:
@@ -602,6 +626,7 @@ def aider(args):
         if not line:
             out("> ")
             continue
+        log("FAKE_AIDER_LOG", f"LINE {line}")
         if line.startswith("!"):
             out(f"{line[1:]}\nRun shell command? (Y)es/(N)o/(D)on't ask again [Yes]: ")
             yn = (term.line() or "").replace("\r", "")

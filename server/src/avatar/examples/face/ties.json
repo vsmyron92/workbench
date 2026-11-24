@@ -1,0 +1,10 @@
+{
+  "name": "Ties",
+  "svg": "<svg viewBox='-100 -100 200 200'><rect id='head' x='-30.062' y='-30' width='60.062' height='50' fill='#74c0fc'/><rect id='edge' x='-80.125' y='-20' width='20' height='20' transform='scale(0.5)' fill='#e03131'/><rect id='past' x='-80.127' y='-20' width='20' height='20' transform='scale(0.5)' fill='#e03131'/></svg>",
+  "roles": {
+    "head": "head"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": []
+}

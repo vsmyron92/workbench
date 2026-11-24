@@ -1,0 +1,124 @@
+{
+  "name": "Hoot",
+  "svg": "<svg viewBox='0 0 200 200'><defs><radialGradient id='plume' cx='0.4' cy='0.35' r='0.75'><stop offset='0' stop-color='#b98257'/><stop offset='1' stop-color='#7a4a2e'/></radialGradient><mask id='bellyMask'><ellipse cx='100' cy='140' rx='27' ry='29' fill='#ffffff'/></mask><filter id='soft' x='-20%' y='-20%' width='140%' height='150%'><feGaussianBlur in='SourceAlpha' stdDeviation='3' result='blur'/><feOffset in='blur' dx='0' dy='4' result='drop'/><feFlood flood-color='#3b2416' flood-opacity='0.35' result='tint'/><feComposite in='tint' in2='drop' operator='in' result='shade'/><feMerge><feMergeNode in='shade'/><feMergeNode in='SourceGraphic'/></feMerge></filter></defs><ellipse id='shadow' cx='100' cy='188' rx='32' ry='5' fill='#000000' opacity='0.16'/><g id='owl'><path id='wingL' d='M66 104 Q40 128 50 162 Q62 150 70 128 Z' fill='#6e4228'/><path id='wingR' d='M134 104 Q160 128 150 162 Q138 150 130 128 Z' fill='#6e4228'/><g id='trunk' filter='url(#soft)'><ellipse cx='100' cy='130' rx='40' ry='44' fill='url(#plume)'/><ellipse cx='100' cy='140' rx='27' ry='29' fill='#f3dcc0'/><g id='feathers' mask='url(#bellyMask)' fill='none' stroke='#c8875a' stroke-width='2.5' stroke-linecap='round' stroke-dasharray='3 5'><path d='M70 124 Q100 136 130 124'/><path d='M70 138 Q100 150 130 138'/><path d='M70 152 Q100 164 130 152'/></g></g><g id='feet' fill='#f2a33a'><ellipse cx='88' cy='176' rx='7' ry='4'/><ellipse cx='112' cy='176' rx='7' ry='4'/></g><g id='head'><path id='tuftL' d='M70 54 L64 32 L86 46 Z' fill='#6e4228'/><path id='tuftR' d='M130 54 L136 32 L114 46 Z' fill='#6e4228'/><ellipse cx='100' cy='76' rx='42' ry='34' fill='url(#plume)'/><g id='eyes'><g id='eyeL'><circle cx='84' cy='76' r='13' fill='#fff6d5' stroke='#3b2416' stroke-width='2'/><g id='pupil'><circle cx='84' cy='77' r='6' fill='#2a1a10'/><circle cx='86' cy='74' r='2' fill='#ffffff'/></g></g><use id='eyeR' href='#eyeL' x='32'/></g><path id='beak' d='M93 90 L100 102 L107 90 Z' fill='#f2a33a' stroke='#b9741f' stroke-width='1.5' stroke-linejoin='round'/></g></g></svg>",
+  "pivots": {
+    "owl": [100, 182],
+    "trunk": [100, 172],
+    "head": [100, 104],
+    "wingL": [66, 106],
+    "wingR": [134, 106],
+    "tuftL": [72, 52],
+    "tuftR": [128, 52],
+    "eyes": [100, 76],
+    "beak": [100, 90]
+  },
+  "parents": {
+    "wingL": "trunk",
+    "wingR": "trunk",
+    "head": "trunk"
+  },
+  "roles": {
+    "body": "owl",
+    "head": "head",
+    "eyes": "eyes",
+    "pupils": "pupil",
+    "armL": "wingL",
+    "armR": "wingR"
+  },
+  "animations": {
+    "sway": {
+      "duration": 4,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "trunk", "prop": "skewX", "values": [0, 2.5, 0, -2.5, 0] },
+        { "target": "head", "prop": "rotate", "values": [0, -2, 0, 2, 0], "phase": 0.25 }
+      ]
+    },
+    "walk": {
+      "duration": 0.6,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "owl", "prop": "rotate", "values": [-4, 4, -4] },
+        { "target": "feet", "prop": "translateY", "values": [0, -2, 0, -2, 0] }
+      ]
+    },
+    "ponder": {
+      "duration": 3,
+      "loop": true,
+      "times": [0, 0.3, 0.7, 1],
+      "ease": "inOut",
+      "tracks": [
+        { "target": "head", "prop": "rotate", "values": [0, 9, 9, 0] },
+        { "target": "tuftL", "prop": "rotate", "values": [0, -6, -6, 0] }
+      ]
+    },
+    "hoot": {
+      "duration": 1.2,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "head", "prop": "translateY", "values": [0, -2, 0] },
+        { "target": "owl", "prop": "scaleY", "values": [1, 1.03, 1] }
+      ]
+    },
+    "alarm": {
+      "duration": 1,
+      "loop": true,
+      "tracks": [
+        { "target": "tuftL", "prop": "rotate", "values": [0, -12, 0], "ease": "inOut" },
+        { "target": "tuftR", "prop": "rotate", "values": [0, 12, 0], "ease": "inOut" },
+        { "target": "feathers", "prop": "strokeDashoffset", "values": [0, -16] }
+      ]
+    },
+    "roost": {
+      "duration": 4,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "eyes", "prop": "scaleY", "values": [0.15, 0.15] },
+        { "target": "owl", "prop": "translateY", "values": [3, 5, 3] },
+        { "target": "head", "prop": "rotate", "values": [6, 6] }
+      ]
+    },
+    "hop": {
+      "duration": 0.9,
+      "ease": [[0.2, 0.8, 0.4, 1], "outBounce"],
+      "tracks": [
+        { "target": "owl", "prop": "translateY", "values": [0, -16, 0] }
+      ]
+    },
+    "ruffle": {
+      "duration": 1.2,
+      "ease": "inOutBack",
+      "tracks": [
+        { "target": "wingL", "prop": "rotate", "values": [0, 22, -8, 0] },
+        { "target": "wingR", "prop": "rotate", "values": [0, -22, 8, 0] }
+      ]
+    }
+  },
+  "states": {
+    "idle": ["sway", "blink"],
+    "working": ["sway", "ponder", "blink"],
+    "speaking": ["sway", "hoot", "blink"],
+    "listening": ["sway", "listen", "blink"],
+    "waiting": ["sway", "blink"],
+    "attention": ["alarm", "blink"],
+    "error": ["sway", "shake"],
+    "done": ["hop", "ruffle", "blink"],
+    "sleeping": ["roost"]
+  },
+  "mouth": { "target": "beak", "open": "M93 90 L100 108 L107 90 Z" },
+  "gaze": 3,
+  "drives": [
+    { "input": "lookX", "target": "head", "prop": "rotate", "values": [-10, 0, 10], "ease": "inOut" },
+    { "input": "turn", "target": "wingL", "prop": "opacity", "values": [1, 1, 0.35], "at": [0, 0.6, 1] },
+    { "input": "turn", "target": "wingR", "prop": "opacity", "values": [0.35, 1, 1], "at": [0, 0.4, 1] },
+    { "input": "turn", "target": "beak", "prop": "translateX", "values": [-5, 0, 5] },
+    { "input": "pace", "target": "wingL", "prop": "rotate", "values": [0, 14], "ease": [0.4, 0, 0.2, 1] },
+    { "input": "pace", "target": "wingR", "prop": "rotate", "values": [0, -14], "ease": [0.4, 0, 0.2, 1] },
+    { "input": "held", "target": "eyes", "prop": "scaleY", "values": [1, 1.2], "ease": "outBack" }
+  ],
+  "voice": { "lang": "en-GB", "pitch": 0.9, "rate": 0.95 }
+}

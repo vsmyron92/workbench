@@ -1,5 +1,7 @@
 // Pure helpers over TerminalInfo: agent state presentation, attention ordering, cache
 // updates. No React, no DOM — covered by sessions.test.ts.
+//
+// Contract module for the avatar feature: `tone`, `stateLabel`, `needsAttention`, `composeBlocked`, `agentSessions`, `isRunning`.
 
 import type { AgentInfo, TerminalInfo } from '@/api/types'
 
@@ -268,6 +270,33 @@ export function ultracodeNote(t: TerminalInfo | null | undefined): { label: stri
     label: 'Ultracode',
     title: 'Started with ultracode: Claude plans a workflow of subagents for each substantive task, which uses far more tokens. Claude Code leaves it off when the model cannot take xhigh effort or workflows are off for your account.',
   }
+}
+
+/** A session started with the composer's Avatar control says so on its tab and card. */
+export function avatarNote(t: TerminalInfo | null | undefined): { label: string; title: string } | null {
+  if (t?.meta?.avatar !== true) return null
+  return { label: 'Avatar', title: 'This session has a live avatar' }
+}
+
+/**
+ * Why a session asked for with the Avatar control started without one: the answer of
+ * `POST /api/agents` says so in `meta.noAvatar` (no room left). `null`: nothing to say.
+ */
+export function noAvatarNote(t: TerminalInfo | null | undefined): string | null {
+  const why = t?.meta?.noAvatar
+  return typeof why === 'string' && why.trim() !== '' ? why : null
+}
+
+/**
+ * The Avatar badge of a session's card and header. It follows the live record: `on` is what
+ * the avatar feature tells through `useAvatarOn` (shell/avatarBridge.ts). true: the session's
+ * avatar is on, also when it was given one after its start. false: it has none, or the user
+ * turned it off. null: not known (the list has not loaded, or the feature is gone), and then
+ * a session started with the Avatar control says so.
+ */
+export function avatarBadge(t: TerminalInfo | null | undefined, on: boolean | null): { label: string; title: string } | null {
+  const shown = on === null || on === undefined ? avatarNote(t) !== null : on === true
+  return shown ? { label: 'Avatar', title: 'This session has a live avatar' } : null
 }
 
 /**

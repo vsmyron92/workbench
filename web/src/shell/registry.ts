@@ -3,6 +3,7 @@
 import agents from '@/features/agents'
 import apps from '@/features/apps'
 import atlassian from '@/features/atlassian'
+import avatar from '@/features/avatar'
 import data from '@/features/data'
 import db from '@/features/db'
 import debug from '@/features/debug'
@@ -19,7 +20,7 @@ import workspace from '@/features/workspace'
 import { toolWindowSides } from './actions'
 import type { Command, CommandContext, FeatureModule, MobileTabDef, PanelDef, SearchProvider, ToolWindowDef } from './types'
 
-export const features: FeatureModule[] = [agents, files, lsp, debug, data, git, gitlab, github, atlassian, apps, devcontainer, db, workspace, skills, help, platform]
+export const features: FeatureModule[] = [agents, avatar, files, lsp, debug, data, git, gitlab, github, atlassian, apps, devcontainer, db, workspace, skills, help, platform]
 
 export const panelDefs: Record<string, PanelDef> = Object.assign({}, ...features.map((f) => f.panels ?? {}))
 

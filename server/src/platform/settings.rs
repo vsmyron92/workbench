@@ -324,7 +324,7 @@ pub async fn apply_config(
 /// Apply a structured change: `patch` maps top-level keys to new values.
 /// Object sections are merged field by field; `secrets` and `extra_roots` are replaced.
 pub fn patched(current: &GlobalConfig, patch: &Map<String, Value>) -> ApiResult<GlobalConfig> {
-    const KEYS: &[&str] = &["server", "projects", "agents", "gitlab", "github", "atlassian", "notify", "push", "update", "extra_roots", "secrets"];
+    const KEYS: &[&str] = &["server", "projects", "agents", "gitlab", "github", "atlassian", "notify", "push", "update", "avatar", "extra_roots", "secrets"];
     let mut v = serde_json::to_value(current)?;
     let obj = v.as_object_mut().ok_or_else(|| ApiError::internal("config is not an object"))?;
     for (k, val) in patch {
@@ -340,6 +340,15 @@ pub fn patched(current: &GlobalConfig, patch: &Map<String, Value>) -> ApiResult<
             _ => {
                 obj.insert(k.clone(), val.clone());
             }
+        }
+    }
+    // Which sessions have an avatar is one of two words (`null`: the default): said by name here,
+    // where the parser below would only name the word it did not know.
+    if let Some(sessions) = obj.get("avatar").and_then(|a| a.get("sessions")).filter(|s| !s.is_null()) {
+        if !matches!(sessions.as_str(), Some("asked" | "any")) {
+            return Err(ApiError::bad_request(
+                "avatar.sessions must be \"asked\" (a session has an avatar when you gave it one) or \"any\" (whenever it asks for one)",
+            ));
         }
     }
     serde_json::from_value(v).map_err(|e| ApiError::bad_request(format!("invalid settings: {e}")))
@@ -952,6 +961,62 @@ mod tests {
         assert!(out.contains("# port note") && out.contains("[github]"), "{out}");
         assert_eq!(toml::from_str::<GlobalConfig>(&out).unwrap(), new);
         assert!(patched(&cfg, json!({"server": {"bind": 5}}).as_object().unwrap()).is_err());
+    }
+
+    /// The Avatar section of Settings: whether sessions may have avatars and which, written
+    /// only where it differs from the default.
+    #[test]
+    fn the_avatar_section_is_patched_and_its_sessions_are_one_of_two_words() {
+        use crate::avatar::{AvatarConfig, Sessions};
+        let patch = |cfg: &GlobalConfig, v: Value| patched(cfg, json!({ "avatar": v }).as_object().unwrap());
+        let cfg = GlobalConfig::default();
+        assert_eq!(cfg.avatar, AvatarConfig::default());
+
+        // Off; on for any session that asks; back to the default.
+        let off = patch(&cfg, json!({ "enabled": false })).unwrap();
+        assert_eq!(off.avatar, AvatarConfig { enabled: Some(false), sessions: None });
+        let any = patch(&off, json!({ "enabled": null, "sessions": "any" })).unwrap();
+        assert_eq!(any.avatar, AvatarConfig { enabled: None, sessions: Some(Sessions::Any) });
+        let asked = patch(&any, json!({ "sessions": "asked" })).unwrap();
+        assert_eq!(asked.avatar, AvatarConfig { enabled: None, sessions: Some(Sessions::Asked) });
+        // The form sends `null` for a default: a field is merged, the other one stays.
+        let both = patch(&any, json!({ "enabled": false })).unwrap();
+        assert_eq!(both.avatar, AvatarConfig { enabled: Some(false), sessions: Some(Sessions::Any) });
+        let default = patch(&both, json!({ "enabled": null, "sessions": null })).unwrap();
+        assert_eq!(default.avatar, AvatarConfig::default());
+        // Nothing else of the config moves with it, and neither value is a problem to report.
+        assert_eq!(GlobalConfig { avatar: AvatarConfig::default(), ..both.clone() }, cfg);
+        assert_eq!(check_global(&both), check_global(&cfg));
+
+        // `sessions` is one of two words: anything else is refused by name, with what to send.
+        for bad in [json!("always"), json!("ANY"), json!(""), json!(true), json!(1), json!(["any"]), json!({ "mode": "any" })] {
+            let e = patch(&cfg, json!({ "sessions": bad })).unwrap_err();
+            assert_eq!((e.status.as_u16(), e.code), (400, "bad_request"), "{bad}");
+            assert!(e.message.starts_with("avatar.sessions must be \"asked\"") && e.message.contains("\"any\""), "{bad}: {}", e.message);
+        }
+        // `enabled` is yes or no, and the section is a table.
+        for bad in [json!({ "enabled": "no" }), json!({ "enabled": 0 }), json!("off"), json!(false)] {
+            let e = patch(&cfg, bad.clone()).unwrap_err();
+            assert_eq!((e.status.as_u16(), e.code), (400, "bad_request"), "{bad}");
+            assert!(e.message.starts_with("invalid settings: "), "{bad}: {}", e.message);
+        }
+
+        // Written into the file like every other section: comments stay, a default leaves no
+        // table behind, and what is written reads back as the same config.
+        let text = "# mine\n[server]\nbind = \"127.0.0.1:7777\" # port note\n";
+        let old: GlobalConfig = toml::from_str(text).unwrap();
+        let new = patch(&old, json!({ "enabled": false, "sessions": "any" })).unwrap();
+        let out = config_edit::update_text(text, &new).unwrap();
+        assert!(out.contains("# port note") && out.contains("[avatar]") && out.contains("enabled = false") && out.contains("sessions = \"any\""), "{out}");
+        assert_eq!(toml::from_str::<GlobalConfig>(&out).unwrap(), new);
+        let back = patch(&new, json!({ "enabled": null, "sessions": null })).unwrap();
+        let out = config_edit::update_text(&out, &back).unwrap();
+        assert!(out.contains("# port note") && !out.contains("avatar"), "{out}");
+        assert_eq!(toml::from_str::<GlobalConfig>(&out).unwrap(), back);
+        // The raw text is held to the same two words.
+        let e = parse_global("[avatar]\nsessions = \"always\"\n").unwrap_err();
+        assert!(e.message.contains("line 2") && e.message.contains("asked") && e.message.contains("any"), "{}", e.message);
+        assert_eq!(parse_global("[avatar]\nenabled = false\nsessions = \"any\"\n").unwrap().0.avatar, new.avatar);
     }
 
     #[test]

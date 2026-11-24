@@ -102,6 +102,7 @@ impl Env {
         match (t.handler)(self.state.clone(), ctx.clone(), args).await? {
             ToolOutput::Json(v) => Ok(v),
             ToolOutput::Text(s) => Ok(Value::String(s)),
+            ToolOutput::Images { text, .. } => Ok(Value::String(text)),
         }
     }
 }

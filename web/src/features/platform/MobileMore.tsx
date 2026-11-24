@@ -1,4 +1,4 @@
-// Phone "More" tab: theme, updates, push notifications, devices (pair / revoke), recent activity, sign out.
+// Phone "More" tab: theme, avatars (show, voice), updates, push notifications, devices (pair / revoke), recent activity, sign out.
 
 import { lazy, Suspense, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -20,6 +20,8 @@ import { DevicesList } from './sections/Remote'
 import './platform.css'
 
 const HelpView = lazy(() => import('@/features/help/HelpPanel').then((m) => ({ default: m.HelpView })))
+// Loaded with the tab, not with the app: the section lists this browser's voices, which brings the avatar slice's speech code along.
+const AvatarMobile = lazy(() => import('./sections/Avatar').then((m) => ({ default: m.AvatarMobile })))
 
 /** A newer release, an update under way or a pending restart; nothing otherwise. */
 function UpdateMobile() {
@@ -121,6 +123,11 @@ export function MobileMore({ projectId }: { projectId: string | null }) {
           </div>
         </div>
       </section>
+
+      {/* Its own section, title included: nothing is shown until it has loaded, or while avatars are switched off. */}
+      <Suspense fallback={null}>
+        <AvatarMobile />
+      </Suspense>
 
       <UpdateMobile />
 

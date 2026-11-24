@@ -1,5 +1,6 @@
 // "New session" composer: the agent CLI (provider), prompt, name, model, effort,
-// permission mode, Remote Control (Claude), and the project's starter prompts as chips.
+// permission mode, Remote Control (Claude), a live avatar, and the project's starter
+// prompts as chips.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { CircleQuestionMark, Container, FileCode, Play, Plus, Sparkles, TriangleAlert } from 'lucide-react'
@@ -22,6 +23,64 @@ export const ULTRACODE_HELP =
 /** `claude --restricted`, as its own help puts it. */
 const RESTRICTED_HELP =
   'Restricted: for a repository you do not trust. Claude can read and edit files in the project, but runs no commands, fetches no web pages and ignores your own Claude settings files. Not with “bypassPermissions”.'
+
+/** The Avatar option: its tooltip, and what the composer says while it is ticked. */
+export const AVATAR_LABEL = 'Avatar: this session gets a live avatar'
+export const AVATAR_HELP =
+  'Avatar: the session appears as a small animated character over the window. It draws its own look, says the short version aloud or as captions, and takes your answers by click, typing or voice. Drawing the look takes about half a minute and a few thousand tokens.'
+
+/**
+ * Whether the session about to start gets an avatar: the control is on, and this CLI
+ * shows it. A choice remembered from before avatars were switched off in Settings starts
+ * nothing unseen (the server would refuse the session).
+ */
+export function avatarWanted(p: Pick<ProviderInfo, 'supports'> | undefined, remembered: unknown): boolean {
+  return p?.supports.avatar === true && remembered === true
+}
+
+/** The composer's Avatar option, a check box among the session options (after Ultracode where that is offered): ticked while the next session gets a live avatar. */
+export function AvatarOption({ on, onChange }: { on: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <span title={AVATAR_LABEL}>
+      <Checkbox checked={on} onChange={onChange}>
+        Avatar
+      </Checkbox>
+    </span>
+  )
+}
+
+/**
+ * What a session of this CLI drives its avatar with where it has no Workbench tools: the
+ * `workbench avatar` command on the host, `curl` in a dev container. null: Workbench's
+ * tools, or a server that does not say. `inContainer` is the form's own choice (Run in dev
+ * container), so the composer's sentence follows it.
+ */
+export function avatarDrive(p: Pick<ProviderInfo, 'avatarVia' | 'avatarViaContainer'>, inContainer: boolean): 'command' | 'curl' | null {
+  if (inContainer) return p.avatarViaContainer === 'command' ? 'curl' : null
+  return p.avatarVia === 'command' ? 'command' : null
+}
+
+/** The line under the options while the Avatar option is ticked. For a CLI without Workbench tools where the session will run, it also says how the avatar is driven. */
+export function AvatarHelp({ p, inContainer = false }: { p: Pick<ProviderInfo, 'id' | 'kind' | 'label' | 'home' | 'avatarVia' | 'avatarViaContainer'>; inContainer?: boolean }) {
+  const drive = avatarDrive(p, inContainer)
+  return (
+    <div className="wb-ag-note">
+      {AVATAR_HELP}
+      {drive === 'command' && (
+        <>
+          {' '}
+          {displayLabel(p)} has no Workbench tools: it drives its avatar with the <code>workbench avatar</code> command and may ask you before running it, unless you allow that command.
+        </>
+      )}
+      {drive === 'curl' && (
+        <>
+          {' '}
+          In a dev container {displayLabel(p)} has no Workbench tools: it drives its avatar with <code>curl</code> and may ask you before running it, unless you allow that command.
+        </>
+      )}
+    </div>
+  )
+}
 
 /**
  * Ask for notification permission once, from a user gesture, on remote devices (a phone):
@@ -163,6 +222,9 @@ export function NewSessionForm({
   const d = defaults.data
   const lastProvider = useAgentsUi((s) => s.lastProvider)
   const setLastProvider = useAgentsUi((s) => s.setLastProvider)
+  // The Avatar option is one remembered choice, shown and changed by every composer.
+  const lastAvatar = useAgentsUi((s) => s.lastAvatar)
+  const setLastAvatar = useAgentsUi((s) => s.setLastAvatar)
   const [chosen, setChosen] = useState<string | null>(prefill?.provider ?? null)
   const [prompt, setPrompt] = useState(prefill?.prompt ?? '')
   const [name, setName] = useState(prefill?.name ?? '')
@@ -230,6 +292,7 @@ export function NewSessionForm({
   const preset = presetOf(p, mode || p?.defaults.permissionMode)
   const dangerous = isDangerous(p, mode)
   const label = p ? (p.kind === 'claude' && p.id === 'claude' ? 'Claude' : displayLabel(p)) : 'the agent'
+  const avatar = avatarWanted(p, lastAvatar)
 
   const start = async (text: string, n?: string) => {
     if (busy || !p || (!p.available && !runInside)) return
@@ -258,6 +321,7 @@ export function NewSessionForm({
       remoteControl: p.supports.remoteControl ? (remote ?? undefined) : undefined,
       restricted: p.supports.restricted && restricted ? true : undefined,
       ultracode: p.supports.ultracode && ultracode ? true : undefined,
+      avatar: avatar ? true : undefined,
       inContainer: runInside || undefined,
     })
     setBusy(false)
@@ -379,10 +443,13 @@ export function NewSessionForm({
               </Checkbox>
             </span>
           )}
+          {p.supports.avatar === true && <AvatarOption on={avatar} onChange={setLastAvatar} />}
         </div>
       )}
       {p?.supports.restricted && restricted && <div className="wb-ag-note">{RESTRICTED_HELP}</div>}
       {p?.supports.ultracode && ultracode && <div className="wb-ag-note">{ULTRACODE_HELP}</div>}
+      {/* Also while the phone folds the options: a choice remembered from an earlier session shows. */}
+      {p && avatar && <AvatarHelp p={p} inContainer={runInside} />}
       {dangerous && preset && (
         <div className="wb-ag-danger">
           <TriangleAlert size={13} />

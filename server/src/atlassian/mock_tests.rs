@@ -1679,6 +1679,7 @@ async fn mcp_tools_against_the_mock() {
     let text = |o: crate::mcp::ToolOutput| match o {
         crate::mcp::ToolOutput::Text(t) => t,
         crate::mcp::ToolOutput::Json(v) => v.to_string(),
+        crate::mcp::ToolOutput::Images { text, .. } => text,
     };
 
     let t = text((find("confluence_get_page").handler)(state.clone(), ctx.clone(), json!({ "pageId": format!("{base}/wiki/spaces/DEV/pages/2001/Architecture") })).await.unwrap());
@@ -2045,6 +2046,7 @@ async fn new_mcp_tools_against_the_mock() {
     let text = |o: crate::mcp::ToolOutput| match o {
         crate::mcp::ToolOutput::Text(t) => t,
         crate::mcp::ToolOutput::Json(v) => v.to_string(),
+        crate::mcp::ToolOutput::Images { text, .. } => text,
     };
     let call = |name: &str, args: Value| {
         let t = find(name);

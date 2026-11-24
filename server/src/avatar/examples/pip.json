@@ -1,0 +1,127 @@
+{
+  "name": "Pip",
+  "svg": "<svg viewBox='0 0 200 200'><defs><radialGradient id='skin' gradientUnits='userSpaceOnUse' cx='80' cy='60' r='135'><stop offset='0' stop-color='#b6f092'/><stop offset='0.45' stop-color='#63c96d'/><stop offset='1' stop-color='#2f8f4b'/></radialGradient><linearGradient id='tum' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#fdffe0'/><stop offset='1' stop-color='#d7eea2'/></linearGradient><clipPath id='eyeClip'><circle cx='68' cy='66' r='14.2'/><circle cx='132' cy='66' r='14.2'/></clipPath></defs><ellipse id='shadow' cx='100' cy='178' rx='50' ry='7' fill='#000000' opacity='0.2'/><g id='frog'><g id='legs' fill='#48ab5a' stroke='#256b3a' stroke-width='2.5'><ellipse cx='60' cy='152' rx='25' ry='18'/><ellipse cx='140' cy='152' rx='25' ry='18'/><ellipse cx='50' cy='171' rx='19' ry='6.5'/><ellipse cx='150' cy='171' rx='19' ry='6.5'/></g><g id='torso'><ellipse cx='100' cy='140' rx='45' ry='35' fill='url(#skin)' stroke='#256b3a' stroke-width='2.5'/><ellipse cx='100' cy='150' rx='30' ry='23' fill='url(#tum)'/></g><g id='upper'><g id='head'><circle cx='68' cy='66' r='21' fill='url(#skin)' stroke='#256b3a' stroke-width='2.5'/><circle cx='132' cy='66' r='21' fill='url(#skin)' stroke='#256b3a' stroke-width='2.5'/><ellipse cx='100' cy='97' rx='55' ry='37' fill='url(#skin)' stroke='#256b3a' stroke-width='2.5'/><circle cx='68' cy='66' r='19.5' fill='url(#skin)'/><circle cx='132' cy='66' r='19.5' fill='url(#skin)'/><ellipse cx='84' cy='82' rx='22' ry='7' fill='#ffffff' opacity='0.16' transform='rotate(-10 84 82)'/><g id='eyes'><circle cx='68' cy='66' r='15' fill='#ffffff' stroke='#256b3a' stroke-width='1.5'/><circle cx='132' cy='66' r='15' fill='#ffffff' stroke='#256b3a' stroke-width='1.5'/><g clip-path='url(#eyeClip)'><g id='pupils'><circle cx='70' cy='68' r='8' fill='#14241b'/><circle cx='67' cy='64.5' r='2.8' fill='#ffffff'/><circle cx='130' cy='68' r='8' fill='#14241b'/><circle cx='127' cy='64.5' r='2.8' fill='#ffffff'/></g></g></g><ellipse cx='60' cy='107' rx='8' ry='5' fill='#ff7a93' opacity='0.8'/><ellipse cx='140' cy='107' rx='8' ry='5' fill='#ff7a93' opacity='0.8'/><circle cx='94' cy='87' r='1.8' fill='#256b3a'/><circle cx='106' cy='87' r='1.8' fill='#256b3a'/><path id='mouth' d='M66 104 Q100 120 134 104 Q100 124 66 104 Z' fill='#7a2238' stroke='#256b3a' stroke-width='2' stroke-linejoin='round'/></g><g id='armL'><path d='M62 130 Q50 140 48 155' fill='none' stroke='#256b3a' stroke-width='14' stroke-linecap='round'/><path d='M62 130 Q50 140 48 155' fill='none' stroke='#55b966' stroke-width='9.5' stroke-linecap='round'/><g fill='#b6f092' stroke='#256b3a' stroke-width='1.5'><circle cx='41' cy='158' r='4.5'/><circle cx='47' cy='161' r='4.5'/><circle cx='53' cy='158' r='4.5'/></g></g><g id='armR'><path d='M138 130 Q150 140 152 155' fill='none' stroke='#256b3a' stroke-width='14' stroke-linecap='round'/><path d='M138 130 Q150 140 152 155' fill='none' stroke='#55b966' stroke-width='9.5' stroke-linecap='round'/><g fill='#b6f092' stroke='#256b3a' stroke-width='1.5'><circle cx='159' cy='158' r='4.5'/><circle cx='153' cy='161' r='4.5'/><circle cx='147' cy='158' r='4.5'/></g></g></g></g><text id='z1' x='162' y='40' font-size='15' font-weight='bold' fill='currentColor' opacity='0'>z</text><text id='z2' x='172' y='28' font-size='19' font-weight='bold' fill='currentColor' opacity='0'>Z</text></svg>",
+  "pivots": {
+    "frog": [100, 175],
+    "torso": [100, 175],
+    "head": [100, 124],
+    "eyes": [100, 66],
+    "armL": [62, 130],
+    "armR": [138, 130]
+  },
+  "roles": {
+    "body": "frog",
+    "head": "head",
+    "eyes": "eyes",
+    "pupils": "pupils",
+    "armL": "armL",
+    "armR": "armR"
+  },
+  "animations": {
+    "breathe": {
+      "duration": 3.4,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "torso", "prop": "scaleY", "values": [1, 1.04, 1] },
+        { "target": "torso", "prop": "scaleX", "values": [1, 0.985, 1] },
+        { "target": "upper", "prop": "translateY", "values": [0, -2, 0] }
+      ]
+    },
+    "ponder": {
+      "duration": 2.8,
+      "loop": true,
+      "tracks": [
+        { "target": "head", "prop": "rotate", "values": [-4, 4, -4], "ease": "inOut" },
+        { "target": "pupils", "prop": "translateY", "values": [-3.5, -3.5] },
+        { "target": "pupils", "prop": "translateX", "values": [-3, 3, -3], "ease": "inOut" },
+        { "target": "armL", "prop": "rotate", "values": [0, 0, 9, 0, 9, 0], "times": [0, 0.6, 0.7, 0.8, 0.9, 1], "ease": "inOut" }
+      ]
+    },
+    "talk": {
+      "duration": 1.3,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "head", "prop": "rotate", "values": [-2, 2.5, -2] },
+        { "target": "upper", "prop": "translateY", "values": [0, -2.5, 0, -1.5, 0] },
+        { "target": "torso", "prop": "scaleY", "values": [1, 1.03, 1, 1.02, 1] }
+      ]
+    },
+    "sway": {
+      "duration": 3,
+      "loop": true,
+      "tracks": [
+        { "target": "frog", "prop": "rotate", "values": [-2.5, 2.5, -2.5], "ease": "inOut" },
+        { "target": "pupils", "prop": "translateY", "values": [-1.5, -1.5] }
+      ]
+    },
+    "alert": {
+      "duration": 1.1,
+      "loop": true,
+      "times": [0, 0.12, 0.4, 0.68, 1],
+      "ease": "inOut",
+      "tracks": [
+        { "target": "frog", "prop": "translateY", "values": [0, 3, -12, 0, 0] },
+        { "target": "torso", "prop": "scaleY", "values": [1, 0.93, 1.05, 0.95, 1] },
+        { "target": "shadow", "prop": "scaleX", "values": [1, 1.04, 0.8, 1.04, 1] },
+        { "target": "eyes", "prop": "scale", "values": [1.12, 1.12], "times": [0, 1] }
+      ]
+    },
+    "doze": {
+      "duration": 5,
+      "loop": true,
+      "tracks": [
+        { "target": "eyes", "prop": "scaleY", "values": [0.08, 0.08] },
+        { "target": "head", "prop": "rotate", "values": [7, 9, 7], "ease": "inOut" },
+        { "target": "upper", "prop": "translateY", "values": [3, 5, 3], "ease": "inOut" },
+        { "target": "torso", "prop": "scaleY", "values": [0.97, 1.03, 0.97], "ease": "inOut" },
+        { "target": "z1", "prop": "opacity", "values": [0, 1, 1, 0, 0], "times": [0, 0.15, 0.45, 0.6, 1] },
+        { "target": "z1", "prop": "translateY", "values": [0, -10, -10], "times": [0, 0.6, 1] },
+        { "target": "z2", "prop": "opacity", "values": [0, 0, 1, 1, 0], "times": [0, 0.35, 0.5, 0.8, 1] },
+        { "target": "z2", "prop": "translateY", "values": [0, 0, -12], "times": [0, 0.35, 1] }
+      ]
+    },
+    "wave": {
+      "duration": 1.6,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "armR", "prop": "rotate", "values": [0, -112, -82, -112, -82, -112, 0], "times": [0, 0.2, 0.34, 0.48, 0.62, 0.76, 1] },
+        { "target": "head", "prop": "rotate", "values": [0, 5, 0], "delay": 0.2 }
+      ]
+    },
+    "hop": {
+      "duration": 0.9,
+      "times": [0, 0.16, 0.5, 0.8, 0.88, 1],
+      "ease": "inOut",
+      "tracks": [
+        { "target": "frog", "prop": "translateY", "values": [0, 5, -34, 0, 2, 0], "ease": ["out", "out", "in", "out", "inOut"] },
+        { "target": "torso", "prop": "scaleY", "values": [1, 0.86, 1.1, 0.9, 1.03, 1] },
+        { "target": "torso", "prop": "scaleX", "values": [1, 1.08, 0.95, 1.06, 0.99, 1] },
+        { "target": "upper", "prop": "translateY", "values": [0, 7, -5, 6, -1, 0] },
+        { "target": "shadow", "prop": "scaleX", "values": [1, 1.06, 0.55, 1.06, 1, 1] },
+        { "target": "shadow", "prop": "opacity", "values": [null, 0.08, null], "times": [0, 0.5, 1] }
+      ]
+    },
+    "cheer": {
+      "duration": 1.6,
+      "times": [0, 0.18, 0.36, 0.54, 0.72, 1],
+      "ease": "inOut",
+      "tracks": [
+        { "target": "armR", "prop": "rotate", "values": [0, -125, -105, -125, -105, 0] },
+        { "target": "armL", "prop": "rotate", "values": [0, 125, 105, 125, 105, 0] },
+        { "target": "frog", "prop": "translateY", "values": [0, -14, 0, -10, 0, 0] },
+        { "target": "shadow", "prop": "scaleX", "values": [1, 0.75, 1, 0.82, 1, 1] },
+        { "target": "eyes", "prop": "scaleY", "values": [1, 0.3, 0.3, 1], "times": [0, 0.15, 0.8, 1] }
+      ]
+    }
+  },
+  "states": {
+    "working": ["breathe", "ponder", "blink"],
+    "speaking": ["talk", "blink"],
+    "waiting": ["breathe", "sway", "blink"],
+    "done": ["breathe", "blink", "hop"]
+  },
+  "mouth": { "target": "mouth", "open": "M66 104 Q100 112 134 104 Q100 152 66 104 Z" },
+  "voice": { "lang": "en-GB", "prefer": ["Female", "Sonia", "Libby", "Serena"], "pitch": 1.2, "rate": 1.05 }
+}

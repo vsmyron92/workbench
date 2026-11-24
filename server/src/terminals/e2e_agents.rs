@@ -485,6 +485,117 @@ async fn aider_sessions_confirm_on_screen_and_restore_their_chat() {
     t.kill(&a.id).await.unwrap();
 }
 
+/// A restart of an Aider session whose avatar is on. Aider restores the chat it wrote for the
+/// session: that conversation goes on and has heard of the avatar, so it is told nothing. Without
+/// that history the restart is a new conversation, and it is told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restored_aider_chat_is_not_told_of_its_avatar_again() {
+    use crate::avatar::{BriefVariant, Via};
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "aider");
+    let log = dir.path().join("aider.log");
+    let aider = crate::config::global::ProviderConfig {
+        command: Some(fake.display().to_string()),
+        args: vec!["--no-auto-commits".into()],
+        env: [("FAKE_AIDER_LOG".to_string(), log.display().to_string())].into(),
+        ..Default::default()
+    };
+    let (state, pid) = provider_state(dir.path(), vec![("aider", aider)]).await;
+    crate::avatar::start(&state).await;
+    let t = &state.terminals;
+    let briefs = || log_lines(&log, &format!("LINE {}", crate::avatar::BRIEF_TAGS.0));
+    let idle = |id: &str| agent_of(&state, id).state == AgentState::Idle;
+    let a = t
+        .spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), provider: Some("aider".into()), avatar: Some(true), ..Default::default() })
+        .await
+        .unwrap();
+    // Its first conversation is told of the avatar, and that turn goes into its chat history.
+    wait_long("the brief", 30, || briefs().len() == 1).await;
+    assert_eq!(briefs(), [format!("LINE {}", super::e2e::avatar_brief(BriefVariant::First, Via::Command, true))]);
+    let history = state.projects.get(&pid).unwrap().root.join(super::providers::AIDER_HISTORY);
+    wait_long("the chat history", 20, || std::fs::read_to_string(&history).is_ok_and(|h| h.contains(crate::avatar::BRIEF_MARK))).await;
+    wait_long("aider idle", 20, || idle(&a.id)).await;
+
+    // The restart restores it: nothing is pasted.
+    t.kill(&a.id).await.unwrap();
+    t.restart(&state, &a.id).await.unwrap();
+    wait_long("the restore", 10, || t.screen_text(&a.id, 20).is_some_and(|s| s.contains("Restored previous conversation history: #### <workbench-avatar>"))).await;
+    assert_eq!(log_lines(&log, "--"), ["--no-auto-commits", "--restore-chat-history --no-auto-commits"]);
+    wait_long("aider idle", 20, || idle(&a.id)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert_eq!(briefs().len(), 1, "{:?}", log_lines(&log, "LINE"));
+
+    // Without the history a restart starts a new conversation, which is told.
+    t.kill(&a.id).await.unwrap();
+    std::fs::remove_file(&history).unwrap();
+    t.restart(&state, &a.id).await.unwrap();
+    wait_long("the brief of the new conversation", 30, || briefs().len() == 2).await;
+    assert_eq!(log_lines(&log, "--").last().map(String::as_str), Some("--no-auto-commits"), "{:?}", log_lines(&log, "--"));
+    assert_eq!(log_lines(&log, "--").len(), 3);
+    t.kill(&a.id).await.unwrap();
+}
+
+/// A first prompt that is a command of the CLI (`/add src/main.py`) goes in as the user wrote it:
+/// joined to it, the brief would be the command's arguments (Aider takes each word for a file to
+/// add). The session is told of its avatar by itself, after the command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_prompt_that_is_a_command_goes_in_alone_and_the_brief_follows_it() {
+    use crate::avatar::{BriefVariant, Via};
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "aider");
+    let log = dir.path().join("aider.log");
+    let aider = crate::config::global::ProviderConfig {
+        command: Some(fake.display().to_string()),
+        env: [("FAKE_AIDER_LOG".to_string(), log.display().to_string())].into(),
+        ..Default::default()
+    };
+    let (state, pid) = provider_state(dir.path(), vec![("aider", aider)]).await;
+    // The avatar slice tells a session through the ask route, in-process.
+    let _router = app::build_router(state.clone());
+    crate::avatar::start(&state).await;
+    let t = &state.terminals;
+    let sent = || log_lines(&log, "LINE ");
+    let a = t
+        .spawn_agent(
+            &state,
+            super::agent::AgentRequest { project_id: pid.clone(), provider: Some("aider".into()), prompt: Some("/add src/main.py".into()), avatar: Some(true), ..Default::default() },
+        )
+        .await
+        .unwrap();
+    wait_long("the command", 30, || !sent().is_empty()).await;
+    assert_eq!(sent()[0], "LINE /add src/main.py", "the command goes in as the user wrote it");
+    // The avatar slice is told that the session is still to be told of its avatar.
+    assert_eq!((a.title.as_str(), &a.meta["avatar"], &a.meta["avatarBrief"]), ("/add src/main.py", &json!(true), &json!("later")));
+    // It is, by itself and once: with the brief of a session that is given an avatar while it works.
+    wait_long("the brief", 60, || sent().len() == 2).await;
+    assert_eq!(sent()[1], format!("LINE {}", super::e2e::avatar_brief(BriefVariant::Given, Via::Command, true)));
+    wait_long("aider idle", 20, || agent_of(&state, &a.id).state == AgentState::Idle).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert_eq!(sent().len(), 2, "{:?}", sent());
+    t.kill(&a.id).await.unwrap();
+}
+
+/// The same for Claude Code, whose first prompt travels in its command line: the command stands
+/// there alone, and the session may call its avatar tools unasked as at any start with an avatar.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claude_session_started_with_a_command_has_its_avatar_tools_allowed_all_the_same() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    let log = dir.path().join("claude.log");
+    let (state, _addr, pid) = served_state(dir.path(), &fake, &log).await;
+    let t = &state.terminals;
+    let a = t
+        .spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), prompt: Some("/fix-issue 123".into()), avatar: Some(true), ..Default::default() })
+        .await
+        .unwrap();
+    wait_long("the start", 10, || !log_lines(&log, "ARGS ").is_empty()).await;
+    let args = log_lines(&log, "ARGS ");
+    assert!(args[0].ends_with(" -- /fix-issue 123") && !args[0].contains(crate::avatar::BRIEF_MARK), "{args:?}");
+    assert_eq!(log_lines(&log, "ALLOW"), [format!("ALLOW {}", crate::avatar::PREALLOWED.join(" "))]);
+    assert_eq!((a.title.as_str(), &a.meta["avatar"], &a.meta["avatarBrief"]), ("/fix-issue 123", &json!(true), &json!("later")));
+    t.kill(&a.id).await.unwrap();
+}
+
 /// Cross-area (terminals ↔ platform push): a permission request Workbench can answer
 /// reaches a subscribed device as a push carrying `{terminalId, permissionId}`, with
 /// Allow only when the notification shows the whole request (`complete` and short),
@@ -730,6 +841,190 @@ async fn an_ultracode_session_has_the_setting_keeps_it_when_restarted_and_starts
     }
 }
 
+/// What `GET /api/agents/defaults` tells the new-session form of an avatar, per provider:
+/// `(id, supports.avatar, avatarVia, avatarViaContainer)`.
+async fn avatar_defaults(addr: SocketAddr, token: &str, pid: &str) -> [(String, Value, Value, Value); 6] {
+    let d: Value = reqwest::Client::new().get(format!("http://{addr}/api/agents/defaults?projectId={pid}")).bearer_auth(token).send().await.unwrap().json().await.unwrap();
+    ["claude", "codex", "kimi", "gemini", "aider", "mycli"].map(|id| {
+        let p = d["providers"].as_array().unwrap().iter().find(|p| p["id"] == id).unwrap_or_else(|| panic!("no provider {id}: {d}"));
+        (id.to_string(), p["supports"]["avatar"].clone(), p["avatarVia"].clone(), p["avatarViaContainer"].clone())
+    })
+}
+
+/// The Avatar option with Claude Code, end to end: the brief reaches the CLI once and with the
+/// prompt only, the avatar tools are allowed unasked for as long as the session's avatar is on,
+/// and a session started without the option, or by another session, gets neither.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_with_an_avatar_is_told_once_keeps_the_users_title_and_calls_its_tools_unasked() {
+    use crate::avatar::{BriefVariant, Via};
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    let log = dir.path().join("claude.log");
+    let home = dir.path().join("claude-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let (state, addr, pid) = served_with(dir.path(), &fake, |cfg| {
+        cfg.agents.providers.insert(
+            "claude".into(),
+            crate::config::global::ProviderConfig {
+                env: [("CLAUDE_CONFIG_DIR".to_string(), home.display().to_string()), ("FAKE_CLAUDE_LOG".to_string(), log.display().to_string())].into(),
+                ..Default::default()
+            },
+        );
+        cfg.agents.providers.insert("mycli".into(), crate::config::global::ProviderConfig { command: Some("mycli".into()), ..Default::default() });
+    })
+    .await;
+    // The avatar slice's own background work: it makes a session's record when its terminal is created.
+    crate::avatar::start(&state).await;
+    let t = &state.terminals;
+    let http = reqwest::Client::new();
+    let master = state.auth.master_token().to_string();
+    let ask = |prompt: Option<&str>, avatar: Option<bool>| super::agent::AgentRequest { project_id: pid.clone(), prompt: prompt.map(str::to_string), avatar, ..Default::default() };
+    let allowed = format!("ALLOW {}", crate::avatar::PREALLOWED.join(" "));
+    // Starts of the fake so far: each logs its ALLOW line, then its ARGS line.
+    let starts = || log_lines(&log, "ARGS ").len();
+    let active = |id: &str| crate::avatar::active(&state, id);
+    let launch = |id: &str| t.get(id).unwrap().rec.lock().launch.clone().unwrap();
+    let restart = |id: String| {
+        let state = state.clone();
+        async move {
+            state.terminals.kill(&id).await.unwrap();
+            state.terminals.restart(&state, &id).await.unwrap();
+        }
+    };
+    let now = crate::util::now_ms;
+
+    // What the new-session form is told: every CLI can have an avatar, and how each drives it,
+    // on the host and in a dev container. Only Claude Code has Workbench's tools in both.
+    let via = [("claude", "tools", "tools"), ("codex", "tools", "command"), ("kimi", "command", "command"), ("gemini", "command", "command"), ("aider", "command", "command"), ("mycli", "command", "command")];
+    assert_eq!(avatar_defaults(addr, &master, &pid).await, via.map(|(id, host, inside)| (id.to_string(), json!(true), json!(host), json!(inside))));
+
+    // 1. With a prompt: the brief stands below it in the command line, once. The tab, the
+    // launch's name and the record's option are as the user gave them.
+    let a = t.spawn_agent(&state, ask(Some("fix the parser"), Some(true))).await.unwrap();
+    wait_long("the session to start", 10, || agent_of(&state, &a.id).state == AgentState::Idle).await;
+    let info = t.info(&a.id).unwrap();
+    assert_eq!((info.title.as_str(), &info.meta["avatar"], info.meta.get("movedFrom")), ("fix the parser", &json!(true), None));
+    assert!(launch(&a.id).avatar && launch(&a.id).name.is_none());
+    let brief = super::e2e::avatar_brief(BriefVariant::First, Via::Tools, false);
+    let args = log_lines(&log, "ARGS ");
+    assert!(args[0].ends_with(&format!(" -- fix the parser /  / {brief}")), "{args:?}");
+    assert_eq!(args[0].matches(crate::avatar::BRIEF_MARK).count(), 1);
+    assert!(!args[0].contains("--name") && !args[0].contains("wba_"), "{args:?}");
+    assert_eq!(log_lines(&log, "ALLOW"), [allowed.clone()]);
+    wait_long("its avatar", 10, || active(&a.id)).await;
+
+    // 2. Without a prompt: the brief is the whole prompt, wrapped, and the tab is the CLI's.
+    let b = t.spawn_agent(&state, ask(None, Some(true))).await.unwrap();
+    wait_long("the second session to start", 10, || agent_of(&state, &b.id).state == AgentState::Idle).await;
+    assert_eq!(t.info(&b.id).unwrap().title, "Claude");
+    let whole = super::e2e::avatar_brief(BriefVariant::First, Via::Tools, true);
+    assert!(whole.starts_with("<workbench-avatar>[Workbench avatar] ") && whole.ends_with("</workbench-avatar>"), "{whole}");
+    assert!(log_lines(&log, "ARGS ")[1].ends_with(&format!(" -- {whole}")), "{:?}", log_lines(&log, "ARGS "));
+    assert_eq!(log_lines(&log, "ALLOW")[1], allowed);
+    wait_long("the second avatar", 10, || active(&b.id)).await;
+
+    // 3. Not asked for (here over REST, where the terminal a session moves from is no part of
+    // the body): no brief, no option, and no permissions entry at all in its settings.
+    let r = http.post(format!("http://{addr}/api/agents")).bearer_auth(&master).json(&json!({ "projectId": pid, "prompt": "just this", "movedFrom": a.id })).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let plain: Value = r.json().await.unwrap();
+    let plain_id = plain["id"].as_str().unwrap().to_string();
+    assert!(plain["meta"].get("avatar").is_none() && plain["meta"].get("movedFrom").is_none(), "{plain}");
+    wait_long("the plain session to start", 10, || agent_of(&state, &plain_id).state == AgentState::Idle).await;
+    assert!(log_lines(&log, "ARGS ")[2].ends_with(" -- just this"), "{:?}", log_lines(&log, "ARGS "));
+    assert_eq!(log_lines(&log, "ALLOW")[2], "ALLOW <unset>");
+    assert!(!launch(&plain_id).avatar && !active(&plain_id));
+
+    // 4. A restart that resumes the conversation tells it nothing again, and the tools stay
+    // allowed: the option, the tab and the record are as they were.
+    // (Its transcript, as Claude Code writes the first message: the prompt as it was started with.)
+    let sid = agent_of(&state, &a.id).session_id;
+    let user = |id: &str, text: &str| format!("{}\n", json!({ "type": "user", "isSidechain": false, "message": { "role": "user", "content": text }, "sessionId": id }));
+    let transcript = super::transcript::transcript_path(&home, Path::new(&info.cwd), &sid);
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, user(&sid, &format!("fix the parser\n\n{brief}"))).unwrap();
+    // And one of a session that was started with the brief alone and asked something later.
+    let other = "0f0e0d0c-0b0a-4000-8000-00000000000a";
+    std::fs::write(transcript.with_file_name(format!("{other}.jsonl")), format!("{}{}", user(other, &whole), user(other, "and now the tests"))).unwrap();
+    // History shows each by the user's own words: not a word of the brief.
+    let h = t.history(&state, &pid, None, 10).await.unwrap();
+    let row = |id: &str| h.iter().find(|e| e.id == id).unwrap_or_else(|| panic!("no row for {id}: {h:?}"));
+    assert_eq!((row(&sid).title.as_str(), row(&sid).first_prompt.as_deref(), row(&sid).terminal_id.as_deref()), ("fix the parser", None, Some(a.id.as_str())));
+    assert_eq!((row(other).title.as_str(), row(other).first_prompt.as_deref()), ("and now the tests", None));
+    restart(a.id.clone()).await;
+    wait_long("the restart", 10, || starts() == 4).await;
+    assert_eq!(log_lines(&log, "ALLOW")[3], allowed);
+    wait_long("the restarted session", 10, || agent_of(&state, &a.id).state == AgentState::Idle).await;
+    let again = log_lines(&log, "ARGS ")[3].clone();
+    assert!(again.starts_with("ARGS --resume ") && !again.contains(crate::avatar::BRIEF_MARK) && !again.contains(" -- "), "{again}");
+    let info = t.info(&a.id).unwrap();
+    assert_eq!((info.title.as_str(), &info.meta["avatar"]), ("fix the parser", &json!(true)));
+    assert!(launch(&a.id).avatar);
+
+    // 5. A session it starts does not inherit the avatar: that is the user's choice per session.
+    let out = start_session(&state, &a.id, &pid, json!({ "prompt": "check the parser" })).await.unwrap();
+    let child = out["terminalId"].as_str().unwrap().to_string();
+    wait_long("the child to start", 10, || starts() == 5).await;
+    assert_eq!(log_lines(&log, "ALLOW")[4], "ALLOW <unset>");
+    assert!(log_lines(&log, "ARGS ")[4].ends_with(" -- check the parser"), "{:?}", log_lines(&log, "ARGS "));
+    assert!(t.info(&child).unwrap().meta.get("avatar").is_none() && !launch(&child).avatar && !active(&child));
+
+    // 6. After a session was created its avatar's record is the truth, not the option. The
+    // second session never had a turn, so a restart finds nothing to resume and starts a new
+    // conversation. Its avatar is on and has a look of its own by now: the conversation is
+    // told that the session still has it, and to keep the look.
+    let pass = crate::avatar::session::gate(&state, &b.id, crate::avatar::session::Call::Design, Via::Tools, now()).unwrap();
+    crate::avatar::session::design(&state, &pass, &json!({ "name": "Pip", "svg": "<svg viewBox='0 0 200 200'><g id='body'><circle cx='100' cy='110' r='50' fill='#ffcc00'/></g></svg>" }), now()).unwrap();
+    restart(b.id.clone()).await;
+    wait_long("the restart with its look", 10, || starts() == 6).await;
+    assert_eq!(log_lines(&log, "ALLOW")[5], allowed);
+    let still = super::e2e::avatar_brief(BriefVariant::Again, Via::Tools, true);
+    assert!(log_lines(&log, "ARGS ")[5].starts_with("ARGS --session-id ") && log_lines(&log, "ARGS ")[5].ends_with(&format!(" -- {still}")), "{:?}", log_lines(&log, "ARGS "));
+    assert!(still.contains("still has its live avatar") && still.contains("Do not design a new look"), "{still}");
+    assert_eq!(t.info(&b.id).unwrap().title, "Claude");
+    // The user turned the avatar off: the next start says nothing and allows nothing unasked.
+    crate::avatar::device::turn_off(&state, &b.id, now()).unwrap();
+    restart(b.id.clone()).await;
+    wait_long("the restart without its avatar", 10, || starts() == 7).await;
+    assert_eq!(log_lines(&log, "ALLOW")[6], "ALLOW <unset>");
+    assert!(!log_lines(&log, "ARGS ")[6].contains(crate::avatar::BRIEF_MARK), "{:?}", log_lines(&log, "ARGS "));
+    assert_eq!(t.info(&b.id).unwrap().meta["avatar"], true, "what it was started with stays on the record");
+    // A device gave the plain session an avatar: its next start allows the tools. It never had
+    // a turn either, and its avatar has no look yet: the new conversation is told of the avatar
+    // as a session that starts with one is, and draws its own.
+    crate::avatar::device::turn_on(&state, &plain_id, now()).unwrap();
+    restart(plain_id.clone()).await;
+    wait_long("the restart with an avatar", 10, || starts() == 8).await;
+    assert_eq!(log_lines(&log, "ALLOW")[7], allowed);
+    assert!(log_lines(&log, "ARGS ")[7].ends_with(&format!(" -- {whole}")), "{:?}", log_lines(&log, "ARGS "));
+    assert!(t.info(&plain_id).unwrap().meta.get("avatar").is_none());
+
+    // 7. Avatars switched off in Settings: asking for one is refused with the reason, in
+    // process and over REST, before anything is started; no session's tools are allowed
+    // unasked; and the form is told that no CLI takes the option.
+    state.config.write().avatar.enabled = Some(false);
+    let before = t.list().len();
+    let e = t.spawn_agent(&state, ask(Some("with an avatar, please"), Some(true))).await.unwrap_err();
+    assert_eq!((e.status.as_u16(), e.code, e.message.as_str()), (400, "bad_request", "avatars are switched off in Settings"));
+    let r = http.post(format!("http://{addr}/api/agents")).bearer_auth(&master).json(&json!({ "projectId": pid, "avatar": true })).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(r.json::<Value>().await.unwrap()["error"], json!({ "code": "bad_request", "message": "avatars are switched off in Settings" }));
+    assert_eq!(t.list().len(), before, "a refused start leaves no terminal");
+    restart(plain_id.clone()).await;
+    wait_long("the restart while avatars are off", 10, || starts() == 9).await;
+    assert_eq!(log_lines(&log, "ALLOW")[8], "ALLOW <unset>");
+    assert!(!log_lines(&log, "ARGS ")[8].contains(crate::avatar::BRIEF_MARK), "{:?}", log_lines(&log, "ARGS "));
+    assert_eq!(avatar_defaults(addr, &master, &pid).await, via.map(|(id, host, inside)| (id.to_string(), json!(false), json!(host), json!(inside))));
+    // `false` and nothing are the same as not asking: such a start works as before.
+    let off = t.spawn_agent(&state, ask(None, Some(false))).await.unwrap();
+    wait_long("the start without the option", 10, || starts() == 10).await;
+    assert_eq!(log_lines(&log, "ALLOW")[9], "ALLOW <unset>");
+    assert!(!log_lines(&log, "ARGS ")[9].contains(" -- "), "{:?}", log_lines(&log, "ARGS "));
+    for id in [&a.id, &b.id, &plain_id, &child, &off.id] {
+        let _ = t.kill(id).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restricted_session_starts_only_restricted_claude_sessions() {
     let dir = tempfile::tempdir().unwrap();
@@ -803,6 +1098,187 @@ async fn start_session(state: &AppState, terminal: &str, pid: &str, args: Value)
     match (tool.handler)(state.clone(), ctx, args).await? {
         crate::mcp::ToolOutput::Json(v) => Ok(v),
         crate::mcp::ToolOutput::Text(t) => panic!("text answer {t}"),
+        crate::mcp::ToolOutput::Images { text, .. } => panic!("text answer {text}"),
+    }
+}
+
+/// A session gives the session it starts an avatar where sessions may take one themselves (the
+/// default): the new one is told with its prompt and has the tools allowed. Where the user decides
+/// who has one, where avatars are switched off, where the user turned the starter's own avatar
+/// off, and for a value that is neither true nor false, nothing is started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_starts_a_session_with_an_avatar_where_sessions_may_have_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    let log = dir.path().join("claude.log");
+    let (state, _addr, pid) = served_with(dir.path(), &fake, |cfg| {
+        let home = dir.path().join("claude-home");
+        std::fs::create_dir_all(&home).unwrap();
+        cfg.agents.providers.insert(
+            "claude".into(),
+            crate::config::global::ProviderConfig {
+                env: [("CLAUDE_CONFIG_DIR".to_string(), home.display().to_string()), ("FAKE_CLAUDE_LOG".to_string(), log.display().to_string())].into(),
+                ..Default::default()
+            },
+        );
+    })
+    .await;
+    crate::avatar::start(&state).await;
+    let t = &state.terminals;
+    assert_eq!(crate::avatar::sessions(&state), crate::avatar::Sessions::Any, "the default");
+    let parent = t.spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), ..Default::default() }).await.unwrap();
+    let idle = |id: String| {
+        let state = state.clone();
+        async move { wait_long("the session to start", 10, || agent_of(&state, &id).state == AgentState::Idle).await }
+    };
+    idle(parent.id.clone()).await;
+    let count = || t.list().iter().filter(|i| i.agent.is_some()).count();
+
+    // With the option: its tab says so, its first prompt carries the brief, and the tools are allowed.
+    let with = start_session(&state, &parent.id, &pid, json!({ "prompt": "say hello", "name": "with one", "avatar": true })).await.unwrap();
+    let with_id = with["terminalId"].as_str().unwrap().to_string();
+    idle(with_id.clone()).await;
+    assert_eq!(t.info(&with_id).unwrap().meta["avatar"], json!(true));
+    wait_long("its avatar", 10, || crate::avatar::active(&state, &with_id)).await;
+    let allowed = format!("ALLOW {}", crate::avatar::PREALLOWED.join(" "));
+    let lines = std::fs::read_to_string(&log).unwrap();
+    assert!(lines.lines().any(|l| l == allowed), "{lines}");
+    assert!(lines.lines().any(|l| l.starts_with("ARGS ") && l.contains("say hello") && l.contains("[Workbench avatar]")), "{lines}");
+
+    // Without it nothing changes: no avatar, no brief, nothing allowed.
+    let plain = start_session(&state, &parent.id, &pid, json!({ "prompt": "plain work", "avatar": false })).await.unwrap();
+    let plain_id = plain["terminalId"].as_str().unwrap().to_string();
+    idle(plain_id.clone()).await;
+    assert!(t.info(&plain_id).unwrap().meta.get("avatar").is_none() && !crate::avatar::active(&state, &plain_id));
+    let lines = std::fs::read_to_string(&log).unwrap();
+    assert!(lines.lines().any(|l| l.starts_with("ARGS ") && l.contains("plain work") && !l.contains("[Workbench avatar]")), "{lines}");
+
+    // A value that is neither true nor false is refused, and nothing is started.
+    let before = count();
+    for odd in [json!("true"), json!(1), json!({})] {
+        let e = start_session(&state, &parent.id, &pid, json!({ "prompt": "say hello", "avatar": odd })).await.unwrap_err();
+        assert_eq!((e.status, e.message.as_str()), (axum::http::StatusCode::BAD_REQUEST, "avatar is true or false"));
+    }
+    assert_eq!(count(), before);
+
+    // A session whose own avatar the user turned off gives none to a session it starts; once it is on again, it does.
+    let before = count();
+    let now = crate::util::now_ms();
+    crate::avatar::device::turn_on(&state, &parent.id, now).unwrap();
+    crate::avatar::device::turn_off(&state, &parent.id, now).unwrap();
+    let e = start_session(&state, &parent.id, &pid, json!({ "prompt": "say hello", "avatar": true })).await.unwrap_err();
+    assert_eq!((e.status, e.message.as_str()), (axum::http::StatusCode::CONFLICT, crate::avatar::session::NOT_WITH_YOURS_OFF));
+    assert_eq!(count(), before);
+    start_session(&state, &parent.id, &pid, json!({ "prompt": "plain, from one whose avatar is off" })).await.unwrap();
+    crate::avatar::device::turn_on(&state, &parent.id, now + 1).unwrap();
+    start_session(&state, &parent.id, &pid, json!({ "prompt": "say hello", "avatar": true })).await.unwrap();
+    assert_eq!(count(), before + 2);
+
+    // Where the user decides who has an avatar, a session does not decide for the user.
+    let before = count();
+    state.config.write().avatar.sessions = Some(crate::avatar::Sessions::Asked);
+    let e = start_session(&state, &parent.id, &pid, json!({ "prompt": "say hello", "avatar": true })).await.unwrap_err();
+    assert_eq!((e.status, e.message.as_str()), (axum::http::StatusCode::CONFLICT, crate::avatar::session::NOT_YOURS_TO_GIVE));
+    // Switched off: said, as for a session the user starts with the option.
+    state.config.write().avatar = crate::avatar::AvatarConfig { enabled: Some(false), sessions: None };
+    let e = start_session(&state, &parent.id, &pid, json!({ "prompt": "say hello", "avatar": true })).await.unwrap_err();
+    assert_eq!(e.message, crate::avatar::session::SWITCHED_OFF);
+    assert_eq!(count(), before, "neither refusal started a session");
+    // And without the option both settings start a session as before.
+    start_session(&state, &parent.id, &pid, json!({ "prompt": "plain again" })).await.unwrap();
+    assert_eq!(count(), before + 1);
+}
+
+/// While 64 open sessions have an avatar, a start with the Avatar option (the composer, REST,
+/// `workbench_start_session`) starts the session without one: no brief in its first prompt, no
+/// option on its tab or launch, no tools allowed unasked, and the answer says why. Sessions in
+/// History take no room: once one is closed, a start has its avatar again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_start_with_the_option_and_no_room_starts_without_it_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    let log = dir.path().join("claude.log");
+    let (state, addr, pid) = served_with(dir.path(), &fake, |cfg| {
+        let home = dir.path().join("claude-home");
+        std::fs::create_dir_all(&home).unwrap();
+        cfg.agents.providers.insert(
+            "claude".into(),
+            crate::config::global::ProviderConfig {
+                env: [("CLAUDE_CONFIG_DIR".to_string(), home.display().to_string()), ("FAKE_CLAUDE_LOG".to_string(), log.display().to_string())].into(),
+                ..Default::default()
+            },
+        );
+    })
+    .await;
+    crate::avatar::start(&state).await;
+    let t = &state.terminals;
+    let now = crate::util::now_ms;
+    let mark = crate::avatar::BRIEF_MARK;
+    let why = crate::avatar::no_room_at_start();
+    // 64 open sessions have an avatar (stand-ins: running, idle, no process).
+    let holders: Vec<String> = (0..crate::avatar::store::MAX_AVATARS)
+        .map(|_| {
+            let id = t.insert_test_agent(Some(&pid), json!({})).id;
+            crate::avatar::device::turn_on(&state, &id, now()).unwrap();
+            id
+        })
+        .collect();
+    let ask = |prompt: &str| super::agent::AgentRequest { project_id: pid.clone(), prompt: Some(prompt.into()), avatar: Some(true), ..Default::default() };
+
+    // The composer's start: told nothing of an avatar, and the answer says why. Only the answer:
+    // the terminal's meta does not keep it.
+    let a = t.spawn_agent(&state, ask("fix the parser")).await.unwrap();
+    assert_eq!((&a.meta["noAvatar"], a.meta.get("avatar")), (&json!(why), None));
+    wait_long("the start", 10, || log_lines(&log, "ARGS ").len() == 1).await;
+    let args = log_lines(&log, "ARGS ");
+    assert!(args[0].ends_with(" -- fix the parser") && !args[0].contains(mark), "{args:?}");
+    assert_eq!(log_lines(&log, "ALLOW"), ["ALLOW <unset>"]);
+    assert!(!t.get(&a.id).unwrap().rec.lock().launch.as_ref().unwrap().avatar);
+    assert!(t.info(&a.id).unwrap().meta.get("noAvatar").is_none());
+    wait_long("the session to start", 10, || agent_of(&state, &a.id).state == AgentState::Idle).await;
+    assert!(crate::avatar::store::get(&state, &a.id).is_err(), "no avatar was made for it");
+
+    // Over REST, as the web composer starts one.
+    let master = state.auth.master_token().to_string();
+    let r = reqwest::Client::new().post(format!("http://{addr}/api/agents")).bearer_auth(&master).json(&json!({ "projectId": pid, "prompt": "and this", "avatar": true })).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let b: Value = r.json().await.unwrap();
+    assert_eq!((&b["meta"]["noAvatar"], b["meta"].get("avatar")), (&json!(why), None), "{b}");
+    // By a session, which is told why in the tool's answer.
+    let out = start_session(&state, &a.id, &pid, json!({ "prompt": "say hello", "avatar": true })).await.unwrap();
+    assert_eq!(out["avatar"], json!(why), "{out}");
+    wait_long("the three starts", 10, || log_lines(&log, "ARGS ").len() == 3).await;
+    assert!(log_lines(&log, "ARGS ").iter().all(|l| !l.contains(mark)), "{:?}", log_lines(&log, "ARGS "));
+    assert_eq!(log_lines(&log, "ALLOW"), ["ALLOW <unset>"; 3]);
+
+    // One of the 64 ends and its tab is closed: it is in History, and takes no room.
+    // (A status call of a session without an avatar says whether there is room; it has a rate.)
+    let probe = t.insert_test_agent(Some(&pid), json!({})).id;
+    let room = || {
+        let pass = crate::avatar::session::gate(&state, &probe, crate::avatar::session::Call::Status, crate::avatar::Via::Tools, now());
+        pass.ok().and_then(|pass| crate::avatar::session::status(&state, &pass, Default::default()).ok()).is_some_and(|s| s.allowed)
+    };
+    assert!(!room());
+    t.update(&t.get(&holders[0]).unwrap(), |r| {
+        r.info.status = super::TerminalStatus::Exited;
+        r.info.open = false;
+        true
+    });
+    for tries in 0.. {
+        if room() {
+            break;
+        }
+        assert!(tries < 25, "the session in History still takes room");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    let c = t.spawn_agent(&state, ask("with one now")).await.unwrap();
+    assert_eq!((c.meta.get("noAvatar"), &c.meta["avatar"]), (None, &json!(true)));
+    wait_long("the fourth start", 10, || log_lines(&log, "ARGS ").len() == 4).await;
+    assert!(log_lines(&log, "ARGS ")[3].contains(mark), "{:?}", log_lines(&log, "ARGS "));
+    assert_eq!(log_lines(&log, "ALLOW")[3], format!("ALLOW {}", crate::avatar::PREALLOWED.join(" ")));
+    wait_long("its avatar", 10, || crate::avatar::store::get(&state, &c.id).is_ok_and(|a| a.on)).await;
+    for id in [a.id.as_str(), b["id"].as_str().unwrap(), out["terminalId"].as_str().unwrap(), c.id.as_str()] {
+        let _ = t.kill(id).await;
     }
 }
 

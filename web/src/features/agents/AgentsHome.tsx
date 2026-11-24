@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import { useProjects, useTerminals } from '@/api/queries'
 import type { TerminalInfo } from '@/api/types'
+import { useAvatarOn } from '@/shell/avatarBridge'
 import { useUi } from '@/state/store'
 import { Badge, Button, Checkbox, EmptyState, ErrorBox, IconButton, Input, Loading, Section, showMenu, showMenuAt, Spinner, Tabs, TimeAgo, formatBytes } from '@/ui'
 import { copyText, killTerminal, openRemote, restartTerminal, terminalMenu } from './actions'
@@ -29,7 +30,7 @@ import { openTerminal, startAgent, useAgentDefaults, useAgentHistory, useExterna
 import { pendingOf } from './lib/permission'
 import { dialogSeenOnScreen, displayLabel, historyProviders, providerKindOf, reportsAnswers, resumes, SEEN_ON_SCREEN } from './lib/providers'
 import { newShell } from './commands'
-import { agentMeta, agentSessions, artifactPages, colorCss, counts, isRunning, lastActivity, resumeNote, sortSessions, tone, ultracodeNote } from './lib/sessions'
+import { agentMeta, agentSessions, artifactPages, avatarBadge, colorCss, counts, isRunning, lastActivity, resumeNote, sortSessions, tone, ultracodeNote } from './lib/sessions'
 import { NewSessionForm } from './NewSession'
 import { ArtifactPageLink, ColorBar, ContainerBadge, ProviderBadge, ProviderIcon, RemoteLink, StateChip, StateDot } from './parts'
 import { PermissionRequest } from './Permission'
@@ -55,6 +56,8 @@ export function SessionCard({ t, showProject }: { t: TerminalInfo; showProject?:
   const meta = agentMeta(a)
   const resume = running ? resumeNote(a) : null
   const ultra = ultracodeNote(t)
+  // The badge follows the avatar's live record: given later it appears, turned off it goes.
+  const avatar = avatarBadge(t, useAvatarOn(t.id))
   return (
     <div
       className={`wb-ag-card ${tone(t)}`}
@@ -101,6 +104,11 @@ export function SessionCard({ t, showProject }: { t: TerminalInfo; showProject?:
         {ultra && (
           <Badge tone="accent" title={ultra.title}>
             {ultra.label}
+          </Badge>
+        )}
+        {avatar && (
+          <Badge tone="accent" title={avatar.title}>
+            {avatar.label}
           </Badge>
         )}
         {resume && (

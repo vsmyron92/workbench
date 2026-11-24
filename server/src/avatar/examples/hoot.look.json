@@ -1,0 +1,871 @@
+{
+  "viewBox": [
+    0,
+    0,
+    200,
+    200
+  ],
+  "nodes": [
+    {
+      "tag": "defs",
+      "children": [
+        {
+          "tag": "radialGradient",
+          "id": "plume",
+          "attrs": {
+            "cx": 0.4,
+            "cy": 0.35,
+            "r": 0.75
+          },
+          "box": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "children": [
+            {
+              "tag": "stop",
+              "attrs": {
+                "offset": 0,
+                "stopColor": "#b98257"
+              }
+            },
+            {
+              "tag": "stop",
+              "attrs": {
+                "offset": 1,
+                "stopColor": "#7a4a2e"
+              }
+            }
+          ]
+        },
+        {
+          "tag": "mask",
+          "id": "bellyMask",
+          "box": [
+            73,
+            111,
+            54,
+            58
+          ],
+          "children": [
+            {
+              "tag": "ellipse",
+              "attrs": {
+                "cx": 100,
+                "cy": 140,
+                "fill": "#ffffff",
+                "rx": 27,
+                "ry": 29
+              }
+            }
+          ]
+        },
+        {
+          "tag": "filter",
+          "id": "soft",
+          "attrs": {
+            "height": 1.5,
+            "width": 1.4,
+            "x": -0.2,
+            "y": -0.2
+          },
+          "box": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "children": [
+            {
+              "tag": "feGaussianBlur",
+              "attrs": {
+                "in": "SourceAlpha",
+                "result": "blur",
+                "stdDeviation": "3"
+              }
+            },
+            {
+              "tag": "feOffset",
+              "attrs": {
+                "dx": 0,
+                "dy": 4,
+                "in": "blur",
+                "result": "drop"
+              }
+            },
+            {
+              "tag": "feFlood",
+              "attrs": {
+                "floodColor": "#3b2416",
+                "floodOpacity": 0.35,
+                "result": "tint"
+              }
+            },
+            {
+              "tag": "feComposite",
+              "attrs": {
+                "in": "tint",
+                "in2": "drop",
+                "operator": "in",
+                "result": "shade"
+              }
+            },
+            {
+              "tag": "feMerge",
+              "children": [
+                {
+                  "tag": "feMergeNode",
+                  "attrs": {
+                    "in": "shade"
+                  }
+                },
+                {
+                  "tag": "feMergeNode",
+                  "attrs": {
+                    "in": "SourceGraphic"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "tag": "ellipse",
+      "id": "shadow",
+      "attrs": {
+        "cx": 100,
+        "cy": 188,
+        "fill": "#000000",
+        "opacity": 0.16,
+        "rx": 32,
+        "ry": 5
+      },
+      "box": [
+        68,
+        183,
+        64,
+        10
+      ]
+    },
+    {
+      "tag": "g",
+      "id": "owl",
+      "box": [
+        40,
+        32,
+        120,
+        148
+      ],
+      "children": [
+        {
+          "tag": "path",
+          "id": "wingL",
+          "attrs": {
+            "d": "M 66 104 Q 40 128 50 162 Q 62 150 70 128 Z",
+            "fill": "#6e4228"
+          },
+          "box": [
+            40,
+            104,
+            30,
+            58
+          ]
+        },
+        {
+          "tag": "path",
+          "id": "wingR",
+          "attrs": {
+            "d": "M 134 104 Q 160 128 150 162 Q 138 150 130 128 Z",
+            "fill": "#6e4228"
+          },
+          "box": [
+            130,
+            104,
+            30,
+            58
+          ]
+        },
+        {
+          "tag": "g",
+          "id": "trunk",
+          "attrs": {
+            "filterRef": "soft"
+          },
+          "box": [
+            60,
+            86,
+            80,
+            88
+          ],
+          "children": [
+            {
+              "tag": "ellipse",
+              "attrs": {
+                "cx": 100,
+                "cy": 130,
+                "fillRef": "plume",
+                "rx": 40,
+                "ry": 44
+              }
+            },
+            {
+              "tag": "ellipse",
+              "attrs": {
+                "cx": 100,
+                "cy": 140,
+                "fill": "#f3dcc0",
+                "rx": 27,
+                "ry": 29
+              }
+            },
+            {
+              "tag": "g",
+              "id": "feathers",
+              "attrs": {
+                "fill": "none",
+                "maskRef": "bellyMask",
+                "stroke": "#c8875a",
+                "strokeDasharray": "3 5",
+                "strokeLinecap": "round",
+                "strokeWidth": 2.5
+              },
+              "box": [
+                70,
+                124,
+                60,
+                40
+              ],
+              "children": [
+                {
+                  "tag": "path",
+                  "attrs": {
+                    "d": "M 70 124 Q 100 136 130 124"
+                  }
+                },
+                {
+                  "tag": "path",
+                  "attrs": {
+                    "d": "M 70 138 Q 100 150 130 138"
+                  }
+                },
+                {
+                  "tag": "path",
+                  "attrs": {
+                    "d": "M 70 152 Q 100 164 130 152"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "tag": "g",
+          "id": "feet",
+          "attrs": {
+            "fill": "#f2a33a"
+          },
+          "box": [
+            81,
+            172,
+            38,
+            8
+          ],
+          "children": [
+            {
+              "tag": "ellipse",
+              "attrs": {
+                "cx": 88,
+                "cy": 176,
+                "rx": 7,
+                "ry": 4
+              }
+            },
+            {
+              "tag": "ellipse",
+              "attrs": {
+                "cx": 112,
+                "cy": 176,
+                "rx": 7,
+                "ry": 4
+              }
+            }
+          ]
+        },
+        {
+          "tag": "g",
+          "id": "head",
+          "box": [
+            58,
+            32,
+            84,
+            78
+          ],
+          "children": [
+            {
+              "tag": "path",
+              "id": "tuftL",
+              "attrs": {
+                "d": "M 70 54 L 64 32 L 86 46 Z",
+                "fill": "#6e4228"
+              },
+              "box": [
+                64,
+                32,
+                22,
+                22
+              ]
+            },
+            {
+              "tag": "path",
+              "id": "tuftR",
+              "attrs": {
+                "d": "M 130 54 L 136 32 L 114 46 Z",
+                "fill": "#6e4228"
+              },
+              "box": [
+                114,
+                32,
+                22,
+                22
+              ]
+            },
+            {
+              "tag": "ellipse",
+              "attrs": {
+                "cx": 100,
+                "cy": 76,
+                "fillRef": "plume",
+                "rx": 42,
+                "ry": 34
+              }
+            },
+            {
+              "tag": "g",
+              "id": "eyes",
+              "box": [
+                71,
+                63,
+                58,
+                26
+              ],
+              "children": [
+                {
+                  "tag": "g",
+                  "id": "eyeL",
+                  "box": [
+                    71,
+                    63,
+                    26,
+                    26
+                  ],
+                  "children": [
+                    {
+                      "tag": "circle",
+                      "attrs": {
+                        "cx": 84,
+                        "cy": 76,
+                        "fill": "#fff6d5",
+                        "r": 13,
+                        "stroke": "#3b2416",
+                        "strokeWidth": 2
+                      }
+                    },
+                    {
+                      "tag": "g",
+                      "id": "pupil",
+                      "box": [
+                        78,
+                        71,
+                        12,
+                        12
+                      ],
+                      "children": [
+                        {
+                          "tag": "circle",
+                          "attrs": {
+                            "cx": 84,
+                            "cy": 77,
+                            "fill": "#2a1a10",
+                            "r": 6
+                          }
+                        },
+                        {
+                          "tag": "circle",
+                          "attrs": {
+                            "cx": 86,
+                            "cy": 74,
+                            "fill": "#ffffff",
+                            "r": 2
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "tag": "use",
+                  "id": "eyeR",
+                  "attrs": {
+                    "useRef": "eyeL",
+                    "x": 32
+                  },
+                  "box": [
+                    103,
+                    63,
+                    26,
+                    26
+                  ]
+                }
+              ]
+            },
+            {
+              "tag": "path",
+              "id": "beak",
+              "attrs": {
+                "d": "M 93 90 L 100 102 L 107 90 Z",
+                "fill": "#f2a33a",
+                "stroke": "#b9741f",
+                "strokeLinejoin": "round",
+                "strokeWidth": 1.5
+              },
+              "box": [
+                93,
+                90,
+                14,
+                12
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "pivots": {
+    "beak": [
+      100,
+      90
+    ],
+    "eyes": [
+      100,
+      76
+    ],
+    "head": [
+      100,
+      104
+    ],
+    "owl": [
+      100,
+      182
+    ],
+    "trunk": [
+      100,
+      172
+    ],
+    "tuftL": [
+      72,
+      52
+    ],
+    "tuftR": [
+      128,
+      52
+    ],
+    "wingL": [
+      66,
+      106
+    ],
+    "wingR": [
+      134,
+      106
+    ]
+  },
+  "roles": {
+    "body": "owl",
+    "head": "head",
+    "eyes": "eyes",
+    "pupils": "pupil",
+    "armL": "wingL",
+    "armR": "wingR"
+  },
+  "animations": {
+    "alarm": {
+      "duration": 1,
+      "loop": true,
+      "tracks": [
+        {
+          "target": "tuftL",
+          "prop": "rotate",
+          "values": [
+            0,
+            -12,
+            0
+          ],
+          "ease": "inOut"
+        },
+        {
+          "target": "tuftR",
+          "prop": "rotate",
+          "values": [
+            0,
+            12,
+            0
+          ],
+          "ease": "inOut"
+        },
+        {
+          "target": "feathers",
+          "prop": "strokeDashoffset",
+          "values": [
+            0,
+            -16
+          ]
+        }
+      ]
+    },
+    "hoot": {
+      "duration": 1.2,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        {
+          "target": "head",
+          "prop": "translateY",
+          "values": [
+            0,
+            -2,
+            0
+          ]
+        },
+        {
+          "target": "owl",
+          "prop": "scaleY",
+          "values": [
+            1,
+            1.03,
+            1
+          ]
+        }
+      ]
+    },
+    "hop": {
+      "duration": 0.9,
+      "ease": [
+        [
+          0.2,
+          0.8,
+          0.4,
+          1
+        ],
+        "outBounce"
+      ],
+      "tracks": [
+        {
+          "target": "owl",
+          "prop": "translateY",
+          "values": [
+            0,
+            -16,
+            0
+          ]
+        }
+      ]
+    },
+    "ponder": {
+      "duration": 3,
+      "loop": true,
+      "times": [
+        0,
+        0.3,
+        0.7,
+        1
+      ],
+      "ease": "inOut",
+      "tracks": [
+        {
+          "target": "head",
+          "prop": "rotate",
+          "values": [
+            0,
+            9,
+            9,
+            0
+          ]
+        },
+        {
+          "target": "tuftL",
+          "prop": "rotate",
+          "values": [
+            0,
+            -6,
+            -6,
+            0
+          ]
+        }
+      ]
+    },
+    "roost": {
+      "duration": 4,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        {
+          "target": "eyes",
+          "prop": "scaleY",
+          "values": [
+            0.15,
+            0.15
+          ]
+        },
+        {
+          "target": "owl",
+          "prop": "translateY",
+          "values": [
+            3,
+            5,
+            3
+          ]
+        },
+        {
+          "target": "head",
+          "prop": "rotate",
+          "values": [
+            6,
+            6
+          ]
+        }
+      ]
+    },
+    "ruffle": {
+      "duration": 1.2,
+      "ease": "inOutBack",
+      "tracks": [
+        {
+          "target": "wingL",
+          "prop": "rotate",
+          "values": [
+            0,
+            22,
+            -8,
+            0
+          ]
+        },
+        {
+          "target": "wingR",
+          "prop": "rotate",
+          "values": [
+            0,
+            -22,
+            8,
+            0
+          ]
+        }
+      ]
+    },
+    "sway": {
+      "duration": 4,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        {
+          "target": "trunk",
+          "prop": "skewX",
+          "values": [
+            0,
+            2.5,
+            0,
+            -2.5,
+            0
+          ]
+        },
+        {
+          "target": "head",
+          "prop": "rotate",
+          "values": [
+            0,
+            -2,
+            0,
+            2,
+            0
+          ],
+          "phase": 0.25
+        }
+      ]
+    },
+    "walk": {
+      "duration": 0.6,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        {
+          "target": "owl",
+          "prop": "rotate",
+          "values": [
+            -4,
+            4,
+            -4
+          ]
+        },
+        {
+          "target": "feet",
+          "prop": "translateY",
+          "values": [
+            0,
+            -2,
+            0,
+            -2,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "states": {
+    "idle": [
+      "sway",
+      "blink"
+    ],
+    "working": [
+      "sway",
+      "ponder",
+      "blink"
+    ],
+    "speaking": [
+      "sway",
+      "hoot",
+      "blink"
+    ],
+    "listening": [
+      "sway",
+      "listen",
+      "blink"
+    ],
+    "waiting": [
+      "sway",
+      "blink"
+    ],
+    "attention": [
+      "alarm",
+      "blink"
+    ],
+    "error": [
+      "sway",
+      "shake"
+    ],
+    "done": [
+      "hop",
+      "ruffle",
+      "blink"
+    ],
+    "sleeping": [
+      "roost"
+    ]
+  },
+  "mouth": [
+    {
+      "target": "beak",
+      "open": "M 93 90 L 100 108 L 107 90 Z"
+    }
+  ],
+  "gaze": 3,
+  "parents": {
+    "head": "trunk",
+    "wingL": "trunk",
+    "wingR": "trunk"
+  },
+  "drives": [
+    {
+      "input": "lookX",
+      "target": "head",
+      "prop": "rotate",
+      "values": [
+        -10,
+        0,
+        10
+      ],
+      "ease": "inOut"
+    },
+    {
+      "input": "turn",
+      "target": "wingL",
+      "prop": "opacity",
+      "values": [
+        1,
+        1,
+        0.35
+      ],
+      "at": [
+        0,
+        0.6,
+        1
+      ]
+    },
+    {
+      "input": "turn",
+      "target": "wingR",
+      "prop": "opacity",
+      "values": [
+        0.35,
+        1,
+        1
+      ],
+      "at": [
+        0,
+        0.4,
+        1
+      ]
+    },
+    {
+      "input": "turn",
+      "target": "beak",
+      "prop": "translateX",
+      "values": [
+        -5,
+        0,
+        5
+      ]
+    },
+    {
+      "input": "pace",
+      "target": "wingL",
+      "prop": "rotate",
+      "values": [
+        0,
+        14
+      ],
+      "ease": [
+        0.4,
+        0,
+        0.2,
+        1
+      ]
+    },
+    {
+      "input": "pace",
+      "target": "wingR",
+      "prop": "rotate",
+      "values": [
+        0,
+        -14
+      ],
+      "ease": [
+        0.4,
+        0,
+        0.2,
+        1
+      ]
+    },
+    {
+      "input": "held",
+      "target": "eyes",
+      "prop": "scaleY",
+      "values": [
+        1,
+        1.2
+      ],
+      "ease": "outBack"
+    }
+  ]
+}

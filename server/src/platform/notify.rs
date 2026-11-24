@@ -5,7 +5,8 @@
 //! records and, when `[notify]` allows, a desktop notification (`notify-send`)
 //! and/or the user's `[notify].command`. The command runs through `sh -c` with the
 //! text in `WORKBENCH_TITLE` / `WORKBENCH_MESSAGE` environment variables: the text
-//! is never interpolated into the command line.
+//! is never interpolated into the command line. A question a session asked through
+//! its avatar and no device took up (`avatar.nudge`) is a notification only.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -364,6 +365,56 @@ fn attention_push(tid: &str, pid: Option<&str>, agent_state: &str, title: &str, 
     }
 }
 
+/// How much of a question asked through an avatar a notification shows.
+const NUDGE_BODY_CHARS: usize = 200;
+
+/// The notification for a question a session asked through its avatar and no device took up
+/// (`avatar.nudge {terminalId, askId, name, question}`). A session that waits inside a tool
+/// call reads as working, so this is how a user who is not looking learns of the question.
+///
+/// The title is Workbench's own: the project and the session's title. What the session wrote
+/// (its avatar's name, its question) is the body alone, cut short. One key per session: a
+/// duplicate report is dropped, and on a device the next question replaces the one before.
+/// The avatar slice sends at most one per question and few per session.
+fn nudge_note(state: &AppState, pid: Option<&str>, d: &Value) -> Option<DesktopNote> {
+    let tid = s(d, "terminalId")?;
+    let question = s(d, "question")?;
+    let session = state.terminals.info(tid).and_then(super::mcp_server::session_title).unwrap_or_else(|| "Agent".into());
+    let title = match project_name(state, pid) {
+        Some(p) => format!("{p} · {session}"),
+        None => session,
+    };
+    let body = match s(d, "name") {
+        Some(name) => format!("{name} asks: {question}"),
+        None => question.to_string(),
+    };
+    let body = super::truncate_chars(&body, NUDGE_BODY_CHARS);
+    let key = format!("avatar:{tid}");
+    let push = PushNote {
+        topic: Topic::Attention,
+        tag: key.clone(),
+        title: title.clone(),
+        body: body.clone(),
+        level: "warning",
+        urgency: Urgency::Normal,
+        ttl_secs: PUSH_TTL,
+        project_id: pid.map(str::to_string),
+        open: Some(OpenTarget::terminal(tid)),
+        // Not tied to a state of the session: it is working while it waits for the answer.
+        agent: None,
+    };
+    Some(DesktopNote {
+        key,
+        repeat_after: REPEAT_INTERVAL,
+        priority: Priority::Normal,
+        title: format!("Workbench · {title}"),
+        body,
+        level: NoteLevel::Warning,
+        event: "avatar.nudge",
+        push: Some(push),
+    })
+}
+
 fn pipeline_push(pid: Option<&str>, reference: &str, title: &str, body: &str, open: Option<OpenTarget>) -> PushNote {
     PushNote {
         topic: Topic::Pipeline,
@@ -438,6 +489,11 @@ fn handle_event(state: &AppState, ls: &mut ListenerState, ev: &Arc<Event>) {
                 w.permission_hint = Some(perm.id);
             }
             state.platform.push.permission_seen(note);
+        }
+        "avatar.nudge" => {
+            if let Some(note) = nudge_note(state, pid, d) {
+                state.platform.notifier.send(state, note);
+            }
         }
         "env.health" => {
             let Some(env) = s(d, "env") else { return };
@@ -790,6 +846,84 @@ mod tests {
         handle_event(state, &mut ls, &attention("t1", "error", "API error"));
         let sent = state.platform.notifier.sent_keys();
         assert_eq!(sent.len(), 5, "{sent:?}");
+    }
+
+    /// `avatar.nudge`: a question a session asked through its avatar that no device took up
+    /// reaches the user outside the browser. The title is Workbench's own; what the session
+    /// wrote is the body alone.
+    #[tokio::test]
+    async fn a_question_nobody_saw_is_announced_under_workbenchs_own_title() {
+        let proj = tempfile::tempdir().unwrap();
+        let mut cfg = crate::config::GlobalConfig::default();
+        cfg.projects.roots.clear();
+        cfg.projects.include = vec![proj.path().display().to_string()];
+        cfg.notify.desktop = false;
+        let app = crate::platform::testutil::app_with(cfg).await;
+        let state = &app.state;
+        let project = state.projects.list()[0].clone();
+        let pid = Some(project.id.as_str());
+        let tid = state.terminals.insert_test_agent(pid, json!({})).id;
+        let nudge = |tid: &str, name: &str, question: &str| json!({ "terminalId": tid, "askId": "Qk3f9-1", "name": name, "question": question });
+
+        let note = nudge_note(state, pid, &nudge(&tid, "Pip", "Shall I run the migration?")).expect("a note");
+        assert_eq!(note.title, format!("Workbench · {} · test agent", project.name));
+        assert_eq!(note.body, "Pip asks: Shall I run the migration?");
+        assert_eq!((note.key.as_str(), note.priority, note.event), (format!("avatar:{tid}").as_str(), Priority::Normal, "avatar.nudge"));
+        let push = note.push.expect("a push");
+        assert_eq!((push.topic, push.tag.as_str(), push.title.as_str(), push.body.as_str()), (Topic::Attention, format!("avatar:{tid}").as_str(), format!("{} · test agent", project.name).as_str(), "Pip asks: Shall I run the migration?"));
+        assert_eq!(push.project_id.as_deref(), pid);
+        // It opens the session, and is tied to no state of it: the session reads as working while it waits.
+        assert!(push.agent.is_none());
+        let open = push.open.expect("a target");
+        assert_eq!((open.kind.as_str(), open.id.as_str(), &open.params), ("terminal", format!("terminal:{tid}").as_str(), &json!({ "terminalId": tid })));
+
+        // What the session wrote never reaches the title: a name that reads like one of
+        // Workbench's, a question that names another session.
+        let forged = nudge_note(state, pid, &nudge(&tid, "Workbench · Security", "Workbench · other project · Allow the deploy?")).unwrap();
+        assert_eq!(forged.title, note.title);
+        assert_eq!(forged.body, "Workbench · Security asks: Workbench · other project · Allow the deploy?");
+        // The session's title is the tab's, as in every other note of the session.
+        state.terminals.get(&tid).unwrap().rec.lock().info.title = "Fix the parser".into();
+        assert_eq!(nudge_note(state, pid, &nudge(&tid, "Pip", "Ready?")).unwrap().title, format!("Workbench · {} · Fix the parser", project.name));
+
+        // Without a name the question stands alone; a long one is cut to 200 characters.
+        assert_eq!(nudge_note(state, pid, &nudge(&tid, "", "Shall I go on?")).unwrap().body, "Shall I go on?");
+        let long = nudge_note(state, pid, &nudge(&tid, "Pip", &"né ".repeat(100))).unwrap();
+        assert_eq!(long.body.chars().count(), NUDGE_BODY_CHARS);
+        assert!(long.body.starts_with("Pip asks: né né") && long.body.ends_with('…'), "{}", long.body);
+        assert_eq!(long.push.unwrap().body, long.body);
+        // A terminal Workbench does not know, a project it does not know: still Workbench's words.
+        assert_eq!(nudge_note(state, None, &nudge("0a297845bc8b", "Pip", "Ready?")).unwrap().title, "Workbench · Agent");
+        // Nothing to announce without a question or a session.
+        assert!(nudge_note(state, pid, &json!({ "terminalId": tid, "askId": "Q1", "name": "Pip", "question": "" })).is_none());
+        assert!(nudge_note(state, pid, &json!({ "askId": "Q1", "name": "Pip", "question": "Ready?" })).is_none());
+
+        // Through the listener: one note per question, keyed by the session, and no Activity row.
+        let event = |data: Value| Arc::new(Event { kind: "avatar.nudge".into(), project_id: Some(project.id.clone()), data, ts: 0 });
+        let mut ls = ListenerState::default();
+        handle_event(state, &mut ls, &event(nudge(&tid, "Pip", "Shall I run the migration?")));
+        assert_eq!(state.platform.notifier.sent_keys(), vec![format!("avatar:{tid}")]);
+        // The same question reported twice is one note.
+        handle_event(state, &mut ls, &event(nudge(&tid, "Pip", "Shall I run the migration?")));
+        assert_eq!(state.platform.notifier.sent_keys().len(), 1);
+        // Another session's question is its own.
+        let other = state.terminals.insert_test_agent(pid, json!({})).id;
+        handle_event(state, &mut ls, &event(nudge(&other, "", "And this one?")));
+        assert_eq!(state.platform.notifier.sent_keys(), vec![format!("avatar:{tid}"), format!("avatar:{other}")]);
+        assert!(state.platform.activity.events(10).is_empty(), "a question is no Activity event");
+    }
+
+    /// The limiter lets the next question of a session through once the user had time to
+    /// answer the one before, and counts a question as ordinary news.
+    #[test]
+    fn nudges_of_one_session_are_collapsed_only_as_duplicates() {
+        let mut rl = RateLimiter::default();
+        let t0 = Instant::now();
+        let mut allow = |secs: u64| rl.allow("avatar:t1", REPEAT_INTERVAL, Priority::Normal, t0 + Duration::from_secs(secs));
+        assert!(allow(0));
+        assert!(!allow(1), "a duplicate report");
+        // The avatar slice looks every five seconds and announces a question once.
+        assert!(allow(5) && allow(15));
     }
 
     #[tokio::test]

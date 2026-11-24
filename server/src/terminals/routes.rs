@@ -667,12 +667,20 @@ async fn defaults(State(state): State<AppState>, Query(q): Query<DefaultsQuery>)
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?
     };
+    // Settings can switch avatars off (`[avatar] enabled`).
+    let avatars = crate::avatar::enabled(&state);
     let described: Vec<Value> = list
         .iter()
         .zip(found.iter())
         .map(|(p, path)| {
             let mut v = providers::describe(p, path.as_ref());
             v["usage"] = state.terminals.usage.describe(&p.id, util::now_ms());
+            // A session of any CLI can be started with a live avatar while avatars are on. How it then
+            // drives it (`tools`: Workbench's MCP tools; `command`: a command it runs, which its CLI may
+            // ask about) is the avatar slice's one answer, on the host and in a dev container.
+            v["supports"]["avatar"] = json!(avatars);
+            v["avatarVia"] = json!(crate::avatar::via_for(p.kind, false));
+            v["avatarViaContainer"] = json!(crate::avatar::via_for(p.kind, true));
             if p.kind == providers::ProviderKind::Claude {
                 // Project [agent] settings are Claude Code settings.
                 let d = &mut v["defaults"];

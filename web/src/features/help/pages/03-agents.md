@@ -14,6 +14,8 @@ Selected code in the editor can be sent to an agent with **Ctrl+Shift+A** (*Ask 
 
 **Speak the prompt.** The microphone beside **Start session** takes the task by voice: click it, say what you want, and the words appear in the prompt at the caret; click it again to stop. Nothing starts until you press **Start session**, so a misheard word is fixed first, and typing in the prompt stops the listening. The recognition is your browser's (Chrome, Edge and Safari have it, Firefox does not): the audio goes to its speech service, not to Workbench. It needs Workbench on `localhost` or over HTTPS ([Remote access](remote-access)); on plain HTTP the button tells you so.
 
+**Avatar.** Tick **Avatar** among the options and the session gets a live avatar: a small animated character that it draws itself and that walks about the workspace window, says the short version of its work aloud or as captions, and asks you questions you answer by click, typing or voice. A running session can be given one with *Avatar: Give This Session an Avatar* (**Ctrl+K**). By default a session may also take one itself; **Settings › Avatar** decides. Its tab and card then show an **Avatar** badge. See [Avatars](avatar).
+
 ## Permission requests
 
 When Claude Code asks for permission, Workbench shows the request on the session's card, on its tab, in a toast, and on the phone's Agents tab. Choose:

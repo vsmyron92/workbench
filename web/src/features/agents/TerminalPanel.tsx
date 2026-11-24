@@ -7,13 +7,14 @@ import { AlertTriangle, CircleStop, MoreHorizontal, OctagonX, Palette, Pencil, P
 import { useTerminals } from '@/api/queries'
 import type { TerminalInfo } from '@/api/types'
 import { showToolWindow } from '@/shell/actions'
+import { useAvatarOn } from '@/shell/avatarBridge'
 import type { PanelProps } from '@/shell/types'
 import { Button, EmptyState, IconButton, Loading, showMenuAt, TimeAgo } from '@/ui'
 import { closeTerminal, colorMenu, interrupt, killTerminal, ownerHint, renameTerminal, restartTerminal, terminalMenu } from './actions'
 import { openTerminal, terminalsApi } from './api'
 import { pendingOf } from './lib/permission'
 import { dialogSeenOnScreen, resumes, SEEN_ON_SCREEN } from './lib/providers'
-import { agentMeta, colorCss, isRunning, lingering, restartMode, resumeNote, ultracodeNote } from './lib/sessions'
+import { agentMeta, avatarBadge, colorCss, isRunning, lingering, restartMode, resumeNote, ultracodeNote } from './lib/sessions'
 import { ArtifactPageLink, ContainerBadge, ProviderBadge, RemoteLink, StateChip, StateDot } from './parts'
 import { PermissionActions, PermissionDetail, PermissionRule, PermissionSummary } from './Permission'
 import { dismissPermissionToasts } from './permissionToasts'
@@ -111,6 +112,8 @@ function AgentHeader({ t, view }: { t: TerminalInfo; view: React.RefObject<Termi
   const meta = agentMeta(a)
   const resume = running ? resumeNote(a) : null
   const ultra = ultracodeNote(t)
+  // The badge follows the avatar's live record: given later it appears, turned off it goes.
+  const avatar = avatarBadge(t, useAvatarOn(t.id))
   const color = colorCss(t.color)
   return (
     <div className="wb-ag-header" style={color ? { boxShadow: `inset 3px 0 0 ${color}` } : undefined}>
@@ -129,6 +132,11 @@ function AgentHeader({ t, view }: { t: TerminalInfo; view: React.RefObject<Termi
       {ultra && (
         <span className="wb-badge accent" title={ultra.title}>
           {ultra.label}
+        </span>
+      )}
+      {avatar && (
+        <span className="wb-badge accent" title={avatar.title}>
+          {avatar.label}
         </span>
       )}
       {a.permissionMode && a.permissionMode !== 'default' && <span className="wb-badge">{a.permissionMode}</span>}

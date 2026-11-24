@@ -1,0 +1,230 @@
+{
+  "viewBox": [
+    0,
+    0,
+    200,
+    200
+  ],
+  "nodes": [
+    {
+      "tag": "defs"
+    },
+    {
+      "tag": "g",
+      "attrs": {
+        "transform": "matrix(0.9 0.1 -0.2 1.05 30 -12)"
+      },
+      "children": [
+        {
+          "tag": "g",
+          "id": "body",
+          "attrs": {
+            "stroke": "#4a6a94",
+            "strokeLinejoin": "round",
+            "strokeWidth": 4
+          },
+          "box": [
+            46,
+            48,
+            92,
+            118
+          ],
+          "children": [
+            {
+              "tag": "g",
+              "attrs": {
+                "strokeLinecap": "round",
+                "strokeWidth": 9
+              },
+              "children": [
+                {
+                  "tag": "g",
+                  "attrs": {
+                    "transform": "translate(74 116) scale(1.4 0.8) translate(-74 -116)"
+                  },
+                  "children": [
+                    {
+                      "tag": "line",
+                      "id": "armL",
+                      "attrs": {
+                        "x1": 74,
+                        "x2": 54,
+                        "y1": 116,
+                        "y2": 140
+                      },
+                      "box": [
+                        54,
+                        116,
+                        20,
+                        24
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "tag": "line",
+                  "id": "armR",
+                  "attrs": {
+                    "transform": "skewX(-20)",
+                    "x1": 126,
+                    "x2": 146,
+                    "y1": 116,
+                    "y2": 140
+                  },
+                  "box": [
+                    126,
+                    116,
+                    20,
+                    24
+                  ]
+                }
+              ]
+            },
+            {
+              "tag": "rect",
+              "attrs": {
+                "fill": "#3d85c6",
+                "height": 62,
+                "rx": 16,
+                "width": 56,
+                "x": 72,
+                "y": 104
+              }
+            },
+            {
+              "tag": "g",
+              "id": "head",
+              "box": [
+                62,
+                48,
+                76,
+                58
+              ],
+              "children": [
+                {
+                  "tag": "rect",
+                  "attrs": {
+                    "fill": "#f6f1e1",
+                    "height": 58,
+                    "rx": 22,
+                    "width": 76,
+                    "x": 62,
+                    "y": 48
+                  }
+                },
+                {
+                  "tag": "g",
+                  "id": "eyes",
+                  "attrs": {
+                    "strokeWidth": 2
+                  },
+                  "box": [
+                    75,
+                    65,
+                    50,
+                    18
+                  ],
+                  "children": [
+                    {
+                      "tag": "circle",
+                      "attrs": {
+                        "cx": 84,
+                        "cy": 74,
+                        "fill": "#ffffff",
+                        "r": 9
+                      }
+                    },
+                    {
+                      "tag": "circle",
+                      "attrs": {
+                        "cx": 116,
+                        "cy": 74,
+                        "fill": "#ffffff",
+                        "r": 9
+                      }
+                    },
+                    {
+                      "tag": "g",
+                      "id": "pupils",
+                      "attrs": {
+                        "fill": "#274060"
+                      },
+                      "box": [
+                        80,
+                        71,
+                        40,
+                        8
+                      ],
+                      "children": [
+                        {
+                          "tag": "circle",
+                          "attrs": {
+                            "cx": 84,
+                            "cy": 75,
+                            "r": 4
+                          }
+                        },
+                        {
+                          "tag": "circle",
+                          "attrs": {
+                            "cx": 116,
+                            "cy": 75,
+                            "r": 4
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "tag": "path",
+                  "id": "mouth",
+                  "attrs": {
+                    "d": "M 90 91 Q 100 95 110 91 Q 100 96 90 91 Z",
+                    "fill": "#8a2a3c"
+                  },
+                  "box": [
+                    90,
+                    91,
+                    20,
+                    5
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "pivots": {
+    "armL": [
+      74,
+      116
+    ],
+    "armR": [
+      126,
+      116
+    ],
+    "body": [
+      100,
+      170
+    ],
+    "head": [
+      100,
+      106
+    ]
+  },
+  "roles": {
+    "body": "body",
+    "head": "head",
+    "eyes": "eyes",
+    "pupils": "pupils",
+    "armL": "armL",
+    "armR": "armR"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": [],
+  "gaze": null
+}

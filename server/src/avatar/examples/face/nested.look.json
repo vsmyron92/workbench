@@ -1,0 +1,182 @@
+{
+  "viewBox": [
+    0,
+    0,
+    200,
+    200
+  ],
+  "nodes": [
+    {
+      "tag": "g",
+      "id": "figure",
+      "attrs": {
+        "transform": "matrix(-1 0 0 1 200 0)"
+      },
+      "box": [
+        55,
+        43.858,
+        146.269,
+        136.142
+      ],
+      "children": [
+        {
+          "tag": "g",
+          "id": "tail",
+          "attrs": {
+            "transform": "rotate(20 150 150)"
+          },
+          "box": [
+            150,
+            110,
+            40,
+            40
+          ],
+          "children": [
+            {
+              "tag": "path",
+              "attrs": {
+                "d": "M 150 150 Q 190 150 185 110",
+                "fill": "none",
+                "stroke": "#e8590c",
+                "strokeLinecap": "round",
+                "strokeWidth": 10
+              }
+            }
+          ]
+        },
+        {
+          "tag": "g",
+          "id": "body",
+          "attrs": {
+            "transform": "translate(0 10)"
+          },
+          "box": [
+            55,
+            33.858,
+            109,
+            136.142
+          ],
+          "children": [
+            {
+              "tag": "ellipse",
+              "id": "belly",
+              "attrs": {
+                "cx": 100,
+                "cy": 130,
+                "fill": "#ffa94d",
+                "rx": 45,
+                "ry": 40
+              },
+              "box": [
+                55,
+                90,
+                90,
+                80
+              ]
+            },
+            {
+              "tag": "g",
+              "id": "head",
+              "attrs": {
+                "transform": "rotate(-8 100 70)"
+              },
+              "box": [
+                68,
+                38,
+                64,
+                64
+              ],
+              "children": [
+                {
+                  "tag": "circle",
+                  "attrs": {
+                    "cx": 100,
+                    "cy": 70,
+                    "fill": "#ffc078",
+                    "r": 32
+                  }
+                },
+                {
+                  "tag": "g",
+                  "id": "eyes",
+                  "box": [
+                    84,
+                    62,
+                    32,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "tag": "circle",
+                      "attrs": {
+                        "cx": 88,
+                        "cy": 66,
+                        "fill": "#212529",
+                        "r": 4
+                      }
+                    },
+                    {
+                      "tag": "circle",
+                      "attrs": {
+                        "cx": 112,
+                        "cy": 66,
+                        "fill": "#212529",
+                        "r": 4
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "tag": "circle",
+              "id": "bell",
+              "attrs": {
+                "cx": 138,
+                "cy": 106,
+                "fill": "#fcc419",
+                "r": 6
+              },
+              "box": [
+                132,
+                100,
+                12,
+                12
+              ]
+            },
+            {
+              "tag": "path",
+              "id": "whisker",
+              "attrs": {
+                "d": "M 140 66 L 164 60",
+                "stroke": "#495057",
+                "strokeWidth": 2
+              },
+              "box": [
+                140,
+                60,
+                24,
+                6
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "pivots": {
+    "body": [
+      100,
+      170
+    ]
+  },
+  "roles": {
+    "body": "body",
+    "head": "head",
+    "eyes": "eyes"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": [],
+  "gaze": null
+}

@@ -1,0 +1,10 @@
+{
+  "name": "Dot",
+  "svg": "<svg viewBox='0 0 120 160'><circle id='dot' cx='60' cy='60' r='30' fill='#4dabf7'/><rect id='far' x='0' y='140' width='20' height='20' fill='#f03e3e'/></svg>",
+  "roles": {
+    "body": "dot"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": []
+}

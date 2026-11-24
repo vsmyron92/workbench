@@ -13,7 +13,8 @@
 //!   the body. They may call `server/discover`.
 //!
 //! Tool failures are *results* with `isError: true` (the model can react);
-//! malformed requests are JSON-RPC errors.
+//! malformed requests are JSON-RPC errors. A tool's pictures (`ToolOutput::Images`)
+//! follow its text as `image` content blocks (base64 PNG).
 //!
 //! Auth: an agent token (`WORKBENCH_AGENT_TOKEN`, bound to one terminal) or the
 //! master token as `Authorization: Bearer`. With the master token a caller may
@@ -57,7 +58,7 @@ const MAX_BATCH: usize = 64;
 /// How long clients may cache `tools/list` (modern revision).
 const LIST_TTL_MS: u64 = 300_000;
 
-const INSTRUCTIONS: &str = "Workbench is the developer workspace hosting this Claude Code session. \
+const INSTRUCTIONS: &str = "Workbench is the developer workspace hosting this agent session. \
 Its tools act on the user's open Workbench UI and its integrations: open files, diffs and apps in the UI, \
 notify the user, read CI pipelines and logs, merge requests, Confluence pages and Jira issues, and check \
 environment health and run output. Prefer your own shell for plain file and git work; use these tools for \
@@ -464,7 +465,9 @@ fn tool_json(t: &McpTool) -> Value {
         "description": t.description,
         "inputSchema": schema,
         "annotations": {
-            "readOnlyHint": !t.mutating,
+            // A tool that acts (`McpTool::acts`) is neither: it does something for the user
+            // to see, so it is not read-only, and it changes no remote state.
+            "readOnlyHint": !t.mutating && !t.acts,
             "destructiveHint": t.mutating,
         },
     })
@@ -478,6 +481,49 @@ impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// How much of a text argument is looked at for what to mask before it is summarised. A summary
+/// shows the first characters of a text's first line, which lie well inside this many bytes, so
+/// a page body of megabytes costs no more than a short line.
+const SUMMARY_LOOK: usize = 16 * 1024;
+
+/// The one-line summary of a call's arguments for the Activity view and the `mcp.call` event.
+///
+/// A session's call is summarised with what that session must not show masked, as its permission
+/// details are (`Terminals::redact_text`: what looks like a credential, and the secret values the
+/// session was started with). The texts are masked before the summary cuts them, so a cut never
+/// leaves the beginning of a secret standing, and the summary passes once more as a whole (an
+/// argument's name and its value together can be the credential). A caller that is no session
+/// (the master token without a terminal) has no secrets of a session to mask.
+fn summary_of(state: &AppState, terminal_id: Option<&str>, args: &mut Map<String, Value>) -> String {
+    let Some(tid) = terminal_id else { return summarize_args(args) };
+    let masked = |text: &str| {
+        if text.len() <= SUMMARY_LOOK {
+            return state.terminals.redact_text(tid, text);
+        }
+        let cut = (0..=SUMMARY_LOOK).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+        format!("{}{}", state.terminals.redact_text(tid, &text[..cut]), &text[cut..])
+    };
+    // In place, and put back afterwards: the arguments go to the tool as they came, and none
+    // but the texts is copied.
+    let mut texts = vec![];
+    for value in args.values_mut() {
+        if let Value::String(text) = value {
+            let shown = masked(text);
+            texts.push(std::mem::replace(text, shown));
+        }
+    }
+    let summary = summarize_args(args);
+    let mut texts = texts.into_iter();
+    for value in args.values_mut() {
+        if let Value::String(text) = value {
+            if let Some(original) = texts.next() {
+                *text = original;
+            }
+        }
+    }
+    state.terminals.redact_text(tid, &summary)
 }
 
 /// Run `tools/call`. `Err` is a protocol error (unknown tool, bad params);
@@ -495,15 +541,27 @@ async fn call_tool(state: &AppState, caller: &Caller, params: Map<String, Value>
     };
     let tools = state.platform.tools();
     let tool = tools.iter().find(|t| t.name == name).ok_or((INVALID_PARAMS, format!("Unknown tool: {name}")))?;
+    Ok(run_tool(state, caller, tool, args).await)
+}
 
+/// One call of a tool: its answer as the result of `tools/call` (the text, then its pictures),
+/// and the Activity record and `mcp.call` event made from its arguments and its error.
+async fn run_tool(state: &AppState, caller: &Caller, tool: &McpTool, mut args: Map<String, Value>) -> Value {
+    let name = tool.name.clone();
     let ctx = caller.ctx(state);
-    let summary = summarize_args(&args);
+    let summary = summary_of(state, ctx.terminal_id.as_deref(), &mut args);
     let started = Instant::now();
     let task = tokio::spawn((tool.handler)(state.clone(), ctx.clone(), Value::Object(args)));
     let _abort = AbortOnDrop(task.abort_handle());
+    // Pictures go to the session after the text; everything else here works from the text.
+    let mut images: Vec<Vec<u8>> = vec![];
     let outcome: Result<String, String> = match tokio::time::timeout(MAX_TOOL_TIME, task).await {
         Ok(Ok(Ok(ToolOutput::Text(t)))) => Ok(t),
         Ok(Ok(Ok(ToolOutput::Json(v)))) => Ok(serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())),
+        Ok(Ok(Ok(ToolOutput::Images { text, png }))) => {
+            images = png;
+            Ok(text)
+        }
         Ok(Ok(Err(e))) => Err(e.message),
         Ok(Err(join)) if join.is_panic() => {
             tracing::error!(tool = name, "mcp tool panicked");
@@ -515,28 +573,45 @@ async fn call_tool(state: &AppState, caller: &Caller, params: Map<String, Value>
     let ms = started.elapsed().as_millis() as u64;
 
     let ok = outcome.is_ok();
-    let rec = McpCallRecord {
-        id: state.platform.activity.next_id(),
-        at: crate::util::now_ms(),
-        terminal_id: ctx.terminal_id.clone(),
-        project_id: ctx.project_id.clone(),
-        session: caller.session_title(state),
-        tool: name.clone(),
-        ok,
-        mutating: tool.mutating,
-        ms,
-        summary,
-        error: outcome.as_ref().err().map(|e| super::truncate_chars(e, 300)),
-    };
-    state.platform.activity.push_call(rec.clone());
-    state.events.emit("mcp.call", ctx.project_id.as_deref(), &rec);
-    tracing::info!(tool = name, ok, ms, terminal = ctx.terminal_id.as_deref().unwrap_or("-"), "mcp tool call");
+    if ok && tool.quiet {
+        // A quiet tool (`McpTool::quiet`) is called often with little to tell: what
+        // succeeded stays out of the Activity ring, so it does not push the rest out.
+        tracing::debug!(tool = name, ok, ms, terminal = ctx.terminal_id.as_deref().unwrap_or("-"), "mcp tool call");
+    } else {
+        // A refusal may quote what the session passed: it is masked like the summary, before it is
+        // cut. The session is answered with it as it was (below): the value is its own.
+        let error = outcome.as_ref().err().map(|e| {
+            let shown = match ctx.terminal_id.as_deref() {
+                Some(tid) => state.terminals.redact_text(tid, e),
+                None => e.clone(),
+            };
+            super::truncate_chars(&shown, 300)
+        });
+        let rec = McpCallRecord {
+            id: state.platform.activity.next_id(),
+            at: crate::util::now_ms(),
+            terminal_id: ctx.terminal_id.clone(),
+            project_id: ctx.project_id.clone(),
+            session: caller.session_title(state),
+            tool: name.clone(),
+            ok,
+            mutating: tool.mutating,
+            ms,
+            summary,
+            error,
+        };
+        state.platform.activity.push_call(rec.clone());
+        state.events.emit("mcp.call", ctx.project_id.as_deref(), &rec);
+        tracing::info!(tool = name, ok, ms, terminal = ctx.terminal_id.as_deref().unwrap_or("-"), "mcp tool call");
+    }
 
     let (text, is_error) = match outcome {
         Ok(t) => (t, false),
         Err(e) => (e, true),
     };
-    Ok(json!({ "content": [{ "type": "text", "text": cap_output(text) }], "isError": is_error }))
+    let mut content = vec![json!({ "type": "text", "text": cap_output(text) })];
+    content.extend(images.iter().map(|png| json!({ "type": "image", "data": base64::engine::general_purpose::STANDARD.encode(png), "mimeType": "image/png" })));
+    json!({ "content": content, "isError": is_error })
 }
 
 fn cap_output(text: String) -> String {
@@ -621,6 +696,9 @@ mod tests {
         assert_eq!(v["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(v["result"]["serverInfo"]["name"], "workbench");
         assert_eq!(v["result"]["capabilities"]["tools"]["listChanged"], false);
+        // Every hosted CLI that is given the tools reads this, not Claude Code alone.
+        let instructions = v["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.starts_with("Workbench is the developer workspace hosting this agent session. ") && !instructions.contains("Claude"), "{instructions}");
 
         let (s, v) = send(&app, Req {
             token: Some(&tok),
@@ -877,5 +955,278 @@ mod tests {
         let s = "x".repeat(MAX_OUTPUT_CHARS + 5);
         let out = cap_output(s);
         assert!(out.ends_with("[output truncated: 5 more characters]"));
+    }
+
+    fn tool_call(name: &str, arguments: Value) -> String {
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}).to_string()
+    }
+
+    /// `McpTool::acts`: a tool that does something for the user to see is listed as neither
+    /// read-only nor destructive; a tool that only reads and a tool that changes remote state
+    /// are listed as before.
+    #[tokio::test]
+    async fn tools_that_act_are_listed_as_neither_read_only_nor_destructive() {
+        let app = testutil::app().await;
+        let tok = master(&app);
+        let (_, v) = send(&app, Req { token: Some(&tok), headers: vec![], body: json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}).to_string() }).await;
+        let listed = v["result"]["tools"].as_array().unwrap();
+        let hints = |name: &str| {
+            let t = listed.iter().find(|t| t["name"] == name).unwrap_or_else(|| panic!("no tool {name}"));
+            (t["annotations"]["readOnlyHint"].clone(), t["annotations"]["destructiveHint"].clone())
+        };
+        for name in ["avatar_design", "avatar_say", "avatar_ask", "avatar_act"] {
+            assert_eq!(hints(name), (json!(false), json!(false)), "{name}");
+        }
+        for name in ["avatar_status", "workbench_notify", "workbench_projects"] {
+            assert_eq!(hints(name), (json!(true), json!(false)), "{name}");
+        }
+        assert_eq!(hints("data_append"), (json!(false), json!(true)));
+        // For every tool the two hints follow from its traits, and a tool is never both.
+        let tools = app.state.platform.tools();
+        assert_eq!(tools.len(), listed.len());
+        for t in tools.iter() {
+            assert_eq!(tool_json(t)["annotations"], json!({ "readOnlyHint": !t.mutating && !t.acts, "destructiveHint": t.mutating }), "{}", t.name);
+            assert!(!(t.mutating && t.acts), "{}: a tool that changes remote state is mutating, not one that merely acts", t.name);
+        }
+    }
+
+    /// `McpTool::quiet`: what succeeds stays out of the Activity ring and emits no `mcp.call`;
+    /// a failure of the same tool is recorded like any other call.
+    #[tokio::test]
+    async fn a_quiet_tool_is_recorded_only_when_it_fails() {
+        let app = testutil::app().await;
+        // A session with an avatar: `avatar_say` and `avatar_act` are the quiet tools.
+        let tid = app.state.terminals.insert_test_agent(None, json!({})).id;
+        crate::avatar::device::turn_on(&app.state, &tid, crate::util::now_ms()).unwrap();
+        let agent = app.state.auth.issue_agent_token(&tid);
+        let mut events = app.state.events.subscribe();
+
+        for (name, arguments) in [("avatar_say", json!({ "text": "Tests are green." })), ("avatar_act", json!({ "play": "nod" }))] {
+            let (_, v) = send(&app, Req { token: Some(&agent), headers: vec![], body: tool_call(name, arguments) }).await;
+            assert_eq!(v["result"]["isError"], false, "{v}");
+        }
+        assert!(app.state.platform.activity.calls(10).is_empty(), "a line said and a gesture played are not Activity");
+
+        // The same tool, refused: recorded, with what was wrong.
+        let (_, v) = send(&app, Req { token: Some(&agent), headers: vec![], body: tool_call("avatar_say", json!({ "gesture": "nod" })) }).await;
+        assert_eq!(v["result"]["isError"], true, "{v}");
+        let calls = app.state.platform.activity.calls(10);
+        assert_eq!(calls.len(), 1);
+        assert_eq!((calls[0].tool.as_str(), calls[0].ok, calls[0].mutating, calls[0].terminal_id.as_deref()), ("avatar_say", false, false, Some(tid.as_str())));
+        assert!(calls[0].error.as_deref().is_some_and(|e| e.starts_with("say needs text")), "{:?}", calls[0].error);
+
+        // A tool that is not quiet is recorded when it succeeds, as before.
+        let (_, v) = send(&app, Req { token: Some(&agent), headers: vec![], body: tool_call("avatar_status", json!({})) }).await;
+        assert_eq!(v["result"]["isError"], false, "{v}");
+        let calls = app.state.platform.activity.calls(10);
+        assert_eq!(calls.iter().map(|c| (c.tool.as_str(), c.ok)).collect::<Vec<_>>(), [("avatar_status", true), ("avatar_say", false)], "newest first");
+
+        // The events follow the ring: two calls were announced, the quiet two were not.
+        let mut announced = vec![];
+        while let Ok(event) = events.try_recv() {
+            if event.kind == "mcp.call" {
+                announced.push((event.data["tool"].as_str().unwrap_or_default().to_string(), event.data["ok"].clone()));
+            }
+        }
+        assert_eq!(announced, [("avatar_say".to_string(), json!(false)), ("avatar_status".to_string(), json!(true))]);
+    }
+
+    /// What a session passes to a tool may hold what it must not show: the summary that goes to
+    /// the Activity view and into `mcp.call` is masked like the session's permission details,
+    /// before it is cut, and the tool still gets its arguments as they came.
+    #[tokio::test]
+    async fn the_argument_summary_of_a_sessions_call_is_masked() {
+        const SECRET: &str = "hunter2hunter2hunter2hunter2hunter2";
+        let app = testutil::app().await;
+        let state = &app.state;
+        let tid = state.terminals.insert_test_agent(None, json!({})).id;
+        // A secret value the session was started with (project `[agent].env`, an API key).
+        state.terminals.get(&tid).unwrap().redact.lock().push(crate::secrets::Secret::from_value(SECRET.into()));
+        crate::avatar::device::turn_on(state, &tid, crate::util::now_ms()).unwrap();
+        let agent = state.auth.issue_agent_token(&tid);
+        let mut events = state.events.subscribe();
+        let summary_of_last = || state.platform.activity.calls(1)[0].summary.clone();
+        let call = |name: &'static str, arguments: Value| {
+            let agent = agent.clone();
+            let app = &app;
+            async move { send(app, Req { token: Some(&agent), headers: vec![], body: tool_call(name, arguments) }).await.1 }
+        };
+
+        // A short text is summarised whole: the secret in it and what looks like a credential are masked.
+        let v = call("workbench_notify", json!({ "message": format!("key {SECRET} and --token abcdef123456"), "title": "Deploy" })).await;
+        assert_eq!(v["result"]["isError"], false, "{v}");
+        assert_eq!(summary_of_last(), "message=\"key •••••• and --token ••••••\", title=\"Deploy\"");
+
+        // A long text is cut after its first words. The cut falls inside the secret: none of it is left.
+        let long = format!("The deploy key is {SECRET}, keep it to yourself. {}", "More words. ".repeat(20));
+        let v = call("workbench_notify", json!({ "message": long })).await;
+        assert_eq!(v["result"]["isError"], false, "{v}");
+        let summary = summary_of_last();
+        assert!(summary.starts_with("message=\"The deploy key is ••••••, keep it to yo…\" (") && summary.ends_with(" chars)"), "{summary}");
+        assert!(!summary.contains("hunter"), "the beginning of the secret is left: {summary}");
+        // The tool itself got the text as it came.
+        let got = state.platform.activity.events(5);
+        assert!(got.iter().any(|e| e.message.contains(SECRET)), "{got:?}");
+
+        // A call that fails is recorded too (also a quiet tool's): its summary is masked the same way.
+        let v = call("avatar_say", json!({ "text": format!("Use {SECRET} now."), "gesture": 7 })).await;
+        assert_eq!(v["result"]["isError"], true, "{v}");
+        let summary = summary_of_last();
+        assert!(summary.contains("text=\"Use •••••• now.\"") && !summary.contains("hunter"), "{summary}");
+
+        // Megabytes of text cost no more to summarise, and reach the tool whole; what a summary
+        // shows of them is masked.
+        let page = format!("PASSWORD={SECRET}\n{}", "x".repeat(3 * 1024 * 1024));
+        let v = call("workbench_notify", json!({ "message": page })).await;
+        assert_eq!(v["result"]["isError"], false, "{v}");
+        let summary = summary_of_last();
+        assert!(summary.starts_with("message=\"PASSWORD=••••••\" (") && !summary.contains("hunter"), "{summary}");
+
+        // What is announced is what is recorded.
+        let mut announced = vec![];
+        while let Ok(event) = events.try_recv() {
+            if event.kind == "mcp.call" {
+                announced.push(event.data["summary"].as_str().unwrap_or_default().to_string());
+            }
+        }
+        assert_eq!(announced.len(), 4);
+        assert!(announced.iter().all(|s| !s.contains("hunter") && s.contains("••••••")), "{announced:?}");
+        let recorded: Vec<String> = state.platform.activity.calls(10).into_iter().rev().map(|c| c.summary).collect();
+        assert_eq!(announced, recorded);
+
+        // A caller that is no session has no session's secrets: its summary is as before.
+        let tok = master(&app);
+        let (_, v) = send(&app, Req { token: Some(&tok), headers: vec![], body: tool_call("workbench_notify", json!({ "message": format!("--token abcdef123456 {SECRET}") })) }).await;
+        assert_eq!(v["result"]["isError"], false, "{v}");
+        assert_eq!(summary_of_last(), format!("message=\"--token abcdef123456 {SECRET}\""));
+        // The master token naming that session speaks as it: masked.
+        let (_, v) = send(&app, Req { token: Some(&tok), headers: vec![("x-workbench-terminal", tid.clone())], body: tool_call("workbench_notify", json!({ "message": format!("again {SECRET}") })) }).await;
+        assert_eq!(v["result"]["isError"], false, "{v}");
+        assert_eq!(summary_of_last(), "message=\"again ••••••\"");
+    }
+
+    /// A tool's refusal can quote what the session passed: the error of a failed call is masked
+    /// like its summary before it is cut, recorded and announced. The session itself is answered
+    /// with the text as it was: the value is its own.
+    #[tokio::test]
+    async fn a_failed_call_records_its_error_masked_like_its_summary() {
+        const SECRET: &str = "hunter2hunter2";
+        // Longer than any quote is cut to.
+        const LONG: &str = "q7zv4kx9w2mj8rt5bn3hc6yd1pf0gs4lq7zv4kx9w2mj8rt5bn";
+        let app = testutil::app().await;
+        let state = &app.state;
+        let tid = state.terminals.insert_test_agent(None, json!({})).id;
+        for secret in [SECRET, LONG] {
+            state.terminals.get(&tid).unwrap().redact.lock().push(crate::secrets::Secret::from_value(secret.into()));
+        }
+        crate::avatar::device::turn_on(state, &tid, crate::util::now_ms()).unwrap();
+        let agent = state.auth.issue_agent_token(&tid);
+        let mut events = state.events.subscribe();
+        let error_of_last = || state.platform.activity.calls(1)[0].error.clone().unwrap_or_default();
+        let call = |name: &'static str, arguments: Value| {
+            let agent = agent.clone();
+            let app = &app;
+            async move { send(app, Req { token: Some(&agent), headers: vec![], body: tool_call(name, arguments) }).await.1 }
+        };
+
+        // A refusal that quotes an argument: the record shows it masked, the session reads it as it was.
+        let v = call("workbench_terminal_output", json!({ "terminalId": SECRET })).await;
+        assert_eq!(v["result"]["isError"], true, "{v}");
+        assert_eq!(v["result"]["content"][0]["text"], format!("no terminal \"{SECRET}\" in this session's project"));
+        assert_eq!(error_of_last(), "no terminal \"••••••\" in this session's project");
+
+        // Artwork that holds a secret outside its text: no word of it in what is recorded, nor the
+        // beginning of a long one.
+        let design = |secret: &str| json!({ "svg": format!("<svg viewBox='0 0 200 200'>{secret}<circle id='c' r='5'/></svg>") });
+        for secret in [SECRET, LONG] {
+            let v = call("avatar_design", design(secret)).await;
+            assert_eq!(v["result"]["isError"], true, "{v}");
+            let error = error_of_last();
+            assert!(error.contains("••••••"), "{error}");
+            assert!((0..=secret.len() - 8).all(|at| !error.contains(&secret[at..at + 8])), "a piece of the secret is left: {error}");
+        }
+
+        // What is announced is what is recorded.
+        let mut announced = vec![];
+        while let Ok(event) = events.try_recv() {
+            if event.kind == "mcp.call" {
+                announced.push(event.data["error"].as_str().unwrap_or_default().to_string());
+            }
+        }
+        let recorded: Vec<String> = state.platform.activity.calls(10).into_iter().rev().map(|c| c.error.unwrap_or_default()).collect();
+        assert_eq!(announced, recorded);
+        assert!(announced.iter().all(|e| !e.contains("hunter2") && !e.contains(&LONG[..8])), "{announced:?}");
+    }
+
+    #[tokio::test]
+    async fn a_summary_is_made_of_masked_texts_and_the_arguments_come_back_as_they_were() {
+        let app = testutil::app().await;
+        let state = &app.state;
+        let tid = state.terminals.insert_test_agent(None, json!({})).id;
+        state.terminals.get(&tid).unwrap().redact.lock().push(crate::secrets::Secret::from_value("s3cr3t-value-0001".into()));
+        let original = json!({ "a": "s3cr3t-value-0001", "b": 5, "c": ["s3cr3t-value-0001", 1], "d": { "k": "v" }, "e": "plain", "f": null, "g": true });
+        let mut args = original.as_object().unwrap().clone();
+        // A caller that is no session: the plain summary.
+        assert_eq!(summary_of(state, None, &mut args), "a=\"s3cr3t-value-0001\", b=5, c=[2 items], d={1 keys}, e=\"plain\", f=null, g=true");
+        assert_eq!(Value::Object(args.clone()), original);
+        assert_eq!(summary_of(state, Some(&tid), &mut args), "a=\"••••••\", b=5, c=[2 items], d={1 keys}, e=\"plain\", f=null, g=true");
+        assert_eq!(Value::Object(args.clone()), original, "the tool gets what the caller sent");
+        // An unknown terminal (a name the master token gave) masks nothing, as `redact_text` says.
+        assert_eq!(summary_of(state, Some("0a297845bc8b"), &mut args), "a=\"s3cr3t-value-0001\", b=5, c=[2 items], d={1 keys}, e=\"plain\", f=null, g=true");
+        // A text longer than what is looked at keeps its length in the summary and its end untouched.
+        let long = format!("{}{}", "é".repeat(SUMMARY_LOOK), "s3cr3t-value-0001");
+        let mut args = json!({ "text": long }).as_object().unwrap().clone();
+        let summary = summary_of(state, Some(&tid), &mut args);
+        assert!(summary.ends_with(&format!("({} chars)", SUMMARY_LOOK + 17)) && !summary.contains("s3cr3t"), "{summary}");
+        assert_eq!(args["text"], json!(long));
+    }
+
+    /// `ToolOutput::Images`: the session reads the text first, then each picture as an `image`
+    /// block of base64 PNG. A failed call of the same tool is its error text alone. The Activity
+    /// record and `mcp.call` are made from the arguments and the error, as for any call, and the
+    /// session's secrets are masked there.
+    #[tokio::test]
+    async fn pictures_follow_the_text_and_an_error_stays_text() {
+        const SECRET: &str = "hunter2hunter2hunter2";
+        let app = testutil::app().await;
+        let state = &app.state;
+        let tid = state.terminals.insert_test_agent(None, json!({})).id;
+        state.terminals.get(&tid).unwrap().redact.lock().push(crate::secrets::Secret::from_value(SECRET.into()));
+        let pictures = crate::mcp::tool("test_pictures", "Draws two pictures.", json!({ "type": "object" }), false, |_, _, args: Value| async move {
+            if let Some(why) = args.get("fail").and_then(Value::as_str) {
+                return Err(crate::error::ApiError::bad_request(format!("no pictures: {why}")));
+            }
+            Ok(ToolOutput::Images { text: "Two pictures: light, then dark.".into(), png: vec![b"\x89PNG\r\n\x1a\none".to_vec(), b"\x89PNG\r\n\x1a\ntwo".to_vec()] })
+        });
+        let caller = Caller { terminal_id: Some(tid.clone()), project_hint: None };
+        let mut events = state.events.subscribe();
+        let args = |v: Value| v.as_object().unwrap().clone();
+
+        let out = run_tool(state, &caller, &pictures, args(json!({ "look": format!("key {SECRET}") }))).await;
+        let png = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert_eq!(
+            out,
+            json!({ "content": [
+                { "type": "text", "text": "Two pictures: light, then dark." },
+                { "type": "image", "data": png(b"\x89PNG\r\n\x1a\none"), "mimeType": "image/png" },
+                { "type": "image", "data": png(b"\x89PNG\r\n\x1a\ntwo"), "mimeType": "image/png" }
+            ], "isError": false })
+        );
+
+        let out = run_tool(state, &caller, &pictures, args(json!({ "fail": format!("the look {SECRET} is off") }))).await;
+        assert_eq!(out, json!({ "content": [{ "type": "text", "text": format!("no pictures: the look {SECRET} is off") }], "isError": true }));
+
+        let calls = state.platform.activity.calls(10);
+        assert_eq!(calls.iter().map(|c| (c.tool.as_str(), c.ok)).collect::<Vec<_>>(), [("test_pictures", false), ("test_pictures", true)], "newest first");
+        assert_eq!(calls[1].summary, "look=\"key ••••••\"");
+        assert_eq!(calls[0].error.as_deref(), Some("no pictures: the look •••••• is off"));
+        let mut announced = vec![];
+        while let Ok(event) = events.try_recv() {
+            if event.kind == "mcp.call" {
+                assert!(!event.data.to_string().contains("hunter2") && !event.data.to_string().contains("image/png"), "{}", event.data);
+                announced.push(event.data["ok"].clone());
+            }
+        }
+        assert_eq!(announced, [json!(true), json!(false)]);
     }
 }

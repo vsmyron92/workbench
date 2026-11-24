@@ -1,0 +1,4 @@
+{
+  "cheer": {"duration":1.2,"tracks":[{"ease":"inOut","prop":"rotate","target":"armL","values":[0.0,88.194,76.194,88.194,76.194,0.0]},{"ease":"inOut","prop":"rotate","target":"armR","values":[0.0,-88.194,-76.194,-88.194,-76.194,0.0]}]},
+  "wave": {"duration":1.4,"tracks":[{"ease":"inOut","prop":"rotate","target":"armR","values":[0.0,-92.194,-60.194,-92.194,-60.194,0.0]}]}
+}

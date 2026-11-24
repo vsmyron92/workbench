@@ -4,6 +4,8 @@
 //
 // Everything here is plain TypeScript with the recognizer passed in, so it runs under
 // vitest without a browser. `Dictate.tsx` is the React side.
+//
+// Contract module for the avatar feature: `dictationLive`, `onDictationChange`, and the types `Dictate.tsx` hands on (`Problem`, `Support`, `DictationState`).
 
 /** The parts of a `SpeechRecognition` that dictation uses (TypeScript's DOM lib has no typings for it). */
 export interface Recognizer {
@@ -148,6 +150,48 @@ export interface DictationOptions {
 /** The running dictation, if any: only one field listens at a time. */
 let live: Dictation | null = null
 
+// Who hears that a microphone opened or closed: whatever speaks aloud must not speak into
+// one (its words would be written into the field that listens).
+const watchers = new Set<(live: boolean) => void>()
+/** What the watchers were told last. */
+let announced = false
+/** Calls of `startDictation` under way: the watchers hear of their outcome, not of the steps in between. */
+let starting = 0
+
+function announce() {
+  if (starting > 0 || announced === (live !== null)) return
+  announced = live !== null
+  // Over the set itself: a watcher that another one unsubscribes meanwhile is not called.
+  for (const cb of watchers) {
+    try {
+      // The value as it is now: an earlier watcher of this round may have changed it.
+      cb(live !== null)
+    } catch (e) {
+      // A watcher that fails must not leave a microphone open or its button lit.
+      console.error('[workbench] a dictation watcher failed', e)
+    }
+  }
+}
+
+/**
+ * Whether a field is listening anywhere in the page (the new-session prompt included): from
+ * the start of a dictation until its recognizer has ended, so also while a stopped one may
+ * still deliver its last words.
+ */
+export function dictationLive(): boolean {
+  return live !== null
+}
+
+/**
+ * Call `cb` with the new `dictationLive()` each time it changes; it is not called for the
+ * value at the time of subscribing. One field taking over from another is no change.
+ * Returns the unsubscribe.
+ */
+export function onDictationChange(cb: (live: boolean) => void): () => void {
+  watchers.add(cb)
+  return () => void watchers.delete(cb)
+}
+
 /**
  * Listen and write what is heard into the field, from where its caret is. Each result
  * replaces the previous guess (`before` + speech + `after`), so interim text is corrected in
@@ -155,6 +199,16 @@ let live: Dictation | null = null
  * speech would overwrite the edit.
  */
 export function startDictation(ctor: RecognizerCtor, opts: DictationOptions, hooks: DictationHooks): Dictation {
+  starting++
+  try {
+    return listen(ctor, opts, hooks)
+  } finally {
+    starting--
+    announce()
+  }
+}
+
+function listen(ctor: RecognizerCtor, opts: DictationOptions, hooks: DictationHooks): Dictation {
   live?.cancel()
   const field = hooks.field()
   const before = field.value.slice(0, field.start)
@@ -174,6 +228,7 @@ export function startDictation(ctor: RecognizerCtor, opts: DictationOptions, hoo
     over = true
     rec.onaudiostart = rec.onresult = rec.onerror = rec.onend = null
     if (live === me) live = null
+    announce()
   }
   const me: Dictation = {
     stop() {

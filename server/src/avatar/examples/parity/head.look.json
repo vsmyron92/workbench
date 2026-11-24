@@ -1,0 +1,44 @@
+{
+  "viewBox": [
+    0,
+    0,
+    160,
+    240
+  ],
+  "nodes": [
+    {
+      "tag": "g",
+      "id": "head",
+      "box": [
+        40,
+        60,
+        80,
+        80
+      ],
+      "children": [
+        {
+          "tag": "circle",
+          "attrs": {
+            "cx": 80,
+            "cy": 100,
+            "fill": "#f6f1e1",
+            "r": 40
+          }
+        }
+      ]
+    }
+  ],
+  "pivots": {
+    "head": [
+      80,
+      140
+    ]
+  },
+  "roles": {
+    "head": "head"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": [],
+  "gaze": null
+}

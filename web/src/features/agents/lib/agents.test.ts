@@ -1,8 +1,18 @@
-import { describe, expect, it } from 'vitest'
-import type { AgentInfo, TerminalInfo } from '@/api/types'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { AgentInfo, PendingPermission, TerminalInfo } from '@/api/types'
+import { useToasts } from '@/shell/actions'
+import { avatarShows, setAvatarShows, setAvatarsOn } from '@/shell/avatarBridge'
+import { SessionCard } from '../AgentsHome'
+import { dismissPermissionToasts } from '../permissionToasts'
+import { attentionToast, type Attention } from '../providers'
 import { backoff, FrameRouter, OSC52_MAX, osc52WriteAllowed, validSize, wheelDecision, wheelLines } from './protocol'
 import {
   agentMeta,
+  avatarBadge,
+  avatarNote,
   canKill,
   colorCss,
   bottomTabs,
@@ -14,6 +24,7 @@ import {
   lingering,
   needsAttention,
   nextAttention,
+  noAvatarNote,
   quotePath,
   removeTerminal,
   restartMode,
@@ -320,5 +331,155 @@ describe('ultracode sessions', () => {
     expect(ultracodeNote(t({ ultracode: true }))?.title).toContain('more tokens')
     for (const meta of [{}, { ultracode: false }, { ultracode: 'yes' }, { forkedFrom: 'x' }]) expect(ultracodeNote(t(meta))).toBeNull()
     expect(ultracodeNote(null)).toBeNull()
+  })
+})
+
+describe('avatar sessions', () => {
+  it('say so on their tab and card only when the session was started with one', () => {
+    const t = (meta: Record<string, unknown>) => ({ id: 't', meta, agent: agent() }) as unknown as TerminalInfo
+    expect(avatarNote(t({ avatar: true }))).toEqual({ label: 'Avatar', title: 'This session has a live avatar' })
+    // Only the server's own `true` counts: not a look-alike, and not what another option set.
+    for (const meta of [{}, { avatar: false }, { avatar: 'true' }, { avatar: 1 }, { avatar: {} }, { ultracode: true }, { movedFrom: 't0' }]) expect(avatarNote(t(meta))).toBeNull()
+    expect(avatarNote(null)).toBeNull()
+    expect(avatarNote(undefined)).toBeNull()
+    // A terminal without meta (a hand-built or older record) is no reason to fail.
+    expect(avatarNote({ id: 't' } as unknown as TerminalInfo)).toBeNull()
+    // The two badges do not depend on each other.
+    expect([avatarNote(t({ avatar: true, ultracode: true }))?.label, ultracodeNote(t({ avatar: true, ultracode: true }))?.label]).toEqual(['Avatar', 'Ultracode'])
+  })
+
+  it('say why a start asked for with one has none, as the answer of the start says it', () => {
+    const t = (meta: Record<string, unknown>) => ({ id: 't', meta, agent: agent() }) as unknown as TerminalInfo
+    const why = 'Started without an avatar: 64 sessions have one already. Close sessions you no longer need, then give it one.'
+    expect(noAvatarNote(t({ noAvatar: why }))).toBe(why)
+    for (const meta of [{}, { avatar: true }, { noAvatar: '' }, { noAvatar: ' ' }, { noAvatar: true }, { noAvatar: 64 }]) expect(noAvatarNote(t(meta))).toBeNull()
+    expect(noAvatarNote(null)).toBeNull()
+    expect(noAvatarNote({ id: 't' } as unknown as TerminalInfo)).toBeNull()
+  })
+
+  it('wear the badge by the live record once it is known, and by how they were started until then', () => {
+    const t = (meta: Record<string, unknown>) => ({ id: 't', meta, agent: agent() }) as unknown as TerminalInfo
+    const badge = { label: 'Avatar', title: 'This session has a live avatar' }
+    // Not known (the list has not loaded, or the avatar feature is gone): what the session was started with.
+    expect(avatarBadge(t({ avatar: true }), null)).toEqual(badge)
+    expect(avatarBadge(t({}), null)).toBeNull()
+    expect(avatarBadge(t({ avatar: 'true' }), null)).toBeNull()
+    expect(avatarBadge(null, null)).toBeNull()
+    // Known: the record decides. A session given an avatar later wears the badge.
+    expect(avatarBadge(t({}), true)).toEqual(badge)
+    expect(avatarBadge(t({ avatar: true }), true)).toEqual(badge)
+    // And one whose avatar the user turned off does not, although it was started with the option.
+    expect(avatarBadge(t({ avatar: true }), false)).toBeNull()
+    expect(avatarBadge(t({}), false)).toBeNull()
+    // A caller without the live answer falls back like "not known"; nothing but a plain yes shows it.
+    expect(avatarBadge(t({ avatar: true }), undefined as unknown as null)).toEqual(badge)
+    expect(avatarBadge(t({}), 'yes' as unknown as boolean)).toBeNull()
+    // The same words as the note of a session started with the option.
+    expect(avatarBadge(t({}), true)).toEqual(avatarNote(t({ avatar: true })))
+  })
+
+  it('show it on their card as the avatar feature tells it, session by session', () => {
+    const card = (id: string, meta: Record<string, unknown>) => renderToStaticMarkup(createElement(QueryClientProvider, { client: new QueryClient() }, createElement(SessionCard, { t: term(id, { meta }) })))
+    const badge = '<span class="wb-badge accent" title="This session has a live avatar">Avatar</span>'
+    try {
+      // Nothing known yet: the session started with the option says so, the other does not.
+      setAvatarsOn(null)
+      expect(card('t1', { avatar: true })).toContain(badge)
+      expect(card('t2', {})).not.toContain('live avatar')
+      // The list arrived: t2 was given an avatar from a device, and t1's was turned off.
+      setAvatarsOn(new Set(['t2']))
+      expect(card('t1', { avatar: true })).not.toContain('live avatar')
+      expect(card('t2', {})).toContain(badge)
+      // Both on; then nobody has one.
+      setAvatarsOn(new Set(['t1', 't2']))
+      expect(card('t1', { avatar: true })).toContain(badge)
+      expect(card('t2', {})).toContain(badge)
+      setAvatarsOn(new Set())
+      expect(card('t1', { avatar: true })).not.toContain('live avatar')
+      // It stands beside the Ultracode badge, not instead of it.
+      setAvatarsOn(new Set(['t1']))
+      const both = card('t1', { ultracode: true })
+      expect(both).toContain(badge)
+      expect(both).toContain('>Ultracode</span>')
+    } finally {
+      setAvatarsOn(null)
+    }
+  })
+})
+
+describe('attention toasts', () => {
+  const permission: PendingPermission = { id: 'p1', tool: 'Bash', summary: 'Permission to run `npm test`', since: 1, detail: 'npm test', complete: true }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    // The notifier toasts only in a visible window, and toasts expire on `window` timers.
+    vi.stubGlobal('window', globalThis)
+    vi.stubGlobal('document', { visibilityState: 'visible' })
+  })
+  afterEach(() => {
+    setAvatarShows(null)
+    dismissPermissionToasts('t1')
+    useToasts.setState({ toasts: [] })
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  /** The toasts these events leave on screen. */
+  function toasted(...events: Attention[]): string[] {
+    useToasts.setState({ toasts: [] })
+    for (const a of events) attentionToast(a)
+    return useToasts.getState().toasts.map((t) => t.message)
+  }
+  const done = (terminalId: string): Attention => ({ terminalId, state: 'idle', message: 'All tests pass', title: 'Build' })
+
+  it('tell that a session finished while nothing shows its avatar', () => {
+    // No avatar feature registered (or none loaded yet): as before.
+    expect(avatarShows('t1')).toBe(false)
+    expect(toasted(done('t1'))).toEqual(['Build finished'])
+  })
+
+  it('leave "finished" to an avatar that is on screen here, for that session only', () => {
+    setAvatarShows((id) => id === 't1')
+    expect([avatarShows('t1'), avatarShows('t2')]).toEqual([true, false])
+    expect(toasted(done('t1'))).toEqual([])
+    expect(toasted(done('t2'))).toEqual(['Build finished'])
+    // The avatar feature went away (signed out, or its overlay closed): toasts again.
+    setAvatarShows(null)
+    expect(avatarShows('t1')).toBe(false)
+    expect(toasted(done('t1'))).toEqual(['Build finished'])
+  })
+
+  it('still tell what waits for the user, avatar or not', () => {
+    setAvatarShows(() => true)
+    const seen = toasted(
+      { terminalId: 't1', state: 'needs_input', message: 'Which branch?', title: 'Build' },
+      { terminalId: 't1', state: 'error', message: 'API error', title: 'Build' },
+      { terminalId: 't1', state: 'needs_permission', message: 'Permission to run npm test', title: 'Build', permission },
+    )
+    expect(seen).toEqual(['Build: Which branch?', 'Build: API error', 'Build asks for permission'])
+    // The request's toast keeps its Allow and Deny.
+    expect(useToasts.getState().toasts.at(-1)?.actions?.map((a) => a.label)).toEqual(['Allow', 'Deny', 'Open'])
+  })
+
+  it('are shown when the avatar’s answer fails, or is not a plain yes', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      setAvatarShows(() => {
+        throw new Error('boom')
+      })
+      expect(avatarShows('t1')).toBe(false)
+      expect(toasted(done('t1'))).toEqual(['Build finished'])
+      expect(errors).toHaveBeenCalled()
+      setAvatarShows((() => 'yes') as unknown as (id: string) => boolean)
+      expect(avatarShows('t1')).toBe(false)
+      expect(toasted(done('t1'))).toEqual(['Build finished'])
+    } finally {
+      errors.mockRestore()
+    }
+  })
+
+  it('stay quiet in a hidden window, as before', () => {
+    vi.stubGlobal('document', { visibilityState: 'hidden' })
+    expect(toasted(done('t1'))).toEqual([])
   })
 })

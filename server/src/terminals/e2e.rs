@@ -1374,3 +1374,388 @@ async fn kimi_sessions_in_one_folder_find_their_own_ids() {
     let _ = outside.wait();
     t.kill(&c.id).await.unwrap();
 }
+
+// ---------------------------------------------------------------- the Avatar option
+
+/// The avatar brief a session on the host is given, in the avatar slice's own words.
+pub(super) fn avatar_brief(variant: crate::avatar::BriefVariant, via: crate::avatar::Via, whole: bool) -> String {
+    crate::avatar::session_brief(&crate::avatar::Brief { variant, via, in_container: false, shell: crate::util::os::shell::Dialect::HOST, whole })
+}
+
+/// Whether the avatar of terminal `id` remembers that its session was not told of it, as its file
+/// says (`"unbriefed": true`, only when it is so).
+pub(super) fn unbriefed(state: &AppState, id: &str) -> bool {
+    let file = state.paths.data_dir.join("avatar").join(format!("{id}.json"));
+    let stored: Value = serde_json::from_slice(&std::fs::read(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()))).unwrap();
+    stored.get("unbriefed") == Some(&Value::Bool(true))
+}
+
+/// A Workbench restart (`restore_on_start`) of a session whose avatar is on and whose CLI starts a
+/// new conversation (a custom CLI): the brief is pasted as soon as the session is up. The restore
+/// waits for the same signal of a session being up, and does not take it from the brief.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restored_session_is_told_of_its_avatar_as_soon_as_it_is_up() {
+    use crate::avatar::{BriefVariant, Via};
+    let dir = tempfile::tempdir().unwrap();
+    let heard = dir.path().join("heard.log");
+    let mut scripted = python_argv(&format!(
+        "import json, sys\nprint('ready', flush=True)\nfor l in sys.stdin:\n    with open({}, 'a', encoding='utf-8') as f:\n        f.write(json.dumps(l.rstrip('\\r\\n')) + '\\n')\n    print('noted', flush=True)",
+        py_str(&heard.display().to_string())
+    ));
+    let custom = crate::config::global::ProviderConfig { command: Some(scripted.remove(0)), args: scripted, label: Some("Scripted".into()), ..Default::default() };
+    let (state, pid) = provider_state(dir.path(), vec![("scripted", custom)]).await;
+    let _router = app::build_router(state.clone());
+    crate::avatar::start(&state).await;
+    let t = &state.terminals;
+    let lines = || -> Vec<String> { std::fs::read_to_string(&heard).unwrap_or_default().lines().map(|l| serde_json::from_str::<String>(l).unwrap()).collect() };
+    let c = t
+        .spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), provider: Some("scripted".into()), avatar: Some(true), ..Default::default() })
+        .await
+        .unwrap();
+    let whole = avatar_brief(BriefVariant::First, Via::Command, true);
+    wait_long("the brief at its start", 30, || lines().len() == 1).await;
+    assert_eq!(lines()[0], whole);
+    wait_long("the session idle", 20, || agent_of(&state, &c.id).state == super::AgentState::Idle).await;
+
+    // As a start of Workbench finds it: it was running when Workbench stopped.
+    t.kill(&c.id).await.unwrap();
+    t.update(&t.get(&c.id).unwrap(), |r| {
+        r.was_running = true;
+        true
+    });
+    state.config.write().agents.restore_on_start = true;
+    super::agent::restore(state.clone()).await;
+    // The brief waits for the session to be up (at most a minute), not for its own time-out.
+    wait_long("the brief of the restored conversation", 10, || lines().len() == 2).await;
+    assert_eq!(lines()[1], whole);
+    t.kill(&c.id).await.unwrap();
+}
+
+/// A CLI without Workbench's tools has its first prompt pasted: the brief follows the user's
+/// prompt on the same line, or is the whole prompt in its wrapped form, and never names the
+/// tab. A restart of such a CLI starts a new conversation, which is told of the avatar for as
+/// long as it is on, whatever the session was started with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pasted_first_prompt_carries_the_brief_and_a_new_conversation_is_told_again() {
+    use crate::avatar::{BriefVariant, Via};
+    let dir = tempfile::tempdir().unwrap();
+    let heard = dir.path().join("heard.log");
+    // It notes every line it reads, as it read it.
+    let mut scripted = python_argv(&format!(
+        "import json, sys\nprint('ready', flush=True)\nfor l in sys.stdin:\n    with open({}, 'a', encoding='utf-8') as f:\n        f.write(json.dumps(l.rstrip('\\r\\n')) + '\\n')\n    print('noted', flush=True)",
+        py_str(&heard.display().to_string())
+    ));
+    let custom = crate::config::global::ProviderConfig { command: Some(scripted.remove(0)), args: scripted, label: Some("Scripted".into()), ..Default::default() };
+    let (state, pid) = provider_state(dir.path(), vec![("scripted", custom)]).await;
+    // The avatar slice's own background work: it makes a session's record when its terminal is
+    // created, and tells a session that was not told of its avatar (through the ask route, in-process).
+    let _router = app::build_router(state.clone());
+    crate::avatar::start(&state).await;
+    let t = &state.terminals;
+    let lines = || -> Vec<String> { std::fs::read_to_string(&heard).unwrap_or_default().lines().map(|l| serde_json::from_str::<String>(l).unwrap()).collect() };
+    let start = |prompt: Option<&str>, avatar: Option<bool>| super::agent::AgentRequest {
+        project_id: pid.clone(),
+        provider: Some("scripted".into()),
+        prompt: prompt.map(str::to_string),
+        avatar,
+        ..Default::default()
+    };
+    let restart = |id: String| {
+        let state = state.clone();
+        async move {
+            state.terminals.kill(&id).await.unwrap();
+            state.terminals.restart(&state, &id).await.unwrap();
+        }
+    };
+
+    // After the user's prompt: one space, one line, and the tab is named after the user's words alone.
+    let c = t.spawn_agent(&state, start(Some("go"), Some(true))).await.unwrap();
+    assert_eq!((c.title.as_str(), &c.meta["avatar"]), ("go", &json!(true)));
+    wait_long("the pasted prompt", 30, || lines().len() == 1).await;
+    let first = avatar_brief(BriefVariant::First, Via::Command, false);
+    assert_eq!(lines()[0], format!("go {first}"));
+    assert!(first.contains(" avatar guide`") && !first.contains("avatar_status"), "a CLI without the tools is given its command: {first}");
+    assert_eq!(t.info(&c.id).unwrap().title, "go");
+
+    // Without a prompt of the user's the brief is the whole prompt, wrapped; the tab is the CLI's.
+    let w = t.spawn_agent(&state, start(None, Some(true))).await.unwrap();
+    assert_eq!(w.title, "Scripted");
+    wait_long("the brief alone", 30, || lines().len() == 2).await;
+    let whole = avatar_brief(BriefVariant::First, Via::Command, true);
+    assert_eq!(lines()[1], whole);
+    assert!(whole.starts_with("<workbench-avatar>[Workbench avatar] ") && whole.ends_with("</workbench-avatar>"), "{whole}");
+    assert_eq!(t.info(&w.id).unwrap().title, "Scripted");
+
+    // Not asked for: the user's prompt and nothing else.
+    let plain = t.spawn_agent(&state, start(Some("just this"), None)).await.unwrap();
+    wait_long("the plain prompt", 30, || lines().len() == 3).await;
+    assert_eq!(lines()[2], "just this");
+    assert!(plain.meta.get("avatar").is_none());
+    wait_long("the avatars", 10, || crate::avatar::active(&state, &c.id) && crate::avatar::active(&state, &w.id)).await;
+    assert!(!crate::avatar::active(&state, &plain.id));
+
+    // A restart of this CLI is a new conversation. Its avatar is on and has no look of its own
+    // yet (this CLI drew none): it is told of the avatar as at its start, and draws one. The
+    // option and the tab's name stay.
+    restart(c.id.clone()).await;
+    wait_long("the brief of a new conversation", 30, || lines().len() == 4).await;
+    assert_eq!(lines()[3], whole);
+    let info = t.info(&c.id).unwrap();
+    assert_eq!((info.title.as_str(), &info.meta["avatar"]), ("go", &json!(true)));
+    assert!(t.get(&c.id).unwrap().rec.lock().launch.as_ref().is_some_and(|l| l.avatar && l.name.is_none()));
+    // Once it has a look, a new conversation is told that it still has its avatar, and not to
+    // draw another.
+    wait_long("the restarted session", 20, || agent_of(&state, &c.id).state == super::AgentState::Idle).await;
+    let pass = crate::avatar::session::gate(&state, &c.id, crate::avatar::session::Call::Design, Via::Command, crate::util::now_ms()).unwrap();
+    crate::avatar::session::design(&state, &pass, &json!({ "name": "Pip", "svg": "<svg viewBox='0 0 200 200'><g id='body'><circle cx='100' cy='110' r='50' fill='#ffcc00'/></g></svg>" }), crate::util::now_ms()).unwrap();
+    restart(c.id.clone()).await;
+    wait_long("the brief of a conversation that has its look", 30, || lines().len() == 5).await;
+    let again = avatar_brief(BriefVariant::Again, Via::Command, true);
+    assert_eq!(lines()[4], again);
+    assert!(again.contains("still has its live avatar") && again.contains("Do not design a new look"), "{again}");
+    assert_eq!(t.info(&c.id).unwrap().title, "go");
+
+    // The user turned the avatar off: a restart says nothing, though the session was started
+    // with the option. A session that never had one hears nothing either.
+    crate::avatar::device::turn_off(&state, &w.id, crate::util::now_ms()).unwrap();
+    for id in [&w.id, &plain.id] {
+        restart(id.clone()).await;
+        wait_long("the restarted session", 20, || agent_of(&state, id).state == super::AgentState::Idle).await;
+    }
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(lines().len(), 5, "{:?}", lines());
+    // The avatar slice keeps count of who heard of it: the new conversation of the session whose
+    // avatar is off has not, and is told when the avatar is turned on again. Those that were told
+    // at their restart are not told again.
+    assert_eq!((unbriefed(&state, &w.id), unbriefed(&state, &c.id)), (true, false));
+
+    // A device gave it an avatar meanwhile: its next new conversation is told, though the
+    // session was started without the option. Told then, it is not told once more when it is
+    // idle (the avatar slice tells a session it was given to while it runs).
+    crate::avatar::device::turn_on(&state, &plain.id, crate::util::now_ms()).unwrap();
+    assert!(unbriefed(&state, &plain.id), "the session was not told yet");
+    restart(plain.id.clone()).await;
+    wait_long("the brief after the avatar was given", 30, || lines().len() == 6).await;
+    assert_eq!(lines()[5], whole);
+    assert!(t.info(&plain.id).unwrap().meta.get("avatar").is_none(), "the option stays what the session was started with");
+    wait_long("the restarted session", 20, || agent_of(&state, &plain.id).state == super::AgentState::Idle).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(lines().len(), 6, "{:?}", lines());
+    assert!(!unbriefed(&state, &plain.id));
+    for id in [&c.id, &w.id, &plain.id] {
+        t.kill(id).await.unwrap();
+    }
+}
+
+/// Codex takes its first prompt in the command line and names an untitled session after its
+/// first message: the brief stands below the user's prompt there, and neither the tab nor the
+/// History row shows a word of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_codex_session_with_an_avatar_is_named_after_the_users_own_prompt() {
+    use crate::avatar::{BriefVariant, Via};
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "codex");
+    let home = dir.path().join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let log = dir.path().join("argv.log");
+    let codex = crate::config::global::ProviderConfig {
+        command: Some(fake.display().to_string()),
+        env: [
+            ("CODEX_HOME".to_string(), home.display().to_string()),
+            ("FAKE_CODEX_TURN_SECS".to_string(), "0.3".to_string()),
+            ("FAKE_CODEX_LOG".to_string(), log.display().to_string()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let (state, pid) = provider_state(dir.path(), vec![("codex", codex)]).await;
+    let t = &state.terminals;
+    let start = |prompt: Option<&str>| super::agent::AgentRequest { project_id: pid.clone(), provider: Some("codex".into()), prompt: prompt.map(str::to_string), avatar: Some(true), ..Default::default() };
+    let brief = avatar_brief(BriefVariant::First, Via::Tools, false);
+    let whole = avatar_brief(BriefVariant::First, Via::Tools, true);
+
+    // With a prompt: in the command line, below a blank line. Codex on the host has Workbench's tools.
+    let a = t.spawn_agent(&state, start(Some("first task"))).await.unwrap();
+    assert_eq!((a.title.as_str(), &a.meta["avatar"]), ("first task", &json!(true)));
+    // (Its answer repeats the whole message; what the session keeps of it is the end.)
+    wait_long("a's answer", 20, || agent_of(&state, &a.id).last_message.is_some_and(|m| m.ends_with("is not from the user."))).await;
+    let argv = std::fs::read_to_string(&log).unwrap();
+    assert!(argv.contains(&format!("-- first task\n\n{brief}\n")), "{argv}");
+    assert_eq!(argv.matches(crate::avatar::BRIEF_MARK).count(), 1, "{argv}");
+    assert!(brief.contains("avatar_status") && !argv.contains("wba_"), "{argv}");
+    // Its rollout's first message holds the brief; the tab keeps the user's words.
+    let a_id = agent_of(&state, &a.id).session_id;
+    assert!(super::transcript::is_uuid(&a_id), "{a_id:?}");
+    assert_eq!(t.info(&a.id).unwrap().title, "first task");
+    assert_eq!(agent_of(&state, &a.id).title.as_deref(), Some("first task"));
+
+    // Without a prompt: the brief alone, wrapped. The tab stays the CLI's.
+    let b = t.spawn_agent(&state, start(None)).await.unwrap();
+    assert_eq!(b.title, "Codex");
+    wait_long("b's answer", 20, || agent_of(&state, &b.id).last_message.is_some()).await;
+    let argv = std::fs::read_to_string(&log).unwrap();
+    assert!(argv.contains(&format!("-- {whole}\n")), "{argv}");
+    let b_id = agent_of(&state, &b.id).session_id;
+    assert!(super::transcript::is_uuid(&b_id) && b_id != a_id, "{b_id:?}");
+    assert_eq!((t.info(&b.id).unwrap().title.as_str(), agent_of(&state, &b.id).title), ("Codex", None));
+
+    // History names each by the user's own prompt, or by none.
+    let h = t.history(&state, &pid, Some("codex"), 10).await.unwrap();
+    let row = |id: &str| h.iter().find(|e| e.id == id).unwrap_or_else(|| panic!("no row for {id}: {h:?}"));
+    assert_eq!((row(&a_id).title.as_str(), row(&a_id).first_prompt.as_deref()), ("first task", None));
+    assert_eq!(row(&b_id).title, "(untitled session)");
+    assert!(h.iter().all(|e| !format!("{} {}", e.title, e.first_prompt.as_deref().unwrap_or("")).contains("avatar")), "{h:?}");
+    t.kill(&a.id).await.unwrap();
+    t.kill(&b.id).await.unwrap();
+}
+
+/// `ask` with a named session pastes its text and presses Enter. A dialog that opens while the
+/// text is on its way would take that Enter as its answer ("Yes"): the Enter is withheld, and
+/// the caller is told where its text is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_enter_after_a_paste_is_withheld_when_a_dialog_opened_meanwhile() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "codex");
+    let home = dir.path().join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let log = dir.path().join("codex.log");
+    let codex = crate::config::global::ProviderConfig {
+        command: Some(fake.display().to_string()),
+        env: [
+            ("CODEX_HOME".to_string(), home.display().to_string()),
+            ("FAKE_CODEX_TURN_SECS".to_string(), "0.3".to_string()),
+            ("FAKE_CODEX_LOG".to_string(), log.display().to_string()),
+            // The approval overlay comes up the moment text arrives at the prompt.
+            ("FAKE_CODEX_PASTE_APPROVAL".to_string(), "1".to_string()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let (state, pid) = provider_state(dir.path(), vec![("codex", codex)]).await;
+    let t = &state.terminals;
+    let a = t.spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), provider: Some("codex".into()), ..Default::default() }).await.unwrap();
+    wait_long("a to settle", 20, || agent_of(&state, &a.id).state == super::AgentState::Idle).await;
+    let entry = t.get(&a.id).unwrap();
+    assert!(t.prompt_refusal(&entry).is_none(), "nothing is in the way before the text is sent");
+
+    // The text goes in, the dialog opens on it, and the Enter stays out.
+    let text = "Look at the failing CI job and fix it";
+    let err = t.ask(&state, ask_req(&pid, text, Some(&a.id))).await.unwrap_err();
+    assert_eq!((err.status.as_u16(), err.code), (409, "conflict"), "{err}");
+    assert_eq!(err.message, "a dialog opened while your text was being pasted: it is in the session's input box, not sent");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(log_lines(&log, "APPROVAL").is_empty(), "the Enter answered the dialog: {:?}", log_lines(&log, "APPROVAL"));
+    let screen = t.screen_text(&a.id, 30).unwrap();
+    assert!(screen.contains("Would you like to run the following command?"), "{screen}");
+    wait_long("the session to read as asking", 10, || agent_of(&state, &a.id).state == super::AgentState::NeedsPermission).await;
+
+    // While the dialog is up nothing more is pasted: the refusal that was there before.
+    let err = t.ask(&state, ask_req(&pid, "and one more thing", Some(&a.id))).await.unwrap_err();
+    assert_eq!(err.code, "conflict");
+    assert!(err.message.contains("answer it first"), "{}", err.message);
+
+    // The user's own Enter is the first to reach the dialog: it was unanswered until now, and
+    // the text that was pasted is what stood before it.
+    t.write(&a.id, b"\r").unwrap();
+    wait_long("the user's answer", 10, || !log_lines(&log, "APPROVAL").is_empty()).await;
+    assert_eq!(log_lines(&log, "APPROVAL"), [format!("APPROVAL {text}")]);
+
+    // With no dialog in the way the same call pastes and submits.
+    wait_long("the dialog to be gone", 20, || agent_of(&state, &a.id).state == super::AgentState::Idle && t.prompt_refusal(&entry).is_none()).await;
+    t.ask(&state, ask_req(&pid, "second task", Some(&a.id))).await.unwrap();
+    wait_long("the submitted turn", 20, || agent_of(&state, &a.id).last_message.as_deref() == Some("Done: second task")).await;
+
+    // A text that itself reads like a dialog of this CLI (a choice a session offered and the
+    // user clicked) is no dialog once it is echoed: its Enter is pressed. The screen alone
+    // would have said otherwise.
+    wait_long("the session to be idle", 20, || agent_of(&state, &a.id).state == super::AgentState::Idle && t.prompt_refusal(&entry).is_none()).await;
+    let choice = "Answer to question Q1: choice 1, \"Yes, proceed\"";
+    t.ask(&state, ask_req(&pid, choice, Some(&a.id))).await.unwrap();
+    wait_long("the turn of the text that reads like a dialog", 20, || agent_of(&state, &a.id).last_message.as_deref() == Some(&format!("Done: {choice}")[..])).await;
+    assert_eq!(log_lines(&log, "APPROVAL").len(), 1);
+    // Nor does the periodic look take its echo for one, while it stands in the input box and
+    // later in the history above it: the session stays idle, nobody is called, and what is sent
+    // next goes in.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let x = agent_of(&state, &a.id);
+    assert_eq!((x.state, x.attention.as_deref()), (super::AgentState::Idle, None), "{x:?}");
+    assert!(t.screen_text(&a.id, 30).unwrap().contains("Yes, proceed"), "the echo is on the screen");
+    assert!(t.screen_dialog(&entry).is_none() && t.prompt_refusal(&entry).is_none(), "the echoed text is no dialog");
+    t.ask(&state, ask_req(&pid, "next", Some(&a.id))).await.unwrap();
+    wait_long("the turn after it", 20, || agent_of(&state, &a.id).last_message.as_deref() == Some("Done: next")).await;
+    t.kill(&a.id).await.unwrap();
+
+    // Such a text does not disarm the check: a dialog that opens on it says more than the text
+    // does, and the Enter stays out all the same.
+    let b = t.spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), provider: Some("codex".into()), ..Default::default() }).await.unwrap();
+    wait_long("b to settle", 20, || agent_of(&state, &b.id).state == super::AgentState::Idle).await;
+    let err = t.ask(&state, ask_req(&pid, choice, Some(&b.id))).await.unwrap_err();
+    assert_eq!(err.message, "a dialog opened while your text was being pasted: it is in the session's input box, not sent");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(log_lines(&log, "APPROVAL").len(), 1, "the Enter answered the dialog: {:?}", log_lines(&log, "APPROVAL"));
+    t.kill(&b.id).await.unwrap();
+}
+
+/// The same for Claude Code, whose dialogs are known from its hooks: a permission request that
+/// arrives while the text is on its way keeps the Enter out, and the text waits in the input
+/// box for whatever is sent next.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_enter_is_withheld_from_a_claude_session_that_asks_for_permission_meanwhile() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let t = &state.terminals;
+    // A stand-in Claude Code session: a program that answers every line it is sent.
+    let id = t.insert_test_agent(None, json!({})).id;
+    let entry = t.get(&id).unwrap();
+    let launch = super::pty::LaunchSpec {
+        argv: python_argv("import sys\nfor l in sys.stdin:\n    sys.stdout.write('got ' + l)\n    sys.stdout.flush()"),
+        cwd: dir.path().to_path_buf(),
+        env: vec![],
+        cols: 80,
+        rows: 24,
+        redact: vec![],
+    };
+    t.launch(&state, &entry, launch, true).await.unwrap();
+    let set_state = |s: super::AgentState| {
+        t.update(&entry, |r| {
+            r.info.agent.as_mut().unwrap().state = s;
+            true
+        });
+    };
+    assert_eq!(agent_of(&state, &id).state, super::AgentState::Idle);
+
+    // The permission request arrives while the text is on its way: a send holds the session's
+    // input from its paste to its Enter.
+    let asks = tokio::spawn({
+        let (state, id) = (state.clone(), id.clone());
+        async move {
+            let entry = state.terminals.get(&id).unwrap();
+            while entry.input_lock.try_lock().is_ok() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            state.terminals.update(&entry, |r| {
+                r.info.agent.as_mut().unwrap().state = super::AgentState::NeedsPermission;
+                true
+            });
+        }
+    });
+    let err = t.ask(&state, ask_req("", "fix the build", Some(&id))).await.unwrap_err();
+    assert_eq!((err.status.as_u16(), err.code), (409, "conflict"), "{err}");
+    assert_eq!(err.message, "a dialog opened while your text was being pasted: it is in the session's input box, not sent");
+    asks.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let screen = t.screen_text(&id, 10).unwrap();
+    assert!(screen.contains("fix the build") && !screen.contains("got "), "the Enter was pressed: {screen:?}");
+
+    // While it asks, nothing is pasted at all.
+    let err = t.ask(&state, ask_req("", "one more", Some(&id))).await.unwrap_err();
+    assert!(err.message.contains("answer it first"), "{}", err.message);
+    assert!(!t.screen_text(&id, 10).unwrap().contains("one more"));
+
+    // Once the request is answered the next text goes in and is sent: the session reads the
+    // text that waited in its input box with it.
+    set_state(super::AgentState::Working);
+    t.ask(&state, ask_req("", ", then the tests", Some(&id))).await.unwrap();
+    wait_for("the submitted line", || t.screen_text(&id, 10).is_some_and(|s| s.contains("got fix the build, then the tests"))).await;
+    t.kill(&id).await.unwrap();
+}

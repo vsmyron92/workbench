@@ -1,0 +1,10 @@
+{
+  "alert": {"duration":1.2,"loop":true,"times":[0.0,0.14,0.42,0.7,0.84,1.0],"tracks":[{"ease":["linear","out","in","linear","linear"],"prop":"translateY","target":"body","values":[0.0,0.0,-14.0,0.0,0.0,0.0]},{"ease":"inOut","prop":"scaleY","target":"body","values":[1.0,0.93,1.05,0.94,1.0,1.0]}]},
+  "breathe": {"duration":3.6,"ease":"inOut","loop":true,"tracks":[{"prop":"scaleY","target":"body","values":[1.0,1.025,1.0]},{"prop":"scaleX","target":"body","values":[1.0,0.99,1.0]}]},
+  "cheer": {"duration":1.2,"tracks":[{"ease":"inOut","prop":"rotate","target":"armL","values":[0.0,99.928,87.928,99.928,87.928,0.0]},{"ease":"inOut","prop":"rotate","target":"armR","values":[0.0,-99.928,-87.928,-99.928,-87.928,0.0]},{"ease":["out","in","out","in","linear"],"prop":"translateY","target":"body","values":[0.0,-14.0,0.0,-7.0,0.0,0.0]},{"ease":"inOut","prop":"scaleY","target":"body","values":[1.0,1.05,0.95,1.025,0.98,1.0]}]},
+  "listen": {"duration":2.4,"ease":"inOut","loop":true,"tracks":[{"prop":"rotate","target":"body","values":[-2.5,-3.2,-2.5]}]},
+  "nod": {"duration":0.7,"ease":"inOut","tracks":[{"prop":"scaleY","target":"body","values":[1.0,0.95,1.0,0.97,1.0]}]},
+  "shake": {"duration":0.8,"ease":"inOut","tracks":[{"prop":"rotate","target":"body","values":[0.0,-3.0,3.0,-2.0,1.5,0.0]}]},
+  "talk": {"duration":0.9,"ease":"inOut","loop":true,"tracks":[{"prop":"rotate","target":"body","values":[0.0,1.6,0.0,-1.6,0.0]}]},
+  "wave": {"duration":1.4,"tracks":[{"ease":"inOut","prop":"rotate","target":"armR","values":[0.0,-103.928,-71.928,-103.928,-71.928,0.0]}]}
+}

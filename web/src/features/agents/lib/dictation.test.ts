@@ -1,8 +1,10 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  dictationLive,
   dictationProblem,
   INSECURE_MESSAGE,
   needsSpace,
+  onDictationChange,
   place,
   spokenText,
   speechSupport,
@@ -276,5 +278,152 @@ describe('startDictation', () => {
     Fake.failStart = null
     const next = open({ value: '', start: 0, end: 0 })
     expect(next.rec.started).toBe(1)
+  })
+})
+
+describe('a microphone open anywhere in the page', () => {
+  const EMPTY: Field = { value: '', start: 0, end: 0 }
+  const offs: (() => void)[] = []
+  /** What a watcher is told at each change. */
+  const watch = () => {
+    const seen: boolean[] = []
+    offs.push(onDictationChange((on) => seen.push(on)))
+    return seen
+  }
+  afterEach(() => {
+    for (const off of offs.splice(0)) off()
+  })
+
+  it('is live from the start of a dictation until its recognizer has ended', () => {
+    expect(dictationLive()).toBe(false)
+    const { rec, d } = open(EMPTY)
+    expect(dictationLive()).toBe(true)
+    rec.onaudiostart?.()
+    // Stopped: the button is off, but the last words are still on their way.
+    d.stop()
+    expect(dictationLive()).toBe(true)
+    rec.hear('one more thing')
+    expect(dictationLive()).toBe(true)
+    rec.onend?.()
+    expect(dictationLive()).toBe(false)
+  })
+
+  it('is closed at once by a cancel, and never open for a recognizer that could not start', () => {
+    const { d } = open(EMPTY)
+    d.cancel()
+    expect(dictationLive()).toBe(false)
+    Fake.failStart = new Error('already started')
+    open(EMPTY)
+    expect(dictationLive()).toBe(false)
+  })
+
+  it('tells its watchers when it opens and when it closes, once each', () => {
+    const seen = watch()
+    // Subscribing reports nothing: the watcher reads the value it starts with itself.
+    expect(seen).toEqual([])
+    const { rec, d } = open(EMPTY)
+    expect(seen).toEqual([true])
+    // Hearing, and a stop whose last words are still to come, change nothing.
+    rec.onaudiostart?.()
+    rec.hear('fix')
+    d.stop()
+    expect(seen).toEqual([true])
+    rec.onend?.()
+    expect(seen).toEqual([true, false])
+    // A second end, or a cancel after the end, says nothing more.
+    d.cancel()
+    expect(seen).toEqual([true, false])
+  })
+
+  it('hands a watcher the value it would read itself, also one that takes no argument', () => {
+    const told: [boolean, boolean][] = []
+    const read: boolean[] = []
+    offs.push(onDictationChange((on) => told.push([on, dictationLive()])))
+    offs.push(onDictationChange(() => read.push(dictationLive())))
+    open(EMPTY).d.cancel()
+    expect(told).toEqual([
+      [true, true],
+      [false, false],
+    ])
+    expect(read).toEqual([true, false])
+  })
+
+  it('stops telling a watcher that unsubscribed', () => {
+    const seen: boolean[] = []
+    const off = onDictationChange((on) => seen.push(on))
+    open(EMPTY).d.cancel()
+    expect(seen).toEqual([true, false])
+    off()
+    open(EMPTY).d.cancel()
+    expect(seen).toEqual([true, false])
+  })
+
+  it('does not tell a watcher that an earlier one unsubscribed during the same change', () => {
+    const seen: string[] = []
+    let offSecond = () => {}
+    offs.push(
+      onDictationChange(() => {
+        seen.push('first')
+        offSecond()
+      }),
+    )
+    offSecond = onDictationChange(() => seen.push('second'))
+    offs.push(offSecond)
+    open(EMPTY).d.cancel()
+    expect(seen).toEqual(['first', 'first'])
+  })
+
+  it('does not call one field taking over from another a change', () => {
+    const seen = watch()
+    const first = open(EMPTY)
+    const second = open(EMPTY)
+    // The first was cancelled for the second, yet a microphone was open throughout.
+    expect(first.rec.aborted).toBe(1)
+    expect(seen).toEqual([true])
+    expect(dictationLive()).toBe(true)
+    second.d.cancel()
+    expect(seen).toEqual([true, false])
+  })
+
+  it('says nothing about a recognizer that could not start, and tells the end when a takeover fails', () => {
+    const seen = watch()
+    Fake.failStart = new Error('already started')
+    open(EMPTY)
+    expect(seen).toEqual([])
+    Fake.failStart = null
+    const first = open(EMPTY)
+    expect(seen).toEqual([true])
+    // The next field cancels the first, then cannot start: nothing listens any more.
+    Fake.failStart = new Error('busy')
+    const second = open(EMPTY)
+    expect(first.rec.aborted).toBe(1)
+    expect(second.log.states).toEqual(['starting', 'idle'])
+    expect(dictationLive()).toBe(false)
+    expect(seen).toEqual([true, false])
+  })
+
+  it('goes on when a watcher throws: the field, the recognizer and the other watchers are not left hanging', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      offs.push(
+        onDictationChange(() => {
+          throw new Error('boom')
+        }),
+      )
+      const seen = watch()
+      const { rec, log, d } = open(EMPTY)
+      expect(log.states).toEqual(['starting'])
+      expect(rec.started).toBe(1)
+      rec.hear('still here')
+      expect(log.value).toBe('still here')
+      d.cancel()
+      // The microphone's own button went off and the recognizer was told to stop.
+      expect(log.states.at(-1)).toBe('idle')
+      expect(rec.aborted).toBe(1)
+      expect(seen).toEqual([true, false])
+      expect(errors).toHaveBeenCalledTimes(2)
+    } finally {
+      errors.mockRestore()
+    }
   })
 })

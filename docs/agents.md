@@ -69,16 +69,20 @@ they touch. Every tool is confined to the session's own project, except the debu
 | `run_*`, `env_status` | Start and read run configurations; environment health |
 | `code_*`, `debug_*`, `files_local_history` | Diagnostics and symbols from running language servers; driving the debugger (start, attach, step, evaluate, breakpoints) and reading its state; Local History |
 | `data_*` | Fill the data viewer and read statistics back ([data viewer](data-viewer.md)) |
+| `avatar_*` | Draw the session's own avatar, say a line, ask a question, play a gesture, read it back ([avatars](avatar.md)) |
 | `devcontainer_status` | Whether the dev container runs |
 
 An agent can hand a separate piece of work to **another agent session** (`workbench_start_session`:
-any provider, a prompt, an optional name and folder). The new session opens as a tab beside yours and
-runs on its own, with its permission requests coming to you like any other. It is held to what its
-starter may do: the same project and a folder inside it; the same CLI starts in the permission mode
-the starter runs in; it never runs without asking (or Codex without its sandbox) unless its starter
-already does; sessions started by sessions go two levels deep, and at most 8 of them run in a project
-at once. Beyond that, the agent is told to ask you. A session that was started **Restricted** (below)
-starts only restricted ones.
+any provider, a prompt, an optional name and folder, and optionally an avatar). The new session opens
+as a tab beside yours and runs on its own, with its permission requests coming to you like any other.
+It is held to what its starter may do: the same project and a folder inside it; the same CLI starts in
+the permission mode the starter runs in; it never runs without asking (or Codex without its sandbox)
+unless its starter already does; sessions started by sessions go two levels deep, and at most 8 of
+them run in a project at once. Beyond that, the agent is told to ask you. A session that was started
+**Restricted** (below) starts only restricted ones. With `avatar: true` the new session starts with a
+live avatar, as with the composer's **Avatar** option; where **Settings › Avatar** says **When I give
+them one** or **Off**, or you turned the starting session's own avatar off, that start is refused and
+nothing is started.
 
 Claude Code sessions can also message each other (its own `SendMessage` and `ListAgents`, by
 session name): a session that gives its child a distinct `name` can message it and ask to be told
@@ -103,6 +107,17 @@ it on with `"ultracode": true` in the session's own settings, so the Effort choi
 restart or a move to another Claude account keeps it, and the session's tab and card show an
 **Ultracode** badge. A session never starts another one in ultracode: that is your choice for each
 session.
+
+**Avatar** (New session › options, after Ultracode, every CLI): the session gets a live avatar, a
+small animated character that it draws itself and that walks about the workspace window, says the
+short version of what the session does aloud or as captions, asks you questions you answer by
+click, typing or voice, and shows the session's state. Drawing the look takes about half a minute and a few
+thousand tokens. A running session can be given one later (**Avatar: Give This Session an
+Avatar** in the palette, or the avatar widget's menu in the status bar). By default a session may
+also take one itself, the first time it uses one, and start another session with one;
+**Settings › Avatar** can leave giving them to you (**When I give them one**) or switch them off.
+You can turn any session's avatar off. The session's tab and card show an **Avatar** badge while
+its avatar is on. See [Avatars](avatar.md).
 
 Tools never deploy, never run destructive git operations, never start a language server,
 never query a database, never update or restart Workbench and never answer a permission
@@ -159,8 +174,10 @@ Codex, Kimi Code, Gemini CLI and Aider are presets: install one and it appears i
 composer. Any other CLI is a `[agents.providers.<name>]` entry with its `command`. Codex
 sessions get the MCP tools and their state from Codex's own session log; Kimi Code, Gemini
 CLI, Aider and custom CLIs run without the MCP tools (their MCP settings live in files
-Workbench does not change) and show activity from their output. Permission requests
-answered from Workbench and Review Changes are Claude Code's.
+Workbench does not change) and show activity from their output; they drive an
+[avatar](avatar.md) with the `workbench avatar` command on the host, or `curl` in a dev container
+(as Codex does there), instead of its tools, and may ask you before they run it. Permission
+requests answered from Workbench and Review Changes are Claude Code's.
 
 ## More than one account
 

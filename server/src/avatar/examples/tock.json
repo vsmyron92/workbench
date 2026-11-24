@@ -1,0 +1,199 @@
+{
+  "name": "Tock",
+  "svg": "<svg viewBox='0 0 200 200'><defs><linearGradient id='shell' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#f8fafc'/><stop offset='1' stop-color='#c3cedc'/></linearGradient><linearGradient id='glass' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#1e293b'/><stop offset='1' stop-color='#0b1220'/></linearGradient></defs><ellipse id='shadow' cx='100' cy='188' rx='34' ry='5' fill='#000000' opacity='0.18'/><g id='bot'><ellipse id='jet' cx='100' cy='177' rx='13' ry='4' fill='#22d3ee' opacity='0.5'/><rect x='91' y='138' width='18' height='12' fill='#64748b'/><rect x='72' y='146' width='56' height='28' rx='12' fill='url(#shell)' stroke='#475569' stroke-width='3'/><circle id='core' cx='100' cy='160' r='6' fill='#22d3ee' stroke='#0e7490' stroke-width='1.5'/><g id='head'><g id='antenna'><line x1='100' y1='48' x2='100' y2='29' stroke='#475569' stroke-width='4' stroke-linecap='round'/><circle id='ping' cx='100' cy='24' r='8' fill='none' stroke='#fb923c' stroke-width='2.5' opacity='0'/><circle id='bulb' cx='100' cy='24' r='6.5' fill='#fb923c' stroke='#9a3412' stroke-width='1.5'/></g><g id='earL'><circle cx='36' cy='94' r='10' fill='#94a3b8' stroke='#475569' stroke-width='2.5'/><line x1='36' y1='94' x2='36' y2='87' stroke='#475569' stroke-width='2.5' stroke-linecap='round'/></g><g id='earR'><circle cx='164' cy='94' r='10' fill='#94a3b8' stroke='#475569' stroke-width='2.5'/><line x1='164' y1='94' x2='164' y2='87' stroke='#475569' stroke-width='2.5' stroke-linecap='round'/></g><rect x='40' y='48' width='120' height='94' rx='30' fill='url(#shell)' stroke='#475569' stroke-width='3'/><rect x='52' y='60' width='96' height='70' rx='20' fill='url(#glass)'/><path d='M62 76 Q66 66 82 65' fill='none' stroke='#ffffff' stroke-width='3' stroke-linecap='round' opacity='0.2'/><g id='eyes'><path id='eyeL' d='M76 82 Q76 89 76 96' fill='none' stroke='#67e8f9' stroke-width='13' stroke-linecap='round'/><path id='eyeR' d='M124 82 Q124 89 124 96' fill='none' stroke='#67e8f9' stroke-width='13' stroke-linecap='round'/></g><g id='mouth' fill='#67e8f9'><rect x='81' y='114.2' width='5' height='1.6' rx='0.8'/><rect x='89' y='113.5' width='5' height='3' rx='1'/><rect x='97.5' y='113' width='5' height='4' rx='1'/><rect x='106' y='113.5' width='5' height='3' rx='1'/><rect x='114' y='114.2' width='5' height='1.6' rx='0.8'/></g></g><g id='handL'><circle cx='52' cy='164' r='9' fill='url(#shell)' stroke='#475569' stroke-width='3'/><circle cx='60' cy='158' r='4' fill='#e2e8f0' stroke='#475569' stroke-width='2'/></g><g id='handR'><circle cx='148' cy='164' r='9' fill='url(#shell)' stroke='#475569' stroke-width='3'/><circle cx='140' cy='158' r='4' fill='#e2e8f0' stroke='#475569' stroke-width='2'/></g></g></svg>",
+  "pivots": {
+    "bot": [100, 152],
+    "head": [100, 140],
+    "antenna": [100, 48],
+    "earL": [36, 94],
+    "earR": [164, 94],
+    "eyes": [100, 89],
+    "mouth": [100, 115],
+    "handL": [52, 192],
+    "handR": [148, 192]
+  },
+  "roles": {
+    "body": "bot",
+    "head": "head",
+    "eyes": "eyes",
+    "pupils": "eyes",
+    "armL": "handL",
+    "armR": "handR"
+  },
+  "animations": {
+    "hover": {
+      "duration": 3.6,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "bot", "prop": "translateY", "values": [0, -5, 0] },
+        { "target": "shadow", "prop": "scaleX", "values": [1, 0.88, 1] },
+        { "target": "jet", "prop": "opacity", "values": [0.5, 0.8, 0.5] }
+      ]
+    },
+    "drift": {
+      "duration": 2.9,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "handL", "prop": "translateY", "values": [0, -4, 0] },
+        { "target": "handR", "prop": "translateY", "values": [0, -4, 0], "phase": 0.5 },
+        { "target": "antenna", "prop": "rotate", "values": [-4, 4, -4] }
+      ]
+    },
+    "scan": {
+      "duration": 2.4,
+      "loop": true,
+      "tracks": [
+        { "target": "eyes", "prop": "translateX", "values": [-6, 6, -6], "ease": "inOut" },
+        { "target": "earL", "prop": "rotate", "values": [0, 360] },
+        { "target": "earR", "prop": "rotate", "values": [0, -360] },
+        { "target": "core", "prop": "fill", "values": ["#22d3ee", "#ecfeff", "#22d3ee"], "ease": "inOut" }
+      ]
+    },
+    "type": {
+      "duration": 0.6,
+      "loop": true,
+      "ease": "out",
+      "tracks": [
+        { "target": "handL", "prop": "translateY", "values": [0, -6, 0, 0, 0] },
+        { "target": "handR", "prop": "translateY", "values": [0, 0, 0, -6, 0] }
+      ]
+    },
+    "speak": {
+      "duration": 1.6,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "bot", "prop": "rotate", "values": [-2.5, 2.5, -2.5] },
+        { "target": "antenna", "prop": "rotate", "values": [4, -4, 4] },
+        { "target": "bulb", "prop": "fill", "values": ["#fb923c", "#fdba74", "#fb923c"] }
+      ]
+    },
+    "attend": {
+      "duration": 2,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "bot", "prop": "rotate", "values": [-5, -3.5, -5] },
+        { "target": "earL", "prop": "scale", "values": [1, 1.2, 1] },
+        { "target": "earR", "prop": "scale", "values": [1, 1.2, 1], "phase": 0.5 },
+        { "target": "eyes", "prop": "scale", "values": [1.1, 1.1] }
+      ]
+    },
+    "await": {
+      "duration": 1.8,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "eyes", "prop": "translateY", "values": [-2.5, -2.5] },
+        { "target": "handR", "prop": "translateY", "values": [-12, -15, -12] },
+        { "target": "handR", "prop": "rotate", "values": [-12, 12, -12] },
+        { "target": "bulb", "prop": "fill", "values": ["#fb923c", "#fde68a", "#fb923c"] }
+      ]
+    },
+    "ping": {
+      "duration": 1.3,
+      "loop": true,
+      "tracks": [
+        { "target": "ping", "prop": "r", "values": [8, 17], "ease": "out" },
+        { "target": "ping", "prop": "opacity", "values": [0, 0.95, 0], "times": [0, 0.15, 1], "ease": "out" },
+        { "target": "ping", "prop": "strokeWidth", "values": [2.5, 0.5] },
+        { "target": "bulb", "prop": "fill", "values": ["#fb923c", "#ef4444", "#fb923c"], "ease": "inOut" },
+        { "target": "bot", "prop": "translateX", "values": [0, -2.5, 2.5, -2.5, 2.5, 0, 0], "times": [0, 0.06, 0.12, 0.18, 0.24, 0.3, 1] },
+        { "target": "eyes", "prop": "scale", "values": [1.14, 1.14] }
+      ]
+    },
+    "standby": {
+      "duration": 5,
+      "loop": true,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "eyes", "prop": "scaleY", "values": [0.1, 0.1] },
+        { "target": ["eyeL", "eyeR"], "prop": "stroke", "values": ["#0e7490", "#0e7490"] },
+        { "target": "bot", "prop": "translateY", "values": [8, 10, 8] },
+        { "target": "bot", "prop": "rotate", "values": [4, 4] },
+        { "target": "antenna", "prop": "rotate", "values": [28, 28] },
+        { "target": "bulb", "prop": "fill", "values": ["#64748b", "#64748b"] },
+        { "target": "core", "prop": "fill", "values": ["#155e75", "#0e7490", "#155e75"] },
+        { "target": "jet", "prop": "opacity", "values": [0.12, 0.22, 0.12] },
+        { "target": "handL", "prop": "translateY", "values": [5, 7, 5] },
+        { "target": "handR", "prop": "translateY", "values": [7, 5, 7] }
+      ]
+    },
+    "wave": {
+      "duration": 1.8,
+      "times": [0, 0.2, 0.8, 1],
+      "ease": "inOut",
+      "tracks": [
+        { "target": "handR", "prop": "translateX", "values": [0, 22, 22, 0] },
+        { "target": "handR", "prop": "translateY", "values": [0, -98, -98, 0] },
+        { "target": "handR", "prop": "rotate", "values": [0, -16, 16, -16, 16, -16, 0], "times": [0, 0.2, 0.35, 0.5, 0.65, 0.8, 1] },
+        { "target": "bot", "prop": "rotate", "values": [0, 3, 3, 0] }
+      ]
+    },
+    "cheer": {
+      "duration": 1.6,
+      "ease": "inOut",
+      "tracks": [
+        { "target": "handL", "prop": "translateX", "values": [0, -20, -20, 0], "times": [0, 0.2, 0.8, 1] },
+        { "target": "handR", "prop": "translateX", "values": [0, 20, 20, 0], "times": [0, 0.2, 0.8, 1] },
+        { "target": ["handL", "handR"], "prop": "translateY", "values": [0, -100, -100, 0], "times": [0, 0.2, 0.8, 1] },
+        { "target": "handL", "prop": "rotate", "values": [0, 14, -14, 14, -14, 0] },
+        { "target": "handR", "prop": "rotate", "values": [0, -14, 14, -14, 14, 0] },
+        { "target": "bot", "prop": "translateY", "values": [0, -9, 0, -6, 0, 0] },
+        { "target": "eyeL", "prop": "d", "values": [null, "M68 93 Q76 79 84 93", "M68 93 Q76 79 84 93", null], "times": [0, 0.15, 0.85, 1] },
+        { "target": "eyeR", "prop": "d", "values": [null, "M116 93 Q124 79 132 93", "M116 93 Q124 79 132 93", null], "times": [0, 0.15, 0.85, 1] },
+        { "target": ["eyeL", "eyeR"], "prop": "strokeWidth", "values": [null, 7, 7, null], "times": [0, 0.15, 0.85, 1] },
+        { "target": "bulb", "prop": "fill", "values": [null, "#fde047", null, "#fde047", null], "ease": "linear" }
+      ]
+    },
+    "flip": {
+      "duration": 1,
+      "tracks": [
+        { "target": "bot", "prop": "scaleX", "values": [1, 0, -1, 0, 1] },
+        { "target": "bot", "prop": "translateY", "values": [0, -8, 0], "ease": "inOut" }
+      ]
+    },
+    "idea": {
+      "duration": 2.4,
+      "times": [0, 0.15, 0.85, 1],
+      "ease": "inOut",
+      "tracks": [
+        { "target": "eyes", "prop": "translateX", "values": [0, 5, 5, 0] },
+        { "target": "eyes", "prop": "translateY", "values": [0, -5, -5, 0] },
+        { "target": "handR", "prop": "translateX", "values": [0, -14, -14, 0] },
+        { "target": "handR", "prop": "translateY", "values": [0, -22, -22, 0] },
+        { "target": "antenna", "prop": "rotate", "values": [0, -12, -12, 0] },
+        { "target": "bulb", "prop": "fill", "values": [null, "#fde047", null, "#fde047", null], "times": [0, 0.25, 0.5, 0.75, 1], "ease": "linear" }
+      ]
+    },
+    "oops": {
+      "duration": 1.8,
+      "times": [0, 0.15, 0.85, 1],
+      "ease": "inOut",
+      "tracks": [
+        { "target": "eyeL", "prop": "d", "values": [null, "M82 84 Q76 89 70 94", "M82 84 Q76 89 70 94", null] },
+        { "target": "eyeR", "prop": "d", "values": [null, "M118 84 Q124 89 130 94", "M118 84 Q124 89 130 94", null] },
+        { "target": ["eyeL", "eyeR"], "prop": "strokeWidth", "values": [null, 7, 7, null] },
+        { "target": "antenna", "prop": "rotate", "values": [0, 32, 32, 0] },
+        { "target": "bot", "prop": "translateY", "values": [0, 5, 5, 0] },
+        { "target": "bulb", "prop": "fill", "values": [null, "#64748b", "#64748b", null] }
+      ]
+    }
+  },
+  "states": {
+    "idle": ["hover", "drift", "blink"],
+    "working": ["hover", "scan", "type", "blink"],
+    "speaking": ["hover", "speak", "blink"],
+    "listening": ["hover", "attend", "blink"],
+    "waiting": ["hover", "await", "blink"],
+    "attention": ["hover", "ping", "blink"],
+    "error": ["hover", "blink", "oops"],
+    "done": ["hover", "blink", "flip"],
+    "sleeping": ["standby"]
+  },
+  "mouth": { "target": "mouth", "prop": "scaleY", "open": 5.6 },
+  "gaze": 4,
+  "voice": { "lang": "en-US", "prefer": ["Google US English", "Guy", "Aaron", "Male"], "pitch": 0.85, "rate": 1.08 }
+}
