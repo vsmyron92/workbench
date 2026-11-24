@@ -15,9 +15,10 @@
 //! On Windows there is no limit a process can put on itself this way: the wait and the kill
 //! hold there, and an allocation that fails still ends only the drawing.
 //!
-//! The answer of the child: status 0 and the PNG on standard output, with what it cost as one
-//! line of JSON on standard error; status [`EXIT_REFUSED`] and a sentence for the session on
-//! standard error; anything else (a signal, another status) means the drawing died of the look.
+//! The answer of the child: status 0 and the PNG on standard output, with what it cost and what
+//! it showed as one line of JSON on standard error ([`report`]); status [`EXIT_REFUSED`] and a
+//! sentence for the session on standard error; anything else (a signal, another status) means
+//! the drawing died of the look.
 
 use std::io::{Read, Write};
 use std::process::Stdio;
@@ -26,7 +27,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
-use super::preview::{self, Inputs, Picture, Pose, Spent};
+use super::preview::{self, Chosen, Inputs, Moment, Picture, Played, Pose, Spent};
 
 /// The subcommand that draws: `workbench avatar-draw`.
 pub const COMMAND: &str = "avatar-draw";
@@ -55,15 +56,22 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 pub enum Want {
     /// The figure in one pose, on the light and on the dark panel.
     Sheet(Pose),
-    /// Moments of one of its own animations, with these inputs held.
-    Strip { animation: String, frames: usize, inputs: Inputs },
+    /// Moments of one of its animations (its own, or a built-in one), with these inputs held, and
+    /// close up on the part `zoom` names, where it names one.
+    Strip { animation: String, frames: usize, inputs: Inputs, zoom: Option<String> },
 }
 
 impl Want {
     fn to_json(&self) -> (&'static str, Value) {
         match self {
             Want::Sheet(pose) => ("sheet", pose.to_json()),
-            Want::Strip { animation, frames, inputs } => ("strip", json!({ "animation": animation, "frames": frames, "inputs": Value::Object(inputs.to_json()) })),
+            Want::Strip { animation, frames, inputs, zoom } => {
+                let mut strip = json!({ "animation": animation, "frames": frames, "inputs": Value::Object(inputs.to_json()) });
+                if let Some(zoom) = zoom {
+                    strip["zoom"] = json!(zoom);
+                }
+                ("strip", strip)
+            }
         }
     }
 
@@ -75,8 +83,59 @@ impl Want {
         let animation = strip.get("animation").and_then(Value::as_str).ok_or("a strip names an animation")?.to_string();
         let frames = strip.get("frames").and_then(Value::as_u64).ok_or("a strip names its frames")? as usize;
         let inputs = Inputs::from_json(strip.get("inputs").unwrap_or(&Value::Null))?;
-        Ok(Want::Strip { animation, frames, inputs })
+        let zoom = match strip.get("zoom") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(id)) => Some(id.clone()),
+            Some(_) => return Err("zoom in a pose is the id of the part to look at closely".to_string()),
+        };
+        Ok(Want::Strip { animation, frames, inputs, zoom })
     }
+}
+
+/// What the child says beside a picture, as one line of JSON: what drawing it costs (`filters`,
+/// `layers`), the same at rest (`rest`), and what it showed of an animation (`builtin`, `loop`,
+/// and for a pose its moment: `at`, `chosen`, `still`).
+fn report(picture: &Picture) -> Value {
+    let mut out = json!({
+        "filters": picture.spent.filters,
+        "layers": picture.spent.layers,
+        "rest": { "filters": picture.rest.filters, "layers": picture.rest.layers },
+    });
+    if let Some(played) = &picture.played {
+        out["builtin"] = json!(played.builtin);
+        out["loop"] = json!(played.looping);
+        if let Some(moment) = &played.moment {
+            out["at"] = json!(moment.at);
+            out["chosen"] = json!(match moment.chosen {
+                Chosen::Given => "given",
+                Chosen::Furthest => "furthest",
+                Chosen::Unmoved => "unmoved",
+            });
+            out["still"] = json!(moment.still);
+        }
+    }
+    out
+}
+
+/// [`report`] read back with the picture. What it does not say reads as it did before the child
+/// said it: no cost is 0, the cost at rest is the cost, and without `builtin` nothing is known of
+/// an animation (the caption then asks the look).
+fn reported(png: Vec<u8>, line: &str) -> Picture {
+    let said = serde_json::from_str::<Value>(line).unwrap_or(Value::Null);
+    let spent_of = |v: &Value| Spent { filters: v["filters"].as_f64().unwrap_or(0.0), layers: v["layers"].as_f64().unwrap_or(0.0) };
+    let spent = spent_of(&said);
+    let rest = if said["rest"].is_object() { spent_of(&said["rest"]) } else { spent };
+    let moment = said["at"].as_f64().filter(|at| (0.0..=1.0).contains(at)).map(|at| Moment {
+        at,
+        chosen: match said["chosen"].as_str() {
+            Some("furthest") => Chosen::Furthest,
+            Some("unmoved") => Chosen::Unmoved,
+            _ => Chosen::Given,
+        },
+        still: said["still"].as_bool().unwrap_or(false),
+    });
+    let played = said["builtin"].as_bool().map(|builtin| Played { builtin, looping: said["loop"].as_bool().unwrap_or(false), moment });
+    Picture { png, spent, rest, played }
 }
 
 /// Why there is no picture.
@@ -167,8 +226,7 @@ fn read_answer(status: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<Pict
             let Some(from) = from.filter(|_| stdout.len() <= MAX_ANSWER_BYTES) else {
                 return Err(NotDrawn::Unavailable("the drawing answered with no picture".to_string()));
             };
-            let spent = serde_json::from_str::<Value>(last).ok().map(|v| Spent { filters: v["filters"].as_f64().unwrap_or(0.0), layers: v["layers"].as_f64().unwrap_or(0.0) }).unwrap_or_default();
-            Ok(Picture { png: stdout[from..].to_vec(), spent })
+            Ok(reported(stdout[from..].to_vec(), last))
         }
         Some(EXIT_REFUSED) if !last.is_empty() => Err(NotDrawn::Refused(last.chars().take(600).collect())),
         // A signal (no status), the status of an abort or of a panic: the drawing died of the look.
@@ -194,7 +252,7 @@ pub fn child() -> ! {
         Ok(picture) => {
             let mut out = std::io::stdout().lock();
             let written = out.write_all(&picture.png).and_then(|_| out.flush());
-            eprintln!("{}", json!({ "filters": picture.spent.filters, "layers": picture.spent.layers }));
+            eprintln!("{}", report(&picture));
             std::process::exit(if written.is_ok() { 0 } else { 1 })
         }
         // No sentence: the drawing failed in a way that says nothing to a session.
@@ -213,7 +271,7 @@ fn answer(request: &[u8]) -> Result<Picture, String> {
     let look = request.get("look").ok_or_else(String::new)?;
     match Want::from_json(&request)? {
         Want::Sheet(pose) => preview::draw_sheet(look, &pose),
-        Want::Strip { animation, frames, inputs } => preview::draw_strip(look, &animation, frames, &inputs),
+        Want::Strip { animation, frames, inputs, zoom } => preview::draw_strip(look, &animation, frames, &inputs, zoom.as_deref()),
     }
 }
 
@@ -364,8 +422,8 @@ mod tests {
                 };
                 let mut wants = vec![Want::Sheet(Pose::default())];
                 for name in look.get("animations").and_then(Value::as_object).into_iter().flat_map(|a| a.keys()) {
-                    wants.push(Want::Sheet(Pose { animation: Some((name.clone(), 0.5)), ..Pose::default() }));
-                    wants.push(Want::Strip { animation: name.clone(), frames: 6, inputs: Inputs::default() });
+                    wants.push(Want::Sheet(Pose { animation: Some((name.clone(), Some(0.5))), ..Pose::default() }));
+                    wants.push(Want::Strip { animation: name.clone(), frames: 6, inputs: Inputs::default(), zoom: None });
                 }
                 wants.push(Want::Sheet(Pose { inputs: Inputs { look_x: 1.0, look_y: -1.0, mouth: Some(1.0), pace: 1.0, turn: -1.0, held: 1.0 }, ..Pose::default() }));
                 for want in wants {
@@ -404,9 +462,29 @@ mod tests {
         assert!(picture.png.starts_with(PNG_SIGNATURE), "{} bytes", picture.png.len());
         // The same picture as the renderer draws in this process.
         assert_eq!(picture.png, preview::sheet(&dot(), &Pose::default()).unwrap());
-        let strip = draw(&look(json!([{ "tag": "circle", "id": "dot", "attrs": { "cx": 100, "cy": 100, "r": 40, "fill": "#3366cc" } }])), &Want::Strip { animation: "none".into(), frames: 3, inputs: Inputs::default() }).await;
+        // And what it says beside it: the cost in the pose and at rest, the animation and the
+        // moment the child chose where the pose names none.
+        let mut hazy = look(json!([
+            { "tag": "g", "id": "hub", "attrs": { "opacity": 0.5 }, "box": [60, 60, 80, 80], "children": [{ "tag": "circle", "attrs": { "cx": 100, "cy": 100, "r": 40, "fill": "#3366cc" } }] }
+        ]));
+        hazy["animations"] = json!({ "grow": { "duration": 1, "tracks": [{ "target": "hub", "prop": "scale", "values": [1, 2, 1] }] } });
+        // Numbers travel as JSON text: equal to the last few digits.
+        let near = |a: Spent, b: Spent| (a.filters - b.filters).abs() < 1e-9 && (a.layers - b.layers).abs() < 1e-9;
+        for want in [
+            Want::Sheet(Pose { animation: Some(("grow".into(), None)), ..Pose::default() }),
+            Want::Strip { animation: "grow".into(), frames: 3, inputs: Inputs::default(), zoom: Some("hub".into()) },
+        ] {
+            let in_here = match &want {
+                Want::Sheet(pose) => preview::draw_sheet(&hazy, pose).unwrap(),
+                Want::Strip { animation, frames, inputs, zoom } => preview::draw_strip(&hazy, animation, *frames, inputs, zoom.as_deref()).unwrap(),
+            };
+            let there = draw(&hazy, &want).await.unwrap();
+            assert!(in_here.spent.layers > in_here.rest.layers && in_here.played.is_some(), "{want:?}: {in_here:?}");
+            assert!(there.png == in_here.png && near(there.spent, in_here.spent) && near(there.rest, in_here.rest) && there.played == in_here.played, "{want:?}: {there:?}");
+        }
+        let strip = draw(&look(json!([{ "tag": "circle", "id": "dot", "attrs": { "cx": 100, "cy": 100, "r": 40, "fill": "#3366cc" } }])), &Want::Strip { animation: "none".into(), frames: 3, inputs: Inputs::default(), zoom: None }).await;
         // What the renderer refuses comes back as its sentence.
-        assert_eq!(strip.unwrap_err(), NotDrawn::Refused("no animation \"none\" in this look: it has no animations of its own".to_string()));
+        assert_eq!(strip.unwrap_err(), NotDrawn::Refused("no animation \"none\" in this look: it has no animations of its own, and its roles give it none of Workbench's built-in ones".to_string()));
     }
 
     /// The two looks that got past the estimate and made the renderer ask for more memory than
@@ -426,8 +504,8 @@ mod tests {
         let started = std::time::Instant::now();
         for (name, look, want) in [
             ("a layer inside a shifted layer", &shifted, Want::Sheet(Pose::default())),
-            ("a layer past the integers", &saturated, Want::Sheet(Pose { animation: Some(("move".into(), 0.5)), ..Pose::default() })),
-            ("the same as a strip", &saturated, Want::Strip { animation: "move".into(), frames: 6, inputs: Inputs::default() }),
+            ("a layer past the integers", &saturated, Want::Sheet(Pose { animation: Some(("move".into(), Some(0.5))), ..Pose::default() })),
+            ("the same as a strip", &saturated, Want::Strip { animation: "move".into(), frames: 6, inputs: Inputs::default(), zoom: None }),
         ] {
             match draw(look, &want).await {
                 // Refused with a sentence by the estimate, or dead of the look: never a picture, never more.
@@ -446,6 +524,9 @@ mod tests {
         let png = [PNG_SIGNATURE, b"rest"].concat();
         let drawn = read_answer(Some(0), &png, b"{\"filters\":12.5,\"layers\":3}\n").unwrap();
         assert_eq!((drawn.png.as_slice(), drawn.spent), (png.as_slice(), Spent { filters: 12.5, layers: 3.0 }));
+        // What an answer of fewer words leaves out reads as before: the cost at rest is the cost,
+        // and nothing is known of an animation.
+        assert_eq!((drawn.rest, drawn.played), (drawn.spent, None));
         assert_eq!(read_answer(Some(0), b"not a picture", b""), Err(NotDrawn::Unavailable("the drawing answered with no picture".into())));
         assert_eq!(read_answer(Some(EXIT_REFUSED), b"", b"noise\nno animation \"x\" in this look\n"), Err(NotDrawn::Refused("no animation \"x\" in this look".into())));
         // An abort, a panic, a kill, a refusal without words: the look cost too much.
@@ -457,10 +538,42 @@ mod tests {
 
     #[test]
     fn what_to_draw_reads_back_as_it_was_written() {
-        let pose = Pose { animation: Some(("walk".into(), 0.25)), inputs: Inputs { look_x: -1.0, turn: 1.0, mouth: Some(0.5), ..Inputs::default() }, zoom: Some("mouth".into()) };
-        for want in [Want::Sheet(Pose::default()), Want::Sheet(pose), Want::Strip { animation: "walk".into(), frames: 4, inputs: Inputs { turn: -1.0, pace: 1.0, ..Inputs::default() } }] {
+        let pose = Pose { animation: Some(("walk".into(), Some(0.25))), inputs: Inputs { look_x: -1.0, turn: 1.0, mouth: Some(0.5), ..Inputs::default() }, zoom: Some("mouth".into()) };
+        // A pose that names no moment is sent without one: the child chooses it.
+        let open = Pose { animation: Some(("nod".into(), None)), ..Pose::default() };
+        assert!(Want::Sheet(open.clone()).to_json().1.get("at").is_none());
+        for want in [
+            Want::Sheet(Pose::default()),
+            Want::Sheet(pose),
+            Want::Sheet(open),
+            Want::Strip { animation: "walk".into(), frames: 4, inputs: Inputs { turn: -1.0, pace: 1.0, ..Inputs::default() }, zoom: None },
+            Want::Strip { animation: "nod".into(), frames: 6, inputs: Inputs::default(), zoom: Some("head".into()) },
+        ] {
             let (key, value) = want.to_json();
             assert_eq!(Want::from_json(&json!({ "look": {}, key: value })).unwrap(), want);
         }
+        // A strip of an older request has no zoom.
+        assert_eq!(Want::from_json(&json!({ "strip": { "animation": "walk", "frames": 2 } })).unwrap(), Want::Strip { animation: "walk".into(), frames: 2, inputs: Inputs::default(), zoom: None });
+    }
+
+    /// What the child says beside a picture is read back as it said it; what it leaves out
+    /// reads as before.
+    #[test]
+    fn what_the_child_says_beside_a_picture_reads_back() {
+        let png = [PNG_SIGNATURE, b"posed"].concat();
+        let moment = Moment { at: 0.25, chosen: Chosen::Furthest, still: false };
+        for played in [None, Some(Played { builtin: true, looping: false, moment: Some(moment) }), Some(Played { builtin: false, looping: true, moment: None })] {
+            let picture = Picture { png: png.clone(), spent: Spent { filters: 9.5, layers: 2.25 }, rest: Spent { filters: 3.0, layers: 1.0 }, played };
+            assert_eq!(reported(png.clone(), &report(&picture).to_string()), picture);
+        }
+        for (chosen, word) in [(Chosen::Given, "given"), (Chosen::Furthest, "furthest"), (Chosen::Unmoved, "unmoved")] {
+            let played = Played { builtin: false, looping: false, moment: Some(Moment { at: 0.5, chosen, still: true }) };
+            let line = report(&Picture { png: png.clone(), spent: Spent::default(), rest: Spent::default(), played: Some(played) });
+            assert_eq!((line["chosen"].as_str(), reported(png.clone(), &line.to_string()).played), (Some(word), Some(played)));
+        }
+        // A moment without its words is one the pose gave; nothing at all is no cost.
+        let said = reported(png.clone(), "{\"filters\":1,\"layers\":2,\"builtin\":false,\"at\":0.5}");
+        assert_eq!(said.played, Some(Played { builtin: false, looping: false, moment: Some(Moment { at: 0.5, chosen: Chosen::Given, still: false }) }));
+        assert_eq!(reported(png.clone(), "not json"), Picture { png, spent: Spent::default(), rest: Spent::default(), played: None });
     }
 }

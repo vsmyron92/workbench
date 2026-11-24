@@ -68,11 +68,13 @@ untrusted:
   apart, never jumping, springing or bouncing, and let colours and opacities follow only the
   figure's walk, its turn and a drag, which change slowly, in two values (three along the turn),
   never the pointer. That is the first line; the bound is in the browser's animation engine,
-  which everything the figure shows passes through: a colour or an opacity on any part, and
-  every other change of a large part, may turn back only 150 ms after its last turn, so nothing
+  which everything the figure shows passes through: a fill or stroke (its brightness too) or an
+  opacity on any part, and every other change of a large part, may turn back only 150 ms after
+  its last turn, so nothing
   shows more than three complete flashes a second, also under reduced motion, whatever the
   session's states, gestures, drives and mouth combine to. Not covered: two opacities that
-  cancel out on one part or down its tree, and two colours whose blend dips in brightness.
+  cancel out on one part or down its tree, and a colour and an opacity or fill-opacity of one
+  part or down its tree that change together.
 - **Pictures for the session are drawn in a process of their own.** So that a session can see
   what it drew, Workbench draws its stored look as a PNG. The renderer reads the stored look
   again as untrusted data, writes the SVG it renders from its own tables of elements and
@@ -88,8 +90,8 @@ untrusted:
   design call draws the new look there before it stores it and refuses one that cannot be drawn.
   Two pictures are drawn at a time for all sessions, one at a time per session, and after a
   drawing that died of its look that session's pictures pause for half a minute. A picture goes
-  only to the session that asked for it, of its own avatar, and none is drawn for an avatar you
-  turned off.
+  only to the session that asked for it, of its own avatar, and none is drawn for an avatar that
+  is off.
 - **Text is one line of plain text.** A line, a question, a choice, the avatar's name and the
   words in its drawing lose line breaks and control characters, have the session's secrets
   masked, and are shown as text, never as Markdown or links. A refusal that quotes what the
@@ -98,7 +100,9 @@ untrusted:
   name follows in quotation marks.
 - **An avatar belongs to one session.** Its tools act only on the calling session's own avatar
   and take no session id; the hook routes under `/api/hooks/avatar/<session>` accept only that
-  session's own agent token, and refuse the master token.
+  session's own agent token, and refuse the master token. On `/mcp` the master token, which is
+  yours, may name a session in the `X-Workbench-Terminal` header and then calls the avatar tools
+  as that session, as it calls every other tool: no session can do that for another.
 - **It is your choice.** By default (`[avatar] sessions = "any"` in `config.toml`) a session
   takes an avatar with its first avatar call and may start another session with one; with
   `sessions = "asked"` a session gets one only when you start it with the Avatar option or give
@@ -107,7 +111,8 @@ untrusted:
   never turns it on again, nor starts another session with the `avatar` argument. That refusal
   concerns the argument only: under `"any"` a session it starts without one may still take one
   itself. The master token is yours: a session started with it and the Avatar option has an
-  avatar, as one started from the composer. `enabled = false` turns every avatar off. A
+  avatar, as one started from the composer. An avatar whose stored file Workbench cannot read
+  stays off until you turn it on. `enabled = false` turns every avatar off. A
   repository cannot set this.
 - **Only your devices answer.** Replying, dismissing a question, turning an avatar on or off,
   resetting its look and telling the server that a line was heard are for signed-in devices

@@ -1,10 +1,10 @@
 # Your avatar
 
-You draw it blind, then you see it: a picture of what you drew (on the light and the dark panel; large, at its resting size, and as a face), and the design answer lists each part's box and pivot. Look, then fix what is off.
+You draw it blind, then you see it: a picture of what you drew (on the light and the dark panel; large, at its resting size, and as a face), and the design answer lists each part with an id, in drawing order, with its box and pivot. Look, then fix what is off.
 
 ## The stage
 
-You draw for a square of 132 px (56 px at rest, 28 to 40 px as a face in a top bar) on a light or a dark panel. Use viewBox 0 0 200 200, keep the resting figure inside 30..170 and leave room for your own jumps: what leaves the viewBox is cut off. A few flat colours read best at 56 px; an outline or mid-tones so the figure reads on both themes; currentColor is the theme's text colour.
+You draw for a square of 132 px (56 px at rest, 28 to 40 px as a face in a top bar: the square around the head, without parts that neither meet the head nor fit in that square) on a light or a dark panel. Use viewBox 0 0 200 200, keep the resting figure inside 30..170 and leave room for your own jumps: what leaves the viewBox is cut off. A few flat colours read best at 56 px; an outline or mid-tones so the figure reads on both themes; currentColor is the theme's text colour.
 
 ## Not the SVG you know
 
@@ -16,15 +16,15 @@ A filter is drawn again on every frame its part moves: a soft shadow under the f
 
 ## The rig
 
-An id on every part that moves: a g, one shape, or a use (`all` and `none` are taken). Nest what moves together (body > head > eyes > pupils); document order is depth. A transform attribute on a moving part is kept and moves with it: it is simpler to draw the part where it stands, with no transform. `pivots` maps a part id to [x, y], the point it turns, skews and scales about.
+An id on every part that moves: a g, one shape, or a use (`all` and `none` are taken). Nest what moves together (body > head > eyes > pupils); document order is depth. `pivots` maps a part id to [x, y], the point it turns, skews and scales about, in the coordinates the part is drawn in, inside its own and its groups' transforms. A transform attribute on a moving part is kept and moves with it, but it is simpler to draw the part where it stands, with no transform.
 
 `parents` maps a part to the part it hangs on: {"tail": "body"}. The child moves as if it were drawn inside its parent, without being nested in it, so it keeps its own depth: a far arm or a tail behind the body, a hat in front of everything.
 
-`roles` (optional) maps body, head, eyes, pupils, armL, armR to part ids, and Workbench then moves them for you.
+`roles` (optional) maps body, head, eyes, pupils, armL, armR to part ids, and Workbench then moves them for you: give the arms a pivot at the shoulder.
 
 ## Motion that is there already
 
-From the roles Workbench plays breathe and alert (body), blink (eyes), think (pupils or head), talk, listen, nod and shake (head or body), doze (eyes and body), wave (an arm), cheer (both arms, or body), by the session's state: idle, working, speaking, listening, waiting, attention, error, done, sleeping. Pupils follow the pointer, the mouth your speech. Idle, the avatar strolls about and meets other avatars: it hops along and waves, or plays your `walk` (loop: true) while it moves and your `greet` when it meets one.
+From the roles Workbench plays breathe and alert (body), blink (eyes), think (head, or pupils unless gaze is 0), talk, listen, nod and shake (head or body), doze (eyes and body), wave (an arm), cheer (both arms, or body), by the session's state: idle, working, speaking, listening, waiting, attention, error, done, sleeping. Pupils follow the pointer, the mouth your speech. Idle, the avatar strolls about and meets other avatars: it hops along and waves, or plays your `walk` (loop: true) while it moves and your `greet` when it meets one. For a gesture it stops and turns to the user, so your front view plays it.
 
 Every one of these names is yours to take: an animation you call breathe, blink, talk, nod, cheer or wave replaces Workbench's. Without roles nothing moves but what you animate.
 
@@ -36,23 +36,23 @@ Every one of these names is yours to take: an animation you call breathe, blink,
 4. `loop: true` repeats, `every: [min, max]` restarts after a random pause, neither is a one-shot. `phase` (0..1) is for a loop's track, `delay` for a one-shot's.
 5. An animation plays where a state lists it or as a gesture. `states`: state to up to 6 names, yours or built-in, replacing that state's default.
 6. fill, stroke and opacity keyframes: 0.17 s apart or more, never step, outElastic, outBounce or a bezier that leaves 0..1, and in a loop the track ends on the value it starts with. d keyframes: the same commands with the same count of numbers as each other and as the element's own d.
-7. Nothing flashes: a colour, an opacity, and whatever moves a large part turn back at most about six times a second; faster, Workbench holds the value until it may turn.
+7. Nothing flashes: a colour (also its brightness, which dips halfway from green to magenta), an opacity, and whatever moves a large part turn back at most about six times a second; faster, Workbench holds the value until it may turn.
 
 A blink is scaleY 1, 0.1, 1 in 0.18 s; loops of different durations never line up; a gesture is anticipation, action, overshoot, settle.
 
 ## Drives
 
-`drives` tie what happens to the avatar to your own parts: [{input, target, prop, values}]. Inputs: lookX, lookY (-1 … 1: where it looks, the pointer or the avatar it meets), mouth (0 … 1 while it speaks), pace (0 … 1 while it walks), turn (-1 walking or facing left … 1 right, 0 facing the user), held (0 … 1 while the user drags it). The values lie evenly across the input's range, or at `at` (rising, first 0 and last 1): for lookX, lookY and turn the middle value is the rest.
+`drives` tie what happens to the avatar to your own parts: [{input, target, prop, values}]. Inputs: lookX, lookY (-1 … 1: where it looks, the pointer or the avatar it meets), mouth (0 … 1 while it speaks), pace (0 … 1 while it walks), turn (-1 walking or facing left … 1 right, 0 facing the user), held (0 … 1 while the user drags it). The values lie evenly across the input's range, or at `at` (rising, first 0 and last 1): for lookX, lookY and turn the middle value is the rest, for mouth, pace and held the first. Put the prop's own rest there (0, 1 for a scale, null): it shows while nothing happens.
 
 - a head that turns to the pointer: {"input":"lookX","target":"head","prop":"rotate","values":[-8,0,8]}
-- a side view for walking: input turn, scaleX [-1,-1,0,1,1] at [0,0.4,0.5,0.6,1] on the side view (mirrored to the left, folded away facing the user) and [0,0,1,0,0] with the same `at` on the front view. Opacity along turn takes 3 values and always fades across the whole turn.
+- a side view for walking: input turn, scaleX [-1,-1,0,1,1] at [0,0.4,0.5,0.6,1] on the side view (mirrored to the left, folded away facing the user) and [0,0,1,0,0] with the same `at` on the front view.
 - legs that dangle when it is picked up: input held, rotate [0,25]
 
 Colours and opacities take pace, turn and held only, with 2 values (3 along turn). A drive on pace, or your own `walk`, replaces Workbench's hop; a drive on turn its lean. `mouth`: {target, open} (a path morph from its own d to `open`) or {target, prop: "scaleY", open: 1.5} is the short form for the mouth; `gaze` for the pupils.
 
 ## Seeing it
 
-Beside the picture of the avatar at rest you can ask for: one of your animations as a row of moments (`frames`), also under inputs (a walk that shows only in the side view: `frames` with a pose of turn 1 and pace 1); a pose ({"turn": 1, "mouth": 1}, or inside an animation: {"animation": "greet", "at": 0.5}); and a closer look at one part ({"zoom": "mouth"}), since a mouth is a few pixels in the whole figure. Check every animation you wrote once. Pictures show your own animations and drives, not Workbench's motion (its breathing, its hop and lean).
+Beside the picture of the avatar at rest you can ask for: one of your animations as a row of moments (`frames`), also under inputs (a walk that shows only in the side view: `frames` with a pose of turn 1 and pace 1); a pose ({"turn": 1, "mouth": 1}, or inside an animation: {"animation": "greet"} where it has moved furthest, or with "at": 0.5); and a closer look at one part ({"zoom": "mouth"}: a mouth is a few pixels), also with `frames`. Check every animation you wrote once. Pictures show your animations and drives, and Workbench's built-in motion by name (frames "wave"), so a wrong arm pivot shows. They do not show the hop and lean of a walk, or a state's mix.
 
 ## Example
 
@@ -91,4 +91,4 @@ svg 32 KiB, also in its stored, spaced-out form (typical: 3 KB); 300 elements, a
 
     duration 45 (at animations.sway): seconds, from 0.1 to 30
 
-Design in two or three calls: draw, look at the picture, correct. When the status says designed true (a restart, a resume, a compaction) do not design again unless the user asks.
+Design in two or three calls: draw, look at the picture, correct. Without svg a call changes what it sends: pivots, parents, roles, animations and states by key (null removes one), other fields whole. When the status says designed true (a restart, a resume, a compaction) do not design again unless the user asks.

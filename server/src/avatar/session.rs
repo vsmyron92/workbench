@@ -27,7 +27,7 @@ use super::store::{
     MAX_CHOICE_CHARS, MAX_CHOICES, MAX_LINES, MAX_NAME_CHARS, MAX_PENDING_LINES, MAX_REPLY_CHARS, MAX_SAY_CHARS, MAX_WAIT_HOOK_SECS, MAX_WAIT_TOOL_SECS, OpenAsk, Outcome, Reason, Record, ReplyVia, SAY_PER_MINUTE,
     SAY_WAIT_EXTRA_SECS, SAY_WAIT_SOFT_MS, SPEECH_CHARS_PER_SEC, STATUS_LINES, STATUS_PER_MINUTE, Speaker, UNSEEN_SECS, Windows, emit_act, emit_ask, emit_changed, emit_say, ensure_loaded, next_id, running_agent, save,
 };
-use super::{Sessions, Via, draw, preview, text};
+use super::{Sessions, Via, builtin, draw, preview, text};
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
 use crate::terminals::AgentState;
@@ -43,9 +43,18 @@ pub const NO_AVATAR: &str = "This session has no avatar. The user gives a sessio
 /// 409: a session asked for an avatar for the session it starts, where the user decides who has one.
 pub const NOT_YOURS_TO_GIVE: &str = "Not started: here the user decides which sessions have an avatar ([avatar] sessions = \"asked\"). Start it without avatar; the user can give it one.";
 /// 409: a session whose own avatar the user turned off asked for an avatar for the session it starts.
-pub const NOT_WITH_YOURS_OFF: &str = "Not started: the user turned this session's avatar off, so it does not give one to a session it starts. Start it without avatar.";
+pub const NOT_WITH_YOURS_OFF: &str = "Not started: this session's avatar is off, and only the user turns it on, so it does not give one to a session it starts. Start it without avatar.";
 /// 409: the user turned the avatar off.
 pub const TURNED_OFF: &str = "The user turned this session's avatar off. Say it in the terminal instead.";
+/// 409: the avatar is off because its stored file could not be read at a start (nobody knows what
+/// the user chose), until the user turns it on.
+pub const UNREADABLE: &str = "Workbench could not read this avatar's stored file, so it is off until the user turns it on. Say it in the terminal instead.";
+
+/// What a session is told of its avatar that is off: why it is off.
+pub(super) fn off_words(rec: &Record) -> &'static str {
+    if rec.unreadable { UNREADABLE } else { TURNED_OFF }
+}
+
 /// 409: the session needs a permission or an answer; its avatar says and asks nothing meanwhile.
 pub const QUIET: &str = "a permission request or question is open in the session: the avatar is quiet until it is answered";
 
@@ -151,10 +160,11 @@ impl Pass {
 /// record's `via` follows the last interface used.
 ///
 /// In this order: avatars are switched off (403); the caller is not a running agent session
-/// (400); it has no avatar: with `sessions = "any"` it gets one, otherwise it is remembered as
-/// having asked and refused (409); the user turned its avatar off (409); it made more calls of
-/// this kind in the last minute than the kind allows (429). A status call passes the first two
-/// checks and the rate alone, and reports the rest.
+/// (400); it has no avatar: with `sessions = "any"` it gets one (the one its stored file holds,
+/// when it has one), otherwise it is remembered as having asked and refused (409); its avatar is
+/// off (409: the user turned it off, or its stored file could not be read); it made more calls
+/// of this kind in the last minute than the kind allows (429). A status call passes the first
+/// two checks and the rate alone, and reports the rest.
 pub fn gate(state: &AppState, tid: &str, call: Call, via: Via, now: i64) -> ApiResult<Pass> {
     ensure_loaded(state);
     if !super::enabled(state) {
@@ -187,9 +197,17 @@ pub fn gate(state: &AppState, tid: &str, call: Call, via: Via, now: i64) -> ApiR
         if records.len() >= MAX_AVATARS {
             return Err(too_many(no_room()));
         }
-        let mut rec = Record::new(&info, now);
-        rec.via = via;
-        save(state, tid, &rec);
+        // A stored file of its own is this session's avatar, as a start reads it: never replaced
+        // by a new one. One the user turned off stays off, and this call is refused below.
+        let rec = match super::store::take_over(state, &info, now) {
+            Some(rec) => rec,
+            None => {
+                let mut rec = Record::new(&info, now);
+                rec.via = via;
+                save(state, tid, &rec);
+                rec
+            }
+        };
         emit_changed(state, tid, &rec);
         asked.retain(|id| id != tid);
         records.insert(tid.to_string(), rec);
@@ -197,7 +215,7 @@ pub fn gate(state: &AppState, tid: &str, call: Call, via: Via, now: i64) -> ApiR
     let rec = records.get_mut(tid).ok_or_else(|| ApiError::conflict(NO_AVATAR))?;
     rec.project_id = info.project_id.clone();
     if !rec.on && call != Call::Status {
-        return Err(ApiError::conflict(TURNED_OFF));
+        return Err(ApiError::conflict(off_words(rec)));
     }
     charge(limits, tid, call, now)?;
     if rec.on && rec.via != via {
@@ -295,8 +313,9 @@ fn own_animations(look: Option<&Look>) -> Vec<String> {
     look.map(|l| l.animations.keys().cloned().collect()).unwrap_or_default()
 }
 
-/// The built-in motion a session may play by name: what its roles allow and it did not replace
-/// with an animation of its own. The default look has every role, so all of it.
+/// The built-in motion a session may play by name: what its roles (and, for think, its gaze)
+/// allow and it did not replace with an animation of its own. The default look has every role,
+/// so all of it.
 fn built_in(look: Option<&Look>) -> Vec<&'static str> {
     match look {
         Some(l) => look::builtins(l).into_iter().filter(|name| !l.animations.contains_key(*name)).collect(),
@@ -308,11 +327,21 @@ fn playable(look: Option<&Look>, name: &str) -> bool {
     look.is_some_and(|l| l.animations.contains_key(name)) || built_in(look).contains(&name)
 }
 
-/// "No animation wink. Yours: blink, hop; built in: wave, nod". `quoted` is the name as a refusal
-/// shows it ([`shown`]), made before the store lock is taken: masking asks the terminals slice.
+/// "No animation wink. Yours: blink, hop; built in: wave, nod". For built-in motion the look does
+/// not get, what it lacks first, in a picture's words: "No animation wave: wave is Workbench's
+/// built-in motion and needs the armR or the armL role, which this look does not name. Yours: …".
+/// `quoted` is the name as a refusal shows it ([`shown`]), made before the store lock is taken:
+/// masking asks the terminals slice. A built-in's name is a plain word, so it is shown as it is.
 fn no_animation(look: Option<&Look>, quoted: &str) -> ApiError {
     let list = |names: Vec<String>| if names.is_empty() { "none".to_string() } else { names.join(", ") };
-    ApiError::bad_request(format!("No animation {quoted}. Yours: {}; built in: {}", list(own_animations(look)), list(built_in(look).into_iter().map(str::to_string).collect())))
+    let lacks = look
+        .zip(look::BUILTIN.into_iter().find(|name| *name == quoted))
+        .and_then(|(l, name)| {
+            let unmet = builtin::unmet(name, |role| l.roles.keys().any(|r| r.name() == role), l.gaze.map(look::Num::get));
+            look::builtin_missing(name, &l.roles, l.gaze).map(|needs| format!(": {name} is Workbench's built-in motion and needs {needs}, {unmet}"))
+        })
+        .unwrap_or_default();
+    ApiError::bad_request(format!("No animation {quoted}{lacks}. Yours: {}; built in: {}", list(own_animations(look)), list(built_in(look).into_iter().map(str::to_string).collect())))
 }
 
 /// Whether mode loop may play it: an animation of the look declared `loop: true`, or built-in
@@ -470,7 +499,13 @@ fn design_answer(rec: &Record, applied: &Applied, changed: bool) -> String {
     let named = if rec.design.name.is_empty() { "no name yet".to_string() } else { format!("named {}", rec.design.name) };
     let mut out = if changed { format!("Saved as revision {}, {named}.", rec.revision) } else { format!("Nothing to save: the avatar already has this design. It is revision {}, {named}.", rec.revision) };
     match &rec.design.look {
-        None => out.push_str("\nThe look is the default one: send svg to draw your own."),
+        None => {
+            out.push_str("\nThe look is the default one: send svg to draw your own.");
+            // Of what else a design holds, the default look can carry only a voice.
+            if let Some(line) = stored_besides(&rec.design) {
+                out.push_str(&format!("\n{line}"));
+            }
+        }
         Some(look) => {
             if applied.parts.is_empty() {
                 out.push_str("\nNo part has an id: give every part that moves an id.");
@@ -488,6 +523,8 @@ fn design_answer(rec: &Record, applied: &Applied, changed: bool) -> String {
             if !look.drives.is_empty() {
                 out.push_str(&format!("\nDrives: {}.", drives(look).join("; ")));
             }
+            // The rest of what is stored, so that a session that merged one field need not ask.
+            out.push_str(&format!("\n{}", stored_besides(&rec.design).unwrap_or_else(|| STORED_NOTHING_ELSE.to_string())));
             let usage = applied.usage;
             out.push_str(&format!(
                 "\nUsage: svg {} of {} KiB, {} of {} elements, {} of {} animations",
@@ -508,7 +545,8 @@ fn design_answer(rec: &Record, applied: &Applied, changed: bool) -> String {
             out.push('.');
             let built = built_in(Some(look));
             if built.is_empty() {
-                out.push_str("\nNo built-in motion applies: name roles (body, head, eyes, pupils, armL, armR) and Workbench moves them.");
+                let has = |role: &str| look.roles.keys().any(|r| r.name() == role);
+                out.push_str(&format!("\nNo built-in motion applies: {}.", builtin::none_applies(has, look.gaze.map(look::Num::get), &look::builtins(look))));
             } else {
                 out.push_str(&format!("\nBuilt-in motion that applies: {}.", built.join(", ")));
             }
@@ -527,6 +565,60 @@ fn design_answer(rec: &Record, applied: &Applied, changed: bool) -> String {
         }
     }
     out
+}
+
+/// The line of a design answer for a look that holds none of what [`stored_besides`] names.
+pub const STORED_NOTHING_ELSE: &str = "Also stored: no roles, states, mouth, gaze or voice.";
+/// Characters of the line [`stored_besides`] writes, at most.
+pub const STORED_CHARS: usize = 160;
+
+/// What the stored design holds besides its name, parts, pivots, parents, animations and drives
+/// (which the design answer lists), in one line: the roles by name, the states it sets, the parts
+/// its mouth moves, the gaze and the voice's language, only what is set. A session that merged
+/// one field reads here that the others are still there. Within [`STORED_CHARS`]: the long lists
+/// are counted instead. `None`: it holds none of them.
+fn stored_besides(design: &Design) -> Option<String> {
+    let stored = design.look.as_ref();
+    let roles: Vec<&str> = stored.map(|l| l.roles.keys().map(|role| role.name()).collect()).unwrap_or_default();
+    let states: Vec<&str> = stored.map(|l| l.states.keys().map(|state| state.name()).collect()).unwrap_or_default();
+    let mouth: Vec<&str> = stored
+        .map(|l| {
+            l.mouth
+                .iter()
+                .map(|drive| match drive {
+                    look::MouthDrive::Path { target, .. } | look::MouthDrive::Prop { target, .. } => target.as_str(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let gaze = stored.and_then(|l| l.gaze).map(|gaze| if gaze.get() > 0.0 { format!("gaze {}", gaze.get()) } else { "gaze off".to_string() });
+    let voice = match &design.voice.lang {
+        Some(lang) => Some(format!("voice {lang}")),
+        None if design.voice != Voice::default() => Some("voice in the default language".to_string()),
+        None => None,
+    };
+    // Names first; where they make the line too long, the mouth's parts and then the states are counted.
+    let line = |states_named: bool, mouth_named: bool| {
+        let mut said: Vec<String> = Vec::new();
+        if !roles.is_empty() {
+            said.push(format!("roles {}", roles.join(", ")));
+        }
+        if !states.is_empty() {
+            said.push(if states_named { format!("states {}", states.join(", ")) } else { format!("{} states", states.len()) });
+        }
+        if !mouth.is_empty() {
+            said.push(match (mouth_named, mouth.len()) {
+                (true, _) => format!("mouth moves {}", mouth.join(", ")),
+                (false, 1) => "mouth moves 1 part".to_string(),
+                (false, n) => format!("mouth moves {n} parts"),
+            });
+        }
+        said.extend(gaze.clone());
+        said.extend(voice.clone());
+        (!said.is_empty()).then(|| format!("Also stored: {}.", said.join("; ")))
+    };
+    let fits = |l: &Option<String>| l.as_ref().is_none_or(|l| l.chars().count() <= STORED_CHARS);
+    [(true, true), (true, false)].into_iter().map(|(states_named, mouth_named)| line(states_named, mouth_named)).find(fits).unwrap_or_else(|| line(false, false))
 }
 
 // ---------------------------------------------------------------- say
@@ -1217,9 +1309,18 @@ impl ActRequest {
             Some(n) if n.fract() == 0.0 && (1.0..=MAX_ACT_TIMES as f64).contains(&n) => Some(n as u32),
             Some(n) => return Err(ApiError::bad_request(format!("times {n}: a whole number from 1 to {MAX_ACT_TIMES}"))),
         };
-        Ok(ActRequest { play: text_of(o, "play")?, mode, times, stop: text_of(o, "stop")? })
+        let play = text_of(o, "play")?;
+        // stop takes a name too, and its refusal says which: `{"stop": true}` reads like a switch.
+        let stop = match o.get("stop") {
+            None | Some(Value::Null) | Some(Value::String(_)) => text_of(o, "stop")?,
+            Some(other) => return Err(ApiError::bad_request(format!("stop is {}: {STOP_TAKES}", kind_of(other)))),
+        };
+        Ok(ActRequest { play, mode, times, stop })
     }
 }
+
+/// What `stop` of `avatar_act` takes, as its refusal says it.
+pub const STOP_TAKES: &str = "write the name of a held or looping gesture, or all";
 
 /// An accepted `avatar_act` call, in words.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1365,7 +1466,38 @@ impl Status {
         let whole = self.avatar.as_ref().is_some_and(|avatar| avatar.design.is_some());
         if whole { serde_json::to_string(self) } else { serde_json::to_string_pretty(self) }.unwrap_or_default()
     }
+
+    /// The answer beside a picture, in a line: who it is, and what stands open. A session
+    /// that corrects its drawing asks for one picture after another, and the parts, the last
+    /// lines and the limits said again with each would cost it more than the pictures do.
+    pub fn brief(&self) -> String {
+        let Some(avatar) = &self.avatar else { return self.note.clone() };
+        // Named as the design answer names it: a name is optional.
+        let who = if avatar.name.is_empty() { BRIEF_UNNAMED } else { avatar.name.as_str() };
+        let mut out = format!("{who}, revision {}{}.", avatar.revision, if avatar.on { "" } else { ", off" });
+        if let Some(held) = &avatar.held {
+            let mode = match held.mode {
+                HeldMode::Hold => "held",
+                HeldMode::Loop => "looping",
+            };
+            out.push_str(&format!(" {} is {mode}.", held.name));
+        }
+        if let Some(ask) = &avatar.ask {
+            out.push_str(&format!(" Question {} is open.", ask.ask_id));
+        }
+        // The default look has no parts to read of: what to send instead.
+        // An avatar that is off takes no design call: nothing is asked of its session.
+        out.push_str(if avatar.designed { BRIEF_MORE } else if avatar.on { BRIEF_DEFAULT } else { "" });
+        out
+    }
 }
+
+/// Where the rest of a status is, said at the end of [`Status::brief`].
+pub const BRIEF_MORE: &str = " Its parts, last lines and limits: avatar_status without a picture.";
+/// The end of [`Status::brief`] for an avatar that shows the default look.
+pub const BRIEF_DEFAULT: &str = " It shows Workbench's default look: send svg with a design call to draw your own.";
+/// How [`Status::brief`] names an avatar without a name.
+pub const BRIEF_UNNAMED: &str = "Your avatar (no name yet)";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1571,7 +1703,7 @@ pub fn status(state: &AppState, pass: &Pass, req: StatusRequest) -> ApiResult<St
         design: req.look.then(|| design_call(&rec.design)),
     };
     let note = match (rec.on, pass.via) {
-        (false, _) => TURNED_OFF,
+        (false, _) => off_words(rec),
         (true, Via::Tools) => NOTE_TOOLS,
         (true, Via::Command) => NOTE_COMMAND,
     };
@@ -1588,8 +1720,9 @@ pub const NO_LOOK_TO_DRAW: &str = "There is no look of your own to draw yet: thi
 pub enum PictureRequest {
     /// The figure in one pose, on the light and on the dark panel.
     Sheet(preview::Pose),
-    /// Moments of one of its own animations, in a row, with these inputs held.
-    Strip { animation: String, frames: usize, inputs: preview::Inputs },
+    /// Moments of one of its animations (its own, or a built-in one), in a row, with these inputs
+    /// held, and close up on the part `zoom` names, where it names one.
+    Strip { animation: String, frames: usize, inputs: preview::Inputs, zoom: Option<String> },
 }
 
 impl PictureRequest {
@@ -1601,7 +1734,8 @@ impl PictureRequest {
     /// From `{picture?, pose?, frames?, count?}` beside whatever else the call takes (the caller
     /// has checked its keys). `picture: true` is the look at rest, `pose` the look in that pose,
     /// `frames` a strip of that animation with `count` moments, and with `pose` beside it the
-    /// pose's inputs held for every moment. `None`: no picture was asked for.
+    /// pose's inputs held for every moment and its `zoom` the close-up of each. `None`: no
+    /// picture was asked for.
     ///
     /// What the session wrote is masked before the renderer sees it, so a sentence of the
     /// renderer that quotes a name never quotes a piece of a secret.
@@ -1629,14 +1763,17 @@ impl PictureRequest {
                 Some(n) if n.fract() == 0.0 && (preview::STRIP_FRAMES_MIN as f64..=preview::STRIP_FRAMES_MAX as f64).contains(&n) => n as usize,
                 Some(_) => return Err(ApiError::bad_request(format!("count is a whole number from {} to {}: how many moments of the animation to draw", preview::STRIP_FRAMES_MIN, preview::STRIP_FRAMES_MAX))),
             };
-            let inputs = match &pose {
-                None => preview::Inputs::default(),
-                Some(pose) if ["animation", "at", "zoom"].iter().any(|key| pose.get(*key).is_some_and(|v| !v.is_null())) => {
-                    return Err(ApiError::bad_request("with frames, a pose holds inputs only (lookX, lookY, mouth, pace, turn, held): the animation is the one frames names"));
+            let (inputs, zoom) = match &pose {
+                None => (preview::Inputs::default(), None),
+                Some(pose) if ["animation", "at"].iter().any(|key| pose.get(*key).is_some_and(|v| !v.is_null())) => {
+                    return Err(ApiError::bad_request("with frames, a pose holds inputs and zoom only (lookX, lookY, mouth, pace, turn, held, zoom): the animation is the one frames names"));
                 }
-                Some(pose) => preview::Inputs::from_json(pose).map_err(|why| ApiError::bad_request(mask(&why)))?,
+                Some(pose) => {
+                    let pose = preview::Pose::from_json(pose).map_err(|why| ApiError::bad_request(mask(&why)))?;
+                    (pose.inputs, pose.zoom)
+                }
             };
-            return Ok(Some(PictureRequest::Strip { animation: mask(&animation), frames, inputs }));
+            return Ok(Some(PictureRequest::Strip { animation: mask(&animation), frames, inputs, zoom }));
         }
         if count.is_some() {
             return Err(ApiError::bad_request("count says how many moments of an animation to draw: name the animation with frames"));
@@ -1648,28 +1785,106 @@ impl PictureRequest {
     }
 
     /// What the picture shows, for the text beside it: nothing is written in the picture itself.
-    pub fn caption(&self) -> String {
-        const SMALL: &str = "under each, at rest: at its resting size and as a face";
+    /// It is said once the picture is drawn, of what the drawing reported (`played`: whether the
+    /// animation is Workbench's built-in motion, which the session did not write; whether it
+    /// loops; the moment a pose shows). Where the drawing did not say, the stored look it was
+    /// drawn from (`look`) tells whether an animation is Workbench's.
+    pub fn caption(&self, look: Option<&Value>, played: Option<&preview::Played>) -> String {
+        const SMALL: &str = "under each, the whole figure in that pose at its resting size, and its face (always at rest)";
+        let workbench = |name: &str| match played {
+            Some(played) => played.builtin,
+            None => look.is_some_and(|look| builtin::is_workbench(look, name)),
+        };
         match self {
             PictureRequest::Sheet(pose) if *pose == preview::Pose::default() => "Picture: your avatar at rest, on the light panel and on the dark one; under each, at its resting size and as a face.".to_string(),
-            PictureRequest::Sheet(pose) => match &pose.zoom {
-                Some(part) => format!("Picture: a closer look at {part} in that pose, on the light panel and on the dark one; {SMALL}."),
-                None => format!("Picture: your avatar in that pose, on the light panel and on the dark one; {SMALL}."),
-            },
-            PictureRequest::Strip { animation, frames, inputs } => {
+            PictureRequest::Sheet(pose) => {
+                let (inside, note) = match &pose.animation {
+                    None => (String::new(), String::new()),
+                    Some((name, given)) => {
+                        let who = if workbench(name) { "Workbench's built-in " } else { "" };
+                        let moment = played.and_then(|played| played.moment).or_else(|| given.map(|at| preview::Moment { at, chosen: preview::Chosen::Given, still: false }));
+                        match moment {
+                            None => (format!(", inside {who}{name}"), String::new()),
+                            Some(moment) => {
+                                let at = moment_text(moment.at);
+                                let inside = match moment.chosen {
+                                    preview::Chosen::Given => format!(", inside {who}{name} at {at}"),
+                                    preview::Chosen::Furthest => format!(", inside {who}{name} at {at}, where it has moved furthest"),
+                                    preview::Chosen::Unmoved => format!(", inside {who}{name} at {at}, where every moment of it looks the same"),
+                                };
+                                // A given moment may be the one where it rests. The moment where its
+                                // values are furthest from rest drawing nothing means that nothing of
+                                // it shows: what it moves is out of sight, or a drive sets the same prop.
+                                let note = match (moment.still, moment.chosen) {
+                                    (true, preview::Chosen::Given) => format!(" At {at} {name} is where it rests: give another at."),
+                                    (true, preview::Chosen::Furthest) => format!(" Nothing of {name} shows in this picture: what it moves is out of sight here, or a drive sets the same prop."),
+                                    _ => String::new(),
+                                };
+                                (inside, note)
+                            }
+                        }
+                    }
+                };
+                match &pose.zoom {
+                    Some(part) => format!("Picture: a closer look at {part} in that pose{inside}, on the light panel and on the dark one; {SMALL}.{note}"),
+                    None => format!("Picture: your avatar in that pose{inside}, on the light panel and on the dark one; {SMALL}.{note}"),
+                }
+            }
+            PictureRequest::Strip { animation, frames, inputs, zoom } => {
+                let whose = if workbench(animation) { ", Workbench's built-in motion made from your roles" } else { "" };
+                let close = zoom.as_ref().map(|part| format!(", close up on {part}")).unwrap_or_default();
                 let held = if *inputs == preview::Inputs::default() { "" } else { ", with those inputs held" };
-                format!("Picture: {frames} moments of {animation}, from its start on the left to its end on the right{held}. A track that has played holds its last keyframe to the end, as in a gesture.")
+                // A loop's moments are at 0, 1/n, 2/n … of one round: the last is not its end.
+                if played.is_some_and(|played| played.looping) {
+                    format!("Picture: {frames} moments of one round of {animation}{whose}{close}, evenly spaced{held}; after the last comes the first again.")
+                } else {
+                    format!("Picture: {frames} moments of {animation}{whose}{close}, from its start on the left to its end on the right{held}. A track that has played holds its last keyframe to the end, as in a gesture.")
+                }
             }
         }
+    }
+
+    /// What drawing costs, said beside a status picture in a line: nothing where it costs about
+    /// what the look at rest costs (the design answer said that), else both. About: by less than
+    /// one in each number, which the design answer does not mention either, so a hundredth of a
+    /// layer that rounds up to one is not a line. Both numbers are the figure in the full view at
+    /// the large size: never about the zoom or a small panel. Beyond the budget (a close-up is
+    /// drawn where the whole figure is not), the line says what that means.
+    pub fn cost(&self, drawn: &preview::Picture) -> Option<String> {
+        let (spent, rest) = (drawn.spent, drawn.rest);
+        if (spent.filters - rest.filters).abs() < 1.0 && (spent.layers - rest.layers).abs() < 1.0 {
+            return None;
+        }
+        let when = match self {
+            PictureRequest::Sheet(_) => "In this pose",
+            PictureRequest::Strip { .. } => "In its costliest moment",
+        };
+        let over = if spent.filters > preview::FILTER_WORK || spent.layers > preview::LAYER_WORK { " Past 60 only a close-up of it can be drawn." } else { "" };
+        Some(format!(
+            "{when} drawing costs about {:.0} of {:.0} for filters and {:.0} of {:.0} for layers; at rest {:.0} and {:.0}.{over}",
+            spent.filters.ceil(),
+            preview::FILTER_WORK,
+            spent.layers.ceil(),
+            preview::LAYER_WORK,
+            rest.filters.ceil(),
+            rest.layers.ceil()
+        ))
     }
 
     /// What the renderer is asked for.
     pub fn want(&self) -> draw::Want {
         match self {
             PictureRequest::Sheet(pose) => draw::Want::Sheet(pose.clone()),
-            PictureRequest::Strip { animation, frames, inputs } => draw::Want::Strip { animation: animation.clone(), frames: *frames, inputs: *inputs },
+            PictureRequest::Strip { animation, frames, inputs, zoom } => draw::Want::Strip { animation: animation.clone(), frames: *frames, inputs: *inputs, zoom: zoom.clone() },
         }
     }
+}
+
+/// A moment of an animation as a caption writes it: at most four decimals, no trailing zeros,
+/// and never "-0".
+fn moment_text(at: f64) -> String {
+    let rounded = (at * 10_000.0).round() / 10_000.0;
+    format!("{}", if rounded == 0.0 { 0.0 } else { rounded })
 }
 
 /// The look a picture of the session's avatar is drawn from, as the browser is sent it. A
@@ -1685,7 +1900,7 @@ pub fn picture_look(state: &AppState, tid: &str) -> ApiResult<Value> {
             return Err(ApiError::conflict(if any { NO_LOOK_TO_DRAW } else { NO_AVATAR }));
         };
         if !rec.on {
-            return Err(ApiError::conflict(TURNED_OFF));
+            return Err(ApiError::conflict(off_words(rec)));
         }
         rec.design.look.clone()
     };
@@ -1693,12 +1908,13 @@ pub fn picture_look(state: &AppState, tid: &str) -> ApiResult<Value> {
     Ok(serde_json::to_value(&look)?)
 }
 
-/// What a design answer and a picture say about what drawing the look costs, when it is worth
-/// a word: a session cannot see that a filter is dear.
+/// What a design answer says about what drawing the look costs, when it is worth a word: a
+/// session cannot see that a filter is dear. Both numbers are areas of the viewBox, not counts
+/// (`preview::Spent`), and the sentence says so; it stays within 240 characters.
 pub fn cost_line(spent: preview::Spent) -> Option<String> {
     (spent.filters >= 1.0 || spent.layers >= 1.0).then(|| {
         format!(
-            "Drawing cost: about {:.0} of {:.0} filter passes and {:.0} of {:.0} layers (every filtered, masked, clipped or half-transparent group is a layer; the browser pays this again on each frame such a part moves).",
+            "Drawing cost: about {:.0} of {:.0} for filters and {:.0} of {:.0} for layers, both in areas of the viewBox: a filtered, masked, clipped or half-transparent group adds its box to layers, and to filters once per primitive (a blur 6 times, a shadow 10).",
             spent.filters.ceil(),
             preview::FILTER_WORK,
             spent.layers.ceil(),

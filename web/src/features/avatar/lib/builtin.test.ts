@@ -89,10 +89,14 @@ describe('builtinAnimations', () => {
     const still = withRoles(['head', 'pupils'])
     still.gaze = 0
     expect(builtinAnimations(still).get('think')?.tracks[0]).toMatchObject({ target: 'head', prop: 'rotate' })
-    // No head to tilt: the pupils do the thinking all the same.
-    const noHead = withRoles(['pupils'])
+    // No head to tilt: nothing thinks, as "0 keeps them still" promises.
+    const noHead = withRoles(['pupils', 'body'])
     noHead.gaze = 0
-    expect(builtinAnimations(noHead).get('think')?.tracks[0]).toMatchObject({ target: 'pupils', prop: 'translateX' })
+    expect(builtinAnimations(noHead).has('think')).toBe(false)
+    // A gaze above 0, however small: they think as far as it goes.
+    const small = withRoles(['pupils', 'body'])
+    small.gaze = 0.5
+    expect(builtinAnimations(small).get('think')?.tracks[0]).toMatchObject({ target: 'pupils', prop: 'translateX', values: [0, -0.4, -0.4, 0.3, 0] })
   })
 
   it('scales its amplitudes to the viewBox', () => {
@@ -158,6 +162,75 @@ describe('builtinAnimations', () => {
     const rotate = tracksOf(wave, 'armR').find((t) => t.prop === 'rotate')?.values as number[]
     expect(Math.max(...rotate.map(Math.abs))).toBeLessThanOrEqual(16)
     expect(tracksOf(wave, 'armR').map((t) => t.prop).sort()).toEqual(['rotate', 'translateY'])
+  })
+
+  it('raises an arm on screen whatever transform it is drawn in', () => {
+    // The left arm drawn again as the right one in a mirror about x 100: on screen it is the plain right arm.
+    const mirrored = (pivots: boolean) => {
+      const look = withRoles(['body', 'armL'], { pivots })
+      look.nodes.push({ tag: 'g', attrs: { transform: 'translate(200 0) scale(-1 1)' }, children: [{ tag: 'g', id: 'armR', box: [40, 100, 20, 40] }] })
+      look.roles.armR = 'armR'
+      if (pivots) look.pivots.armR = [60, 100]
+      return look
+    }
+    const plain = builtinAnimations(withRoles(['body', 'armL', 'armR'], { pivots: true }))
+    const got = builtinAnimations(mirrored(true))
+    const turned = (a: Animation | undefined, arm: string) => (tracksOf(a, arm)[0].values as number[]).map((v) => (v === 0 ? 0 : -v))
+    // It turns as far, the other way round inside the mirror: up and out on screen.
+    expect(tracksOf(got.get('wave'), 'armR')[0].values).toEqual(turned(plain.get('wave'), 'armR'))
+    expect(tracksOf(got.get('wave'), 'armR')[0].values).toEqual([0, 105.435, 73.435, 105.435, 73.435, 0])
+    expect(tracksOf(got.get('cheer'), 'armR')[0].values).toEqual(turned(plain.get('cheer'), 'armR'))
+    // Without a joint it wiggles the other way round and is lifted up the screen all the same.
+    const loose = builtinAnimations(mirrored(false)).get('wave')
+    expect(tracksOf(loose, 'armR').map((t) => [t.prop, t.values])).toEqual([
+      ['rotate', [0, 16, -10, 16, -10, 0]],
+      ['translateY', [0, -6, -6, -6, -6, 0]],
+    ])
+    // Turned a quarter, its lift is along its own x.
+    const quarter = withRoles(['body', 'armR'])
+    quarter.nodes[1].attrs = { transform: 'rotate(90 150 120)' }
+    expect(tracksOf(builtinAnimations(quarter).get('wave'), 'armR').map((t) => [t.prop, t.values])).toEqual([
+      ['rotate', [0, -16, 10, -16, 10, 0]],
+      ['translateY', [0, 0, 0, 0, 0, 0]],
+      ['translateX', [0, -6, -6, -6, -6, 0]],
+    ])
+    // An arm drawn with its own turn: worked out where it really points, so it ends 42 over the horizon.
+    const own = withRoles(['body', 'armR'], { pivots: true })
+    own.nodes[1].attrs = { transform: 'rotate(-40 140 100)' }
+    expect((tracksOf(builtinAnimations(own).get('wave'), 'armR')[0].values as number[])[1]).toBe(-65.435)
+  })
+
+  it('makes the pupils think up and aside on screen and as far as the gaze, whatever transform they are in', () => {
+    // The pupils of withRoles, drawn inside a group with this transform: what think moves them by.
+    const think = (transform: string) => {
+      const look = withRoles(['pupils'], { pivots: true })
+      look.nodes = [{ tag: 'g', attrs: { transform }, children: look.nodes }]
+      const tracks = builtinAnimations(look).get('think')?.tracks ?? []
+      return ['translateX', 'translateY'].map((prop) => tracks.find((t) => t.prop === prop)?.values)
+    }
+    // Moved only: as before, 3% of the width (6), up and to the left on screen.
+    const plain = [
+      [0, -4.8, -4.8, 3.6, 0],
+      [0, -5.4, -5.4, -4.2, 0],
+    ]
+    expect(think('translate(5 7)')).toStrictEqual(plain)
+    // Twice as large: half as far inside, as far on screen. Their gaze goes as far.
+    expect(think('scale(2)')).toStrictEqual([
+      [0, -2.4, -2.4, 1.8, 0],
+      [0, -2.7, -2.7, -2.1, 0],
+    ])
+    // Upside down, mirrored and turned a quarter: inside, the way that is up and aside on screen.
+    expect(think('scale(1 -1)')).toStrictEqual([plain[0], [0, 5.4, 5.4, 4.2, 0]])
+    expect(think('scale(-1 1)')).toStrictEqual([[0, 4.8, 4.8, -3.6, 0], plain[1]])
+    expect(think('rotate(90)')).toStrictEqual([
+      [0, -5.4, -5.4, -4.2, 0],
+      [0, 4.8, 4.8, -3.6, 0],
+    ])
+    // No -0 at rest, whichever way the matrix turns (toStrictEqual tells -0 from 0).
+    expect(think('rotate(180)')).toStrictEqual([
+      [0, 4.8, 4.8, -3.6, 0],
+      [0, 5.4, 5.4, 4.2, 0],
+    ])
   })
 
   it('ignores roles that name nothing drawable', () => {

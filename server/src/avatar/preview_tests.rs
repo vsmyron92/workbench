@@ -94,7 +94,7 @@ fn posed(look: &Value, pose: &Pose) -> (Vec<Option<Matrix>>, HashMap<String, Vec
 }
 
 fn at(name: &str, progress: f64) -> Pose {
-    Pose { animation: Some((name.to_string(), progress)), inputs: Inputs::default(), zoom: None }
+    Pose { animation: Some((name.to_string(), Some(progress))), inputs: Inputs::default(), zoom: None }
 }
 
 fn close(a: Matrix, b: Matrix) -> bool {
@@ -547,7 +547,7 @@ fn a_drive_at_three_input_positions() {
     // The animation comes first, the drive is added to it.
     let mut both = look.clone();
     both["animations"]["move"]["tracks"] = json!([ { "target": "arm", "prop": "rotate", "values": [0, 10] } ]);
-    let (t, _, ids) = posed(&both, &Pose { animation: Some(("move".into(), 1.0)), inputs: Inputs { turn: 1.0, ..Inputs::default() }, zoom: None });
+    let (t, _, ids) = posed(&both, &Pose { animation: Some(("move".into(), Some(1.0))), inputs: Inputs { turn: 1.0, ..Inputs::default() }, zoom: None });
     assert_matrix(t[ids["arm"]], about(50.0, 40.0, rotate(40.0)));
 }
 
@@ -585,6 +585,35 @@ fn the_mouth_and_the_gaze_come_last() {
     assert_eq!(posed(&still, &looking).0[ids["pupils"]], None);
     still["gaze"] = json!(50);
     assert_matrix(posed(&still, &Pose { animation: None, inputs: Inputs { look_x: -1.0, ..Inputs::default() }, zoom: None }).0[ids["pupils"]], translate(-10.0, 0.0));
+}
+
+#[test]
+fn the_gaze_looks_where_it_is_asked_on_screen_whatever_the_pupils_are_drawn_in() {
+    // Pupils of 3 at (100, 80), plainly or inside a group with a transform (`eyes` of gaze.test.ts).
+    let eyes = |transform: Option<&str>| {
+        let pupils = json!({ "tag": "circle", "id": "pupils", "attrs": { "cx": 100, "cy": 80, "r": 3 }, "box": [97, 77, 6, 6] });
+        let node = match transform {
+            Some(t) => json!({ "tag": "g", "attrs": { "transform": t }, "children": [pupils] }),
+            None => pupils,
+        };
+        json!({ "viewBox": [0, 0, 200, 200], "nodes": [node], "pivots": {}, "roles": { "pupils": "pupils" }, "animations": {}, "states": {}, "mouth": [], "gaze": null })
+    };
+    let moved = |transform: Option<&str>, look_x: f64, look_y: f64| {
+        let look = eyes(transform);
+        let (t, _, ids) = posed(&look, &Pose { animation: None, inputs: Inputs { look_x, look_y, ..Inputs::default() }, zoom: None });
+        t[ids["pupils"]]
+    };
+    // Plain, or in a group that only moves them: 3% of the width, as asked.
+    assert_matrix(moved(None, 1.0, 0.0), translate(6.0, 0.0));
+    assert_matrix(moved(Some("translate(10 5)"), 1.0, 0.0), translate(6.0, 0.0));
+    // In a figure mirrored to face the other way their own x runs leftwards: -6 of it is 6 to the right on screen.
+    assert_matrix(moved(Some("translate(200 0) scale(-1 1)"), 1.0, 0.0), translate(-6.0, 0.0));
+    assert_matrix(moved(Some("translate(200 0) scale(-1 1)"), 0.0, 1.0), translate(0.0, 6.0));
+    // Turned a quarter, their own -y points right on screen; drawn twice the size, half as far in their own units.
+    assert_matrix(moved(Some("rotate(90 100 80)"), 1.0, 0.0), translate(0.0, -6.0));
+    assert_matrix(moved(Some("translate(-100 -80) scale(2)"), 1.0, 0.0), translate(3.0, 0.0));
+    // Squashed flat there is nothing to undo: the vector is used as it is.
+    assert_matrix(moved(Some("scale(1 0)"), 1.0, 0.0), translate(6.0, 0.0));
 }
 
 #[test]
@@ -757,7 +786,7 @@ fn the_example_looks_render() {
     let turned = decode(&sheet(&hoot(), &Pose { animation: None, inputs: Inputs { turn: 1.0, pace: 1.0, ..Inputs::default() }, zoom: None }).unwrap());
     assert_ne!(facing.data(), turned.data(), "a turn and a pace show");
     // A strip holds the inputs it is given: the walk is seen in the view that shows it.
-    let walking = draw_strip(&hoot(), "walk", 4, &Inputs { turn: 1.0, pace: 1.0, ..Inputs::default() }).unwrap();
+    let walking = draw_strip(&hoot(), "walk", 4, &Inputs { turn: 1.0, pace: 1.0, ..Inputs::default() }, None).unwrap();
     assert_ne!(walking.png, strip(&hoot(), "walk", 4).unwrap());
     // A closer look at one part is another picture of the same size; a part that is not there is said.
     let close = decode(&sheet(&hoot(), &Pose { zoom: Some("head".into()), ..Pose::default() }).unwrap());
@@ -798,6 +827,190 @@ fn the_face_is_the_square_around_the_head() {
     assert_eq!(Model::read(&headless).unwrap().face_view(), [0.0, 0.0, 200.0, 200.0]);
     // With one: 56 × 1.2 = 67.2, centred on (100, 70).
     assert_eq!(model.face_view(), [66.4, 36.4, 67.2, 67.2]);
+}
+
+// ---------------------------------------------------------------- what the face leaves out
+
+/// The directory of the example looks, and of the face looks under it (`examples/face/`).
+fn examples_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("avatar").join("examples")
+}
+
+/// A design of `examples/face/` as the validator stores it.
+fn face_look(name: &str) -> Value {
+    let design = std::fs::read_to_string(examples_dir().join("face").join(format!("{name}.json"))).unwrap();
+    stored(serde_json::from_str(&design).unwrap())
+}
+
+/// The ids of what the small face of a look leaves out, in document order.
+fn left_out(look: &Value) -> Vec<&str> {
+    let model = Model::read(look).unwrap();
+    model.face_left_out().into_iter().map(|i| model.els[i].id.expect("only what has an id has a box")).collect()
+}
+
+/// The face fixture of a look (`<name>.face.json`): the face's square and the ids of what it
+/// leaves out, in document order, as `lib/golden.test.ts` reads them.
+fn face_fixture(look: &Value) -> String {
+    let view = Model::read(look).unwrap().face_view();
+    format!("{{\"viewBox\": {}, \"leftOut\": {}}}\n", serde_json::to_string(&view).unwrap(), serde_json::to_string(&left_out(look)).unwrap())
+}
+
+/// The names of the files of `dir`, sorted.
+fn files_in(dir: &std::path::Path) -> Vec<String> {
+    let mut files: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    files.sort();
+    files
+}
+
+/// Every `<name>.look.json` of `dir` by name, each with its `<name>.face.json` checked to be what
+/// this renderer makes of it, or with `AVATAR_WRITE_FACE=1` written so. With `designs`, every
+/// `<name>.json` of `dir` is a design whose `<name>.look.json` is checked (or written) to be what
+/// the validator stores of it. No fixture outlives its look.
+fn face_fixtures_in(dir: &std::path::Path, designs: bool) -> Vec<(String, Value)> {
+    let write = std::env::var_os("AVATAR_WRITE_FACE").is_some_and(|v| v == "1");
+    if designs {
+        for name in files_in(dir).iter().filter_map(|f| f.strip_suffix(".json")).filter(|n| !n.ends_with(".look") && !n.ends_with(".face")) {
+            let design: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap()).unwrap();
+            let applied = crate::avatar::look::apply(None, &design).unwrap_or_else(|problems| panic!("{name} is refused: {problems:#?}"));
+            let look = applied.design.look.expect("a look");
+            let path = dir.join(format!("{name}.look.json"));
+            if write {
+                std::fs::write(&path, serde_json::to_string_pretty(&look).unwrap() + "\n").unwrap();
+            }
+            let stored = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{} is missing: write it with AVATAR_WRITE_FACE=1", path.display()));
+            let stored: crate::avatar::look::Look = serde_json::from_str(&stored).unwrap_or_else(|e| panic!("{name}.look.json is not a look: {e}"));
+            assert_eq!(stored, look, "{} is not what the validator stores of {name}.json: write it again with AVATAR_WRITE_FACE=1", path.display());
+        }
+    }
+    let files = files_in(dir);
+    let mut out = vec![];
+    for name in files.iter().filter_map(|f| f.strip_suffix(".look.json")) {
+        if designs {
+            assert!(files.contains(&format!("{name}.json")), "{name}.look.json has no design");
+        }
+        let look: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{name}.look.json"))).unwrap()).unwrap();
+        let made = face_fixture(&look);
+        let path = dir.join(format!("{name}.face.json"));
+        if write {
+            std::fs::write(&path, &made).unwrap();
+        }
+        let stored = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{} is missing: write it with AVATAR_WRITE_FACE=1", path.display()));
+        assert_eq!(stored, made, "{} is not what the server makes of {name}: write it again with AVATAR_WRITE_FACE=1 and review the difference", path.display());
+        out.push((name.to_string(), look));
+    }
+    for file in files.iter().filter_map(|f| f.strip_suffix(".face.json")) {
+        assert!(out.iter().any(|(name, _)| name == file), "{file}.face.json has no look");
+    }
+    out
+}
+
+/// `examples/<name>.face.json` holds what the small face shows of `examples/<name>.look.json`:
+/// its square and what it leaves out. `examples/face/` holds designs made for the face, each with
+/// the look the validator stores of it and its face: a fox whose tail reaches into the square, a
+/// ghost whose head is only the features on its body, a look without a head, `use`s, references,
+/// parents and a sliver without an id, a flipped and turned figure, and an edge that rounds at a
+/// half. `lib/golden.test.ts` makes the same faces with the browser's code and compares. After a
+/// deliberate change, write them again with `AVATAR_WRITE_FACE=1 cargo test --locked
+/// avatar::preview::tests::the_faces` and review the difference.
+#[test]
+fn the_faces_of_the_example_looks_are_in_their_fixture_files() {
+    let examples = face_fixtures_in(&examples_dir(), false);
+    let named: Vec<&str> = examples.iter().map(|(name, _)| name.as_str()).collect();
+    for name in ["hoot", "pip", "tock"] {
+        assert!(named.contains(&name), "{name} in {named:?}");
+    }
+    let faces = face_fixtures_in(&examples_dir().join("face"), true);
+    assert_eq!(faces.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["fox", "ghost", "nested", "nohead", "refs", "ties"]);
+    let of = |name: &str| examples.iter().chain(&faces).find(|(n, _)| n == name).map(|(_, look)| look).unwrap();
+    // Tock keeps its hands and its core, which lie inside the square: only the jet at its lower
+    // edge goes (and the shadow, which lies wholly outside it).
+    assert_eq!(left_out(of("tock")), ["shadow", "jet"]);
+    assert_eq!(left_out(of("hoot")), ["shadow", "feet"]);
+    assert_eq!(left_out(of("pip")), ["shadow", "z1", "z2"]);
+    // The tip of the fox's tail beside its head; the side view a drive hides at rest overlaps the head and stays.
+    assert_eq!(left_out(of("fox")), ["tail"]);
+    // The ghost's head is only its features: the body they sit on meets them and stays.
+    assert_eq!(left_out(of("ghost")), ["bow", "wisp"]);
+    // Without a head, the face is the whole viewBox and nothing is left out.
+    assert!(left_out(of("nohead")).is_empty());
+    assert_eq!(Model::read(of("nohead")).unwrap().face_view(), [0.0, 0.0, 120.0, 160.0]);
+    // Boxes that touch meet; a part wholly inside the square stays; a part hung on the head
+    // (`parents`) follows the same rule; a `use` is judged by its own box, whatever it repeats.
+    assert_eq!(left_out(of("refs")), ["paw", "echo", "miss", "halo"]);
+    // -30.0625 rounds to -30.062 as JavaScript rounds (towards +∞), and so touches the head.
+    assert_eq!(left_out(of("ties")), ["past"]);
+}
+
+/// The light face panel of a sheet.
+fn face_panel(sheet: &Pixmap) -> Vec<[u8; 3]> {
+    let x = (SHEET_FIGURE_PX - SMALL_FIGURE_PX - SMALL_GAP_PX - FACE_PX) / 2 + SMALL_FIGURE_PX + SMALL_GAP_PX;
+    let y = SHEET_FIGURE_PX + GAP_PX + GAP_PX + (SMALL_FIGURE_PX - FACE_PX) / 2;
+    (y..y + FACE_PX).flat_map(|yy| (x..x + FACE_PX).map(move |xx| (xx, yy))).map(|(xx, yy)| sheet.pixel(xx, yy).map(|c| [c.red(), c.green(), c.blue()]).unwrap()).collect()
+}
+
+fn rgb_of(p: &Pixmap) -> Vec<[u8; 3]> {
+    p.pixels().iter().map(|c| [c.red(), c.green(), c.blue()]).collect()
+}
+
+#[test]
+fn the_face_in_a_picture_leaves_out_what_its_square_only_cuts() {
+    for name in ["ghost", "fox"] {
+        let look = face_look(name);
+        let model = Model::read(&look).unwrap();
+        let rest = model.pose(&Pose::default()).unwrap();
+        let face = model.face_view();
+        let whole = model.render(&model.body(&rest), face, FACE_PX, LIGHT).unwrap();
+        let cut = model.render(&model.body_without(&rest, &model.face_left_out()), face, FACE_PX, LIGHT).unwrap();
+        assert_ne!(rgb_of(&whole), rgb_of(&cut), "{name}: what is left out showed in the square");
+        // The sheet's face is the face without them; the large views are the whole figure.
+        let sheet = decode(&sheet(&look, &Pose::default()).unwrap());
+        assert_eq!(face_panel(&sheet), rgb_of(&cut), "{name}");
+    }
+    // The ghost's pink bow reaches into the square beside its features: gone from the face. Its
+    // body, which the features sit on, stays.
+    let look = face_look("ghost");
+    let model = Model::read(&look).unwrap();
+    let rest = model.pose(&Pose::default()).unwrap();
+    let pink = |p: &[[u8; 3]]| p.iter().filter(|c| c[0] > 180 && c[1] < 130 && c[2] > 80 && c[2] < 180).count();
+    let sheet_colour = |p: &[[u8; 3]]| p.iter().filter(|c| **c == [0xe9, 0xec, 0xef]).count();
+    let whole = rgb_of(&model.render(&model.body(&rest), model.face_view(), FACE_PX, LIGHT).unwrap());
+    let face = face_panel(&decode(&sheet(&look, &Pose::default()).unwrap()));
+    assert!(pink(&whole) > 0 && pink(&face) == 0, "{} pink before, {} after", pink(&whole), pink(&face));
+    assert!(sheet_colour(&face) > 200, "the body behind the features: {}", sheet_colour(&face));
+    // Nothing is left out of a look without a head: its face is the whole figure.
+    let look = face_look("nohead");
+    let model = Model::read(&look).unwrap();
+    let rest = model.pose(&Pose::default()).unwrap();
+    assert_eq!(model.body_without(&rest, &model.face_left_out()), model.body(&rest));
+}
+
+#[test]
+fn what_the_face_leaves_out_is_out_of_sight_where_a_use_and_a_reference_still_find_it() {
+    let look = face_look("refs");
+    let model = Model::read(&look).unwrap();
+    let rest = model.pose(&Pose::default()).unwrap();
+    let body = model.body_without(&rest, &model.face_left_out());
+    // Each is written inside a defs of its own, with its ids: the paw holds a gradient, a clip, a
+    // mask and a filter that parts the face keeps refer to.
+    assert!(body.contains("<defs><g id='paw'>") && body.contains("<defs><use id='echo'") && body.contains("<defs><rect id='miss'") && body.contains("</defs></g></defs><use id='pawNear' href='#paw'"), "{body}");
+    assert_eq!(body.matches("<defs>").count(), model.body(&rest).matches("<defs>").count() + 4, "{body}");
+    // A part left out is posed as any other: the halo's drive moves it at rest, out of sight.
+    assert!(body.contains("<defs><circle id='halo' transform='matrix(1 0 0 1 4 0)'"), "{body}");
+    // The face's square is [64, 44, 72, 72] at 40 px: a pixel is 1.8 units across. Each point
+    // below lies wholly inside what it samples.
+    assert_eq!(model.face_view(), [64.0, 44.0, 72.0, 72.0]);
+    let face = face_panel(&decode(&sheet(&look, &Pose::default()).unwrap()));
+    let at = |x: f64, y: f64| face[((y - 44.0) / 1.8) as usize * 40 + ((x - 64.0) / 1.8) as usize];
+    // The use beside the head still shows the paw it repeats, painted with the paw's own gradient.
+    assert_eq!(at(120.0, 108.0), [0x70, 0x48, 0xe8]);
+    // The badge is clipped by the paw's clip to its left half.
+    assert_eq!(at(94.0, 112.0), [0x2f, 0x9e, 0x44]);
+    assert_ne!(at(106.0, 112.0), [0x2f, 0x9e, 0x44]);
+    // The nose is masked by the paw's mask: a hole in its middle, black around it.
+    assert_ne!(at(100.0, 88.0), [0, 0, 0]);
+    assert_eq!(at(100.0, 93.5), [0, 0, 0]);
+    // The cheek is blurred by the paw's filter: softened, but there.
+    assert!(face.iter().any(|c| c[0] > 0xf0 && c[1] < 0xb0 && c[1] > 0x80), "the cheek");
 }
 
 #[test]
@@ -1016,19 +1229,77 @@ fn text_is_drawn_with_a_system_font() {
 // ---------------------------------------------------------------- refusals
 
 #[test]
-fn an_animation_that_is_not_the_looks_own_is_named_in_a_sentence() {
+fn an_animation_that_the_look_does_not_have_is_named_in_a_sentence() {
+    // Its own animations, then the built-in ones its roles give it that it did not replace.
     assert_eq!(
         sheet(&pip(), &at("walk", 0.5)).unwrap_err(),
-        "no animation \"walk\" in this look: its own animations are alert, breathe, cheer, doze, hop, ponder, sway, talk, wave"
+        "no animation \"walk\" in this look: its own animations are alert, breathe, cheer, doze, hop, ponder, sway, talk, wave; Workbench's built-in ones for its roles are blink, think, listen, nod, shake"
     );
-    // pip has a breathe of its own; blink is Workbench's.
-    assert_eq!(strip(&pip(), "blink", 6).unwrap_err(), "blink is one of Workbench's built-in animations, which are not drawn here: define your own to see it");
-    sheet(&pip(), &at("breathe", 0.5)).unwrap();
     let mut bare = pip();
     bare["animations"] = json!({});
-    assert_eq!(strip(&bare, "walk", 6).unwrap_err(), "no animation \"walk\" in this look: it has no animations of its own");
-    assert_eq!(strip(&bare, "x\"\n", 6).unwrap_err(), "no animation \"x\\\"\\n\" in this look: it has no animations of its own");
+    assert_eq!(strip(&bare, "walk", 6).unwrap_err(), "no animation \"walk\" in this look: it has no animations of its own; Workbench's built-in ones for its roles are breathe, blink, think, talk, listen, alert, doze, wave, cheer, nod, shake");
+    bare["roles"] = json!({});
+    assert_eq!(strip(&bare, "x\"\n", 6).unwrap_err(), "no animation \"x\\\"\\n\" in this look: it has no animations of its own, and its roles give it none of Workbench's built-in ones");
+    // A built-in that its roles do not give it says what it needs.
+    assert_eq!(strip(&bare, "wave", 6).unwrap_err(), "wave is Workbench's built-in motion and needs the armR or the armL role, which this look does not name");
+    let mut armless = pip();
+    armless["roles"] = json!({ "body": "frog", "head": "head" });
+    assert_eq!(sheet(&armless, &at("blink", 0.5)).unwrap_err(), "blink is Workbench's built-in motion and needs the eyes role, which this look does not name");
     assert_eq!(sheet(&Value::Null, &Pose::default()).unwrap_err(), "there is no look of its own to draw: this avatar shows Workbench's default look");
+}
+
+#[test]
+fn pupils_that_keep_still_are_refused_think_for_their_gaze_and_not_for_a_role() {
+    // The look names the pupils, with gaze 0 and no head: what it lacks is a gaze above 0.
+    let still = stored(json!({ "svg": "<svg viewBox='0 0 200 200'><g id='pupils'><circle cx='90' cy='90' r='4'/></g></svg>", "roles": { "pupils": "pupils" }, "gaze": 0 }));
+    let words = "think is Workbench's built-in motion and needs the head role, or the pupils role and a gaze above 0, and this look's gaze is 0";
+    assert_eq!(sheet(&still, &at("think", 0.5)).unwrap_err(), words);
+    assert_eq!(strip(&still, "think", 6).unwrap_err(), words);
+    // Without the pupils it lacks a role, as every other built-in does.
+    let mut bare = still.clone();
+    bare["roles"] = json!({});
+    assert_eq!(strip(&bare, "think", 6).unwrap_err(), "think is Workbench's built-in motion and needs the head role, or the pupils role and a gaze above 0, which this look does not name");
+}
+
+#[test]
+fn a_pose_and_a_strip_show_workbenchs_built_in_motion_by_name() {
+    // pip blinks and nods Workbench's way: each is drawn as the browser makes it from the roles.
+    let (transforms, _, ids) = posed(&pip(), &at("nod", 0.25));
+    // At a quarter of the nod (the end of its first segment of four) the head has dipped by 6.
+    assert_matrix(transforms[ids["head"]], [1.0, 0.0, 0.0, 1.0, 0.0, 6.0]);
+    let (transforms, _, ids) = posed(&pip(), &at("blink", 0.5));
+    let eyes = transforms[ids["eyes"]].expect("the eyes close");
+    assert!((eyes[3] - 0.1).abs() < 1e-9, "{eyes:?}");
+    // A strip of a built-in one-shot and of a built-in loop: frames that differ.
+    let picture = decode(&strip(&pip(), "nod", 3).unwrap());
+    assert_eq!((picture.width(), picture.height()), (3 * STRIP_FRAME_PX + 2 * GAP_PX, STRIP_FRAME_PX));
+    for name in ["blink", "think", "listen", "shake"] {
+        assert!(strip(&pip(), name, 4).is_ok(), "{name}");
+    }
+    // tock and hoot have every role: every built-in is drawn for each.
+    for look in [tock(), hoot()] {
+        for name in BUILTIN {
+            assert!(sheet(&look, &at(name, 0.4)).is_ok(), "{name}");
+        }
+    }
+}
+
+#[test]
+fn the_looks_own_animation_of_a_built_ins_name_is_the_one_drawn() {
+    // pip waves its own way: the built-in wave turns armR about its joint, pip's own does not.
+    let own = |name: &str| pip()["animations"][name]["tracks"].as_array().unwrap().iter().map(|t| t["target"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let built = builtin::animations(&pip()).into_iter().find(|(n, _)| *n == "wave").unwrap().1;
+    assert_ne!(built["tracks"].as_array().unwrap().iter().map(|t| t["target"].as_str().unwrap().to_string()).collect::<Vec<_>>(), own("wave"));
+    let mut without = pip();
+    without["animations"].as_object_mut().unwrap().remove("wave");
+    let mid = at("wave", 0.3);
+    assert_ne!(posed(&pip(), &mid).0, posed(&without, &mid).0, "the own wave and the built-in one are drawn differently");
+    // With its own taken away the built-in one is drawn, and the own one is drawn as written.
+    let mut only = pip();
+    only["animations"] = json!({ "wave": { "duration": 1, "tracks": [{ "target": "head", "prop": "translateX", "values": [0, 10] }] } });
+    let (transforms, _, ids) = posed(&only, &at("wave", 1.0));
+    assert_matrix(transforms[ids["head"]], [1.0, 0.0, 0.0, 1.0, 10.0, 0.0]);
+    assert!(transforms[ids["armR"]].is_none(), "the built-in wave plays nowhere");
 }
 
 #[test]
@@ -1036,14 +1307,305 @@ fn a_pose_as_a_call_writes_it() {
     assert_eq!(Pose::from_json(&json!({})).unwrap(), Pose::default());
     assert_eq!(
         Pose::from_json(&json!({ "animation": "hop", "lookX": -1, "mouth": 0.4, "turn": 0.5, "pace": 1, "held": 0 })).unwrap(),
-        Pose { animation: Some(("hop".into(), 0.5)), inputs: Inputs { look_x: -1.0, look_y: 0.0, mouth: Some(0.4), pace: 1.0, turn: 0.5, held: 0.0 }, zoom: None }
+        Pose { animation: Some(("hop".into(), None)), inputs: Inputs { look_x: -1.0, look_y: 0.0, mouth: Some(0.4), pace: 1.0, turn: 0.5, held: 0.0 }, zoom: None }
     );
-    assert_eq!(Pose::from_json(&json!({ "animation": "hop", "at": 1 })).unwrap().animation, Some(("hop".into(), 1.0)));
+    assert_eq!(Pose::from_json(&json!({ "animation": "hop", "at": 1 })).unwrap().animation, Some(("hop".into(), Some(1.0))));
     assert_eq!(Pose::from_json(&json!({ "lookX": 2 })).unwrap_err(), "lookX in a pose is a number from -1 to 1");
     assert_eq!(Pose::from_json(&json!({ "mouth": "open" })).unwrap_err(), "mouth in a pose is a number from 0 to 1");
     assert_eq!(Pose::from_json(&json!({ "at": 0.5 })).unwrap_err(), "at in a pose says how far into its animation: name the animation too");
     assert_eq!(Pose::from_json(&json!({ "frame": 2 })).unwrap_err(), "a pose takes animation, at, lookX, lookY, mouth, pace, turn, held and zoom, not \"frame\"");
-    assert_eq!(Pose::from_json(&json!({ "animation": 3 })).unwrap_err(), "animation in a pose is the name of one of the look's own animations");
+    assert_eq!(Pose::from_json(&json!({ "animation": 3 })).unwrap_err(), "animation in a pose is the name of one of the look's own animations or of a built-in one");
+}
+
+// ---------------------------------------------------------------- what a picture costs and shows
+
+/// A design call as the validator stores it.
+fn stored(design: Value) -> Value {
+    let applied = crate::avatar::look::apply(None, &design).unwrap_or_else(|problems| panic!("refused: {problems:?}"));
+    serde_json::to_value(applied.design.look.expect("a look")).unwrap()
+}
+
+/// 24 half-transparent strips in a group `hub` that `grow` scales tenfold about its edge, a dot
+/// far from it and a body: near the budget for layers in the large view, and far within it at 56
+/// pixels, where each layer's margin weighs more.
+fn strips() -> Value {
+    let groups: String = (0..24).map(|i| format!("<g opacity='0.5'><rect x='0' y='{i}' width='10' height='170' fill='#3366cc'/></g>")).collect();
+    stored(json!({
+        "name": "Strips",
+        "svg": format!("<svg viewBox='0 0 200 200'><g id='hub'>{groups}</g><circle id='dot' cx='190' cy='100' r='3' fill='#cc3333'/><circle id='body' cx='100' cy='100' r='30' fill='#33aa55'/></svg>"),
+        "pivots": { "hub": [10, 100] },
+        "roles": { "body": "body" },
+        "animations": { "grow": { "duration": 1, "tracks": [{ "target": "hub", "prop": "scaleX", "values": [1, 10] }, { "target": "hub", "prop": "scaleY", "values": [1, 10] }] } }
+    }))
+}
+
+#[test]
+fn the_small_panels_never_refuse_what_the_large_view_draws() {
+    let look = strips();
+    let grow = |at: f64, zoom: Option<&str>| Pose { animation: Some(("grow".into(), Some(at))), inputs: Inputs::default(), zoom: zoom.map(str::to_string) };
+    // Near the budget the large view is drawn, and so are the small figure in the pose and the
+    // face: a small panel costs fewer pixels than the large view of the same content.
+    for at in [0.8, 0.85, 0.9, 0.95] {
+        let picture = draw_sheet(&look, &grow(at, None)).unwrap_or_else(|why| panic!("{at}: {why}"));
+        assert!(picture.spent.layers > 50.0 && picture.spent.layers <= LAYER_WORK, "{at}: {:?}", picture.spent);
+        // What is reported is the figure in that pose in the large view, whatever the zoom.
+        let close = draw_sheet(&look, &grow(at, Some("dot"))).unwrap_or_else(|why| panic!("{at}, close up: {why}"));
+        assert_eq!((close.spent, close.rest), (picture.spent, picture.rest), "{at}");
+    }
+    // At 0.8 the large view costs 52 of 60, which is what is said (the small figure would have said 60).
+    assert_eq!(draw_sheet(&look, &grow(0.8, None)).unwrap().spent.layers.ceil(), 52.0);
+    // Past the budget the large view is refused for the look...
+    let err = draw_sheet(&look, &grow(1.0, None)).unwrap_err();
+    assert!(err.starts_with("this look has too many masked, clipped, filtered or half-transparent groups to draw (about 63 layers the size of the figure, at most 60)"), "{err}");
+    // ...and a close-up far from what grows is drawn, and says what the pose costs: 63 of 60.
+    let close = draw_sheet(&look, &grow(1.0, Some("dot"))).unwrap();
+    assert!(close.spent.layers > LAYER_WORK && close.rest.layers < 5.0, "{close:?}");
+    // The 132 px moments of a strip are drawn as far as the large view of each would be, and no
+    // further: the strip of grow ends where the pose is refused, and is refused in its words.
+    assert_eq!(draw_strip(&look, "grow", 8, &Inputs::default(), None).unwrap_err(), err);
+    // Close up on the dot each moment is drawn, as the close-up pose is, and the strip says the
+    // cost of its costliest moment.
+    let strip = draw_strip(&look, "grow", 8, &Inputs::default(), Some("dot")).unwrap();
+    assert!((strip.spent.layers - close.spent.layers).abs() < 1e-9 && strip.rest == close.rest, "{strip:?}");
+}
+
+#[test]
+fn what_a_picture_costs_is_said_of_the_figure_in_its_pose_whatever_the_zoom() {
+    // A look whose filter is on a part that does not move, and a square that turns.
+    let mut look = square(json!({ "duration": 1, "tracks": [{ "target": "arm", "prop": "rotate", "values": [0, 90] }] }));
+    look["nodes"] = json!([
+        { "tag": "defs", "children": [{ "tag": "filter", "id": "soft", "children": [{ "tag": "feGaussianBlur", "attrs": { "stdDeviation": 2 } }] }] },
+        { "tag": "rect", "id": "arm", "attrs": { "x": 40, "y": 40, "width": 20, "height": 20 }, "box": [40, 40, 20, 20] },
+        { "tag": "circle", "id": "glow", "attrs": { "cx": 50, "cy": 80, "r": 12, "fill": "#3366cc", "filterRef": "soft" }, "box": [38, 68, 24, 24] }
+    ]);
+    let rest = draw_sheet(&look, &Pose::default()).unwrap();
+    assert!(rest.spent.filters > 0.0 && rest.spent == rest.rest && rest.played.is_none(), "{rest:?}");
+    // A pose that changes no cost reports what the rest reports; so does a close-up of it.
+    for pose in [at("move", 1.0), Pose { zoom: Some("arm".into()), ..Pose::default() }, Pose { zoom: Some("glow".into()), ..at("move", 0.5) }] {
+        let posed = draw_sheet(&look, &pose).unwrap();
+        assert_eq!((posed.spent, posed.rest), (rest.spent, rest.spent), "{pose:?}");
+        assert_ne!(posed.png, rest.png, "{pose:?}");
+    }
+    // gadget's turn leans its filtered body: it costs other than its rest, and the same with a
+    // close-up on a part.
+    let turned = Pose { inputs: Inputs { turn: 1.0, ..Inputs::default() }, ..Pose::default() };
+    let whole = draw_sheet(&gadget(), &turned).unwrap();
+    let close = draw_sheet(&gadget(), &Pose { zoom: Some("torso".into()), ..turned.clone() }).unwrap();
+    assert!(whole.spent != whole.rest && (close.spent, close.rest) == (whole.spent, whole.rest), "{whole:?} {close:?}");
+    // And what the rest reports is what a picture at rest reports.
+    assert_eq!(whole.rest, draw_sheet(&gadget(), &Pose::default()).unwrap().spent);
+}
+
+#[test]
+fn a_close_up_that_costs_too_much_says_it_is_the_close_up() {
+    // Thirty half-transparent squares over the figure: a quarter of the budget in the large view,
+    // ten times as large in a close-up of a dot.
+    let mut nodes: Vec<Value> = (0..30).map(|_| json!({ "tag": "rect", "attrs": { "x": 10, "y": 10, "width": 180, "height": 180, "fill": "#3366cc", "opacity": 0.5 } })).collect();
+    nodes.push(json!({ "tag": "circle", "id": "dot", "attrs": { "cx": 100, "cy": 100, "r": 2, "fill": "#000000" }, "box": [98, 98, 4, 4] }));
+    let look = json!({ "viewBox": [0, 0, 200, 200], "nodes": nodes });
+    draw_sheet(&look, &Pose::default()).unwrap();
+    let close = Pose { zoom: Some("dot".into()), ..Pose::default() };
+    let err = draw_sheet(&look, &close).unwrap_err();
+    assert!(err.starts_with("the close-up of dot costs too much to draw (about ") && err.contains(" layers the size of the close-up, at most 60)"), "{err}");
+    assert!(err.ends_with("look at a larger part, or at the whole figure without zoom"), "{err}");
+    assert_eq!(draw_strip(&look, "none", 2, &Inputs::default(), Some("dot")).unwrap_err(), strip(&look, "none", 2).unwrap_err(), "the animation is looked for first");
+}
+
+#[test]
+fn a_pose_without_a_moment_is_drawn_where_its_animation_has_moved_furthest() {
+    let moment = |look: &Value, pose: &Pose| Model::read(look).unwrap().moment(pose).unwrap().1.and_then(|played| played.moment).unwrap();
+    let open = |name: &str| Pose { animation: Some((name.to_string(), None)), ..Pose::default() };
+    // Workbench's nod dips at a quarter and rests at the middle: without at it is drawn dipped.
+    assert_eq!(moment(&pip(), &open("nod")), Moment { at: 0.25, chosen: Chosen::Furthest, still: false });
+    let (transforms, _, ids) = posed(&pip(), &open("nod"));
+    assert_matrix(transforms[ids["head"]], [1.0, 0.0, 0.0, 1.0, 0.0, 6.0]);
+    // At a moment given where it rests, the picture is the figure without it, and says so.
+    assert_eq!(moment(&pip(), &at("nod", 0.5)), Moment { at: 0.5, chosen: Chosen::Given, still: true });
+    assert_eq!(moment(&pip(), &at("nod", 0.25)), Moment { at: 0.25, chosen: Chosen::Given, still: false });
+    let nodded = draw_sheet(&pip(), &open("nod")).unwrap();
+    assert_eq!(nodded.played, Some(Played { builtin: true, looping: false, moment: Some(Moment { at: 0.25, chosen: Chosen::Furthest, still: false }) }));
+    assert_ne!(nodded.png, sheet(&pip(), &Pose::default()).unwrap());
+    assert_eq!(draw_sheet(&pip(), &at("nod", 0.5)).unwrap().png, sheet(&pip(), &Pose::default()).unwrap(), "where it rests, the figure at rest");
+    // A look's own: each track as a part of the furthest it goes, the earliest of the largest sums.
+    let chosen = |animation: Value| moment(&square(animation), &open("move"));
+    let furthest = |at: f64| Moment { at, chosen: Chosen::Furthest, still: false };
+    assert_eq!(chosen(json!({ "duration": 1, "tracks": [{ "target": "arm", "prop": "rotate", "values": [0, 30, -60, 0], "times": [0, 0.25, 0.5, 1] }] })), furthest(0.5));
+    // Ten units across and ninety degrees count alike: both reach 1 of their own furthest, the
+    // first at the middle, the second at the end; the earlier wins.
+    let two = json!({ "duration": 1, "tracks": [
+        { "target": "arm", "prop": "translateX", "values": [0, 10, 0] },
+        { "target": "arm", "prop": "rotate", "values": [0, 0, 90], "times": [0, 0.75, 1] }
+    ] });
+    assert_eq!(chosen(two), furthest(0.5));
+    assert_eq!(chosen(json!({ "duration": 1, "tracks": [{ "target": "arm", "prop": "scale", "values": [1, 1, 2] }] })), furthest(1.0));
+    // A loop follows its phase; a one-shot's track waits for its delay and then holds its end.
+    assert_eq!(chosen(json!({ "duration": 1, "loop": true, "tracks": [{ "target": "arm", "prop": "translateX", "values": [0, 10, 0], "phase": 0.25 }] })), furthest(0.25));
+    assert_eq!(chosen(json!({ "duration": 1, "tracks": [{ "target": "arm", "prop": "translateY", "values": [0, 10], "delay": 1 }] })), furthest(1.0));
+    // An absolute number from the artwork's own (the square is 20 wide); a colour by how far its
+    // channels have gone from the part's own (black: the square sets no fill).
+    assert_eq!(chosen(json!({ "duration": 1, "tracks": [{ "target": "arm", "prop": "width", "values": [20, 40, 30] }] })), furthest(0.5));
+    assert_eq!(chosen(json!({ "duration": 1, "tracks": [{ "target": "arm", "prop": "fill", "values": ["#000000", "#00ff00"] }] })), furthest(1.0));
+    // An animation that never leaves its rest is drawn at its middle.
+    assert_eq!(chosen(json!({ "duration": 1, "tracks": [{ "target": "arm", "prop": "translateX", "values": [0, 0] }] })), Moment { at: 0.5, chosen: Chosen::Unmoved, still: true });
+    assert_eq!(chosen(json!({ "duration": 1, "tracks": [{ "target": "arm", "prop": "width", "values": [30, 30] }] })), Moment { at: 0.5, chosen: Chosen::Unmoved, still: false });
+}
+
+#[test]
+fn frames_close_up_show_each_moment_in_the_square_where_the_part_rests() {
+    let frames = |zoom: Option<&str>| draw_strip(&pip(), "nod", 4, &Inputs::default(), zoom).unwrap();
+    let (whole, close) = (frames(None), frames(Some("head")));
+    let (a, b) = (decode(&whole.png), decode(&close.png));
+    assert!((a.width(), a.height()) == (b.width(), b.height()) && a.data() != b.data());
+    // The square stays where the head rests, so the nod shows against it: moments that differ.
+    let frame = |p: &Pixmap, i: u32| -> Vec<u8> {
+        let x0 = i * (STRIP_FRAME_PX + GAP_PX);
+        (0..STRIP_FRAME_PX).flat_map(|y| (x0..x0 + STRIP_FRAME_PX).map(move |x| (x, y))).flat_map(|(x, y)| p.pixel(x, y).map(|c| [c.red(), c.green(), c.blue()]).unwrap()).collect()
+    };
+    assert_ne!(frame(&b, 0), frame(&b, 1));
+    assert_eq!(frame(&b, 0), frame(&b, 3), "a nod ends where it starts");
+    // What was drawn of the animation travels with it: Workbench's or the look's own, a loop or not.
+    assert_eq!(close.played, Some(Played { builtin: true, looping: false, moment: None }));
+    assert_eq!(draw_strip(&pip(), "hop", 2, &Inputs::default(), None).unwrap().played, Some(Played { builtin: false, looping: false, moment: None }));
+    assert_eq!(draw_strip(&hoot(), "walk", 2, &Inputs::default(), Some("head")).unwrap().played, Some(Played { builtin: false, looping: true, moment: None }));
+    assert_eq!(draw_strip(&pip(), "nod", 3, &Inputs::default(), Some("nose")).unwrap_err(), "zoom names \"nose\", which is no part of this look with a box: name the id of a part that is drawn");
+}
+
+/// The square's `arm` drawn as `nodes`, with `animation` as `move`.
+fn drawn_as(nodes: Value, animation: Value) -> Value {
+    let mut look = square(animation);
+    look["nodes"] = nodes;
+    look
+}
+
+/// A blue rect `arm`, 40 units wide.
+fn blue() -> Value {
+    json!([{ "tag": "rect", "id": "arm", "attrs": { "x": 30, "y": 30, "width": 40, "height": 40, "fill": "#3366cc" }, "box": [30, 30, 40, 40] }])
+}
+
+/// One track of `arm` as the animation `move`.
+fn one_track(prop: &str, values: Value) -> Value {
+    json!({ "duration": 1, "tracks": [{ "target": "arm", "prop": prop, "values": values }] })
+}
+
+#[test]
+fn a_pose_without_a_moment_is_drawn_where_it_is_furthest_from_what_its_parts_show_without_it() {
+    let moment = |look: &Value| Model::read(look).unwrap().moment(&Pose { animation: Some(("move".into(), None)), ..Pose::default() }).unwrap().1.and_then(|played| played.moment).unwrap();
+    let furthest = |at: f64| Moment { at, chosen: Chosen::Furthest, still: false };
+    let on_blue = |prop: &str, values: Value| moment(&drawn_as(blue(), one_track(prop, values)));
+    // A fade-in of a part drawn at opacity 1 is furthest at its start, where it is not there; a
+    // fade-out at its end.
+    assert_eq!(on_blue("opacity", json!([0, 1])), furthest(0.0));
+    assert_eq!(on_blue("opacity", json!([1, 0])), furthest(1.0));
+    assert_eq!(on_blue("opacity", json!([0.5, 1, 0.5])), furthest(0.0));
+    // A number from the artwork's own: a rect 40 wide that grows from 10 is furthest at 10.
+    assert_eq!(on_blue("width", json!([10, 40])), furthest(0.0));
+    // A colour by how far its channels have gone from the part's own: a blush is furthest when
+    // it is fully pink, half way, and a change of colour at its end.
+    assert_eq!(on_blue("fill", json!(["#3366cc", "#ff3366", "#3366cc"])), furthest(0.5));
+    assert_eq!(on_blue("fill", json!([null, "#ff3366", null])), furthest(0.5));
+    assert_eq!(on_blue("fill", json!(["#3366cc", "#ff3366"])), furthest(1.0));
+    let red = json!([{ "tag": "rect", "id": "arm", "attrs": { "x": 30, "y": 30, "width": 40, "height": 40, "fill": "#ff0000" }, "box": [30, 30, 40, 40] }]);
+    assert_eq!(moment(&drawn_as(red, one_track("fill", json!(["#ff0000", "#00ff00"])))), furthest(1.0));
+    // Path data by how far its numbers have gone: a mouth that opens and closes is open half way.
+    let mouth = json!([{ "tag": "path", "id": "arm", "attrs": { "d": "M30 50 Q50 52 70 50", "fill": "none", "stroke": "#000000", "strokeWidth": 4 }, "box": [30, 50, 40, 2] }]);
+    assert_eq!(moment(&drawn_as(mouth, one_track("d", json!(["M30 50 Q50 52 70 50", "M30 50 Q50 90 70 50", "M30 50 Q50 52 70 50"])))), furthest(0.5));
+
+    // A spike between two of the even moments is found at its keyframe, not taken for stillness.
+    let spike = json!({ "duration": 3, "tracks": [{ "target": "arm", "prop": "scaleY", "values": [1, 1, 0, 1, 1], "times": [0, 0.5, 0.52, 0.54, 1] }] });
+    let m = moment(&drawn_as(blue(), spike));
+    assert!(m.chosen == Chosen::Furthest && (m.at - 0.52).abs() < 1e-9, "{m:?}");
+    // Keyframes are found through a loop's phase and a one-shot's delay.
+    let looped = json!({ "duration": 1, "loop": true, "tracks": [{ "target": "arm", "prop": "translateX", "values": [0, 10, 0], "times": [0, 0.3, 1], "phase": 0.1 }] });
+    assert!((moment(&drawn_as(blue(), looped)).at - 0.2).abs() < 1e-9);
+    let delayed = json!({ "duration": 1, "tracks": [{ "target": "arm", "prop": "translateY", "values": [0, 10, 0], "times": [0, 0.4, 1], "delay": 1 }] });
+    assert!((moment(&drawn_as(blue(), delayed)).at - 0.7).abs() < 1e-9);
+    // A colour held from after its delay changes the part then: it has moved, from that moment.
+    let late = json!({ "duration": 1, "tracks": [{ "target": "arm", "prop": "fill", "values": ["#ff0000", "#ff0000"], "delay": 1 }] });
+    assert_eq!(moment(&drawn_as(blue(), late)), furthest(0.5));
+    // Each part of a colour track counts from its own colour: one that the track paints blue
+    // keeps its blue, the green one turns blue after the delay.
+    let two = json!([
+        { "tag": "rect", "id": "arm", "attrs": { "x": 10, "y": 30, "width": 30, "height": 40, "fill": "#3366cc" }, "box": [10, 30, 30, 40] },
+        { "tag": "rect", "id": "leg", "attrs": { "x": 60, "y": 30, "width": 30, "height": 40, "fill": "#00ff00" }, "box": [60, 30, 30, 40] }
+    ]);
+    let both = json!({ "duration": 1, "tracks": [{ "target": ["arm", "leg"], "prop": "fill", "values": ["#3366cc", "#3366cc"], "delay": 1 }] });
+    assert_eq!(moment(&drawn_as(two, both)), furthest(0.5));
+    // Every moment looks the same only where no track changes what it sets.
+    assert_eq!(on_blue("width", json!([30, 30])), Moment { at: 0.5, chosen: Chosen::Unmoved, still: false });
+    assert_eq!(on_blue("translateX", json!([0, 0])), Moment { at: 0.5, chosen: Chosen::Unmoved, still: true });
+}
+
+#[test]
+fn a_moment_drawn_as_the_figure_without_its_animation_is_said_to_rest_there() {
+    let rest = |look: &Value| sheet(look, &Pose::default()).unwrap();
+    let still = |look: &Value, pose: &Pose| draw_sheet(look, pose).unwrap().played.unwrap().moment.unwrap().still;
+    // A track that writes the artwork's own opacity at its ends: written, the figure differs; drawn,
+    // it is the figure at rest.
+    let own = drawn_as(blue(), one_track("opacity", json!([1, 0.4, 1])));
+    let model = Model::read(&own).unwrap();
+    assert!(!model.moment(&at("move", 0.0)).unwrap().1.unwrap().moment.unwrap().still, "written, it differs");
+    assert_eq!(draw_sheet(&own, &at("move", 0.0)).unwrap().png, rest(&own));
+    assert!(still(&own, &at("move", 0.0)) && still(&own, &at("move", 1.0)) && !still(&own, &at("move", 0.5)));
+    // So with a close-up: the figure is compared whole.
+    assert!(still(&own, &Pose { zoom: Some("arm".into()), ..at("move", 0.0) }));
+    assert!(!still(&own, &Pose { zoom: Some("arm".into()), ..at("move", 0.5) }));
+    // A part out of sight at rest moves unseen; a part in sight does not.
+    let hidden = json!([
+        { "tag": "rect", "id": "arm", "attrs": { "x": 30, "y": 30, "width": 40, "height": 40, "fill": "#3366cc" }, "box": [30, 30, 40, 40] },
+        { "tag": "circle", "id": "ghost", "attrs": { "cx": 50, "cy": 80, "r": 8, "fill": "#cc3366", "opacity": 0 }, "box": [42, 72, 16, 16] }
+    ]);
+    let unseen = json!({ "duration": 1, "tracks": [{ "target": "ghost", "prop": "translateX", "values": [0, 20] }] });
+    assert!(still(&drawn_as(hidden.clone(), unseen), &at("move", 1.0)));
+    let seen = json!({ "duration": 1, "tracks": [{ "target": ["ghost", "arm"], "prop": "translateX", "values": [0, 20] }] });
+    assert!(!still(&drawn_as(hidden, seen), &at("move", 1.0)));
+    // An example: pip's hop rests at its start and its end, which it writes out.
+    assert!(still(&pip(), &at("hop", 0.0)) && still(&pip(), &at("hop", 1.0)) && !still(&pip(), &at("hop", 0.5)));
+}
+
+/// Six rects, each dilated by a radius of 20 units, that `grow` scales from 1 to `to`: the cost
+/// of morphology grows with its radius in pixels, so a 132 px moment costs far less than the
+/// large view of it.
+fn dilated(to: f64) -> Value {
+    let mut nodes = vec![json!({ "tag": "defs", "children": [{ "tag": "filter", "id": "f", "attrs": { "x": "-50%", "y": "-50%", "width": "200%", "height": "200%" }, "children": [{ "tag": "feMorphology", "attrs": { "operator": "dilate", "radius": 20 } }] }] })];
+    let ids: Vec<String> = (0..6).map(|i| format!("r{i}")).collect();
+    for (i, id) in ids.iter().enumerate() {
+        let (x, y) = (20 + 60 * (i % 3), 40 + 80 * (i / 3));
+        nodes.push(json!({ "tag": "rect", "id": id, "attrs": { "x": x, "y": y, "width": 20, "height": 20, "fill": "#3366cc", "filterRef": "f" }, "box": [x, y, 20, 20] }));
+    }
+    json!({
+        "viewBox": [0, 0, 200, 200], "nodes": nodes, "pivots": {}, "roles": {}, "states": {}, "mouth": [], "gaze": null,
+        "animations": { "grow": { "duration": 1, "tracks": [{ "target": ids, "prop": "scale", "values": [1, to] }] } }
+    })
+}
+
+#[test]
+fn a_strip_draws_a_moment_where_its_pose_is_drawn_and_refuses_it_in_the_same_words() {
+    // Grown fourfold the large view is refused; so is a strip that ends there, in the same words
+    // and numbers, although its 132 px moment would cost the drawing a sixteenth of that.
+    let look = dilated(4.0);
+    let end = draw_sheet(&look, &at("grow", 1.0)).unwrap_err();
+    assert!(end.starts_with("this look's filters cost too much to draw (about 413 passes over the whole figure, at most 60)"), "{end}");
+    assert_eq!(draw_strip(&look, "grow", 2, &Inputs::default(), None).unwrap_err(), end);
+    // A longer strip is refused at its first moment the pose of which is refused, in its words.
+    let first = (0..8).find_map(|i| draw_sheet(&look, &at("grow", f64::from(i) / 7.0)).err()).unwrap();
+    assert_eq!(draw_strip(&look, "grow", 8, &Inputs::default(), None).unwrap_err(), first);
+    // Grown twofold it is drawn, and the strip reports its costliest moment, its end, in those
+    // units: what the pose of that moment reports, within the budget.
+    let (strip, end) = (draw_strip(&dilated(2.0), "grow", 8, &Inputs::default(), None).unwrap(), draw_sheet(&dilated(2.0), &at("grow", 1.0)).unwrap());
+    assert!(strip.spent == end.spent && strip.rest == end.rest && strip.spent.filters > 20.0 && strip.spent.filters <= FILTER_WORK, "{strip:?} {end:?}");
+    // Close up, a moment is refused as the close-up of that pose is, and in its words.
+    let close = draw_sheet(&dilated(2.0), &Pose { zoom: Some("r0".into()), ..at("grow", 0.0) }).unwrap_err();
+    assert!(close.starts_with("the close-up of r0 costs too much to draw (about "), "{close}");
+    assert_eq!(draw_strip(&dilated(2.0), "grow", 8, &Inputs::default(), Some("r0")).unwrap_err(), close);
+    // A close-up drawn past the budget says the number a refusal of the whole figure says, and
+    // what it means.
+    let look = strips();
+    let refused = draw_strip(&look, "grow", 8, &Inputs::default(), None).unwrap_err();
+    let drawn = draw_strip(&look, "grow", 8, &Inputs::default(), Some("dot")).unwrap();
+    let strip = crate::avatar::session::PictureRequest::Strip { animation: "grow".into(), frames: 8, inputs: Inputs::default(), zoom: Some("dot".into()) };
+    let line = strip.cost(&drawn).unwrap();
+    assert!(refused.contains("(about 63 layers the size of the figure, at most 60)"), "{refused}");
+    assert!(line.contains(" and 63 of 60 for layers; ") && line.ends_with(" Past 60 only a close-up of it can be drawn."), "{line}");
 }
 
 // ---------------------------------------------------------------- looking at the pictures

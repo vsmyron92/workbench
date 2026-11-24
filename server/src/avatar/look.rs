@@ -218,7 +218,7 @@ const BEZIER_Y: (f64, f64) = (-2.0, 3.0);
 
 /// Never an id and never an animation name: the browser looks parts and animations up by name,
 /// and these are names every JavaScript object answers to.
-const RESERVED: [&str; 10] = ["constructor", "prototype", "toString", "toLocaleString", "valueOf", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "all", "none"];
+pub(super) const RESERVED: [&str; 10] = ["constructor", "prototype", "toString", "toLocaleString", "valueOf", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "all", "none"];
 
 /// Workbench's built-in motion, by name. The browser generates it for any look from its roles.
 pub const BUILTIN: [&str; 11] = ["breathe", "blink", "think", "talk", "listen", "alert", "doze", "wave", "cheer", "nod", "shake"];
@@ -1166,9 +1166,12 @@ fn parts_of(look: &Look, ix: &Index<'_>) -> Vec<Part> {
         .collect()
 }
 
-/// The built-in motion a look's roles allow, in the order of [`BUILTIN`].
+/// The built-in motion a look's roles (and, for think, its gaze) allow, in the order of
+/// [`BUILTIN`]: each one `builtin::needs` finds nothing missing for, read from the typed look alone.
+/// A test holds it to what the browser and the pictures make of the look as it is stored
+/// (`builtin::names`).
 pub fn builtins(look: &Look) -> Vec<&'static str> {
-    BUILTIN.into_iter().filter(|name| builtin_missing(name, &look.roles).is_none()).collect()
+    BUILTIN.into_iter().filter(|name| builtin_missing(name, &look.roles, look.gaze).is_none()).collect()
 }
 
 /// Whether the look's animation `name` may be played several times in a row: each of its `fill`,
@@ -1206,20 +1209,10 @@ pub fn message(problems: &[String]) -> String {
     out
 }
 
-/// What a built-in needs that the roles do not give, or `None` when it applies.
-fn builtin_missing(name: &str, roles: &BTreeMap<Role, String>) -> Option<&'static str> {
-    let has = |r: Role| roles.contains_key(&r);
-    let missing = match name {
-        "breathe" | "alert" => (!has(Role::Body)).then_some("the body role"),
-        "blink" => (!has(Role::Eyes)).then_some("the eyes role"),
-        "think" => (!has(Role::Pupils) && !has(Role::Head)).then_some("the pupils or the head role"),
-        "talk" | "listen" | "nod" | "shake" => (!has(Role::Head) && !has(Role::Body)).then_some("the head or the body role"),
-        "doze" => (!has(Role::Eyes) || !has(Role::Body)).then_some("the eyes and the body role"),
-        "wave" => (!has(Role::ArmR) && !has(Role::ArmL)).then_some("the armR or the armL role"),
-        "cheer" => (!(has(Role::ArmL) && has(Role::ArmR)) && !has(Role::Body)).then_some("both arm roles, or the body role"),
-        _ => Some("a name of the built-in set"),
-    };
-    missing
+/// What a built-in needs that the roles and the gaze (`None`: the default travel) do not give, or
+/// `None` when it applies (`builtin::needs`).
+pub(super) fn builtin_missing(name: &str, roles: &BTreeMap<Role, String>, gaze: Option<Num>) -> Option<&'static str> {
+    super::builtin::needs(name, |role| roles.keys().any(|r| r.name() == role), gaze.map(Num::get))
 }
 
 // ---------------------------------------------------------------- problems and warnings
@@ -1241,7 +1234,24 @@ struct Note {
     accepted: String,
     place: String,
     count: usize,
+    /// A kind whose occurrences each say something of their own ([`Notes::add_each`]).
+    each: Option<Each>,
 }
+
+/// A kind of note whose occurrences each say something of their own.
+#[derive(Clone)]
+struct Each {
+    /// What one and several of them are called: "drive", "drives".
+    one: &'static str,
+    many: &'static str,
+    /// What to do, said of them all where the line names more than the first.
+    cure: &'static str,
+    /// The places of the first ones after the first.
+    places: Vec<String>,
+}
+
+/// Places a kind of [`Notes::add_each`] names after its first, at most: then it counts.
+const EACH_NAMED: usize = 2;
 
 impl Notes {
     /// Records one occurrence. `key` names the kind; `what` and `accepted` are kept from the
@@ -1259,7 +1269,29 @@ impl Notes {
             return;
         }
         self.index.insert(key.to_string(), self.kinds.len());
-        self.kinds.push(Note { what, accepted: accepted.to_string(), place: place.to_string(), count: 1 });
+        self.kinds.push(Note { what, accepted: accepted.to_string(), place: place.to_string(), count: 1, each: None });
+    }
+
+    /// Records one occurrence of a kind whose occurrences each say something of their own (a
+    /// drive that changes the figure at rest): they are one kind, so many of them leave room for
+    /// the others. The first is said in full, with `accepted` while it is the only one; the later
+    /// ones are named after it as far as the line holds them, then counted, and `each.cure` is
+    /// said of them all.
+    fn add_each(&mut self, key: &str, place: &str, what: String, accepted: &str, each: Each) {
+        if let Some(note) = self.index.get(key).and_then(|&i| self.kinds.get_mut(i)) {
+            note.count += 1;
+            if let Some(each) = &mut note.each {
+                if each.places.len() < EACH_NAMED {
+                    each.places.push(place.to_string());
+                }
+            }
+            return;
+        }
+        let known = self.index.contains_key(key);
+        self.add(key, place, what, accepted);
+        if let Some(note) = self.index.get(key).filter(|_| !known).and_then(|&i| self.kinds.get_mut(i)) {
+            note.each = Some(each);
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -1279,6 +1311,9 @@ impl Notes {
     }
 
     fn line(note: &Note) -> String {
+        if let Some(each) = note.each.as_ref().filter(|_| note.count > 1) {
+            return Notes::line_each(note, each);
+        }
         let mut s = note.what.clone();
         match (note.count, note.place.is_empty()) {
             (1, true) => {}
@@ -1297,6 +1332,28 @@ impl Notes {
             s.push_str(&note.accepted);
         }
         cut(&s, MAX_PROBLEM_CHARS)
+    }
+
+    /// The line of a kind of [`Notes::add_each`] met more than once: the first, then as many of
+    /// the later ones' places as the line holds and how many more, then what to do with them all.
+    fn line_each(note: &Note, each: &Each) -> String {
+        let later = note.count - 1;
+        let mut shortest = String::new();
+        for named in (0..=each.places.len().min(later)).rev() {
+            let mut also = each.places[..named].join(", ");
+            let more = later - named;
+            if more > 0 {
+                let _ = write!(also, "{}{more} more {}", if named > 0 { " and " } else { "" }, if more == 1 { each.one } else { each.many });
+            }
+            let s = format!("{} (at {}; also {also}): {}", note.what, note.place, each.cure);
+            if s.chars().count() <= MAX_PROBLEM_CHARS {
+                return s;
+            }
+            if shortest.is_empty() || s.chars().count() < shortest.chars().count() {
+                shortest = s;
+            }
+        }
+        cut(&shortest, MAX_PROBLEM_CHARS)
     }
 
     /// The problems of a refusal: one line per kind, then "and N more kinds".
@@ -3975,6 +4032,9 @@ struct Entry<'n> {
     part: bool,
     /// The ids of the elements it stands inside, outermost first.
     above: Vec<&'n str>,
+    /// The elements it stands inside, with an id or without, outermost first: what it inherits
+    /// a paint from.
+    around: Vec<&'n LookNode>,
     /// From the coordinates its geometry is written in to root coordinates.
     to_root: Affine,
     /// The structure of its own `d`, when it is a path that has one: read once, asked for by
@@ -4011,9 +4071,9 @@ impl<'n> Index<'n> {
     /// Walks the tree with a stack of its own: the depth of the input never becomes call depth.
     fn of(nodes: &'n [LookNode]) -> Index<'n> {
         let mut ix = Index { by_id: HashMap::new(), order: Vec::new(), elements: 0 };
-        let mut stack: Vec<(&'n LookNode, Affine, bool, Stroke, Vec<&'n str>)> = nodes.iter().rev().map(|n| (n, IDENTITY, false, Stroke::NONE, Vec::new())).collect();
+        let mut stack: Vec<(&'n LookNode, Affine, bool, Stroke, Vec<&'n str>, Vec<&'n LookNode>)> = nodes.iter().rev().map(|n| (n, IDENTITY, false, Stroke::NONE, Vec::new(), Vec::new())).collect();
         let mut repeated: Vec<&'n str> = Vec::new();
-        while let Some((node, matrix, hidden, inherited, above)) = stack.pop() {
+        while let Some((node, matrix, hidden, inherited, above, around)) = stack.pop() {
             ix.elements += 1;
             let to_root = compose(&matrix, &matrix_of(node));
             let hidden = hidden || !node.tag.is_part();
@@ -4029,11 +4089,13 @@ impl<'n> Index<'n> {
                         ix.order.push(id);
                     }
                     let structure = node.attrs.get("d").and_then(AttrValue::str).and_then(|d| path_data(d, &WIDE, MAX_D_CHARS, &unmasked).ok()).map(|p| p.structure);
-                    ix.by_id.insert(id, Entry { node, part: !hidden, above, to_root, structure, stroke });
+                    ix.by_id.insert(id, Entry { node, part: !hidden, above, around: around.clone(), to_root, structure, stroke });
                 }
             }
+            let mut held = around;
+            held.push(node);
             for child in node.children.iter().rev() {
-                stack.push((child, to_root, hidden, stroke, inside.clone()));
+                stack.push((child, to_root, hidden, stroke, inside.clone(), held.clone()));
             }
         }
         // What each use repeats counts again, as it counted when the artwork was read.
@@ -4275,10 +4337,12 @@ struct Keyed<'v, 'a> {
     ok: bool,
 }
 
-/// The pivots and roles of the look being put together, for the warnings that need them.
+/// The pivots, roles and gaze of the look being put together, for the warnings that need them.
 struct Rig<'r> {
     pivots: &'r BTreeMap<String, [Num; 2]>,
     roles: &'r BTreeMap<Role, String>,
+    /// The gaze as it will be stored (think moves the pupils only with one above 0).
+    gaze: Option<Num>,
 }
 
 /// The checks of what moves an artwork, against the parts of that artwork.
@@ -4891,6 +4955,7 @@ impl<'a> Check<'a> {
             return None;
         }
         self.motion_warnings(&targets, prop, &values, at, rig, out);
+        rest_warning(input, &targets, prop, &values, places.as_deref(), ease.as_ref(), at, &self.view, out);
         let target = match names.as_slice() {
             [one] => Targets::One(one.to_string()),
             many => Targets::Many(many.iter().map(|id| id.to_string()).collect()),
@@ -4948,8 +5013,9 @@ impl<'a> Check<'a> {
                 ok = false;
             } else if animations.contains_key(*name) {
             } else if BUILTIN.contains(name) {
-                if let Some(needs) = builtin_missing(name, rig.roles) {
-                    out.warnings.add(&format!("builtin {name}"), &here, format!("{name} is built in and needs {needs}"), "name the role, or it does nothing in this look");
+                if let Some(needs) = builtin_missing(name, rig.roles, rig.gaze) {
+                    let remedy = super::builtin::remedy(name, |role| rig.roles.keys().any(|r| r.name() == role), rig.gaze.map(Num::get));
+                    out.warnings.add(&format!("builtin {name}"), &here, format!("{name} is built in and needs {needs}"), remedy);
                 }
             } else {
                 let own: Vec<&String> = animations.keys().collect();
@@ -5383,8 +5449,14 @@ fn assemble(view: View, nodes: &[LookNode], base: Option<&Look>, keeping: bool, 
     phrase(&mut carried.cleared, "roles", &cleared);
     (kept, cleared) = (Vec::new(), Vec::new());
 
-    // Animations: against the pivots and roles as they will be.
-    let rig = Rig { pivots: &moving.pivots, roles: &moving.roles };
+    // Animations: against the pivots and roles as they will be. The gaze is checked below; here
+    // it is only looked at, for the states' warnings.
+    let gaze = match req.get("gaze") {
+        None => base.and_then(|b| b.gaze).and_then(|g| check.gaze(&json!(g), &mut Out::default())),
+        Some(v) if v.is_null() => None,
+        Some(v) => check.gaze(v, &mut Out::default()),
+    };
+    let rig = Rig { pivots: &moving.pivots, roles: &moving.roles, gaze };
     let asked = Asked::of(req, "animations", "an object of names with an animation each, null to remove one", &mut cx.out);
     let mut count = asked.given().count();
     for (name, animation) in base.filter(|_| !asked.clear).into_iter().flat_map(|b| &b.animations).filter(|(name, _)| !asked.names(name)) {
@@ -5538,6 +5610,8 @@ fn assemble(view: View, nodes: &[LookNode], base: Option<&Look>, keeping: bool, 
     if moving.gaze.is_some_and(|g| g.get() > 0.0) && !moving.roles.contains_key(&Role::Pupils) {
         cx.out.warnings.add("gaze-pupils", "", "gaze moves the part with the pupils role, and no part has it".to_string(), "name it in roles");
     }
+    arm_pivot_warnings(&moving, &mut cx.out);
+    repeated_role_warnings(&moving, check.ix, &mut cx.out);
     (moving, carried)
 }
 
@@ -5574,6 +5648,267 @@ fn d_keyframe_chars(look: &Look) -> usize {
         MouthDrive::Prop { .. } => 0,
     });
     keyframes.chain(mouth).sum()
+}
+
+/// A role arm without a pivot warns, once for each: Workbench's wave and cheer raise an arm about
+/// its pivot, the shoulder, and without one they can only wiggle it about the centre of its box
+/// (`arm_tracks` of builtin.rs). Only the built-ins that move that arm in this look count: wave
+/// moves armR, or armL where there is no armR, cheer every arm where it plays, and one the look
+/// replaces with an animation of its own moves nothing.
+/// A role part that is a `use` of another role's part warns: a use repeats what it names with
+/// all its motion, so the repeated part moves once for itself and once more with the original
+/// (a right arm that is a mirrored use of the left arm goes out of sight when both are raised).
+fn repeated_role_warnings(moving: &Moving, ix: &Index, out: &mut Out) {
+    for (role, id) in &moving.roles {
+        let Some(entry) = ix.by_id.get(id.as_str()).filter(|entry| entry.node.tag == Tag::Use) else { continue };
+        let Some(target) = entry.node.attrs.get("useRef").and_then(AttrValue::str) else { continue };
+        let Some((other, _)) = moving.roles.iter().find(|(other, named)| *other != role && named.as_str() == target) else { continue };
+        let what = format!("{id} is a use of {target}, the {} part: it also moves whenever {target} moves", other.name());
+        out.warnings.add(&format!("role-use {id}"), &format!("roles.{}", role.name()), what, "draw it as a part of its own, or let both be uses of a shape in defs");
+    }
+}
+
+fn arm_pivot_warnings(moving: &Moving, out: &mut Out) {
+    let own = |name: &str| moving.animations.contains_key(name);
+    let cheers = builtin_missing("cheer", &moving.roles, None).is_none() && !own("cheer");
+    for (role, waved) in [(Role::ArmR, true), (Role::ArmL, !moving.roles.contains_key(&Role::ArmR))] {
+        let Some(id) = moving.roles.get(&role).filter(|id| !moving.pivots.contains_key(*id)) else { continue };
+        let which = match (waved && !own("wave"), cheers) {
+            (true, true) => "wave and cheer",
+            (true, false) => "wave",
+            (false, true) => "cheer",
+            (false, false) => continue,
+        };
+        let what = format!("{id} has no pivot: built-in {which} can only wiggle it");
+        out.warnings.add(&format!("arm-pivot {id}"), &format!("roles.{}", role.name()), what, &format!("give pivots.{id} its shoulder, in the coordinates it is drawn in"));
+    }
+}
+
+/// Where an input rests along its range, as a drive's places count it from 0 to 1: the middle
+/// for where the figure looks and how it turns, the start for the mouth, the pace and the drag.
+fn rest_place(input: Input) -> f64 {
+    match input {
+        Input::LookX | Input::LookY | Input::Turn => 0.5,
+        Input::Mouth | Input::Pace | Input::Held => 0.0,
+    }
+}
+
+/// A drive that changes the figure at rest warns. The browser applies drives on every frame, so a
+/// drive whose value at its input's rest is not the prop's own rest (0 for translate, rotate and
+/// skew, 1 for a scale, for the absolute props what the part shows without it, [`rest_value`])
+/// redraws the figure while nothing happens: two opacities along turn leave the part half there
+/// at rest. Within [`unseen`] of the rest is the rest. A keyframe written at the rest that hides
+/// the part (a scale or an opacity of 0) is meant: a side view folded away while the figure faces
+/// the user. Another keyframe written there may be meant, and the cure says so; a value between
+/// two keyframes is not. It warns and never refuses, so stored looks keep loading, and all such
+/// drives of a design are one warning, so they leave room for the others. The value at rest is
+/// sampled as the browser samples a drive.
+#[allow(clippy::too_many_arguments)]
+fn rest_warning(input: Input, targets: &[(&str, &Entry<'_>)], prop: Prop, values: &[Option<Key>], places: Option<&[f64]>, ease: Option<&Eases>, at: &str, view: &View, out: &mut Out) {
+    let n = values.len();
+    if n < 2 {
+        return;
+    }
+    let places = places.filter(|p| p.len() == n).map_or_else(|| even(n), <[f64]>::to_vec);
+    let rest = rest_place(input);
+    let mut i = 0;
+    while i + 2 < n && rest >= places[i + 1] {
+        i += 1;
+    }
+    let span = places[i + 1] - places[i];
+    let u = if span > 0.0 { ((rest - places[i]) / span).clamp(0.0, 1.0) } else { 1.0 };
+    // On a keyframe's place the ease does not matter; between two it does.
+    let on_place = u <= 0.0 || u >= 1.0;
+    let f = if u <= 0.0 {
+        0.0
+    } else if u >= 1.0 {
+        1.0
+    } else {
+        let written = ease.and_then(|e| serde_json::to_value(e).ok());
+        super::preview::eased(written.as_ref(), n - 1, i, u)
+    };
+    let (a, b) = (&values[i], &values[i + 1]);
+    let number = |key: &Option<Key>, own: f64| match key {
+        Some(Key::Num(v)) => v.get(),
+        _ => own,
+    };
+    // A length is seen against the viewBox, in the part's own units: what scales the part at
+    // rest scales what it moves, a translation along its own axis (a part folded flat shows
+    // nothing).
+    let side = view.w.max(view.h);
+    let size = |entry: &Entry<'_>| {
+        let m = &entry.to_root;
+        let scale = match prop {
+            Prop::TranslateX => m[0].hypot(m[1]),
+            Prop::TranslateY => m[2].hypot(m[3]),
+            _ => (m[0] * m[3] - m[1] * m[2]).abs().sqrt(),
+        };
+        if scale > 0.0 {
+            side / scale
+        } else if scale == 0.0 {
+            f64::INFINITY
+        } else {
+            side
+        }
+    };
+    let differs = |v: f64, own: f64, size: f64| {
+        let swing = values.iter().map(|key| (number(key, own) - own).abs()).fold(0.0, f64::max);
+        (v - own).abs() > unseen(prop, swing, size)
+    };
+    // A keyframe written at the rest may be meant; one between two never is. Null is the part's
+    // own value; what it inherits (`inherited`) is written out, as null cannot be.
+    let cure = |inherited: Option<String>| -> String {
+        if on_place {
+            let k = if u <= 0.0 { i } else { i + 1 };
+            let rests = if prop.is_relative() { fmt_num(if prop.is_scale() { 1.0 } else { 0.0 }) } else { inherited.unwrap_or_else(|| "null, the artwork's own".to_string()) };
+            format!("make values[{k}] {rests}, unless that is meant")
+        } else {
+            "an odd number of values with the rest in the middle, or place them with at".to_string()
+        }
+    };
+    let gives = |id: &str, value: String, instead: String| format!("{} gives {id} {} {value} at rest, not {instead}", input.name(), prop.name());
+    let what = if prop.is_relative() {
+        let own = if prop.is_scale() { 1.0 } else { 0.0 };
+        let v = number(a, own) + (number(b, own) - number(a, own)) * f;
+        let hidden = on_place && prop.is_scale() && v.abs() < 0.0005;
+        let ids: Vec<&str> = targets.iter().map(|(id, _)| *id).collect();
+        // The parts move alike: the one drawn largest shows it first.
+        let size = targets.iter().map(|(_, entry)| size(entry)).fold(f64::INFINITY, f64::min);
+        (!hidden && differs(v, own, size)).then(|| (gives(&listed(&ids), fmt_num(v), fmt_num(own)), None))
+    } else {
+        targets.iter().find_map(|(id, entry)| {
+            let (own, inherited) = rest_value(entry, prop);
+            let written = |text: String| inherited.then(|| cure(Some(text)));
+            match own {
+                Own::Num(own) => {
+                    let v = number(a, own) + (number(b, own) - number(a, own)) * f;
+                    let v = if prop.is_length() { v.max(0.0) } else { v };
+                    let hidden = on_place && prop == Prop::Opacity && v.abs() < 0.0005;
+                    (!hidden && differs(v, own, size(entry))).then(|| (gives(id, fmt_num(v), format!("the artwork's {}", fmt_num(own))), written(fmt_num(own))))
+                }
+                Own::Text(own) => {
+                    let text = |key: &Option<Key>| match key {
+                        Some(Key::Str(s)) => s.clone(),
+                        _ => own.to_string(),
+                    };
+                    let (va, vb) = (text(a), text(b));
+                    let same = |x: &str, y: &str| if prop == Prop::D { x == y } else { x.eq_ignore_ascii_case(y) };
+                    let at_rest = if f == 0.0 || same(&va, &vb) {
+                        Some(va)
+                    } else if f == 1.0 {
+                        Some(vb)
+                    } else {
+                        None
+                    };
+                    let what = match (prop, at_rest) {
+                        (_, Some(v)) if same(&v, own) => None,
+                        (Prop::D, _) => Some(format!("{} gives {id} a d at rest, not the artwork's own", input.name())),
+                        (_, Some(v)) => Some(gives(id, v, format!("the artwork's {own}"))),
+                        (_, None) => Some(gives(id, "a blend".to_string(), format!("the artwork's {own}"))),
+                    };
+                    // No keyframe stands for none: the part is given the paint unseen, and that
+                    // is driven.
+                    let cure = if own == "none" { Some(format!("give it a {name} at {name}-opacity 0 and drive {name}Opacity instead", name = prop.name())) } else { written(own.to_string()) };
+                    what.map(|what| (what, cure))
+                }
+                Own::Unknown => None,
+            }
+        })
+    };
+    if let Some((what, written)) = what {
+        let each = Each { one: "drive", many: "drives", cure: "make each give its prop's rest at its input's rest", places: Vec::new() };
+        out.warnings.add_each("drive-rest", at, what, &written.unwrap_or_else(|| cure(None)), each);
+    }
+}
+
+/// How far from its rest a drive may leave a part at rest and the rest not be seen to change, in
+/// the units of its prop: a tenth of the drive's swing (a part placed a little off its
+/// keyframes), never less than what cannot be seen and never more than what plainly is. Those are
+/// a hundredth and three hundredths of a scale, half a degree and two degrees of a turn or a
+/// skew, two hundredths and a tenth of an opacity, and of a length (a translation, a size, a stroke)
+/// 0.2 and 1 percent of `size`, the viewBox's larger side in the part's own units: half a pixel
+/// and about two and a half pixels in the 264 px picture.
+fn unseen(prop: Prop, swing: f64, size: f64) -> f64 {
+    let (least, most) = if prop.is_scale() {
+        (0.01, 0.03)
+    } else if prop == Prop::Rotate || prop.is_skew() {
+        (0.5, 2.0)
+    } else if prop.is_opacity() {
+        (0.02, 0.1)
+    } else {
+        (0.002 * size, 0.01 * size)
+    };
+    (0.1 * swing).max(least).min(most)
+}
+
+/// What a part shows of an absolute prop without the drive, as [`rest_warning`] compares it, and
+/// whether it inherits that: its own value; for what it inherits (the fill, the stroke and the
+/// opacities, width and offset that go with them) the nearest element around it that sets one,
+/// as the renderer finds it, else the initial value (a black fill, no stroke, a width of 1,
+/// opacities of 1, no offset). A plain colour, `none` or a number; unknown where it is not (a
+/// gradient, `currentColor`), and where nothing the part draws shows it ([`passes_on`]: a group
+/// whose parts all set their own, a stroke's width where no stroke is painted).
+fn rest_value<'e>(entry: &'e Entry<'_>, prop: Prop) -> (Own<'e>, bool) {
+    let (keys, initial): (&[&str], Own<'e>) = match prop {
+        Prop::Fill => (&["fill", "fillRef"], Own::Text("#000000")),
+        Prop::Stroke => (&["stroke", "strokeRef"], Own::Text("none")),
+        Prop::StrokeWidth => (&["strokeWidth"], Own::Num(1.0)),
+        Prop::FillOpacity => (&["fillOpacity"], Own::Num(1.0)),
+        Prop::StrokeOpacity => (&["strokeOpacity"], Own::Num(1.0)),
+        Prop::StrokeDashoffset => (&["strokeDashoffset"], Own::Num(0.0)),
+        _ => return (entry.own(prop), false),
+    };
+    let chain = || std::iter::once(entry.node).chain(entry.around.iter().rev().copied());
+    // A width, an opacity or an offset of a paint shows only where that paint is: its key, its
+    // reference's key, and what nothing sets (a black fill, no stroke).
+    let paint = match prop {
+        Prop::StrokeWidth | Prop::StrokeOpacity | Prop::StrokeDashoffset => Some(("stroke", "strokeRef", false)),
+        Prop::FillOpacity => Some(("fill", "fillRef", true)),
+        _ => None,
+    };
+    let painted = paint.is_none_or(|(key, reference, initial)| chain().find_map(|node| painting(node, key, reference)).unwrap_or(initial));
+    if !passes_on(entry.node, keys, paint.map(|(key, reference, _)| (key, reference)), painted) {
+        return (Own::Unknown, false);
+    }
+    for (k, node) in chain().enumerate() {
+        let inherited = k > 0;
+        match node.attrs.get(keys[0]) {
+            Some(AttrValue::Num(n)) if !prop.is_colour() => return (Own::Num(n.get()), inherited),
+            Some(AttrValue::Str(s)) if prop.is_colour() && (s.starts_with('#') || s == "none") => return (Own::Text(s), inherited),
+            Some(_) => return (Own::Unknown, inherited),
+            None if keys.iter().any(|key| node.attrs.contains_key(*key)) => return (Own::Unknown, inherited),
+            None => {}
+        }
+    }
+    (initial, true)
+}
+
+/// Whether what `node` paints with an inherited prop (set under one of `keys`) shows: a shape, a
+/// text or a use draws it (a line has no fill); a group only where something it draws takes it
+/// from the group (sets none of its own, nor does a group between them). With `paint` (the
+/// paint's key and its reference's key) only what is painted with it shows it; `painted`:
+/// whether `node` is.
+fn passes_on(node: &LookNode, keys: &[&str], paint: Option<(&str, &str)>, painted: bool) -> bool {
+    let draws = |tag: Tag| (tag.is_shape() && !(tag == Tag::Line && keys[0].starts_with("fill"))) || matches!(tag, Tag::Text | Tag::Use);
+    if node.tag != Tag::G {
+        return painted && draws(node.tag);
+    }
+    node.children.iter().filter(|child| !keys.iter().any(|key| child.attrs.contains_key(*key))).any(|child| {
+        let painted = paint.is_none_or(|(key, reference)| painting(child, key, reference).unwrap_or(painted));
+        match child.tag {
+            Tag::G => passes_on(child, keys, paint, painted),
+            tag => painted && draws(tag),
+        }
+    })
+}
+
+/// Whether `node` sets a paint (under `key`, or a reference under `reference`) that is drawn:
+/// anything but `none`. `None` where it sets none and inherits it.
+fn painting(node: &LookNode, key: &str, reference: &str) -> Option<bool> {
+    if node.attrs.contains_key(reference) {
+        return Some(true);
+    }
+    node.attrs.get(key).map(|paint| paint.str() != Some("none"))
 }
 
 /// The lint of the rest pose: parts that reach outside the viewBox, parts too small to see.
@@ -6736,6 +7071,24 @@ mod tests {
         has(&refused(None, figure(json!({ "roles": "head" }))), "roles is a string: an object of roles with the id of a part each, null to remove one");
     }
 
+    #[test]
+    fn pupils_think_only_with_a_gaze_above_0() {
+        let look = |design: Value| accepted(None, figure(design)).design.look.unwrap();
+        // Without a head, gaze 0 keeps the pupils still: no think, and a state that names it is warned.
+        assert_eq!(builtins(&look(json!({ "roles": { "pupils": "pupil" }, "gaze": 0 }))), [""; 0]);
+        assert_eq!(builtins(&look(json!({ "roles": { "pupils": "pupil" }, "gaze": 0.5 }))), ["think"]);
+        assert_eq!(builtins(&look(json!({ "roles": { "pupils": "pupil", "head": "head" }, "gaze": 0 }))), ["think", "talk", "listen", "nod", "shake"]);
+        let warned = |design: Value| accepted(None, figure(design)).warnings;
+        // It names the pupils: the advice is the head or a gaze, not the role it has.
+        let think = "think is built in and needs the head role, or the pupils role and a gaze above 0 (at states.working[0]): name head, or give a gaze above 0";
+        assert_eq!(warned(json!({ "roles": { "pupils": "pupil" }, "gaze": 0, "states": { "working": ["think"] } })), [think]);
+        assert_eq!(warned(json!({ "roles": { "pupils": "pupil" }, "gaze": 2, "states": { "working": ["think"] } })), [""; 0]);
+        // The gaze the look will store: one carried from the design before, and one this call clears.
+        let still = accepted(None, figure(json!({ "roles": { "pupils": "pupil" }, "gaze": 0 }))).design;
+        assert_eq!(accepted(Some(&still), json!({ "states": { "working": ["think"] } })).warnings, [think]);
+        assert_eq!(accepted(Some(&still), json!({ "gaze": null, "states": { "working": ["think"] } })).warnings, [""; 0]);
+    }
+
     // ------------------------------------------------------------ animations
 
     fn rotate(target: &str) -> Value {
@@ -7149,7 +7502,7 @@ mod tests {
         // A built-in that the roles do not allow is accepted, with a warning.
         let applied = accepted(None, base(json!({ "working": ["think", "wave"] })));
         assert_eq!(applied.warnings, [
-            "think is built in and needs the pupils or the head role (at states.working[0]): name the role, or it does nothing in this look",
+            "think is built in and needs the head role, or the pupils role and a gaze above 0 (at states.working[0]): name the role, or it does nothing in this look",
             "wave is built in and needs the armR or the armL role (at states.working[1]): name the role, or it does nothing in this look",
         ]);
     }
@@ -10241,11 +10594,12 @@ mod tests {
         // It moves like any part, and what it repeats may be a part as well.
         let moved = accepted(None, json!({
             "svg": svg("<g id='arm'><rect x='10' y='10' width='10' height='40'/></g><use id='twin' href='#arm' x='100'/>"),
-            "pivots": { "twin": [115, 10] }, "roles": { "armL": "arm", "armR": "twin" },
+            "pivots": { "twin": [115, 10], "arm": [15, 10] }, "roles": { "armL": "arm", "armR": "twin" },
             "animations": { "wave": { "duration": 1, "tracks": [{ "target": "twin", "prop": "rotate", "values": [0, -40, 0] }, { "target": "twin", "prop": "opacity", "values": [null, 0.5, null] }] } }
         }));
         assert_eq!(bbox(moved.design.look.as_ref().unwrap(), "twin"), [110.0, 10.0, 10.0, 40.0]);
-        assert_eq!(moved.warnings, [""; 0]);
+        // Both play a role, and a use repeats its part with all its motion: that is said.
+        assert_eq!(moved.warnings, ["twin is a use of arm, the armL part: it also moves whenever arm moves (at roles.armR): draw it as a part of its own, or let both be uses of a shape in defs"]);
         // width and height of a use size nothing here.
         assert_eq!(accepted(None, json!({ "svg": svg("<circle id='c' cx='50' cy='50' r='5'/><use href='#c' x='10' width='20' height='20'/>") })).warnings, ["width and height of a use are left out (2 times, first at line 1 column 66): a use draws what it repeats at its own size, scale it with transform"]);
         // A g in defs may hold a use, and is then not one to repeat.
@@ -10676,7 +11030,8 @@ mod tests {
             { "input": "lookY", "target": "pupil", "prop": "translateY", "values": [-3, 3], "ease": ["inOutBack"] }
         ]);
         let applied = accepted(None, with(drives.clone()));
-        assert_eq!(applied.warnings, [""; 0]);
+        // The opacity peaks before turn's rest: at rest the label is a little transparent.
+        assert_eq!(applied.warnings, ["turn gives label opacity 0.868 at rest, not the artwork's 1 (at drives[1]): an odd number of values with the rest in the middle, or place them with at"]);
         let look = applied.design.look.as_ref().unwrap();
         // Stored in its normal form: colours as hex, path data spaced, the optional keys only where given.
         let stored = serde_json::to_value(&look.drives).unwrap();
@@ -10873,7 +11228,7 @@ mod tests {
             "states": { "idle": ["bob", "blink"] },
             "drives": [
                 { "input": "lookX", "target": "eyes", "prop": "rotate", "values": [-8, 0, 8] },
-                { "input": "turn", "target": "tail", "prop": "opacity", "values": [1, 0.4, 1], "at": [0, 0.5, 1], "ease": [0.25, 0.1, 0.25, 1] }
+                { "input": "turn", "target": "tail", "prop": "opacity", "values": [0.4, 1, 0.4], "at": [0, 0.5, 1], "ease": [0.25, 0.1, 0.25, 1] }
             ]
         });
         let applied = accepted(None, call);

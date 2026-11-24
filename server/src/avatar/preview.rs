@@ -2,8 +2,9 @@
 //!
 //! A session cannot see the browser, so it is shown what it drew. [`sheet`] draws its look in one
 //! pose at the sizes Workbench shows it: 264 px on the light panel and on the dark panel side by
-//! side, and under each the figure at 56 px and its face at 40 px, both as they rest. [`strip`]
-//! draws 2 to 8 moments of one of the look's own animations in a row, 132 px each, on the light
+//! side, and under each the figure at 56 px in the same pose and its face at 40 px as it rests
+//! (a face is always drawn at rest). [`strip`]
+//! draws 2 to 8 moments of one of the look's animations in a row, 132 px each, on the light
 //! panel. Both answer one PNG; the caller describes the layout in words (nothing is written in the
 //! picture).
 //!
@@ -16,19 +17,27 @@
 //! given no resources directory and an image resolver that resolves nothing, so nothing is read
 //! but the text itself and the system's fonts, which are loaded once, and only for a look with text.
 //!
-//! A pose follows the browser engine (`lib/engine.ts`): one of the look's own animations as a state
-//! animation at a progress (relative props add, scales multiply, absolute props are set), then the
-//! drives, then the look's `mouth` entries and the gaze; `parents` carry a part along with another
-//! one as if it were nested in it. The built-in animations are the browser's alone: a pose names
-//! the look's own animations only, and is told so for another name.
+//! A pose follows the browser engine (`lib/engine.ts`): one animation as a state animation at a
+//! progress (relative props add, scales multiply, absolute props are set), then the drives, then
+//! the look's `mouth` entries and the gaze; `parents` carry a part along with another one as if it
+//! were nested in it. The animation is one of the look's own, or else Workbench's built-in motion
+//! of that name as the browser makes it from the look's roles (`builtin`, from [`Model::rig`]):
+//! the look's own animation of a built-in's name replaces it, as in the browser. Another name is
+//! answered with a sentence that lists both.
 //!
-//! Nothing here is called by the server itself: a picture is drawn in a process of its own
-//! (`draw`), which calls [`draw_sheet`] and [`draw_strip`] under a limit on its memory and its
-//! time. A sheet of the example looks takes a few tens of milliseconds. What a look costs beyond
-//! its size (layers, filters, dashes, strokes far beyond the picture) is estimated from the parsed
+//! Nothing here draws in the server itself: a picture is drawn in a process of its own (`draw`),
+//! which calls [`draw_sheet`] and [`draw_strip`] under a limit on its memory and its time. The
+//! server reads a look here only for what its roles give it ([`rig`]), and draws nothing for it.
+//! A sheet of the example looks takes a few tens of milliseconds. What a look costs beyond its
+//! size (layers, filters, dashes, strokes far beyond the picture) is estimated from the parsed
 //! tree before anything is drawn, and a look over the estimate is answered with a sentence that
-//! says what to change. The estimate is a first answer, not the bound: it mirrors another
-//! program's bookkeeping and has been wrong before. The bound is the process.
+//! says what to change. Every panel, whatever its size, may cost what the large view of a sheet
+//! may: a small panel of the same content costs fewer pixels, so it never refuses what the large
+//! view would draw; a moment of a strip is drawn where the same pose would be, and refused in its
+//! words. What a picture reports is the estimate of the figure in the full view at the
+//! large size, in that pose and at rest, whatever its panels show. The estimate is a first
+//! answer, not the bound: it mirrors another program's bookkeeping and has been wrong before.
+//! The bound is the process.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -37,11 +46,14 @@ use resvg::tiny_skia::{Color, Paint, Pixmap, PixmapPaint, Rect, Transform};
 use resvg::usvg;
 use serde_json::{Map, Value};
 
+use super::builtin;
+use super::look::{BUILTIN, RESERVED};
+
 // ---------------------------------------------------------------- sizes and colours
 
 /// The figure on each of the two big panels of a sheet.
 pub const SHEET_FIGURE_PX: u32 = 264;
-/// The figure as it rests, under each big panel.
+/// The figure at the size it has on the page, under each big panel.
 pub const SMALL_FIGURE_PX: u32 = 56;
 /// The face (the square the browser crops around the head), beside the small figure.
 pub const FACE_PX: u32 = 40;
@@ -83,13 +95,13 @@ pub const FILTER_WORK: f64 = 60.0;
 /// How many layers the size of a panel a look may ask for: every group that is filtered, masked,
 /// clipped or not opaque is one, a mask or a clip one more.
 pub const LAYER_WORK: f64 = 60.0;
-/// How far a stroked shape or a text may reach, in widths of the panel it is drawn into. The
-/// stroker works to a tolerance that shrinks with the scale: far beyond the picture, every curve
-/// is cut to its recursion limit, and one picture takes minutes.
+/// How far a stroked shape or a text may reach, in widths of the large panel. The stroker works
+/// to a tolerance that shrinks with the scale: far beyond the picture, every curve is cut to its
+/// recursion limit, and one picture takes minutes.
 const REACH_MOST: f64 = 400.0;
-/// The largest single layer, in panels. resvg keeps a layer within five panels each way, which
-/// a filter on a part that is squeezed one way and stretched the other gets around: such a look
-/// is not drawn.
+/// The largest single layer, in large panels. resvg keeps a layer within five panels each way,
+/// which a filter on a part that is squeezed one way and stretched the other gets around: such a
+/// look is not drawn.
 const LAYER_MOST: f64 = 30.0;
 
 // ---------------------------------------------------------------- limits
@@ -120,9 +132,6 @@ const VIEW_MAX: f64 = 4096.0;
 const GAZE_DEFAULT: f64 = 0.03;
 const GAZE_MOST: f64 = 0.05;
 
-/// Workbench's built-in animations (look.rs `BUILTIN`), which the browser generates from roles.
-const BUILTIN: [&str; 11] = ["breathe", "blink", "think", "talk", "listen", "alert", "doze", "wave", "cheer", "nod", "shake"];
-
 // ---------------------------------------------------------------- the pose
 
 /// Where a look's live inputs stand. `look_x`, `look_y` and `turn` run from -1 to 1, `pace` and
@@ -138,11 +147,12 @@ pub struct Inputs {
     pub held: f64,
 }
 
-/// What a picture shows: nothing moving (the default), or one of the look's own animations at a
-/// progress from 0 to 1, and the inputs.
+/// What a picture shows: nothing moving (the default), or one of the look's animations (its own,
+/// or Workbench's built-in one of that name) at a progress from 0 to 1 (`None`: where it has
+/// moved furthest from rest, `Model::furthest`), and the inputs.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pose {
-    pub animation: Option<(String, f64)>,
+    pub animation: Option<(String, Option<f64>)>,
     pub inputs: Inputs,
     /// The id of a part to look at closely: the large views show the square around it.
     pub zoom: Option<String>,
@@ -153,8 +163,9 @@ pub const POSE_KEYS: [&str; 9] = ["animation", "at", "lookX", "lookY", "mouth", 
 
 impl Pose {
     /// A pose as a call writes it: `{animation?, at?, lookX?, lookY?, mouth?, pace?, turn?, held?}`.
-    /// `at` is how far into `animation`, 0 to 1 (default 0.5). What is wrong is answered with a
-    /// sentence the session can act on.
+    /// `at` is how far into `animation`, 0 to 1; without it the picture shows where the animation
+    /// has moved furthest from rest. What is wrong is answered with a sentence the session can
+    /// act on.
     pub fn from_json(value: &Value) -> Result<Pose, String> {
         let Value::Object(map) = value else {
             return Err("a pose is an object with animation, at, lookX, lookY, mouth, pace, turn, held and zoom".into());
@@ -179,8 +190,8 @@ impl Pose {
                 }
                 None
             }
-            Some(Value::String(name)) => Some((name.clone(), at.unwrap_or(0.5))),
-            Some(_) => return Err("animation in a pose is the name of one of the look's own animations".into()),
+            Some(Value::String(name)) => Some((name.clone(), at)),
+            Some(_) => return Err("animation in a pose is the name of one of the look's own animations or of a built-in one".into()),
         };
         let inputs = Inputs {
             look_x: number("lookX", -1.0, 1.0)?.unwrap_or(0.0),
@@ -203,7 +214,9 @@ impl Pose {
         let mut map = self.inputs.to_json();
         if let Some((name, at)) = &self.animation {
             map.insert("animation".into(), Value::from(name.clone()));
-            map.insert("at".into(), Value::from(*at));
+            if let Some(at) = at {
+                map.insert("at".into(), Value::from(*at));
+            }
         }
         if let Some(id) = &self.zoom {
             map.insert("zoom".into(), Value::from(id.clone()));
@@ -243,46 +256,111 @@ impl Inputs {
 
 // ---------------------------------------------------------------- pictures
 
-/// A picture and what drawing it cost.
+/// A picture, what drawing it cost, and what it showed of an animation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Picture {
     pub png: Vec<u8>,
+    /// What drawing the look as it is shown costs: the figure in that pose (in a strip, at its
+    /// costliest moment) in the full view at the large size, whatever the panels show.
     pub spent: Spent,
+    /// The same estimate for the figure at rest.
+    pub rest: Spent,
+    /// What it showed of an animation, where it showed one.
+    pub played: Option<Played>,
+}
+
+/// What a picture showed of an animation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Played {
+    /// Workbench's built-in motion: the look has no animation of its own by that name.
+    pub builtin: bool,
+    /// It loops: a strip shows one round of it, evenly spaced.
+    pub looping: bool,
+    /// The moment a pose shows (none for a strip).
+    pub moment: Option<Moment>,
+}
+
+/// The moment of its animation a pose shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Moment {
+    /// How far into the animation, 0 to 1.
+    pub at: f64,
+    pub chosen: Chosen,
+    /// At this moment the animation changes nothing that is drawn: the figure is drawn exactly as
+    /// it is under the same inputs without it.
+    pub still: bool,
+}
+
+/// Where the moment of a pose came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chosen {
+    /// The pose gave it.
+    Given,
+    /// The pose gave none: where the animation has moved furthest from rest.
+    Furthest,
+    /// The pose gave none, and no track of the animation ever changes what it sets, so every
+    /// moment of it looks the same: its middle.
+    Unmoved,
 }
 
 /// The look in `pose` at 264 px on the light panel (left) and on the dark panel (right), and under
-/// each, on the same panel, the figure as it rests at 56 px and its face at 40 px. One PNG, 532 by
-/// 332 pixels. With `pose.zoom` the two large views show the square around that part instead of
-/// the whole figure.
+/// each, on the same panel, the whole figure in that pose at 56 px (how a side view or a gesture
+/// reads at the size it has on the page) and its face at 40 px as it rests (the page draws a face
+/// at rest) without what its square would only cut (`face_left_out`). One PNG, 532 by 332 pixels.
+/// With `pose.zoom` the two large views show the square around that part instead of the whole
+/// figure. A pose inside an animation that names no moment is drawn where the animation has moved
+/// furthest from rest.
 pub fn draw_sheet(look: &Value, pose: &Pose) -> Result<Picture, String> {
     let model = Model::read(look)?;
-    let posed = model.body(&model.pose(pose)?);
-    let rest = model.body(&model.pose(&Pose::default())?);
+    let (pose, mut played) = model.moment(pose)?;
+    let posed = model.body(&model.pose(&pose)?);
+    let resting = model.pose(&Pose::default())?;
+    let rest = model.body(&resting);
     let view = model.view;
     let face = model.face_view();
+    // The face as the page draws it: without what its square would only cut.
+    let face_rest = model.body_without(&resting, &model.face_left_out());
     let close = match &pose.zoom {
-        Some(id) => model.zoom_view(id)?,
-        None => view,
+        Some(id) => Some((id.as_str(), model.zoom_view(id)?)),
+        None => None,
     };
 
     let width = 2 * SHEET_FIGURE_PX + GAP_PX;
     let height = SHEET_FIGURE_PX + GAP_PX + SMALL_ROW_PX;
     let mut canvas = canvas(width, height)?;
+    // The light panel's whole figure, large where it is drawn and small, for what follows.
+    let mut light: Option<(Option<Pixmap>, Pixmap)> = None;
     for (column, theme) in [LIGHT, DARK].into_iter().enumerate() {
         let x = column as u32 * (SHEET_FIGURE_PX + GAP_PX);
-        let big = model.render(&posed, close, SHEET_FIGURE_PX, theme)?;
+        let big = match close {
+            Some((part, square)) => model.render_close(&posed, square, SHEET_FIGURE_PX, theme, part)?,
+            None => model.render(&posed, view, SHEET_FIGURE_PX, theme)?,
+        };
         place(&mut canvas, x, 0, &big);
         let row = SHEET_FIGURE_PX + GAP_PX;
         fill(&mut canvas, x, row, SHEET_FIGURE_PX, SMALL_ROW_PX, theme.panel);
         // The small figure and the face, side by side in the middle of the row.
         let left = x + (SHEET_FIGURE_PX - SMALL_FIGURE_PX - SMALL_GAP_PX - FACE_PX) / 2;
-        let small = model.render(&rest, view, SMALL_FIGURE_PX, theme)?;
+        let small = model.render(&posed, view, SMALL_FIGURE_PX, theme)?;
         place(&mut canvas, left, row + GAP_PX, &small);
-        let head = model.render(&rest, face, FACE_PX, theme)?;
+        let head = model.render(&face_rest, face, FACE_PX, theme)?;
         place(&mut canvas, left + SMALL_FIGURE_PX + SMALL_GAP_PX, row + GAP_PX + (SMALL_FIGURE_PX - FACE_PX) / 2, &head);
+        if column == 0 {
+            light = Some((close.is_none().then_some(big), small));
+        }
+    }
+    // Whether the moment shown changes nothing is said of what is drawn, not of what is written.
+    if let (Some(moment), Some((large, small))) = (played.as_mut().and_then(|played| played.moment.as_mut()), &light) {
+        if !moment.still {
+            moment.still = model.draws_as_without(&pose, &posed, small, large.as_ref());
+        }
     }
     let png = canvas.encode_png().map_err(|e| format!("the picture could not be encoded: {e}"))?;
-    Ok(Picture { png, spent: model.spent.get() })
+    // What it costs is said of the figure in this pose and at rest, in the full view at the large
+    // size: a number about the look, never about the zoom or a small panel.
+    let spent = model.estimate(&posed)?;
+    let at_rest = if posed == rest { spent } else { model.estimate(&rest)? };
+    Ok(Picture { png, spent, rest: at_rest, played })
 }
 
 /// [`draw_sheet`], the picture alone.
@@ -305,34 +383,74 @@ pub fn affordable(look: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// `frames` moments (2 to 8) of the look's own `animation`, left to right, 132 px each on the light
-/// panel, at even moments of its run: a loop at i/n of its duration (the frame after the last would
-/// be the first again), a one-shot or a recurring one at i/(n-1), so the last frame is its end.
+/// What a stored look's built-in motion is made from (`builtin`): its roles' parts, read as a
+/// picture reads the look. `None` for what cannot be read as a look. Nothing is drawn.
+pub(super) fn rig(look: &Value) -> Option<builtin::Rig> {
+    Model::read(look).ok().map(|model| model.rig())
+}
+
+/// `frames` moments (2 to 8) of the look's `animation` (its own, or the built-in one of that name),
+/// left to right, 132 px each on the light panel, at even moments of its run: a loop at i/n of its
+/// duration (the frame after the last would be the first again), a one-shot or a recurring one at
+/// i/(n-1), so the last frame is its end.
 /// `inputs` hold for every moment: a walk that shows only in a side view is drawn with the turn
-/// and the pace that show it.
-pub fn draw_strip(look: &Value, animation: &str, frames: usize, inputs: &Inputs) -> Result<Picture, String> {
+/// and the pace that show it. With `zoom` (a part's id) every moment shows the square around
+/// that part as it rests: a fixed frame, so the motion shows against it. A moment is drawn only
+/// where the same pose would be (its large view within what a picture may cost), and refused as
+/// that pose would be.
+pub fn draw_strip(look: &Value, animation: &str, frames: usize, inputs: &Inputs, zoom: Option<&str>) -> Result<Picture, String> {
     if !(STRIP_FRAMES_MIN..=STRIP_FRAMES_MAX).contains(&frames) {
         return Err(format!("a strip has {STRIP_FRAMES_MIN} to {STRIP_FRAMES_MAX} frames"));
     }
     let model = Model::read(look)?;
-    let looping = model.animation(animation)?.looping;
+    let (looping, builtin) = {
+        let anim = model.animation(animation)?;
+        (anim.looping, anim.builtin)
+    };
+    let close = match zoom {
+        Some(id) => Some((id, model.zoom_view(id)?)),
+        None => None,
+    };
     let width = frames as u32 * STRIP_FRAME_PX + (frames as u32 - 1) * GAP_PX;
     let mut canvas = canvas(width, STRIP_FRAME_PX)?;
+    let mut spent = Spent::default();
     for i in 0..frames {
         let at = if looping { i as f64 / frames as f64 } else { i as f64 / (frames - 1) as f64 };
-        let pose = Pose { animation: Some((animation.to_string(), at)), inputs: *inputs, zoom: None };
+        let pose = Pose { animation: Some((animation.to_string(), Some(at))), inputs: *inputs, zoom: None };
         let body = model.body(&model.pose(&pose)?);
-        let frame = model.render(&body, model.view, STRIP_FRAME_PX, LIGHT)?;
+        // A moment is drawn where a pose of it would be: its large view (the whole figure, or the
+        // close-up) within what a picture may cost, else it is refused in that pose's words and
+        // numbers. So a strip never draws a moment the pose refuses, and what it reports is in
+        // the units its refusal speaks in.
+        let (_, cost) = model.parsed(&body, model.view, SHEET_FIGURE_PX, LIGHT)?;
+        let frame = match close {
+            Some((part, square)) => {
+                if let Some(over) = model.parsed(&body, square, SHEET_FIGURE_PX, LIGHT)?.1.over() {
+                    return Err(over.close_up(part));
+                }
+                model.render_close(&body, square, STRIP_FRAME_PX, LIGHT, part)?
+            }
+            None => {
+                if let Some(over) = cost.over() {
+                    return Err(over.sentence());
+                }
+                model.render(&body, model.view, STRIP_FRAME_PX, LIGHT)?
+            }
+        };
         place(&mut canvas, i as u32 * (STRIP_FRAME_PX + GAP_PX), 0, &frame);
+        // What it costs is said of its costliest moment, in the full view at the large size.
+        let cost = cost.spent();
+        spent = Spent { filters: spent.filters.max(cost.filters), layers: spent.layers.max(cost.layers) };
     }
     let png = canvas.encode_png().map_err(|e| format!("the picture could not be encoded: {e}"))?;
-    Ok(Picture { png, spent: model.spent.get() })
+    let rest = model.estimate(&model.body(&model.pose(&Pose::default())?))?;
+    Ok(Picture { png, spent, rest, played: Some(Played { builtin, looping, moment: None }) })
 }
 
 /// [`draw_strip`] with every input at rest, the picture alone.
 #[cfg(test)]
 pub fn strip(look: &Value, animation: &str, frames: usize) -> Result<Vec<u8>, String> {
-    draw_strip(look, animation, frames, &Inputs::default()).map(|picture| picture.png)
+    draw_strip(look, animation, frames, &Inputs::default(), None).map(|picture| picture.png)
 }
 
 fn canvas(width: u32, height: u32) -> Result<Pixmap, String> {
@@ -435,17 +553,42 @@ impl Model<'_> {
     /// The body drawn into a square panel of `size` pixels, showing `view` of the artwork.
     fn render(&self, body: &str, view: [f64; 4], size: u32, theme: Theme) -> Result<Pixmap, String> {
         let tree = self.tree(body, view, size, theme)?;
+        self.paint(&tree, size, theme)
+    }
+
+    /// [`Model::render`] of a close-up on `part`: what costs too much there is said of the
+    /// close-up, which shows the part larger than the figure does.
+    fn render_close(&self, body: &str, view: [f64; 4], size: u32, theme: Theme, part: &str) -> Result<Pixmap, String> {
+        let (tree, cost) = self.parsed(body, view, size, theme)?;
+        if let Some(over) = cost.over() {
+            return Err(over.close_up(part));
+        }
+        self.paint(&tree, size, theme)
+    }
+
+    /// A parsed tree drawn into a square panel of `size` pixels.
+    fn paint(&self, tree: &usvg::Tree, size: u32, theme: Theme) -> Result<Pixmap, String> {
         let mut pixmap = Pixmap::new(size, size).ok_or("the picture could not be made")?;
         pixmap.fill(Color::from_rgba8(theme.panel[0], theme.panel[1], theme.panel[2], 255));
         // The renderer is not ours: a size or a position it cannot work with must not end more
         // than this one picture.
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut()))).map_err(|_| NOT_DRAWABLE.to_string())?;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resvg::render(tree, Transform::identity(), &mut pixmap.as_mut()))).map_err(|_| NOT_DRAWABLE.to_string())?;
         Ok(pixmap)
     }
 
     /// The body parsed for a panel of `size` pixels, when drawing it stays within what a picture
     /// may cost; else a sentence that says what to change. Nothing is drawn here.
     fn tree(&self, body: &str, view: [f64; 4], size: u32, theme: Theme) -> Result<usvg::Tree, String> {
+        let (tree, cost) = self.parsed(body, view, size, theme)?;
+        match cost.over() {
+            Some(over) => Err(over.sentence()),
+            None => Ok(tree),
+        }
+    }
+
+    /// The body parsed for a panel of `size` pixels, and what drawing it would cost. Nothing is
+    /// drawn here, and nothing is refused for its cost.
+    fn parsed(&self, body: &str, view: [f64; 4], size: u32, theme: Theme) -> Result<(usvg::Tree, Cost), String> {
         if self.unwritable.get() {
             return Err("a part is scaled beyond what can be drawn (its scales and those of what holds it multiply past a thousand million): scale it less".to_string());
         }
@@ -453,37 +596,63 @@ impl Model<'_> {
         let options = options(self.has_text);
         let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| usvg::Tree::from_str(&svg, &options))).map_err(|_| NOT_DRAWABLE.to_string())?.map_err(|e| format!("the look could not be drawn: {e}"))?;
         let cost = Cost::of(&tree, size);
-        let panel = f64::from(size) * f64::from(size);
-        if cost.largest > LAYER_MOST * panel {
-            return Err("a filter sits on a part that is stretched or skewed too far to draw: take the scale or skew off that part and off what holds it, or put the filter on a part that is not stretched".to_string());
-        }
-        if cost.reach > REACH_MOST * f64::from(size) {
-            return Err(format!(
-                "a stroked shape or a text reaches about {:.0} times the picture's width: it is drawn far too large (a tiny viewBox region, a head that is a dot, or scales that multiply): draw it at the size of the figure",
-                cost.reach / f64::from(size)
-            ));
-        }
-        if cost.filters > FILTER_WORK * panel {
-            return Err(format!(
+        Ok((tree, cost))
+    }
+
+    /// What drawing `body` costs in the full view at the large size, as parts of what a picture
+    /// may cost: what a session is told, whatever the panels of its picture show.
+    fn estimate(&self, body: &str) -> Result<Spent, String> {
+        self.parsed(body, self.view, SHEET_FIGURE_PX, LIGHT).map(|(_, cost)| cost.spent())
+    }
+}
+
+/// What makes a panel cost more than a picture may, and how much.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Over {
+    /// A filtered layer larger than [`LAYER_MOST`] large panels.
+    Stretched,
+    /// How far a stroke or a text reaches, in widths of the large panel.
+    Reach(f64),
+    /// Passes of a cheap filter primitive over the large panel.
+    Filters(f64),
+    /// Layers the size of the large panel.
+    Layers(f64),
+    /// Dashes cut from the strokes.
+    Dashes(f64),
+}
+
+impl Over {
+    /// What to change in the look, for the session. Filters and layers are rounded up, as a cost
+    /// line beside a picture rounds them: a picture refused says more than any that is drawn.
+    fn sentence(self) -> String {
+        match self {
+            Over::Stretched => "a filter sits on a part that is stretched or skewed too far to draw: take the scale or skew off that part and off what holds it, or put the filter on a part that is not stretched".to_string(),
+            Over::Reach(times) => format!(
+                "a stroked shape or a text reaches about {times:.0} times the picture's width: it is drawn far too large (a tiny viewBox region, a head that is a dot, or scales that multiply): draw it at the size of the figure"
+            ),
+            Over::Filters(passes) => format!(
                 "this look's filters cost too much to draw (about {:.0} passes over the whole figure, at most {FILTER_WORK:.0}): give fewer parts a filter, keep filter regions close to their part, or use fewer and smaller primitives",
-                cost.filters / panel
-            ));
-        }
-        if cost.layers > LAYER_WORK * panel {
-            return Err(format!(
+                passes.ceil()
+            ),
+            Over::Layers(layers) => format!(
                 "this look has too many masked, clipped, filtered or half-transparent groups to draw (about {:.0} layers the size of the figure, at most {LAYER_WORK:.0}): mask or clip one group that holds the parts instead of every part",
-                cost.layers / panel
-            ));
+                layers.ceil()
+            ),
+            Over::Dashes(dashes) => format!("this look's dashes are too fine to draw (about {dashes:.0} dashes, at most {MAX_DASHES_DRAWN:.0}): make the dashes longer or dash fewer strokes"),
         }
-        if cost.dashes > MAX_DASHES_DRAWN {
-            return Err(format!(
-                "this look's dashes are too fine to draw (about {:.0} dashes, at most {MAX_DASHES_DRAWN:.0}): make the dashes longer or dash fewer strokes",
-                cost.dashes
-            ));
-        }
-        let spent = self.spent.get();
-        self.spent.set(Spent { filters: spent.filters.max(cost.filters / panel), layers: spent.layers.max(cost.layers / panel) });
-        Ok(tree)
+    }
+
+    /// The same said of a close-up on `part`: it shows the part larger than the figure does, so
+    /// it may cost more than the whole figure. Dashes cost the same in every view.
+    fn close_up(self, part: &str) -> String {
+        let what = match self {
+            Over::Stretched => "a filter on a part that is stretched or skewed too far".to_string(),
+            Over::Reach(times) => format!("a stroke or a text that reaches about {times:.0} times its width"),
+            Over::Filters(passes) => format!("about {:.0} filter passes over the whole close-up, at most {FILTER_WORK:.0}", passes.ceil()),
+            Over::Layers(layers) => format!("about {:.0} layers the size of the close-up, at most {LAYER_WORK:.0}", layers.ceil()),
+            Over::Dashes(_) => return self.sentence(),
+        };
+        format!("the close-up of {part} costs too much to draw ({what}): look at a larger part, or at the whole figure without zoom")
     }
 }
 
@@ -538,6 +707,38 @@ impl Cost {
             cost.add(tree.root(), Transform::identity(), room);
         }
         cost
+    }
+
+    /// What this costs beyond what a picture may, if anything. Every panel, whatever its size,
+    /// may cost what the large view of a sheet may, in pixels: a smaller panel of the same content
+    /// costs fewer, so the small figure, the face and the moments of a strip never refuse what
+    /// the large view would draw.
+    fn over(&self) -> Option<Over> {
+        let side = f64::from(SHEET_FIGURE_PX);
+        let panel = side * side;
+        if self.largest > LAYER_MOST * panel {
+            return Some(Over::Stretched);
+        }
+        if self.reach > REACH_MOST * side {
+            return Some(Over::Reach(self.reach / side));
+        }
+        if self.filters > FILTER_WORK * panel {
+            return Some(Over::Filters(self.filters / panel));
+        }
+        if self.layers > LAYER_WORK * panel {
+            return Some(Over::Layers(self.layers / panel));
+        }
+        if self.dashes > MAX_DASHES_DRAWN {
+            return Some(Over::Dashes(self.dashes));
+        }
+        None
+    }
+
+    /// What this costs as parts of what a picture may cost: filter passes and layers, both areas
+    /// measured in large panels (the whole viewBox at the large size).
+    fn spent(&self) -> Spent {
+        let panel = f64::from(SHEET_FIGURE_PX) * f64::from(SHEET_FIGURE_PX);
+        Spent { filters: self.filters / panel, layers: self.layers / panel }
     }
 
     /// Walks the tree as resvg's renderer does (`render_group`, `render_layer`) and adds up what
@@ -863,11 +1064,14 @@ struct Model<'a> {
     /// A pose held a transform beyond what can be written (scales that multiply past a thousand
     /// million): set while a body is written.
     unwritable: std::cell::Cell<bool>,
-    /// The most a panel of this picture cost, in panels: what a session is told beside it.
-    spent: std::cell::Cell<Spent>,
+    /// Workbench's built-in motion for the look's roles (`builtin`), made when a pose first asks.
+    builtins: std::cell::OnceCell<Vec<(&'static str, Value)>>,
 }
 
-/// What drawing cost, as parts of what a picture may cost.
+/// What drawing cost, as parts of what a picture may cost. Both are areas measured in large
+/// panels (the whole viewBox at [`SHEET_FIGURE_PX`]), not counts: every filtered, masked,
+/// clipped or half-transparent group adds the area of its layer, a mask or a clip once more, and
+/// a filter that area once per pass of each primitive.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Spent {
     /// Passes of a cheap filter primitive over the whole figure, of [`FILTER_WORK`].
@@ -883,7 +1087,17 @@ impl<'a> Model<'a> {
         };
         let view = map.get("viewBox").and_then(numbers4).filter(|v| (VIEW_MIN..=VIEW_MAX).contains(&v[2]) && (VIEW_MIN..=VIEW_MAX).contains(&v[3]));
         let view = view.ok_or("the stored look has no sound viewBox and cannot be drawn")?;
-        let mut model = Model { look: map, view, els: vec![], roots: vec![], ids: HashMap::new(), rest_world: vec![], has_text: false, unwritable: std::cell::Cell::new(false), spent: std::cell::Cell::new(Spent::default()) };
+        let mut model = Model {
+            look: map,
+            view,
+            els: vec![],
+            roots: vec![],
+            ids: HashMap::new(),
+            rest_world: vec![],
+            has_text: false,
+            unwritable: std::cell::Cell::new(false),
+            builtins: std::cell::OnceCell::new(),
+        };
         let mut budget = MAX_ELEMENTS;
         if let Some(nodes) = map.get("nodes").and_then(Value::as_array) {
             for node in nodes {
@@ -960,6 +1174,33 @@ impl<'a> Model<'a> {
         self.look.get("roles")?.get(role)?.as_str().and_then(|id| self.part(id))
     }
 
+    /// What Workbench's built-in motion is made from (`builtin`): the viewBox, the gaze, and for
+    /// each role the part that plays it, where it rests, its own box and the pivot the look gives
+    /// it, as `rolePart`, `rootBox` and `raiseTurn` of the browser read them.
+    fn rig(&self) -> builtin::Rig {
+        let part = |role: &str| -> Option<builtin::Part> {
+            let id = self.look.get("roles")?.get(role)?.as_str().filter(|id| !RESERVED.contains(id))?;
+            let i = self.part(id)?;
+            let pivot = self.look.get("pivots").and_then(|p| p.get(id)).and_then(Value::as_array).and_then(|p| Some([p.first()?.as_f64()?, p.get(1)?.as_f64()?]));
+            Some(builtin::Part { id: id.to_string(), root_box: self.root_box(i), own_box: self.els[i].bbox, pivot, matrix: self.rest_world[i] })
+        };
+        builtin::Rig {
+            view: self.view,
+            gaze: self.look.get("gaze").and_then(Value::as_f64),
+            body: part("body"),
+            head: part("head"),
+            eyes: part("eyes"),
+            pupils: part("pupils"),
+            arm_l: part("armL"),
+            arm_r: part("armR"),
+        }
+    }
+
+    /// Workbench's built-in motion for this look's roles, by name.
+    fn builtins(&self) -> &[(&'static str, Value)] {
+        self.builtins.get_or_init(|| builtin::build(&self.rig()))
+    }
+
     fn is_ancestor(&self, ancestor: usize, of: usize) -> bool {
         let mut at = self.els[of].parent;
         while let Some(p) = at {
@@ -991,6 +1232,52 @@ impl<'a> Model<'a> {
         let clamp = |centre: f64, from: f64, length: f64| (centre - side / 2.0).max(from).min(from + length - side);
         let round = |n: f64| (n * 1000.0).round() / 1000.0;
         [round(clamp(head[0] + head[2] / 2.0, view[0], view[2])), round(clamp(head[1] + head[3] / 2.0, view[1], view[3])), round(side), round(side)]
+    }
+
+    /// What the small face leaves out, as indices in document order: the parts its square would
+    /// only cut, such as the tip of a tail beside the head (`faceParts` of look.ts leaves out the
+    /// same). A part is left out when its rest box neither meets the head's rest box (boxes that
+    /// touch meet) nor lies wholly inside `face_view`. The head, what it is drawn inside and what
+    /// it holds are never left out. Whole subtrees are judged: from the roots, an element that
+    /// holds the head is entered and its children are judged one by one; any other is kept or left
+    /// out as a whole by its own box (a group's spans all it holds). What has no box stays: `defs`,
+    /// gradients, clips, masks, filters and an element without an id. Nothing is left out of a
+    /// look without a head.
+    fn face_left_out(&self) -> Vec<usize> {
+        /// A box's edges, left, top, right and bottom, at three decimals as `Math.round` rounds
+        /// (`edges` of look.ts; a half goes towards +∞): what the face compares.
+        fn face_edges(b: [f64; 4]) -> [f64; 4] {
+            let round = |n: f64| {
+                let k = n * 1000.0;
+                let floor = k.floor();
+                (if k - floor >= 0.5 { floor + 1.0 } else { floor }) / 1000.0
+            };
+            [round(b[0]), round(b[1]), round(b[0] + b[2]), round(b[1] + b[3])]
+        }
+        let Some(h) = self.role("head") else { return vec![] };
+        let Some(head) = self.root_box(h).filter(|b| b[2] > 0.0 && b[3] > 0.0) else { return vec![] };
+        let [x, y, side, _] = self.face_view();
+        let (square, near) = (face_edges([x, y, side, side]), face_edges(head));
+        let mut out = vec![];
+        let mut stack: Vec<usize> = self.roots.iter().rev().copied().collect();
+        while let Some(i) = stack.pop() {
+            if i == h {
+                continue;
+            }
+            if self.is_ancestor(i, h) {
+                stack.extend(self.els[i].children.iter().rev());
+                continue;
+            }
+            let el = &self.els[i];
+            let Some(b) = self.root_box(i).filter(|_| el.tag.is_drawn() && el.id.is_some()).map(face_edges) else { continue };
+            let meets = b[0] <= near[2] && near[0] <= b[2] && b[1] <= near[3] && near[1] <= b[3];
+            let inside = b[0] >= square[0] && b[1] >= square[1] && b[2] <= square[2] && b[3] <= square[3];
+            if !meets && !inside {
+                out.push(i);
+            }
+        }
+        out.sort_unstable();
+        out
     }
 
     /// The square around a part, for a closer look: its rest box with a quarter added on each
@@ -1257,17 +1544,30 @@ fn specs(tag: Tag) -> (&'static [Spec], &'static [Spec]) {
 impl<'a> Model<'a> {
     /// The artwork in a pose, as the inside of an `<svg>` element.
     fn body(&self, posed: &Posed) -> String {
+        self.body_without(posed, &[])
+    }
+
+    /// The artwork in a pose with the elements `leave` (indices, sorted) out of sight, each inside
+    /// a `defs` of its own: there it draws nothing, and its ids stay, so a `use` still shows it and
+    /// a gradient, clip or mask in it still paints what refers to it (`lookElements` of look.ts).
+    fn body_without(&self, posed: &Posed, leave: &[usize]) -> String {
         let mut out = String::with_capacity(16 * 1024);
         // Elements written, each `use` counting with what it repeats, as the validator counts.
         let mut budget = MAX_ELEMENTS;
         let mut names = 0;
         for &root in &self.roots {
-            self.write(root, posed, &mut out, &mut budget, &mut names);
+            self.write(root, posed, &mut out, &mut budget, &mut names, leave);
         }
         out
     }
 
-    fn write(&self, i: usize, posed: &Posed, out: &mut String, budget: &mut usize, names: &mut usize) {
+    fn write(&self, i: usize, posed: &Posed, out: &mut String, budget: &mut usize, names: &mut usize, leave: &[usize]) {
+        if leave.binary_search(&i).is_ok() {
+            out.push_str("<defs>");
+            self.write(i, posed, out, budget, names, &[]);
+            out.push_str("</defs>");
+            return;
+        }
         let el = &self.els[i];
         let cost = if el.tag == Tag::Use { 1 + self.use_target(i).map_or(0, |t| self.els[t].size) } else { 1 };
         if *budget < cost {
@@ -1334,7 +1634,7 @@ impl<'a> Model<'a> {
         }
         out.push('>');
         for &child in &el.children {
-            self.write(child, posed, out, budget, names);
+            self.write(child, posed, out, budget, names, leave);
         }
         out.push_str("</");
         out.push_str(el.tag.name());
@@ -2199,6 +2499,13 @@ fn eases(candidates: &[Option<&Value>], segments: usize) -> Vec<Ease> {
     vec![Ease::Linear; segments]
 }
 
+/// How far segment `i` of `segments` has come at `u` (0 to 1 into it), under `ease` as a track or
+/// a drive writes it, as lib/engine.ts eases it: for the validator, which warns of a drive that
+/// changes the figure at rest.
+pub(super) fn eased(ease: Option<&Value>, segments: usize, i: usize, u: f64) -> f64 {
+    eases(&[ease], segments).get(i).copied().unwrap_or(Ease::Linear).at(u)
+}
+
 /// The times of `n` keyframes: the first of `candidates` that has `n` rising numbers from 0 to 1,
 /// else even.
 fn times(candidates: &[Option<&Value>], n: usize) -> Vec<f64> {
@@ -2286,32 +2593,84 @@ struct Posed {
     set: HashMap<usize, Vec<(&'static str, String)>>,
 }
 
-/// One of the look's own animations, as a pose plays it.
+/// One of the look's animations, as a pose plays it.
 struct Anim<'a> {
     duration: f64,
     looping: bool,
     map: &'a Map<String, Value>,
+    /// Workbench's built-in motion: the look has none of its own by that name.
+    builtin: bool,
 }
+
+impl<'a> Anim<'a> {
+    /// Its tracks, and how long one run of it lasts: its duration and its longest `delay`.
+    fn tracks(&self) -> (Vec<&'a Map<String, Value>>, f64) {
+        let tracks: Vec<&Map<String, Value>> = self.map.get("tracks").and_then(Value::as_array).into_iter().flatten().take(MAX_TRACKS).filter_map(Value::as_object).collect();
+        let run = self.duration + tracks.iter().map(|t| delay(t)).fold(0.0, f64::max);
+        (tracks, run)
+    }
+
+    /// How far into its keyframes a track is at `at` of the run (0 to 1): a loop's over its
+    /// duration, shifted by its `phase`; a one-shot's over its duration after its `delay`, holding
+    /// its last keyframe once it has played. `None` before its delay: it changes nothing yet.
+    fn progress(&self, track: &Map<String, Value>, run: f64, at: f64) -> Option<f64> {
+        if self.looping {
+            let phase = track.get("phase").and_then(finite).unwrap_or(0.0).clamp(0.0, 1.0);
+            let p = at + phase;
+            return Some(p - p.floor());
+        }
+        let local = at * run - delay(track);
+        (local >= 0.0).then(|| (local / self.duration).min(1.0))
+    }
+
+    /// The moment of the run (0 to 1) at which a track is `p` into its keyframes, as
+    /// [`Anim::progress`] counts it: in a loop the first such moment of the round.
+    fn moment_of(&self, track: &Map<String, Value>, run: f64, p: f64) -> f64 {
+        if self.looping {
+            let phase = track.get("phase").and_then(finite).unwrap_or(0.0).clamp(0.0, 1.0);
+            return (p - phase).rem_euclid(1.0).clamp(0.0, 1.0);
+        }
+        ((delay(track) + p * self.duration) / run).clamp(0.0, 1.0)
+    }
+}
+
+/// A track's `delay`, in seconds; none is 0.
+fn delay(track: &Map<String, Value>) -> f64 {
+    track.get("delay").and_then(finite).filter(|d| *d > 0.0).unwrap_or(0.0)
+}
+
+/// Moments of an animation a pose without one looks at for the one where it has moved furthest:
+/// 0, 1/16, 2/16 … 1 of its run, and every moment one of its tracks reaches a keyframe.
+const MOMENTS: usize = 16;
 
 const INPUTS: [&str; 6] = ["lookX", "lookY", "mouth", "pace", "turn", "held"];
 
 impl<'a> Model<'a> {
-    /// One of the look's own animations by name, or the sentence that says why there is none.
-    fn animation(&self, name: &str) -> Result<Anim<'a>, String> {
+    /// One of the look's animations by name, or the sentence that says why there is none: its own
+    /// first, then Workbench's built-in motion its roles give it (which its own of that name
+    /// replaces, as in the browser).
+    fn animation(&self, name: &str) -> Result<Anim<'_>, String> {
         let own = self.look.get("animations").and_then(Value::as_object);
-        if let Some(map) = own.filter(|_| is_id(name)).and_then(|a| a.get(name)).and_then(Value::as_object) {
+        let given = own.filter(|_| is_id(name)).and_then(|a| a.get(name)).and_then(Value::as_object);
+        let built = || self.builtins().iter().find(|(n, _)| *n == name).and_then(|(_, a)| a.as_object());
+        let builtin = given.is_none();
+        if let Some(map) = given.or_else(built) {
             let duration = map.get("duration").and_then(finite).filter(|d| (0.05..=60.0).contains(d));
             let duration = duration.ok_or_else(|| format!("the animation {name} has no sound duration and cannot be drawn"))?;
-            return Ok(Anim { duration, looping: map.get("loop") == Some(&Value::Bool(true)) && map.get("every").is_none_or(Value::is_null), map });
+            return Ok(Anim { duration, looping: map.get("loop") == Some(&Value::Bool(true)) && map.get("every").is_none_or(Value::is_null), map, builtin });
         }
-        if BUILTIN.contains(&name) {
-            return Err(format!("{name} is one of Workbench's built-in animations, which are not drawn here: define your own to see it"));
+        let gaze = self.look.get("gaze").and_then(Value::as_f64);
+        if let Some(needs) = BUILTIN.contains(&name).then(|| builtin::needs(name, |role| self.role(role).is_some(), gaze)).flatten() {
+            return Err(format!("{name} is Workbench's built-in motion and needs {needs}, {}", builtin::unmet(name, |role| self.role(role).is_some(), gaze)));
         }
         let names: Vec<&str> = own.map(|a| a.keys().map(String::as_str).filter(|n| is_id(n)).take(MAX_ANIMATIONS).collect()).unwrap_or_default();
-        if names.is_empty() {
-            Err(format!("no animation {} in this look: it has no animations of its own", quote(name)))
+        let theirs = if names.is_empty() { "it has no animations of its own".to_string() } else { format!("its own animations are {}", names.join(", ")) };
+        // The built-in ones it may name: those its roles give it and its own do not replace.
+        let workbench: Vec<&str> = self.builtins().iter().map(|(n, _)| *n).filter(|n| !own.is_some_and(|a| a.contains_key(*n))).collect();
+        if workbench.is_empty() {
+            Err(format!("no animation {} in this look: {theirs}, and its roles give it none of Workbench's built-in ones", quote(name)))
         } else {
-            Err(format!("no animation {} in this look: its own animations are {}", quote(name), names.join(", ")))
+            Err(format!("no animation {} in this look: {theirs}; Workbench's built-in ones for its roles are {}", quote(name), workbench.join(", ")))
         }
     }
 
@@ -2323,6 +2682,8 @@ impl<'a> Model<'a> {
 
         if let Some((name, at)) = &pose.animation {
             let anim = self.animation(name)?;
+            // Without a moment, the one where it has moved furthest from rest.
+            let at = at.unwrap_or_else(|| self.furthest(&anim).unwrap_or(0.5));
             self.play(&anim, at.clamp(0.0, 1.0), &mut accs);
         }
 
@@ -2368,6 +2729,9 @@ impl<'a> Model<'a> {
             let (x, y) = (inputs.look_x, inputs.look_y);
             if travel > 0.0 && x.is_finite() && y.is_finite() && (x != 0.0 || y != 0.0) {
                 let k = travel / x.hypot(y).max(1.0);
+                // Where it looks is on screen; the pupils' translation is written inside their own
+                // transform (`gazeUndo` of the engine).
+                let (x, y) = builtin::undone(builtin::undo_linear(self.rest_world[pupils]), x, y);
                 let acc = accs.entry(pupils).or_insert_with(Acc::new);
                 acc.ch[TX] += x * k;
                 acc.ch[TY] += y * k;
@@ -2382,24 +2746,12 @@ impl<'a> Model<'a> {
     /// `delay`, a track holding its last keyframe once it has played, as in a gesture. (In a
     /// state's list the browser lets each track go back to rest when it ends.)
     fn play(&self, anim: &Anim<'_>, at: f64, accs: &mut HashMap<usize, Acc>) {
-        let tracks: Vec<&Map<String, Value>> = anim.map.get("tracks").and_then(Value::as_array).into_iter().flatten().take(MAX_TRACKS).filter_map(Value::as_object).collect();
-        let delay = |t: &Map<String, Value>| t.get("delay").and_then(finite).filter(|d| *d > 0.0).unwrap_or(0.0);
-        let run = anim.duration + tracks.iter().map(|t| delay(t)).fold(0.0, f64::max);
+        let (tracks, run) = anim.tracks();
         for track in tracks {
-            let p = if anim.looping {
-                let phase = track.get("phase").and_then(finite).unwrap_or(0.0).clamp(0.0, 1.0);
-                let p = at + phase;
-                p - p.floor()
-            } else {
-                let local = at * run - delay(track);
-                // Before its delay a track changes nothing; once it has played it holds its last
-                // keyframe until the whole run is over, as a gesture does (avatar_act, a line's
-                // gesture, a greeting: how a session's own one-shots are mostly played).
-                if local < 0.0 {
-                    continue;
-                }
-                (local / anim.duration).min(1.0)
-            };
+            // Before its delay a track changes nothing; once it has played it holds its last
+            // keyframe until the whole run is over, as a gesture does (avatar_act, a line's
+            // gesture, a greeting: how a session's own one-shots are mostly played).
+            let Some(p) = anim.progress(track, run, at) else { continue };
             let Some(keys) = keys(track, &[track.get("times"), anim.map.get("times")], &[track.get("ease"), anim.map.get("ease")]) else { continue };
             for target in self.targets(track.get("target"), keys.prop) {
                 match self.sample(&keys, target, p) {
@@ -2409,6 +2761,144 @@ impl<'a> Model<'a> {
                 }
             }
         }
+    }
+
+    /// The pose with the moment of its animation it is drawn at (the one it gives, else where the
+    /// animation has moved furthest from rest), and what the picture shows of the animation:
+    /// whether it is Workbench's, whether it loops, and whether at that moment it changes
+    /// nothing (the figure is written as the one under the same inputs without it; a sheet also
+    /// compares what is drawn, [`Model::draws_as_without`]).
+    fn moment(&self, pose: &Pose) -> Result<(Pose, Option<Played>), String> {
+        let Some((name, given)) = &pose.animation else { return Ok((pose.clone(), None)) };
+        let anim = self.animation(name)?;
+        let (at, chosen) = match given {
+            Some(at) => (at.clamp(0.0, 1.0), Chosen::Given),
+            None => match self.furthest(&anim) {
+                Some(at) => (at, Chosen::Furthest),
+                None => (0.5, Chosen::Unmoved),
+            },
+        };
+        let (builtin, looping) = (anim.builtin, anim.looping);
+        let posed = Pose { animation: Some((name.clone(), Some(at))), ..pose.clone() };
+        let without = Pose { animation: None, ..pose.clone() };
+        // Writing a body may find a transform that cannot be written: that is said of the
+        // picture's own bodies, not of this comparison.
+        let unwritable = self.unwritable.get();
+        let still = self.body(&self.pose(&posed)?) == self.body(&self.pose(&without)?);
+        self.unwritable.set(unwritable);
+        Ok((posed, Some(Played { builtin, looping, moment: Some(Moment { at, chosen, still }) })))
+    }
+
+    /// Where the animation has moved furthest from rest, as a pose plays it: of [`MOMENTS`] + 1
+    /// even moments of its run and every moment one of its tracks reaches a keyframe (where a
+    /// motion that does not overshoot turns back), the earliest with the largest sum over its
+    /// tracks of how far each is from what its part shows without the animation
+    /// ([`Model::unanimated`]), as a part of the furthest that track goes. A number counts by its
+    /// difference, a colour by its channels, path data by the sum over its numbers, so a blend
+    /// counts in proportion to how far it has gone. Every part a track of an absolute number or a
+    /// colour names counts, each from its own value; a relative prop moves its parts alike, and
+    /// path data is measured on its first part. `None` when no track ever changes what it sets:
+    /// every moment of the animation looks the same.
+    fn furthest(&self, anim: &Anim<'_>) -> Option<f64> {
+        let (tracks, run) = anim.tracks();
+        let keyed: Vec<(&Map<String, Value>, Keys, Vec<usize>)> = tracks
+            .into_iter()
+            .filter_map(|track| {
+                let keys = keys(track, &[track.get("times"), anim.map.get("times")], &[track.get("ease"), anim.map.get("ease")])?;
+                let mut targets = self.targets(track.get("target"), keys.prop);
+                if !keys.prop.channels().is_empty() || keys.prop == Prop::D {
+                    targets.truncate(1);
+                }
+                (!targets.is_empty()).then_some((track, keys, targets))
+            })
+            .collect();
+        let mut moments: Vec<f64> = (0..=MOMENTS).map(|k| k as f64 / MOMENTS as f64).collect();
+        for (track, keys, _) in &keyed {
+            moments.extend(keys.times.iter().map(|t| anim.moment_of(track, run, *t)));
+        }
+        moments.sort_by(f64::total_cmp);
+        moments.dedup_by(|later, earlier| *later - *earlier < 1e-9);
+        let mut score = vec![0.0f64; moments.len()];
+        let mut moves = false;
+        for (track, keys, targets) in &keyed {
+            let mut away = vec![0.0f64; moments.len()];
+            for &target in targets {
+                let rest = self.unanimated(keys, target);
+                // Before its delay a track sets nothing: the part shows what it has without it.
+                let shown: Vec<Option<Got>> = moments.iter().map(|at| anim.progress(track, run, *at).and_then(|p| self.sample(keys, target, p))).collect();
+                let at = |k: usize| shown[k].as_ref().or(rest.as_ref());
+                for (k, a) in away.iter_mut().enumerate() {
+                    *a += apart(rest.as_ref(), at(k));
+                    moves |= apart(at(0), at(k)) > 0.0;
+                }
+            }
+            let most = away.iter().copied().fold(0.0, f64::max);
+            if most > 0.0 && most.is_finite() {
+                for (s, a) in score.iter_mut().zip(&away) {
+                    *s += a / most;
+                }
+            }
+        }
+        if !moves {
+            return None;
+        }
+        let best = score.iter().copied().fold(0.0, f64::max);
+        Some(score.iter().position(|s| *s >= best - 1e-9).map_or(0.5, |k| moments[k]))
+    }
+
+    /// What the part a track sets shows without the animation, as [`Model::furthest`] measures
+    /// from it: 0 for a translation, rotation or skew, 1 for a scale, the artwork's own number,
+    /// colour (`none`: transparent) or path data, which is what a null keyframe stands for. Where
+    /// its own is not plain (a gradient, `currentColor`, path data of another structure), the
+    /// track's first keyframe.
+    fn unanimated(&self, keys: &Keys, target: usize) -> Option<Got> {
+        let prop = keys.prop;
+        if !prop.channels().is_empty() {
+            return Some(Got::Rel(if prop.is_scale() { 1.0 } else { 0.0 }));
+        }
+        let own = if prop.is_colour() {
+            match self.rest_colour(target, prop) {
+                RestColour::Rgba(c) => Some(Abs::Colour(c)),
+                RestColour::Nothing => Some(Abs::Colour([0.0; 4])),
+                RestColour::Unknown => None,
+            }
+        } else if prop == Prop::D {
+            let shape = keys.keys.iter().find_map(|k| if let Key::Path(s) = k { Some(s) } else { None });
+            shape.and_then(|shape| self.rest_path(target).filter(|r| r.same(shape)).map(|r| Abs::D(shape.clone(), r.nums)))
+        } else {
+            Some(Abs::Num(self.rest_num(target, prop)))
+        };
+        own.map(Got::Abs).or_else(|| self.sample(keys, target, 0.0))
+    }
+
+    /// Whether the figure in `pose` (written as `posed`) is drawn exactly as the figure under the
+    /// same inputs without its animation, on the light panel: the same written figure, or the
+    /// same pixels, of the small figure (`small`, the posed one already drawn) and then of the
+    /// whole figure in the large view (`large`, where it was drawn). What an animation sets may
+    /// not show: the artwork's own value written again, a part out of sight at rest. A figure
+    /// that cannot be drawn within what a picture may cost is not the same.
+    fn draws_as_without(&self, pose: &Pose, posed: &str, small: &Pixmap, large: Option<&Pixmap>) -> bool {
+        // Writing a body may find a transform that cannot be written: that is said of the
+        // picture's own bodies, not of this comparison, and such a figure is not compared.
+        let before = self.unwritable.replace(false);
+        let without = self.pose(&Pose { animation: None, zoom: None, ..pose.clone() }).map(|p| self.body(&p));
+        let unwritable = self.unwritable.replace(before);
+        let Ok(without) = without else { return false };
+        if unwritable {
+            return false;
+        }
+        if without == posed {
+            return true;
+        }
+        let light = |body: &str, size: u32| self.render(body, self.view, size, LIGHT).ok();
+        if light(&without, SMALL_FIGURE_PX).is_none_or(|drawn| drawn.data() != small.data()) {
+            return false;
+        }
+        let large = match large {
+            Some(drawn) => Some(drawn.clone()),
+            None => light(posed, SHEET_FIGURE_PX),
+        };
+        large.is_some_and(|large| light(&without, SHEET_FIGURE_PX).is_some_and(|drawn| drawn.data() == large.data()))
     }
 
     /// The look's `mouth` entries at an openness: a path between its closed and its open form, a
@@ -2690,6 +3180,22 @@ fn nearest<T>(keys: &[Key], at: usize, pick: impl Fn(&Key) -> Option<T>) -> Opti
         }
     }
     None
+}
+
+/// How far apart two values of one track are, for [`Model::furthest`]: numbers by their
+/// difference, colours by the sum over their channels as they paint (each a part of its full
+/// strength, times the alpha, and the alpha), path data by the sum of the differences of its
+/// numbers. Nothing to measure is 0.
+fn apart(a: Option<&Got>, b: Option<&Got>) -> f64 {
+    match (a, b) {
+        (Some(Got::Rel(a)), Some(Got::Rel(b))) | (Some(Got::Abs(Abs::Num(a))), Some(Got::Abs(Abs::Num(b)))) => (a - b).abs(),
+        (Some(Got::Abs(Abs::Colour(a))), Some(Got::Abs(Abs::Colour(b)))) => {
+            let paint = |c: &[f64; 4], i: usize| c[i] / 255.0 * c[3];
+            (0..3).map(|i| (paint(a, i) - paint(b, i)).abs()).sum::<f64>() + (a[3] - b[3]).abs()
+        }
+        (Some(Got::Abs(Abs::D(_, a))), Some(Got::Abs(Abs::D(_, b)))) if a.len() == b.len() => a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum(),
+        _ => 0.0,
+    }
 }
 
 /// The artwork's own paint, as a colour track sees it.

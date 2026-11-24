@@ -3,17 +3,22 @@
 // compiles, and draws from its tables. The files are loaded with `?raw` from outside web/
 // (vite reads them from disk, tsc takes the type from vite/client), as the Confluence
 // converter's test loads its sample; every `*.look.json` of the examples is one of them.
+// Beside each, `*.builtin.json` holds the built-in motion the server makes of it for its
+// pictures (server/src/avatar/builtin.rs): the browser makes the same, number for number. The
+// parity looks (`examples/parity/`) are compared the same way: stored looks that reach the
+// rules of the built-in motion the examples do not.
 
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import lookRs from '../../../../../server/src/avatar/look.rs?raw'
-import { resolves, stateList } from './builtin'
+import { StillLook } from '../Figure'
+import { BUILTIN, builtinAnimations, resolves, stateList } from './builtin'
 import { defaultLook } from './defaultLook'
-import { compile, createEngine, sample } from './engine'
-import type { Clip } from './engine'
+import { compile, createEngine, sample, writeStill } from './engine'
+import type { Clip, EngineNode } from './engine'
 import { fakeFrames } from './fixtures'
-import { LIMITS, MORE_LIMITS, TOKENS, checkLook, cleanIdPrefix, faceViewBox, lookElements, lookIndex } from './look'
+import { LIMITS, MORE_LIMITS, TOKENS, checkLook, cleanIdPrefix, faceParts, faceViewBox, lookElements, lookIndex } from './look'
 import { AVATAR_STATES } from './types'
 import type { Look, LookNode } from './types'
 
@@ -24,6 +29,34 @@ const GOLDEN: readonly (readonly [string, string])[] = Object.entries(FILES)
   .map(([path, raw]): [string, string] => [path.replace(/^.*\//, '').replace(/\.look\.json$/, ''), raw])
   .sort((a, b) => a[0].localeCompare(b[0]))
 const rawOf = (name: string): string => GOLDEN.find(([n]) => n === name)?.[1] ?? ''
+
+const MOTION: Record<string, string> = import.meta.glob('../../../../../server/src/avatar/examples/*.builtin.json', { query: '?raw', import: 'default', eager: true })
+
+/** The built-in motion the server makes of each example, by the example's name. */
+const SERVER_MOTION: ReadonlyMap<string, string> = new Map(Object.entries(MOTION).map(([path, raw]): [string, string] => [path.replace(/^.*\//, '').replace(/\.builtin\.json$/, ''), raw]))
+
+const PARITY_FILES: Record<string, string> = import.meta.glob('../../../../../server/src/avatar/examples/parity/*.look.json', { query: '?raw', import: 'default', eager: true })
+const PARITY_MOTION_FILES: Record<string, string> = import.meta.glob('../../../../../server/src/avatar/examples/parity/*.builtin.json', { query: '?raw', import: 'default', eager: true })
+
+/** Files by their name without the directory and `suffix`, in the order of the names. */
+const named = (files: Record<string, string>, suffix: RegExp): [string, string][] =>
+  Object.entries(files)
+    .map(([path, raw]): [string, string] => [path.replace(/^.*\//, '').replace(suffix, ''), raw])
+    .sort((a, b) => a[0].localeCompare(b[0]))
+
+/** Every parity look, and the built-in motion the server makes of each, by name. */
+const PARITY: readonly (readonly [string, string])[] = named(PARITY_FILES, /\.look\.json$/)
+const PARITY_MOTION: ReadonlyMap<string, string> = new Map(named(PARITY_MOTION_FILES, /\.builtin\.json$/))
+
+const FACE_FILES: Record<string, string> = import.meta.glob('../../../../../server/src/avatar/examples/*.face.json', { query: '?raw', import: 'default', eager: true })
+const FACE_LOOK_FILES: Record<string, string> = import.meta.glob('../../../../../server/src/avatar/examples/face/*.look.json', { query: '?raw', import: 'default', eager: true })
+const FACE_LOOK_FACE_FILES: Record<string, string> = import.meta.glob('../../../../../server/src/avatar/examples/face/*.face.json', { query: '?raw', import: 'default', eager: true })
+
+/** The small face the server draws of each example look (`*.face.json`: its square and the ids it leaves out), by name. */
+const SERVER_FACES: ReadonlyMap<string, string> = new Map(named(FACE_FILES, /\.face\.json$/))
+/** The looks made for the face (`examples/face/`), and the face the server draws of each, by name. */
+const FACE_LOOKS: readonly (readonly [string, string])[] = named(FACE_LOOK_FILES, /\.look\.json$/)
+const FACE_LOOK_FACES: ReadonlyMap<string, string> = new Map(named(FACE_LOOK_FACE_FILES, /\.face\.json$/))
 
 /** A golden file as the server would send it, checked. */
 function golden(raw: string): Look {
@@ -383,6 +416,18 @@ describe('the server’s example looks', () => {
     }
   })
 
+  it('get the built-in motion the server draws in their pictures, number for number', () => {
+    expect([...SERVER_MOTION.keys()].sort()).toEqual(GOLDEN.map(([name]) => name))
+    for (const [name, raw] of GOLDEN) {
+      const look = golden(raw)
+      const made = builtinAnimations(look)
+      // Every one of them: the examples name all six roles.
+      expect([...made.keys()], name).toEqual(BUILTIN)
+      // Strict: a -0 for a 0, a key too many or a number off in its last digit fails.
+      expect(Object.fromEntries(made), name).toStrictEqual(JSON.parse(SERVER_MOTION.get(name) ?? '{}'))
+    }
+  })
+
   it('have a square face inside their viewBox, around the head when they name one', () => {
     for (const [name, raw] of GOLDEN) {
       const look = golden(raw)
@@ -397,6 +442,121 @@ describe('the server’s example looks', () => {
       // It shows the head, not the whole figure.
       if (look.roles.head !== undefined) expect(w, name).toBeLessThan(look.viewBox[2])
     }
+  })
+})
+
+describe('the server’s parity looks', () => {
+  it('are there, each with the built-in motion the server makes of it', () => {
+    const names = PARITY.map(([name]) => name)
+    for (const name of ['arms', 'aside', 'body', 'flipped', 'flipped-loose', 'head', 'lefty-loose', 'middle', 'near', 'pupils-small', 'pupils-still', 'skewed', 'tight', 'turned', 'usearm']) expect(names, name).toContain(name)
+    expect([...PARITY_MOTION.keys()].sort()).toEqual(names)
+  })
+
+  it('are accepted with equal content', () => {
+    for (const [name, raw] of PARITY) {
+      const stored: unknown = JSON.parse(raw)
+      expect(checkLook(stored), name).toEqual(stored)
+    }
+  })
+
+  it('get the built-in motion the server draws in their pictures, number for number', () => {
+    for (const [name, raw] of PARITY) {
+      // Strict: a -0 for a 0, a key too many or a number off in its last digit fails.
+      expect(Object.fromEntries(builtinAnimations(golden(raw))), name).toStrictEqual(JSON.parse(PARITY_MOTION.get(name) ?? '{}'))
+    }
+  })
+})
+
+describe('the small face of the server’s looks', () => {
+  interface ServerFace {
+    viewBox: number[]
+    leftOut: string[]
+  }
+  /** Every example look and every look made for the face, checked, with the face the server draws of it. */
+  const faces = (): [string, Look, ServerFace][] => [
+    ...GOLDEN.map(([name, raw]): [string, Look, ServerFace] => [name, golden(raw), JSON.parse(SERVER_FACES.get(name) ?? 'null') as ServerFace]),
+    ...FACE_LOOKS.map(([name, raw]): [string, Look, ServerFace] => [name, golden(raw), JSON.parse(FACE_LOOK_FACES.get(name) ?? 'null') as ServerFace]),
+  ]
+  const leftOut = (look: Look) => [...faceParts(look)].map((node) => node.id)
+  const lookOf = (name: string) => faces().find(([n]) => n === name)?.[1] as Look
+  /** The markup of a still look on a 28 px stage, as the face or as the whole figure. */
+  const still = (look: Look, face: boolean) => renderToStaticMarkup(createElement(StillLook, { look, idPrefix: 'f1-', size: 28, face }))
+
+  it('is there for every example look and every look made for it', () => {
+    expect([...SERVER_FACES.keys()].sort()).toEqual(GOLDEN.map(([name]) => name))
+    expect(FACE_LOOKS.map(([name]) => name)).toEqual(['fox', 'ghost', 'nested', 'nohead', 'refs', 'ties'])
+    expect([...FACE_LOOK_FACES.keys()].sort()).toEqual(FACE_LOOKS.map(([name]) => name))
+    // Each is a look as the validator stores it, which the browser accepts with equal content.
+    for (const [name, raw] of FACE_LOOKS) expect(checkLook(JSON.parse(raw)), name).toEqual(JSON.parse(raw))
+  })
+
+  it('shows the square the server’s pictures show and leaves out what they leave out, part for part', () => {
+    for (const [name, look, server] of faces()) {
+      expect(faceViewBox(look), name).toEqual(server.viewBox)
+      expect(leftOut(look), name).toEqual(server.leftOut)
+    }
+    // Tock keeps its hands and its core, inside the square: only its jet at the lower edge goes (and its shadow, wholly outside).
+    expect(leftOut(lookOf('tock'))).toEqual(['shadow', 'jet'])
+    // The tip of the fox's tail beside its head.
+    expect(leftOut(lookOf('fox'))).toEqual(['tail'])
+    // The ghost's head is only its features: the body they sit on stays.
+    expect(leftOut(lookOf('ghost'))).toEqual(['bow', 'wisp'])
+    // No head: the face is the whole viewBox, and nothing is left out.
+    expect(leftOut(lookOf('nohead'))).toEqual([])
+    // -30.0625 rounds to -30.062 (Math.round goes towards +∞ at a half): it touches the head.
+    expect(leftOut(lookOf('ties'))).toEqual(['past'])
+  })
+
+  it('is drawn without what it leaves out, which stays out of sight where a use and a reference still find it', () => {
+    for (const [name, look, server] of faces()) {
+      const face = elements(still(look, true))
+      const whole = elements(still(look, false))
+      const gone = new Set(server.leftOut.map((id) => `f1-${id}`))
+      // Each part left out is the only child of a defs of its own, which the whole figure does not have.
+      const wrapper = (el: { tag: string; attrs: Map<string, string> }, next: { attrs: Map<string, string> } | undefined) => el.tag === 'defs' && el.attrs.size === 0 && gone.has(next?.attrs.get('id') ?? '')
+      const wrappers = face.filter((el, i) => wrapper(el, face[i + 1]))
+      expect(wrappers, name).toHaveLength(server.leftOut.length)
+      // Apart from those and the square, the face is the whole figure: every element and every id is there.
+      const shown = (els: typeof face) => els.map((el) => `${el.tag} ${[...el.attrs].filter(([k]) => k !== 'viewBox').map(([k, v]) => `${k}=${v}`).join(' ')} ${el.text}`)
+      expect(shown(face.filter((el, i) => !wrapper(el, face[i + 1]))), name).toEqual(shown(whole))
+      expect(face.find((el) => el.tag === 'svg')?.attrs.get('viewBox'), name).toBe(server.viewBox.join(' '))
+      // Every reference of the face resolves to an element drawn in it.
+      const ids = new Set(face.map((el) => el.attrs.get('id')).filter((id) => id !== undefined))
+      for (const el of face) {
+        for (const [attr, value] of el.attrs) {
+          const ref = attr === 'href' ? /^#(.+)$/.exec(value)?.[1] : /^url\(#(.+)\)$/.exec(value)?.[1]
+          if (ref !== undefined) expect(ids.has(ref), `${name} ${el.tag} ${attr}="${value}"`).toBe(true)
+        }
+      }
+    }
+    // The ghost's body, which its head's features sit on, is drawn in the face; its bow is out of sight.
+    const ghost = still(lookOf('ghost'), true)
+    expect(ghost).toMatch(/<svg [^>]*><path id="f1-sheet"/)
+    expect(ghost).toContain('<defs><path id="f1-bow"')
+    // A use the face keeps shows a part it leaves out, and that part's gradient, clip, mask and filter paint what the face keeps.
+    const refs = still(lookOf('refs'), true)
+    expect(refs).toContain('<defs><g id="f1-paw"><circle')
+    expect(refs).toMatch(/<use id="f1-pawNear" href="#f1-paw"/)
+    for (const used of ['fill="url(#f1-pawPaint)"', 'clip-path="url(#f1-cut)"', 'mask="url(#f1-hole)"', 'filter="url(#f1-blur)"']) expect(refs, used).toContain(used)
+    // A use left out is out of sight; what it repeats is drawn where it stands.
+    expect(refs).toContain('<defs><use id="f1-echo" href="#f1-badge"')
+    expect(refs).toMatch(/<rect id="f1-badge"/)
+  })
+
+  it('writes the rest pose of its drives on a part it leaves out as on any other', () => {
+    // The face of refs leaves out the halo, which a drive on the turn moves 4 to the right at rest.
+    const look = lookOf('refs')
+    expect(leftOut(look)).toContain('halo')
+    const ids = new Set(elements(still(look, true)).map((el) => el.attrs.get('id')))
+    const written: string[] = []
+    const node = (id: string): EngineNode => ({
+      setAttribute: (attr, value) => void written.push(`${id} ${attr}=${value}`),
+      removeAttribute: (attr) => void written.push(`${id} -${attr}`),
+    })
+    const undo = writeStill(look, (id) => (ids.has(`f1-${id}`) ? node(id) : null), 'f1-')
+    expect(written).toEqual(['halo transform=translate(4 0)'])
+    undo()
+    expect(written).toEqual(['halo transform=translate(4 0)', 'halo -transform'])
   })
 })
 

@@ -126,6 +126,23 @@ const coverage = (f: ReturnType<typeof fakeFrames>) => {
   const t = transformOf(f, 'slab')
   return Math.abs(t.sx * t.sy)
 }
+/** The relative luminance (sRGB in linear light, Rec. 709 weights) of a written colour, `#rrggbb` or `rgb(r,g,b)`. */
+const luminance = (text: string): number => {
+  const m = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(text)
+  const [r, g, b] = m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [1, 3, 5].map((at) => Number.parseInt(text.slice(at, at + 2), 16))
+  const lin = (c: number) => (c / 255 <= 0.04045 ? c / 255 / 12.92 : ((c / 255 + 0.055) / 1.055) ** 2.4)
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
+/** The brightness of a part's fill as written, or of the artwork's own fill where nothing was written. */
+const brightnessOf = (id: string, own: string) => (f: ReturnType<typeof fakeFrames>) => luminance(f.nodes.get(id)?.attrs.get('fill') ?? own)
+/** The example looks, as the server keeps them. */
+const EXAMPLES: Record<string, string> = import.meta.glob('../../../../../server/src/avatar/examples/*.look.json', { query: '?raw', import: 'default', eager: true })
+const example = (name: string): Look => {
+  const raw = Object.entries(EXAMPLES).find(([path]) => path.endsWith(`/${name}.look.json`))?.[1]
+  const look = raw ? checkLook(JSON.parse(raw)) : null
+  if (!look) throw new Error(`no example look ${name}`)
+  return look
+}
 
 describe('the limiter: what the frame loop writes does not flash', () => {
   it('limits the paint of every part and every channel of a large one: a large part covers an eighth of the viewBox at its largest scale, reaches far, or has no box', () => {
@@ -241,6 +258,73 @@ describe('the limiter: what the frame loop writes does not flash', () => {
     const driven = film(drive, { seconds: 4, mouth: syllables }, coverage)
     expect(flashesPerSecond(driven)).toBeLessThanOrEqual(3)
     expect(Math.min(...driven)).toBeLessThan(0.7)
+  })
+
+  it('keeps the brightness of a colour to three flashes a second where its blend dips: green and magenta swapped, and a magenta gesture played again and again over green', () => {
+    // Blended in sRGB, green and magenta dip below the darker of the two on the way: twice a change.
+    const swap = (a: string, b: string, gap: number) => stored({ animations: { swap: { duration: 2 * gap, loop: true, tracks: [{ target: 'slab', prop: 'fill', values: [a, b, a] }] } }, states: { idle: ['swap'] } })
+    for (const gap of [0.17, 0.2]) {
+      const series = film(swap('#00cc00', '#ff00ff', gap), { seconds: 4 }, brightnessOf('slab', '#ffffff'))
+      expect(flashesPerSecond(series), `every ${gap} s`).toBeLessThanOrEqual(3)
+      // It still swaps: it gets as dark as the blend, and back to white.
+      expect(Math.min(...series), `every ${gap} s`).toBeLessThan(0.2)
+      expect(Math.max(...series), `every ${gap} s`).toBe(1)
+    }
+    // A gesture blended in and out over a state's colour: each blend is one change of the channels, and two of brightness.
+    const over = stored({
+      animations: {
+        green: { duration: 0.34, loop: true, tracks: [{ target: 'slab', prop: 'fill', values: ['#00cc00', '#00cc00'] }] },
+        magenta: { duration: 0.17, tracks: [{ target: 'slab', prop: 'fill', values: ['#ff00ff', '#ff00ff'] }] },
+      },
+      states: { idle: ['green'] },
+    })
+    for (const every of [9, 12]) {
+      const series = film(over, { seconds: 6, script: (i, h) => void (i % every === 0 && h.play('magenta', 'once')) }, brightnessOf('slab', '#ffffff'))
+      expect(flashesPerSecond(series), `played every ${every} frames`).toBeLessThanOrEqual(3)
+      expect(Math.min(...series.slice(30)), `played every ${every} frames`).toBeLessThan(0.3)
+    }
+  })
+
+  it('keeps black and white, red and green, and the example’s alarm under a gesture to three flashes a second, as before', () => {
+    const swap = (a: string, b: string, gap: number) => stored({ animations: { swap: { duration: 2 * gap, loop: true, tracks: [{ target: 'slab', prop: 'fill', values: [a, b, a] }] } }, states: { idle: ['swap'] } })
+    for (const [a, b] of [
+      ['#000000', '#ffffff'],
+      ['#ff0000', '#00ff00'],
+    ]) {
+      for (const gap of [0.17, 0.2, 0.25]) {
+        const series = film(swap(a, b, gap), { seconds: 4 }, brightnessOf('slab', '#ffffff'))
+        expect(flashesPerSecond(series), `${a} ${b} every ${gap} s`).toBeLessThanOrEqual(3)
+        expect(Math.max(...series) - Math.min(...series), `${a} ${b} every ${gap} s`).toBeGreaterThan(0.5)
+      }
+    }
+    // The example tock: its bulb pings in attention, and "oops" turns it grey, played once and again and again.
+    const tock = example('tock')
+    for (const every of [0, 8, 12]) {
+      const series = film(tock, { state: 'attention', seconds: 6, script: (i, h) => void ((every === 0 ? i === 10 : i % every === 0) && h.play('oops', 'once')) }, brightnessOf('bulb', '#fb923c'))
+      expect(flashesPerSecond(series), `oops every ${every} frames`).toBeLessThanOrEqual(3)
+    }
+  })
+
+  it('keeps every pair of 27 colours swapped every 0.17 s or 0.2 s to three flashes a second, in brightness', () => {
+    const levels = ['00', '80', 'ff']
+    const colours = levels.flatMap((r) => levels.flatMap((g) => levels.map((b) => `#${r}${g}${b}`)))
+    let worst = 0
+    let swapped = 0
+    for (let i = 0; i < colours.length; i++) {
+      for (let j = i + 1; j < colours.length; j++) {
+        for (const gap of [0.17, 0.2]) {
+          const look = stored({ animations: { swap: { duration: 2 * gap, loop: true, tracks: [{ target: 'slab', prop: 'fill', values: [colours[i], colours[j], colours[i]] }] } }, states: { idle: ['swap'] } })
+          const series = film(look, { seconds: 3 }, brightnessOf('slab', '#ffffff')).slice(15)
+          const flashes = flashesPerSecond(series)
+          expect(flashes, `${colours[i]} ${colours[j]} every ${gap} s`).toBeLessThanOrEqual(3)
+          worst = Math.max(worst, flashes)
+          if (Math.max(...series) - Math.min(...series) > 0.1) swapped++
+        }
+      }
+    }
+    // It is near the limit, and the colours still swap.
+    expect(worst).toBe(3)
+    expect(swapped).toBeGreaterThan(500)
   })
 
   it('releases a held channel when the gesture that moved it ends inside the hold: at rest within REVERSAL_MS and a frame', () => {
@@ -390,6 +474,54 @@ describe('the limiter: what it leaves as it is', () => {
     const d = compile(defaultLook('t1')) as Compiled
     expect(isLarge(d, 'head')).toBe(true)
     expectAsSampled(quiet({ idle: [] }), { state: 'idle', seconds: 5, play: (i) => (i % 30 === 3 ? 'nod' : null) })
+  })
+
+  it('writes a fill whose brightness follows its channels exactly as `sample` gives it: black and white, and orange and red as the example’s bulb pings', () => {
+    // The slab is white at rest: each starts there, so the fade in from rest goes one way.
+    for (const values of [
+      ['#ffffff', '#202020', '#ffffff', '#202020', '#ffffff'],
+      ['#ffffff', '#fb923c', '#ef4444', '#fb923c', '#ef4444', '#fb923c', '#ffffff'],
+    ]) {
+      // A state's loop of 0.2 s a keyframe, from the moment it fades in; the fastest a look may change a colour, 0.17 s, as a gesture.
+      const pulse: Animation = { duration: 0.2 * (values.length - 1), loop: true, ease: 'inOut', tracks: [{ target: 'slab', prop: 'fill', values }] }
+      expectAsSampled(stored({ animations: { pulse }, states: { idle: ['pulse'] } }), { state: 'idle', seconds: 4 })
+      const flash: Animation = { duration: 0.17 * (values.length - 1), ease: 'inOut', tracks: [{ target: 'slab', prop: 'fill', values: [null, ...values.slice(1, -1), null] }] }
+      expectAsSampled(stored({ animations: { flash } }), { state: 'idle', seconds: 5, play: (i) => (i % 45 === 3 ? 'flash' : null) })
+    }
+  })
+
+  it('writes a slow change of hue exactly as `sample` gives it, whose brightness dips a little near its keyframes: 0.5 s a change and slower, at several frame rates', () => {
+    /** Frames `gap` ms apart, each checked against `sample`: the state's loop fades in from the start, as the loop does it. */
+    const asSampled = (look: Look, gap: number, seconds: number) => {
+      const c = compile(look) as Compiled
+      const f = fakeFrames()
+      createEngine(f.host).attach(look, (id) => f.find(id), { state: 'idle', reducedMotion: false })
+      const own = sample(c, [], 0).get('slab')?.attrs.get('fill') ?? null
+      for (let i = 0; i * gap <= seconds * 1000; i++) {
+        f.frame(gap)
+        // The loop's time: the first frame counts none.
+        const clock = i * gap
+        const want = sample(c, [{ name: 'cycle', startMs: 0, weight: Math.min(clock / STATE_FADE_MS, 1), mode: 'state', times: 1 }], clock).get('slab')?.attrs.get('fill')
+        const node = f.nodes.get('slab')
+        const now = node?.writes.some(([n]) => n === 'fill') ? (node.attrs.get('fill') ?? null) : own
+        expect(now, `at ${clock.toFixed(0)} ms, frames ${gap.toFixed(1)} ms apart`).toBe(want)
+      }
+    }
+    const cycle = (values: string[], duration: number) => stored({ animations: { cycle: { duration, loop: true, tracks: [{ target: 'slab', prop: 'fill', values }] } }, states: { idle: ['cycle'] } })
+    for (const [values, duration] of [
+      // Red, green and blue at 0.5 s a change: the blend dips near red and near blue, by 0.07 and 0.02.
+      [['#ff0000', '#00ff00', '#0000ff', '#ff0000'], 1.5],
+      // Red and blue at 0.5 s a change.
+      [['#ff0000', '#0000ff', '#ff0000'], 1],
+      // The six hues of a rainbow at 0.5 s a change: green to cyan brightens by 0.07 just before cyan darkens.
+      [['#ff0000', '#ffff00', '#00ff00', '#00ffff', '#0000ff', '#ff00ff', '#ff0000'], 3],
+      // Green and magenta at 0.5 s a change: four turns of brightness a second, 0.25 s apart.
+      [['#00cc00', '#ff00ff', '#00cc00'], 1],
+      // Grey and red at 1 s a change: it dips by 0.09 and comes back by 0.05 on the way.
+      [['#888888', '#ff0000', '#888888'], 2],
+    ] as const) {
+      for (const gap of [FRAME, 35, 41]) asSampled(cycle([...values], duration), gap, 6)
+    }
   })
 
   it('applies to `sample` called directly not at all, nor to the rest pose on detach', () => {

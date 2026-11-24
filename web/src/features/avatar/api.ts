@@ -43,9 +43,13 @@ export interface ReplyRequest {
   via: 'click' | 'typed' | 'voice'
 }
 
-/** `answer`: a waiting call got it. `prompt`: it was pasted into the session as its next message. */
+/**
+ * `answer`: a waiting call got it. `prompt`: it was pasted into the session as its next message.
+ * `inBox`: it was pasted, but a dialog opened meanwhile and its Enter was withheld: it stands in
+ * the session's input box, to be sent there once the dialog is answered.
+ */
 export interface ReplyAnswer {
-  delivered: 'answer' | 'prompt'
+  delivered: 'answer' | 'prompt' | 'inBox'
 }
 
 /** `POST …/on`. `briefed: false`: the avatar is on, but the session could not be told now (it shows a dialog or is starting). */

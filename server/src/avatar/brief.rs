@@ -602,6 +602,12 @@ mod tests {
         let merged = look::apply(Some(&design), &serde_json::json!({ "animations": { "flick": null }, "states": { "idle": ["breathe", "blink", "swish"] } })).unwrap();
         assert_eq!(merged.animations, ["pounce", "swish"]);
         assert!(merged.warnings.is_empty() && merged.design.look.as_ref().is_some_and(|l| l.roles.len() == 6 && l.mouth.len() == 1), "{:?}", merged.warnings);
+        // Roles and pivots merge by key too, and null removes one; the other fields stay.
+        assert!(GUIDE.contains("pivots, parents, roles, animations and states by key (null removes one)"));
+        let fewer = look::apply(Some(&merged.design), &serde_json::json!({ "roles": { "armL": null }, "pivots": { "head": [100, 110] } })).unwrap();
+        let look = fewer.design.look.as_ref().expect("a look");
+        assert!(look.roles.len() == 5 && !look.roles.contains_key(&look::Role::ArmL) && look.mouth.len() == 1 && fewer.animations == ["pounce", "swish"], "{:?}", look.roles);
+        assert!(fewer.parts.iter().any(|p| p.id == "head" && p.pivot == [100.0, 110.0]) && fewer.parts.iter().any(|p| p.id == "armL" && p.pivot == [80.0, 158.0]), "{:?}", fewer.parts);
     }
 
     /// What the guide says is refused or dropped is: each of its warnings, tried on its own example.
@@ -681,6 +687,13 @@ mod tests {
             ("no transform on animated parts", "no transform"),
             ("design in a few calls, looking in between", "two or three calls"),
             ("designed true: do not design again", "designed true"),
+            ("a pivot is in the coordinates the part is drawn in", "in the coordinates the part is drawn in, inside its own and its groups' transforms"),
+            ("the rest of a drive is its prop's own rest", "for mouth, pace and held the first"),
+            ("pupils think only with a gaze", "pupils unless gaze is 0"),
+            ("the parts list: ids, in drawing order", "each part with an id, in drawing order"),
+            ("a pose inside an animation without at", "where it has moved furthest"),
+            ("a colour's brightness turns too", "also its brightness"),
+            ("a gesture stops the walk", "for a gesture it stops"),
         ] {
             assert!(guide.contains(words), "the guide does not say: {rule} ({words:?})");
         }

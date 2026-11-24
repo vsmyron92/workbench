@@ -1,0 +1,13 @@
+{
+  "alert": {"duration":1.2,"loop":true,"times":[0.0,0.14,0.42,0.7,0.84,1.0],"tracks":[{"ease":["linear","out","in","linear","linear"],"prop":"translateY","target":"frog","values":[0.0,0.0,-14.0,0.0,0.0,0.0]},{"ease":"inOut","prop":"scaleY","target":"frog","values":[1.0,0.93,1.05,0.94,1.0,1.0]}]},
+  "blink": {"duration":0.18,"every":[2.4,6.0],"tracks":[{"prop":"scaleY","target":"eyes","values":[1.0,0.1,1.0]}]},
+  "breathe": {"duration":3.6,"ease":"inOut","loop":true,"tracks":[{"prop":"scaleY","target":"frog","values":[1.0,1.025,1.0]},{"prop":"scaleX","target":"frog","values":[1.0,0.99,1.0]}]},
+  "cheer": {"duration":1.2,"tracks":[{"ease":"inOut","prop":"rotate","target":"armL","values":[0.0,92.31,80.31,92.31,80.31,0.0]},{"ease":"inOut","prop":"rotate","target":"armR","values":[0.0,-92.31,-80.31,-92.31,-80.31,0.0]},{"ease":["out","in","out","in","linear"],"prop":"translateY","target":"frog","values":[0.0,-14.0,0.0,-7.0,0.0,0.0]},{"ease":"inOut","prop":"scaleY","target":"frog","values":[1.0,1.05,0.95,1.025,0.98,1.0]}]},
+  "doze": {"duration":5.2,"loop":true,"tracks":[{"prop":"scaleY","target":"eyes","values":[0.1,0.1]},{"ease":"inOut","prop":"scaleY","target":"frog","values":[1.0,1.035,1.0]},{"ease":"inOut","prop":"scaleX","target":"frog","values":[1.0,0.985,1.0]}]},
+  "listen": {"duration":2.4,"ease":"inOut","loop":true,"tracks":[{"prop":"rotate","target":"head","values":[-5.0,-6.2,-5.0]}]},
+  "nod": {"duration":0.7,"ease":"inOut","tracks":[{"prop":"translateY","target":"head","values":[0.0,6.0,0.0,3.6,0.0]}]},
+  "shake": {"duration":0.8,"ease":"inOut","tracks":[{"prop":"translateX","target":"head","values":[0.0,-5.0,5.0,-3.5,2.5,0.0]}]},
+  "talk": {"duration":0.9,"ease":"inOut","loop":true,"tracks":[{"prop":"translateY","target":"head","values":[0.0,2.4,0.0,1.44,0.0]},{"prop":"rotate","target":"head","values":[0.0,1.2,0.0,-1.2,0.0]}]},
+  "think": {"duration":2.8,"ease":"inOut","loop":true,"times":[0.0,0.2,0.55,0.8,1.0],"tracks":[{"prop":"translateX","target":"pupils","values":[0.0,-4.8,-4.8,3.6,0.0]},{"prop":"translateY","target":"pupils","values":[0.0,-5.4,-5.4,-4.2,0.0]}]},
+  "wave": {"duration":1.4,"tracks":[{"ease":"inOut","prop":"rotate","target":"armR","values":[0.0,-96.31,-64.31,-96.31,-64.31,0.0]}]}
+}

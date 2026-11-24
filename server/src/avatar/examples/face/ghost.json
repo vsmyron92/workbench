@@ -1,0 +1,18 @@
+{
+  "name": "Ghost",
+  "svg": "<svg viewBox='0 0 200 200'><path id='sheet' d='M 40 180 L 40 80 Q 40 20 100 20 Q 160 20 160 80 L 160 180 L 140 165 L 120 180 L 100 165 L 80 180 L 60 165 Z' fill='#e9ecef' stroke='#868e96' stroke-width='3'/><path id='bow' d='M 130 40 L 150 48 L 130 56 Z' fill='#e64980'/><g id='features'><g id='eyes'><ellipse cx='80' cy='70' rx='8' ry='11' fill='#212529'/><ellipse cx='120' cy='70' rx='8' ry='11' fill='#212529'/></g><ellipse id='mouth' cx='100' cy='98' rx='9' ry='6' fill='#495057'/></g><circle id='wisp' cx='186' cy='150' r='8' fill='#adb5bd'/></svg>",
+  "pivots": {
+    "sheet": [
+      100,
+      180
+    ]
+  },
+  "roles": {
+    "body": "sheet",
+    "head": "features",
+    "eyes": "eyes"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": []
+}

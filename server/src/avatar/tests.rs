@@ -1454,6 +1454,50 @@ async fn what_the_ask_path_refuses_is_passed_on_as_it_is() {
     assert_eq!(wait_answer_within(waiter, LONG, LONG).await.choice, Some(1));
 }
 
+#[tokio::test]
+async fn a_reply_a_dialog_left_in_the_input_box_went_in_and_is_not_pasted_again() {
+    let e = env().await;
+    let tid = e.with_avatar();
+    let mut pastes = e.pastes();
+    let ask = e.asked(&tid, "Shall I push?", &["Push", "Wait"], T0).await;
+    let mut events = Events::of(&e);
+    // A dialog opens while the paste goes in: the Enter is withheld, and the text stands in the
+    // session's input box.
+    async fn left_in_the_box(pastes: &mut UnboundedReceiver<Paste>, reply: impl Future<Output = ApiResult<Replied>>) -> (ApiResult<Replied>, String) {
+        tokio::join!(reply, async {
+            let paste = tokio::time::timeout(Duration::from_secs(10), pastes.recv()).await.expect("a paste").expect("a paste");
+            let prompt = paste.prompt.clone();
+            let _ = paste.done.send(Err(ApiError::conflict(crate::terminals::PASTED_NOT_SENT)));
+            prompt
+        })
+    }
+    let (first, prompt) = left_in_the_box(&mut pastes, reply(&e.state, &tid, typed(Some(&ask.id), "yes, push"), T0 + SECOND)).await;
+    assert!(prompt.ends_with("yes, push"), "{prompt}");
+    // It went in: delivered into the input box, the user's line recorded, the question answered.
+    assert_eq!(first.unwrap().delivered, Delivered::InBox);
+    let closed = events.drain();
+    assert_eq!(kinds(&closed), ["avatar.line", "avatar.ask"]);
+    assert_eq!(closed[1].data["change"], "answered");
+    let avatar = e.avatar(&tid);
+    assert!(avatar.ask.is_none());
+    assert_eq!(avatar.lines.iter().filter(|l| l.from == Speaker::User && l.ask_id.as_deref() == Some(ask.id.as_str())).count(), 1);
+    // The next Enter, or the choice clicked, finds nothing open: nothing is pasted beside it.
+    for again in [typed(Some(&ask.id), "yes, push"), clicked(&ask.id, 0)] {
+        let refused = reply(&e.state, &tid, again, T0 + 5 * SECOND).await.unwrap_err();
+        assert_eq!((refused.status.as_u16(), refused.code), (409, "not_pending"));
+    }
+    settle().await;
+    assert!(pastes.try_recv().is_err() && events.drain().is_empty());
+    // A message the dialog left in the box went in the same way.
+    let (message, prompt) = left_in_the_box(&mut pastes, reply(&e.state, &tid, typed(None, "and tag it"), T0 + 10 * SECOND)).await;
+    assert_eq!(prompt, "[via avatar, answer with avatar_say] and tag it");
+    assert_eq!(message.unwrap().delivered, Delivered::InBox);
+    assert_eq!(e.avatar(&tid).lines.last().map(|l| (l.text.as_str(), l.from)), Some(("and tag it", Speaker::User)));
+    // On the wire, beside "answer" and "prompt".
+    assert_eq!(serde_json::to_value(Replied { delivered: Delivered::InBox }).unwrap(), json!({ "delivered": "inBox" }));
+    assert_eq!(serde_json::to_value(Replied { delivered: Delivered::Prompt }).unwrap(), json!({ "delivered": "prompt" }));
+}
+
 // ---------------------------------------------------------------- ids
 
 #[tokio::test]
@@ -1742,10 +1786,11 @@ async fn a_session_designs_its_avatar_and_reads_what_it_drew() {
     assert_eq!(answer[1], "Parts (id tag x y w h pivot x y, in root coordinates, at rest):");
     assert_eq!(&answer[2..7], ["body g 60 60 92 80 pivot 100 140", "face circle 60 60 80 80 pivot 100 100 (default)", "eyes g 86 86 8 8 pivot 90 90 (default)", "pupil circle 86 86 8 8 pivot 90 90 (default)", "arm rect 140 100 12 40 pivot 146 100"]);
     assert_eq!(answer[7], "Your animations: blink, fade, hop, spin.");
-    assert!(answer[8].starts_with("Usage: svg 0.") && answer[8].ends_with(" of 32 KiB, 5 of 300 elements, 4 of 32 animations."), "{}", answer[8]);
-    assert_eq!(answer[9], "Built-in motion that applies: breathe, talk, listen, alert, doze, wave, cheer, nod, shake.");
-    assert_eq!(answer[10], "Warnings:");
-    assert!(answer.len() > 11, "{}", drawn.text);
+    assert_eq!(answer[8], "Also stored: roles body, eyes, armR; voice en-GB.");
+    assert!(answer[9].starts_with("Usage: svg 0.") && answer[9].ends_with(" of 32 KiB, 5 of 300 elements, 4 of 32 animations."), "{}", answer[9]);
+    assert_eq!(answer[10], "Built-in motion that applies: breathe, talk, listen, alert, doze, wave, cheer, nod, shake.");
+    assert_eq!(answer[11], "Warnings:");
+    assert!(answer.len() > 12, "{}", drawn.text);
     let avatar = e.avatar(&tid);
     assert!(avatar.designed && avatar.look.is_some());
     assert_eq!((avatar.name.as_str(), avatar.revision, avatar.updated_at, serde_json::to_value(&avatar.voice).unwrap()), ("Dot", 2, T0 + 1, json!({ "lang": "en-GB", "pitch": 1.1 })));
@@ -1903,6 +1948,34 @@ async fn the_answer_and_the_status_name_the_parents_and_the_drives() {
     assert_eq!(e.act(&tid, ActRequest { play: Some("flash".into()), times: Some(2), ..Default::default() }, T0 + 3).unwrap_err().message, "flash cannot repeat: its fillOpacity ends on another value than it starts with. Play it once, or close the track.");
 }
 
+#[tokio::test]
+async fn a_look_that_names_roles_and_gets_no_built_in_motion_is_told_why() {
+    let e = env().await;
+    let tid = e.with_avatar();
+    let svg = "<svg viewBox='0 0 200 200'><g id='pupils'><circle cx='90' cy='90' r='4'/></g><rect id='arm' x='140' y='100' width='12' height='40'/></svg>";
+    let lines = |text: &str| text.lines().map(str::to_string).collect::<Vec<_>>();
+    // No roles: the line it always had.
+    let bare = e.design(&tid, json!({ "svg": svg }), T0).unwrap();
+    assert!(lines(&bare.text).contains(&"No built-in motion applies: name roles (body, head, eyes, pupils, armL, armR) and Workbench moves them.".to_string()), "{}", bare.text);
+    // Pupils with gaze 0 and no head keep still: the answer, the warning and a gesture say it is the gaze.
+    let still = e.design(&tid, json!({ "svg": svg, "roles": { "pupils": "pupils" }, "gaze": 0, "states": { "working": ["think"] } }), T0 + SECOND).unwrap();
+    let answer = lines(&still.text);
+    assert!(answer.contains(&"No built-in motion applies: the pupils think only with a gaze above 0, and this look's gaze is 0.".to_string()), "{}", still.text);
+    assert!(
+        answer.contains(&"think is built in and needs the head role, or the pupils role and a gaze above 0 (at states.working[0]): name head, or give a gaze above 0".to_string()),
+        "{}",
+        still.text
+    );
+    assert_eq!(
+        e.act(&tid, play("think"), T0 + 3 * SECOND).unwrap_err().message,
+        "No animation think: think is Workbench's built-in motion and needs the head role, or the pupils role and a gaze above 0, and this look's gaze is 0. Yours: none; built in: none"
+    );
+    // An arm whose wave the look's own replaces: that is why.
+    let own = json!({ "wave": { "duration": 1, "tracks": [{ "target": "arm", "prop": "translateY", "values": [0, -6, 0] }] } });
+    let replaced = e.design(&tid, json!({ "svg": svg, "roles": { "armR": "arm" }, "animations": own }), T0 + 6 * SECOND).unwrap();
+    assert!(lines(&replaced.text).contains(&"No built-in motion applies: your own animations of the same name replace wave.".to_string()), "{}", replaced.text);
+}
+
 // ---------------------------------------------------------------- act
 
 #[tokio::test]
@@ -1934,7 +2007,8 @@ async fn a_gesture_plays_by_name_in_one_of_three_modes() {
     // A name the avatar does not have: both lists come back.
     let unknown = go(play("wink")).unwrap_err();
     assert_eq!((unknown.status.as_u16(), unknown.message.as_str()), (400, "No animation wink. Yours: blink, fade, hop, spin; built in: breathe, talk, listen, alert, doze, wave, cheer, nod, shake"));
-    assert!(go(play("think")).unwrap_err().message.starts_with("No animation think."), "its roles do not allow it");
+    // Built-in motion its roles do not give: what it lacks, in a picture's words.
+    assert_eq!(go(play("think")).unwrap_err().message, "No animation think: think is Workbench's built-in motion and needs the head role, or the pupils role and a gaze above 0, which this look does not name. Yours: blink, fade, hop, spin; built in: breathe, talk, listen, alert, doze, wave, cheer, nod, shake");
     assert!(go(play("constructor")).unwrap_err().message.starts_with("No animation constructor."));
     assert!(go(stop("wink")).unwrap_err().message.starts_with("No animation wink."));
     assert!(go(play("<img src=x onerror=alert(1)>")).unwrap_err().message.starts_with("No animation \"<img src=x onerror=alert(1)>\"."));
@@ -2112,13 +2186,27 @@ async fn an_avatar_survives_a_restart_and_what_lives_in_memory_does_not() {
     // Names that are no terminal's avatar are not read, and not touched.
     std::fs::write(dir.join("notes.txt"), b"mine").unwrap();
     std::fs::write(dir.join("Not-An-Id.json"), b"{}").unwrap();
+    // A terminal that was not loaded at this start (its meta.json could not be read) is not
+    // gone: its directory is there. Its avatar gets no record now, and keeps its files.
+    let unread = e.state.paths.data_dir.join("terminals").join("0123456789ac");
+    std::fs::create_dir_all(&unread).unwrap();
+    std::fs::write(unread.join("meta.json"), b"{ not json").unwrap();
+    let kept = serde_json::to_vec(&json!({ "version": 1, "on": false, "name": "Sleeper", "designed": false, "look": null, "voice": {}, "via": "tools" })).unwrap();
+    std::fs::write(dir.join("0123456789ac.json"), &kept).unwrap();
+    std::fs::write(dir.join("0123456789ac.json.corrupt"), b"{").unwrap();
     e.state.avatar.restart();
     assert_eq!(list(&e.state).avatars.len(), 2);
+    assert_eq!(std::fs::read(dir.join("0123456789ac.json")).unwrap(), kept, "kept as it was");
     let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|f| f.unwrap().file_name().to_string_lossy().into_owned()).collect();
     left.sort();
-    let mut expected = vec!["Not-An-Id.json".to_string(), format!("{off}.json"), format!("{tid}.json"), "notes.txt".to_string()];
+    let mut expected = vec!["0123456789ac.json".to_string(), "0123456789ac.json.corrupt".to_string(), "Not-An-Id.json".to_string(), format!("{off}.json"), format!("{tid}.json"), "notes.txt".to_string()];
     expected.sort();
     assert_eq!(left, expected);
+    // Once its directory is gone as well, so is what was kept for it.
+    std::fs::remove_dir_all(&unread).unwrap();
+    e.state.avatar.restart();
+    assert_eq!(list(&e.state).avatars.len(), 2);
+    assert!(!dir.join("0123456789ac.json").exists() && !dir.join("0123456789ac.json.corrupt").exists());
 }
 
 #[tokio::test]
@@ -2145,14 +2233,24 @@ async fn a_stored_file_passes_the_validator_a_design_call_passes_or_is_kept_asid
 
     // What a design call would refuse is refused in a file as well: the avatar falls back to
     // the default look and the file is kept aside, one per terminal. What the file says of the
-    // switch still holds when it can be read: an avatar the user turned off stays off. These
-    // files are of an avatar that is off, unless the switch itself is what cannot be read.
+    // switch still holds when it can be read: an avatar the user turned off stays off, one that
+    // was on stays on. Where the switch itself cannot be read, nobody knows what the user chose,
+    // and the avatar is off.
     let off = {
         let mut v = stored.clone();
         v["on"] = json!(false);
         v
     };
     let hostile: Vec<(&str, Value, bool)> = vec![
+        (
+            "an attribute that is not in the table, of an avatar that is on",
+            {
+                let mut v = stored.clone();
+                v["look"]["nodes"][0]["attrs"]["onclick"] = json!("alert(1)");
+                v
+            },
+            true,
+        ),
         (
             "an attribute that is not in the table",
             {
@@ -2214,7 +2312,7 @@ async fn a_stored_file_passes_the_validator_a_design_call_passes_or_is_kept_asid
                 v["on"] = json!("yes");
                 v
             },
-            true,
+            false,
         ),
         (
             "a way of driving it that does not exist",
@@ -2225,7 +2323,7 @@ async fn a_stored_file_passes_the_validator_a_design_call_passes_or_is_kept_asid
             },
             false,
         ),
-        ("no object at all", json!([1, 2, 3]), true),
+        ("no object at all", json!([1, 2, 3]), false),
     ];
     for (what, value, on) in hostile {
         let _ = std::fs::remove_file(&corrupt);
@@ -2236,8 +2334,13 @@ async fn a_stored_file_passes_the_validator_a_design_call_passes_or_is_kept_asid
         assert_eq!(fallen.on, on, "{what}");
         assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(&corrupt).unwrap()).unwrap(), value, "{what}: kept aside");
         // The session's file is a valid one again, so the next start reads it without a word.
+        // Where the switch itself could not be read, it says so: off until the user turns it on.
         let fresh: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-        assert_eq!(fresh, json!({ "version": 1, "on": on, "name": "", "designed": false, "look": null, "voice": {}, "via": "tools" }), "{what}");
+        let mut expected = json!({ "version": 1, "on": on, "name": "", "designed": false, "look": null, "voice": {}, "via": "tools" });
+        if value.get("on").and_then(Value::as_bool).is_none() {
+            expected["unreadable"] = json!(true);
+        }
+        assert_eq!(fresh, expected, "{what}");
     }
 
     // Text that is not JSON, and a file larger than a design may be.
@@ -2245,8 +2348,11 @@ async fn a_stored_file_passes_the_validator_a_design_call_passes_or_is_kept_asid
         std::fs::write(&file, &bytes).unwrap();
         e.state.avatar.restart();
         assert!(e.avatar(&tid).look.is_none(), "{what}");
+        assert!(!e.avatar(&tid).on, "{what}: a switch nobody can read is off");
         assert_eq!(std::fs::read(&corrupt).unwrap(), bytes, "{what}: the newer corrupt file replaces the older");
     }
+    // The user turns it on again, and it is theirs to turn.
+    turn_on(&e.state, &tid, T0 + MINUTE).unwrap();
     // The session designs again; the corrupt file stays for whoever wants to look, until the
     // terminal is removed.
     e.design(&tid, figure(), T0 + MINUTE).unwrap();
@@ -2289,6 +2395,364 @@ async fn a_heavy_design_survives_a_restart_and_stays_off() {
     assert!(!e.file(&tid).with_extension("json.corrupt").exists());
     assert!(std::fs::metadata(e.file(&tid)).unwrap().len() <= MAX_STORED_BYTES);
     assert_eq!(gate(&e.state, &tid, Call::Say, Via::Tools, T0 + MINUTE).unwrap_err().message, TURNED_OFF);
+}
+
+/// What is logged while `f` runs on this thread, as the server's log writes it (without colour).
+fn logged<R>(f: impl FnOnce() -> R) -> (R, String) {
+    #[derive(Clone, Default)]
+    struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let sink = Sink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt().with_ansi(false).with_max_level(tracing::Level::INFO).with_writer(move || writer.clone()).finish();
+    let out = tracing::subscriber::with_default(subscriber, f);
+    let text = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+    (out, text)
+}
+
+/// A designed avatar the user turned off, as its file holds it, from a session that is gone again.
+fn designed_off(e: &Env) -> Vec<u8> {
+    let model = e.with_avatar();
+    e.design(&model, figure(), T0).unwrap();
+    turn_off(&e.state, &model, T0 + 1).unwrap();
+    let bytes = std::fs::read(e.file(&model)).unwrap();
+    on_event(&e.state, &Event { kind: "terminal.removed".into(), project_id: Some(e.pid.clone()), data: json!({ "id": model }), ts: T0 + 2 });
+    assert!(!e.file(&model).exists());
+    bytes
+}
+
+#[tokio::test]
+async fn every_stored_avatar_of_a_loaded_session_is_read_at_a_start_also_beyond_the_cap() {
+    let e = env_with(|cfg| cfg.avatar.sessions = Some(Sessions::Any)).await;
+    let stored = designed_off(&e);
+    // More files than MAX_AVATARS, each of a loaded agent session (a start that kept the file of
+    // a terminal it could not load, while 64 others took an avatar, leaves that).
+    let mut ids: Vec<String> = (0..MAX_AVATARS + 2).map(|_| e.agent(json!({}))).collect();
+    for tid in &ids {
+        std::fs::write(e.file(tid), &stored).unwrap();
+    }
+    ids.sort();
+    e.state.avatar.restart();
+    // Every one is read, none left out, none written over.
+    assert_eq!(list(&e.state).avatars.len(), MAX_AVATARS + 2);
+    for tid in &ids {
+        let avatar = e.avatar(tid);
+        assert!(!avatar.on && avatar.designed && avatar.name == "Dot", "{tid}");
+        assert_eq!(std::fs::read(e.file(tid)).unwrap(), stored, "{tid}: as it was");
+    }
+    // The last by name, which a cap at the start would leave out: off stays off, also against
+    // the session's own call where sessions take an avatar themselves.
+    let last = ids.last().unwrap();
+    assert_eq!(gate(&e.state, last, Call::Say, Via::Tools, T0 + MINUTE).unwrap_err().message, TURNED_OFF);
+    assert_eq!(std::fs::read(e.file(last)).unwrap(), stored);
+    // The user turns it on, with its design.
+    let on = turn_on(&e.state, last, T0 + MINUTE).unwrap();
+    assert!(on.info.on && on.info.designed && on.info.name == "Dot");
+    // MAX_AVATARS bounds new avatars: no session's call, device or option makes one now.
+    let fresh = e.agent(json!({}));
+    assert_eq!(gate(&e.state, &fresh, Call::Say, Via::Tools, T0 + MINUTE).unwrap_err().status.as_u16(), 429);
+    assert_eq!(turn_on(&e.state, &fresh, T0 + MINUTE).unwrap_err().status.as_u16(), 429);
+    let opted = e.with_avatar();
+    assert!(get(&e.state, &fresh).is_err() && get(&e.state, &opted).is_err());
+    assert!(!e.file(&fresh).exists() && !e.file(&opted).exists());
+}
+
+#[tokio::test]
+async fn a_kept_file_waits_for_its_terminal_and_its_record_is_never_a_default_one() {
+    let e = env_with(|cfg| cfg.avatar.sessions = Some(Sessions::Any)).await;
+    let dir = e.state.paths.data_dir.join("avatar");
+    let mut kept: Value = serde_json::from_slice(&designed_off(&e)).unwrap();
+    kept["name"] = json!("Sleeper");
+    let kept = serde_json::to_vec(&kept).unwrap();
+
+    // One start: terminal X's meta.json cannot be read, so X is not loaded, and its avatar file
+    // is kept without a record. The log says so, once.
+    let x = "ffffffffffff".to_string();
+    let xdir = e.state.paths.data_dir.join("terminals").join(&x);
+    std::fs::create_dir_all(&xdir).unwrap();
+    std::fs::write(xdir.join("meta.json"), b"{ not json").unwrap();
+    std::fs::write(e.file(&x), &kept).unwrap();
+    e.state.avatar.restart();
+    let (listed, log) = logged(|| list(&e.state).avatars.len());
+    assert_eq!(listed, 0);
+    assert_eq!(log.matches(&format!("the stored avatar of terminal {x} is kept without a record")).count(), 1, "{log}");
+    assert_eq!(std::fs::read(e.file(&x)).unwrap(), kept);
+    // During that run 64 sessions take an avatar: the kept file holds no record and takes no place.
+    let ids: Vec<String> = (0..MAX_AVATARS).map(|_| e.with_avatar()).collect();
+    let files = std::fs::read_dir(&dir).unwrap().flatten().filter(|f| f.file_name().to_string_lossy().ends_with(".json")).count();
+    assert_eq!((list(&e.state).avatars.len(), files), (MAX_AVATARS, MAX_AVATARS + 1));
+
+    // The next start loads X: its avatar is read with the 64 others, as the user left it.
+    let mut info = serde_json::to_value(e.terminal(&ids[0])).unwrap();
+    info["id"] = json!(x);
+    std::fs::write(xdir.join("meta.json"), serde_json::to_vec(&json!({ "info": info })).unwrap()).unwrap();
+    crate::terminals::start(&e.state).await;
+    assert!(e.state.terminals.info(&x).is_some());
+    e.state.avatar.restart();
+    assert_eq!(list(&e.state).avatars.len(), MAX_AVATARS + 1);
+    let avatar = e.avatar(&x);
+    assert!(!avatar.on && avatar.designed && avatar.name == "Sleeper");
+    // A place frees, X runs again and its session calls: off stays off, and the file is as it was.
+    on_event(&e.state, &Event { kind: "terminal.removed".into(), project_id: Some(e.pid.clone()), data: json!({ "id": ids[0] }), ts: T0 + 10 });
+    e.change(&x, |i| i.status = TerminalStatus::Running);
+    assert_eq!(gate(&e.state, &x, Call::Say, Via::Tools, T0 + 11).unwrap_err().message, TURNED_OFF);
+    assert_eq!(std::fs::read(e.file(&x)).unwrap(), kept);
+    assert!(!e.file(&x).with_extension("json.corrupt").exists());
+    // With 64 records the cap holds for new ones; one fewer, and a new one is made.
+    let fresh = e.agent(json!({}));
+    assert_eq!(gate(&e.state, &fresh, Call::Say, Via::Tools, T0 + 12).unwrap_err().status.as_u16(), 429);
+    on_event(&e.state, &Event { kind: "terminal.removed".into(), project_id: Some(e.pid.clone()), data: json!({ "id": ids[1] }), ts: T0 + 13 });
+    gate(&e.state, &fresh, Call::Say, Via::Tools, T0 + 14).unwrap();
+    assert!(e.avatar(&fresh).on && !e.avatar(&fresh).designed);
+}
+
+#[tokio::test]
+async fn a_record_made_for_a_session_without_one_takes_over_the_file_it_has() {
+    let e = env_with(|cfg| cfg.avatar.sessions = Some(Sessions::Any)).await;
+    let stored = designed_off(&e);
+    let file = |tid: &str| serde_json::from_slice::<Value>(&std::fs::read(e.file(tid)).unwrap()).unwrap();
+    let by_call = e.agent(json!({}));
+    let by_device = e.agent(json!({}));
+    let by_event = e.agent(json!({}));
+    let broken = e.agent(json!({}));
+    // The stored avatars were read, and these sessions got no record, but each has a file (a
+    // start that could not list the directory leaves that).
+    assert!(list(&e.state).avatars.is_empty());
+    for tid in [&by_call, &by_device, &by_event] {
+        std::fs::write(e.file(tid), &stored).unwrap();
+    }
+    let not_json = b"{ \"version\": 1, ".to_vec();
+    std::fs::write(e.file(&broken), &not_json).unwrap();
+
+    // The session's own first call: its avatar is the one in its file, which the user turned
+    // off. The call is refused as for any avatar that is off, and the file stays as it was.
+    assert_eq!(gate(&e.state, &by_call, Call::Say, Via::Tools, T0 + MINUTE).unwrap_err().message, TURNED_OFF);
+    assert_eq!(std::fs::read(e.file(&by_call)).unwrap(), stored);
+    let avatar = e.avatar(&by_call);
+    assert!(!avatar.on && avatar.designed && avatar.name == "Dot");
+    // A device gives a session an avatar: the one it had, turned on, with its design.
+    let given = turn_on(&e.state, &by_device, T0 + MINUTE).unwrap();
+    assert!(given.info.on && given.info.designed && given.info.name == "Dot" && given.brief);
+    let (was, now) = (serde_json::from_slice::<Value>(&stored).unwrap(), file(&by_device));
+    assert_eq!((&now["look"], &now["name"], &now["on"]), (&was["look"], &was["name"], &json!(true)));
+    // The lifecycle: a terminal.created takes its file over too, whatever the meta says.
+    e.event("terminal.created", &by_event, T0 + MINUTE);
+    assert!(!e.avatar(&by_event).on && e.avatar(&by_event).designed);
+    // A file that cannot be read is handled as a start handles it: kept aside, and off until
+    // the user turns it on.
+    assert_eq!(gate(&e.state, &broken, Call::Say, Via::Tools, T0 + MINUTE).unwrap_err().message, super::session::UNREADABLE);
+    assert_eq!(std::fs::read(e.file(&broken).with_extension("json.corrupt")).unwrap(), not_json);
+
+    // While MAX_AVATARS sessions have one, no record is made and the file stays as it is.
+    while list(&e.state).avatars.len() < MAX_AVATARS {
+        e.with_avatar();
+    }
+    let capped = e.agent(json!({ "avatar": true }));
+    std::fs::write(e.file(&capped), &stored).unwrap();
+    assert_eq!(gate(&e.state, &capped, Call::Say, Via::Tools, T0 + MINUTE).unwrap_err().status.as_u16(), 429);
+    assert_eq!(turn_on(&e.state, &capped, T0 + MINUTE).unwrap_err().status.as_u16(), 429);
+    e.event("terminal.created", &capped, T0 + MINUTE);
+    assert!(get(&e.state, &capped).is_err());
+    assert_eq!(std::fs::read(e.file(&capped)).unwrap(), stored);
+    // Once a place is free, the session's call takes it over.
+    on_event(&e.state, &Event { kind: "terminal.removed".into(), project_id: Some(e.pid.clone()), data: json!({ "id": by_call }), ts: T0 + 2 * MINUTE });
+    assert_eq!(gate(&e.state, &capped, Call::Say, Via::Tools, T0 + 2 * MINUTE).unwrap_err().message, TURNED_OFF);
+    assert!(e.avatar(&capped).designed);
+    assert_eq!(std::fs::read(e.file(&capped)).unwrap(), stored);
+}
+
+#[tokio::test]
+async fn a_stored_avatar_is_kept_for_a_terminal_only_while_its_meta_json_is_on_disk() {
+    let e = env().await;
+    let root = e.state.paths.data_dir.join("terminals");
+    let dir = e.state.paths.data_dir.join("avatar");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let stored = serde_json::to_vec(&json!({ "version": 1, "on": false, "name": "S", "designed": false, "look": null, "voice": {}, "via": "tools" })).unwrap();
+    // Gone: never loaded, and never to be (a directory without meta.json is what a server that
+    // died within seconds of starting a session leaves).
+    let gone = ["aaaaaaaaaaa1", "aaaaaaaaaaa2", "aaaaaaaaaaa3", "aaaaaaaaaaa4"];
+    std::fs::create_dir(root.join(gone[0])).unwrap();
+    std::fs::create_dir(root.join(gone[1])).unwrap();
+    std::fs::write(root.join(gone[1]).join("claude-settings.json"), b"{}").unwrap();
+    std::fs::write(root.join(gone[2]), b"a file, not a directory").unwrap();
+    // gone[3]: nothing at all.
+    // On disk, not loaded: its meta.json is there, and does not read (or names another id).
+    let waiting = ["aaaaaaaaaab1", "aaaaaaaaaab2"];
+    std::fs::create_dir(root.join(waiting[0])).unwrap();
+    std::fs::write(root.join(waiting[0]).join("meta.json"), b"{ broken").unwrap();
+    std::fs::create_dir(root.join(waiting[1])).unwrap();
+    std::fs::write(root.join(waiting[1]).join("meta.json"), b"{\"info\":{\"id\":\"bbbbbbbbbbbb\"}}").unwrap();
+    for id in gone.iter().chain(&waiting) {
+        std::fs::write(dir.join(format!("{id}.json")), &stored).unwrap();
+        std::fs::write(dir.join(format!("{id}.json.corrupt")), b"{").unwrap();
+    }
+    e.state.avatar.restart();
+    let (_, log) = logged(|| list(&e.state));
+    for id in gone {
+        assert!(!crate::terminals::on_disk(&e.state, id), "{id}");
+        assert!(!dir.join(format!("{id}.json")).exists() && !dir.join(format!("{id}.json.corrupt")).exists(), "{id}");
+        assert_eq!(log.matches(&format!("the stored avatar of terminal {id} is removed: the terminal is gone")).count(), 1, "{log}");
+    }
+    for id in waiting {
+        assert!(crate::terminals::on_disk(&e.state, id), "{id}");
+        assert_eq!(std::fs::read(dir.join(format!("{id}.json"))).unwrap(), stored, "{id}");
+        assert!(dir.join(format!("{id}.json.corrupt")).exists(), "{id}");
+        assert_eq!(log.matches(&format!("the stored avatar of terminal {id} is kept without a record")).count(), 1, "{log}");
+    }
+    // A terminal that is known but no agent session has no avatar: its file goes.
+    let shell = e.agent(json!({}));
+    e.change(&shell, |info| {
+        info.kind = crate::terminals::TerminalKind::Shell;
+        info.agent = None;
+    });
+    std::fs::write(e.file(&shell), &stored).unwrap();
+    e.state.avatar.restart();
+    let (_, log) = logged(|| list(&e.state));
+    assert!(!e.file(&shell).exists());
+    assert_eq!(log.matches(&format!("the stored avatar of terminal {shell} is removed: the terminal is not an agent session")).count(), 1, "{log}");
+
+    // Where it cannot be told whether meta.json is there (a directory nobody may look into), it
+    // counts as there: nothing is deleted because of a permission.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = root.join(waiting[0]);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        e.state.avatar.restart();
+        let _ = list(&e.state);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(dir.join(format!("{}.json", waiting[0])).exists());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        e.state.avatar.restart();
+        let _ = list(&e.state);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(dir.join(format!("{}.json", waiting[0])).exists() && dir.join(format!("{}.json", waiting[1])).exists());
+    }
+}
+
+#[tokio::test]
+async fn an_avatar_whose_stored_file_could_not_be_read_is_off_and_says_why() {
+    let e = env().await;
+    let tid = e.with_avatar();
+    e.design(&tid, figure(), T0).unwrap();
+    let file = e.file(&tid);
+    let good = std::fs::read(&file).unwrap();
+    let stored = || serde_json::from_slice::<Value>(&std::fs::read(&file).unwrap()).unwrap();
+    let say = |at: i64| gate(&e.state, &tid, Call::Say, Via::Tools, at).map(|_| ()).unwrap_err().message;
+    let unreadable = super::session::UNREADABLE;
+
+    // A file cut short: its switch cannot be read. The log names the cause and what the avatar is now.
+    std::fs::write(&file, &good[..good.len() / 2]).unwrap();
+    e.state.avatar.restart();
+    let (_, log) = logged(|| list(&e.state));
+    let expected = format!("avatar: {} is not JSON; it is kept as .corrupt, and the avatar is off until you turn it on (with the default look)", file.display());
+    assert_eq!(log.matches(&expected).count(), 1, "{log}");
+    assert!(!e.avatar(&tid).on && !e.avatar(&tid).designed);
+    // The session is told what happened, not that the user turned it off: every call, the
+    // status and a picture.
+    for call in [Call::Say, Call::Ask, Call::Act, Call::Design] {
+        assert_eq!(gate(&e.state, &tid, call, Via::Tools, T0 + MINUTE).map(|_| ()).unwrap_err().message, unreadable, "{call:?}");
+    }
+    let pass = gate(&e.state, &tid, Call::Status, Via::Tools, T0 + MINUTE).unwrap();
+    let report = status(&e.state, &pass, StatusRequest::default()).unwrap();
+    assert_eq!((report.note.as_str(), report.allowed), (unreadable, false));
+    assert_eq!(super::session::picture_look(&e.state, &tid).unwrap_err().message, unreadable);
+    // The file says so, and the next start says the same.
+    assert_eq!(stored()["unreadable"], json!(true));
+    e.state.avatar.restart();
+    assert_eq!(say(T0 + MINUTE), unreadable);
+    // A session that moves on takes it along as it is.
+    let moved = e.agent(json!({ "movedFrom": tid }));
+    e.event("terminal.created", &moved, T0 + MINUTE);
+    assert_eq!(gate(&e.state, &moved, Call::Say, Via::Tools, T0 + MINUTE).map(|_| ()).unwrap_err().message, unreadable);
+    // The user turns it on: from then on an avatar that is off is one the user turned off.
+    assert!(turn_on(&e.state, &tid, T0 + 2 * MINUTE).unwrap().info.on);
+    assert_eq!(stored().get("unreadable"), None);
+    turn_off(&e.state, &tid, T0 + 2 * MINUTE + 1).unwrap();
+    assert_eq!(say(T0 + 2 * MINUTE + 2), TURNED_OFF);
+    e.state.avatar.restart();
+    assert_eq!(say(T0 + 2 * MINUTE + 3), TURNED_OFF);
+
+    // Every cause has its words, and what the avatar is now follows the switch where it reads.
+    let value: Value = serde_json::from_slice(&good).unwrap();
+    let with = |on: bool| {
+        let mut v = value.clone();
+        v["on"] = json!(on);
+        v["look"]["nodes"] = json!("broken");
+        serde_json::to_vec(&v).unwrap()
+    };
+    let large = {
+        let mut v = value.clone();
+        v["padding"] = json!("x".repeat(MAX_STORED_BYTES as usize));
+        serde_json::to_vec(&v).unwrap()
+    };
+    let cases = [
+        (with(false), "does not hold a valid avatar; it is kept as .corrupt, and the avatar stays off as you left it (with the default look)".to_string(), Some(TURNED_OFF)),
+        (with(true), "does not hold a valid avatar; it is kept as .corrupt, and the avatar is on with the default look".to_string(), None),
+        (large.clone(), format!("is {} bytes, larger than the {MAX_STORED_BYTES} a stored avatar may have; it is kept as .corrupt, and the avatar is off until you turn it on (with the default look)", large.len()), Some(unreadable)),
+    ];
+    for (bytes, words, refused) in cases {
+        std::fs::write(&file, &bytes).unwrap();
+        e.state.avatar.restart();
+        let (_, log) = logged(|| list(&e.state));
+        assert_eq!(log.matches(&format!("avatar: {} {words}", file.display())).count(), 1, "{log}");
+        assert_eq!(gate(&e.state, &tid, Call::Say, Via::Tools, T0 + 3 * MINUTE).map(|_| ()).err().map(|err| err.message), refused.map(str::to_string), "{words}");
+        assert_eq!(stored().get("unreadable").is_some(), refused == Some(unreadable), "{words}");
+    }
+    // A file that cannot be opened (I/O, permissions) says which error it was.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&file, &good).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Not where permissions do not hold (root).
+        if std::fs::read(&file).is_err() {
+            e.state.avatar.restart();
+            let (_, log) = logged(|| list(&e.state));
+            assert_eq!(log.matches(&format!("avatar: {} could not be read (permission denied); it is kept as .corrupt, and the avatar is off until you turn it on", file.display())).count(), 1, "{log}");
+            assert_eq!(say(T0 + 4 * MINUTE), unreadable);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_stored_file_may_begin_with_a_byte_order_mark_and_hold_keys_this_build_does_not_know() {
+    let e = env().await;
+    let tid = e.with_avatar();
+    e.design(&tid, figure(), T0).unwrap();
+    let file = e.file(&tid);
+    let good = std::fs::read(&file).unwrap();
+    let value: Value = serde_json::from_slice(&good).unwrap();
+    // A byte order mark in front, which some editors write, is no part of the JSON.
+    let mut marked = b"\xEF\xBB\xBF".to_vec();
+    marked.extend_from_slice(&good);
+    std::fs::write(&file, &marked).unwrap();
+    e.state.avatar.restart();
+    let (_, log) = logged(|| list(&e.state));
+    let avatar = e.avatar(&tid);
+    assert!(avatar.on && avatar.designed && avatar.name == "Dot", "{log}");
+    assert!(!file.with_extension("json.corrupt").exists() && !log.contains("avatar:"), "{log}");
+    // A key the reader does not know is not looked at (as in earlier builds, which read a file
+    // with `unreadable` this way); `unreadable` itself is true or false, like `unbriefed`.
+    let mut later = value.clone();
+    later["writtenByALaterBuild"] = json!({ "any": 1 });
+    std::fs::write(&file, serde_json::to_vec(&later).unwrap()).unwrap();
+    e.state.avatar.restart();
+    assert!(e.avatar(&tid).designed && !file.with_extension("json.corrupt").exists());
+    let mut odd = value.clone();
+    odd["unreadable"] = json!("yes");
+    std::fs::write(&file, serde_json::to_vec(&odd).unwrap()).unwrap();
+    e.state.avatar.restart();
+    assert!(!e.avatar(&tid).designed && file.with_extension("json.corrupt").exists());
 }
 
 // ---------------------------------------------------------------- lifecycle
@@ -2662,6 +3126,58 @@ async fn a_brief_left_in_the_input_box_by_a_dialog_is_not_pasted_again() {
     let _ = next_paste(&mut pastes).await.expect("told when idle").done.send(Err(ApiError::conflict("that session is showing a prompt (permission, question or trust); answer it first")));
     settle().await;
     assert!(unbriefed(&e, &other));
+}
+
+#[tokio::test]
+async fn a_missed_created_event_is_made_up_for_when_the_records_are_compared() {
+    let e = env().await;
+    let mut pastes = e.pastes();
+    let old = e.with_avatar();
+    e.design(&old, figure(), T0).unwrap();
+    // A session that moved here (a restart, a failover, another account) and one started with
+    // the option, whose terminal.created events were missed (a lagged receiver).
+    let moved = e.agent(json!({ "movedFrom": old }));
+    let opted = e.agent(json!({ "avatar": true }));
+    let plain = e.agent(json!({}));
+    reconcile(&e.state, T0 + MINUTE);
+    // The moved one has its design, the other its own avatar, the plain one none.
+    let (was, now) = (e.avatar(&old), e.avatar(&moved));
+    assert_eq!((now.on, now.designed, now.name.as_str(), &now.look), (true, true, "Dot", &was.look));
+    assert!(e.avatar(&opted).on && !e.avatar(&opted).designed && e.file(&opted).exists());
+    assert!(get(&e.state, &plain).is_err() && !e.file(&plain).exists());
+    // The one started with the option was told with its first prompt: nothing is pasted for it.
+    // Of the one that moved nobody knows (avatars may have been off when it started, and then
+    // its first prompt held no brief): it is told once, now that it is idle.
+    assert!(!unbriefed(&e, &opted));
+    let paste = next_paste(&mut pastes).await.expect("the moved session is told");
+    assert!(paste.tid == moved && paste.prompt.contains(brief::BRIEF_MARK), "{}", paste.prompt);
+    let _ = paste.done.send(Ok(()));
+    settle().await;
+    assert!(!unbriefed(&e, &moved));
+    assert!(next_paste(&mut pastes).await.is_none());
+    e.say(&opted, "Here.", T0 + MINUTE).unwrap();
+    e.say(&moved, "Back again.", T0 + MINUTE).unwrap();
+    assert!(e.avatar(&moved).designed);
+
+    // A session that has ended and has only the option it was started with gets nothing made
+    // up: it was refused when it started, and room freed since is for sessions that start now.
+    let ended = e.agent(json!({ "avatar": true }));
+    e.change(&ended, |info| info.status = TerminalStatus::Exited);
+    reconcile(&e.state, T0 + MINUTE);
+    assert!(get(&e.state, &ended).is_err() && !e.file(&ended).exists());
+
+    // One whose first prompt was a command of its CLI was not told: it is idle, and is told once.
+    let later = e.agent(json!({ "avatar": true, "avatarBrief": "later" }));
+    reconcile(&e.state, T0 + 2 * MINUTE);
+    let paste = next_paste(&mut pastes).await.expect("told");
+    assert!(paste.tid == later && paste.prompt.contains(brief::BRIEF_MARK), "{}", paste.prompt);
+    let _ = paste.done.send(Ok(()));
+    settle().await;
+    assert!(!unbriefed(&e, &later));
+    reconcile(&e.state, T0 + 3 * MINUTE);
+    e.goes(&later, AgentState::Working, T0 + 4 * MINUTE);
+    e.goes(&later, AgentState::Idle, T0 + 5 * MINUTE);
+    assert!(next_paste(&mut pastes).await.is_none());
 }
 
 #[tokio::test]

@@ -5,7 +5,7 @@
 //! ask <text…> [--choice c]… [--no-free-text] [--wait <seconds>] | ask --again <askId> |
 //! ask --cancel | act <name> [--mode once|hold|loop] [--times n] | act --stop <name|all> |
 //! design <file|-> | picture [<file.png>] [--frames <animation> [--count n]] [--pose <file|->]`
-//! (with both, the strip is drawn with the pose's inputs held).
+//! (with both, the strip is drawn with the pose's inputs held, close up on its zoom).
 //!
 //! It runs inside a hosted session and finds its Workbench the way the status line helper does:
 //! `WORKBENCH_URL`, `WORKBENCH_TERMINAL_ID` and `WORKBENCH_AGENT_TOKEN` from the session's
@@ -20,7 +20,8 @@
 //!
 //! Output: the answer on standard output (text for guide, say, act and design; JSON for status
 //! and ask). `picture` writes the PNG to the file it names, or to one in the system's temporary directory,
-//! and prints where it is and what it shows. Exit status 0: done. 1: Workbench refused the call, or did not answer; the reason
+//! and prints where it is and what it shows (the server's caption, the words the tool says
+//! beside a picture). Exit status 0: done. 1: Workbench refused the call, or did not answer; the reason
 //! is on standard error and says what to do. 2: nothing was sent (not inside a session, no
 //! Workbench there, a file that cannot be read, a form this command does not have).
 
@@ -134,13 +135,13 @@ pub enum AvatarAction {
     Picture {
         /// The PNG file to write; without it, a file in the system's temporary directory.
         file: Option<String>,
-        /// One of the avatar's own animations, drawn as a row of moments from start to end.
+        /// One of the avatar's animations, or a built-in one its roles give (wave, cheer, nod …), drawn as a row of moments: a one-shot from start to end, a loop as one round.
         #[arg(long, value_name = "ANIMATION")]
         frames: Option<String>,
         /// With --frames: how many moments, 2 to 8 (default 6).
         #[arg(long)]
         count: Option<u32>,
-        /// A file with a pose as JSON, or - for standard input: {animation, at, lookX, lookY, turn, mouth, pace, held, zoom}. With --frames: its inputs are held in every moment.
+        /// A file with a pose as JSON, or - for standard input: {animation, at, lookX, lookY, turn, mouth, pace, held, zoom}. Without at: where the animation has moved furthest. With --frames: its inputs are held in every moment, and zoom shows each close up.
         #[arg(long, value_name = "FILE")]
         pose: Option<String>,
     },
@@ -206,7 +207,7 @@ struct Call {
 /// The file a picture goes into.
 struct PictureFile {
     path: String,
-    /// What the picture shows, for the line the command prints.
+    /// What the picture shows, for the line the command prints where the answer has no caption.
     shows: String,
     /// The session named no file: the path is this command's own, in the temporary directory.
     ours: bool,
@@ -333,10 +334,11 @@ impl Call {
                     std::env::temp_dir().join(format!("workbench-avatar-{terminal}-{kind}.png")).to_string_lossy().into_owned()
                 });
                 let mut body = Map::new();
+                // Said only where Workbench's answer has no caption of its own.
                 let shows = match (&frames, &pose) {
                     (Some(animation), Some(_)) => format!("moments of {animation}, from its start on the left to its end on the right, with the inputs of that pose held"),
                     (Some(animation), None) => format!("moments of {animation}, from its start on the left to its end on the right"),
-                    (None, Some(_)) => "your avatar in that pose, on the light panel and on the dark one; under each, at rest: at its resting size and as a face".to_string(),
+                    (None, Some(_)) => "your avatar in that pose, on the light panel and on the dark one; under each, the whole figure in that pose at its resting size, and its face (always at rest)".to_string(),
                     (None, None) => "your avatar at rest, on the light panel and on the dark one; under each, at its resting size and as a face".to_string(),
                 };
                 put(&mut body, "frames", frames);
@@ -395,10 +397,12 @@ fn put(body: &mut Map<String, Value>, key: &str, value: Option<String>) {
     }
 }
 
-/// An HTTP answer: its status and body.
+/// An HTTP answer: its status and body, and what a picture shows where the answer says it.
 struct Answer {
     status: u16,
     body: Vec<u8>,
+    /// The caption of a picture (`X-Workbench-Caption`, percent-encoded), decoded.
+    caption: Option<String>,
 }
 
 /// Why a call has no answer.
@@ -442,12 +446,13 @@ fn parse(raw: &[u8]) -> Option<Answer> {
     let head = std::str::from_utf8(&raw[..end]).ok()?;
     let mut lines = head.split("\r\n");
     let status: u16 = lines.next()?.split(' ').nth(1)?.parse().ok()?;
-    let (mut chunked, mut length) = (false, None);
+    let (mut chunked, mut length, mut caption) = (false, None, None);
     for line in lines {
         let Some((name, value)) = line.split_once(':') else { continue };
         match name.trim().to_ascii_lowercase().as_str() {
             "transfer-encoding" => chunked = value.to_ascii_lowercase().contains("chunked"),
             "content-length" => length = value.trim().parse::<usize>().ok(),
+            header if header == super::routes::CAPTION_HEADER => caption = Some(decoded(value.trim())),
             _ => {}
         }
     }
@@ -458,7 +463,13 @@ fn parse(raw: &[u8]) -> Option<Answer> {
         (false, Some(n)) => rest.get(..n)?.to_vec(),
         (false, None) => rest.to_vec(),
     };
-    Some(Answer { status, body })
+    Some(Answer { status, body, caption })
+}
+
+/// A percent-encoded header as one line of text: what does not decode is kept as it came, and
+/// a control character is a space.
+fn decoded(value: &str) -> String {
+    percent_encoding::percent_decode_str(value).decode_utf8_lossy().chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
 /// A chunked body put together.
@@ -526,7 +537,13 @@ fn run(action: AvatarAction, session: Result<Session, String>, input: &mut dyn R
             let _ = writeln!(err, "the picture was drawn but cannot be written to {}: {e}. Name a file of your own: picture <file.png>.", picture.path);
             return REFUSED;
         }
-        let _ = writeln!(out, "Picture written to {}: {}. Open it and look.", picture.path, picture.shows);
+        // The server's caption, the words the tool says beside the picture; without it, the
+        // command's own.
+        let shows = match &answer.caption {
+            Some(caption) => caption.strip_prefix("Picture: ").unwrap_or(caption).to_string(),
+            None => format!("{}.", picture.shows),
+        };
+        let _ = writeln!(out, "Picture written to {}: {shows} Open it and look.", picture.path);
         return 0;
     }
     let text = String::from_utf8_lossy(&answer.body);
@@ -667,6 +684,48 @@ pub(super) mod tests {
         assert_eq!(std::fs::read(&victim).unwrap(), b"\x89PNG five");
     }
 
+    /// `picture` prints the caption Workbench's answer carries, without its "Picture: ", and its
+    /// own words where the answer has none.
+    #[test]
+    fn a_picture_is_said_in_workbenchs_words_where_the_answer_has_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("p.png").to_string_lossy().into_owned();
+        for (header, said) in [
+            (Some("Picture: 6 moments of wave, Workbench%E2%80%99s built-in motion."), "6 moments of wave, Workbench\u{2019}s built-in motion."),
+            (None, "your avatar at rest, on the light panel and on the dark one; under each, at its resting size and as a face."),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let served = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                // The whole request, so that closing the connection resets nothing.
+                let (mut got, mut buf) = (Vec::new(), [0u8; 1024]);
+                loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    got.extend_from_slice(&buf[..n]);
+                    let Some(end) = got.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        if n == 0 {
+                            break;
+                        }
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&got[..end]).to_ascii_lowercase();
+                    let length = head.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+                    if n == 0 || got.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                let caption = header.map(|h| format!("X-Workbench-Caption: {h}\r\n")).unwrap_or_default();
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n{caption}Content-Length: 8\r\nConnection: close\r\n\r\n").as_bytes()).unwrap();
+                stream.write_all(b"\x89PNG\r\n\x1a\n").unwrap();
+            });
+            let (code, out, err) = run_with(parsed(&["picture", &file]).unwrap(), [Some(&url), Some(TID), Some(TOKEN)], "");
+            served.join().unwrap();
+            assert_eq!((code, out, err.as_str()), (0, format!("Picture written to {file}: {said} Open it and look.\n"), ""));
+            assert_eq!(std::fs::read(&file).unwrap(), b"\x89PNG\r\n\x1a\n");
+        }
+    }
+
     #[test]
     fn a_form_that_is_incomplete_sends_nothing() {
         let env = [Some("http://127.0.0.1:9"), Some(TID), Some(TOKEN)];
@@ -765,7 +824,13 @@ pub(super) mod tests {
         assert!(parse(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel").is_none());
         assert!(parse(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n").is_none() && parse(b"").is_none() && parse(b"garbage\r\n\r\n").is_none());
 
-        let refused = |body: &str| refusal(&Answer { status: 409, body: body.as_bytes().to_vec() });
+        // A picture's caption comes in a header of its own, percent-encoded.
+        let pictured = parse(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nX-Workbench-Caption: Picture: caf%C3%A9 at 50%25,%0Afine\r\nContent-Length: 4\r\n\r\nPNG!").unwrap();
+        assert_eq!((pictured.body.as_slice(), pictured.caption.as_deref()), (&b"PNG!"[..], Some("Picture: café at 50%, fine")));
+        assert_eq!(plain.caption, None);
+        assert_eq!(decoded("%FF%zz plain"), "\u{FFFD}%zz plain", "what does not decode stays as it came");
+
+        let refused = |body: &str| refusal(&Answer { status: 409, body: body.as_bytes().to_vec(), caption: None });
         assert_eq!(refused("{\"error\":{\"code\":\"conflict\",\"message\":\"The user turned this session's avatar off.\"}}"), "The user turned this session's avatar off.");
         assert_eq!(refused("length limit exceeded\nmore"), "Workbench answered 409: length limit exceeded");
         assert_eq!(refused(""), "Workbench answered 409");

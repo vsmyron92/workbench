@@ -1,0 +1,349 @@
+{
+  "viewBox": [
+    0,
+    0,
+    200,
+    200
+  ],
+  "nodes": [
+    {
+      "tag": "circle",
+      "id": "head",
+      "attrs": {
+        "cx": 100,
+        "cy": 80,
+        "fill": "#ffd8a8",
+        "r": 30
+      },
+      "box": [
+        70,
+        50,
+        60,
+        60
+      ]
+    },
+    {
+      "tag": "g",
+      "id": "paw",
+      "box": [
+        12,
+        172,
+        16,
+        16
+      ],
+      "children": [
+        {
+          "tag": "circle",
+          "attrs": {
+            "cx": 20,
+            "cy": 180,
+            "fillRef": "pawPaint",
+            "r": 8
+          }
+        },
+        {
+          "tag": "defs",
+          "children": [
+            {
+              "tag": "linearGradient",
+              "id": "pawPaint",
+              "box": [
+                0,
+                0,
+                0,
+                0
+              ],
+              "children": [
+                {
+                  "tag": "stop",
+                  "attrs": {
+                    "offset": 0,
+                    "stopColor": "#7048e8"
+                  }
+                },
+                {
+                  "tag": "stop",
+                  "attrs": {
+                    "offset": 1,
+                    "stopColor": "#7048e8"
+                  }
+                }
+              ]
+            },
+            {
+              "tag": "clipPath",
+              "id": "cut",
+              "box": [
+                90,
+                100,
+                10,
+                20
+              ],
+              "children": [
+                {
+                  "tag": "rect",
+                  "attrs": {
+                    "height": 20,
+                    "width": 10,
+                    "x": 90,
+                    "y": 100
+                  }
+                }
+              ]
+            },
+            {
+              "tag": "mask",
+              "id": "hole",
+              "box": [
+                0,
+                0,
+                200,
+                200
+              ],
+              "children": [
+                {
+                  "tag": "rect",
+                  "attrs": {
+                    "fill": "#ffffff",
+                    "height": 200,
+                    "width": 200,
+                    "x": 0,
+                    "y": 0
+                  }
+                },
+                {
+                  "tag": "circle",
+                  "attrs": {
+                    "cx": 100,
+                    "cy": 88,
+                    "fill": "#000000",
+                    "r": 3
+                  }
+                }
+              ]
+            },
+            {
+              "tag": "filter",
+              "id": "blur",
+              "box": [
+                0,
+                0,
+                0,
+                0
+              ],
+              "children": [
+                {
+                  "tag": "feGaussianBlur",
+                  "attrs": {
+                    "stdDeviation": "1"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "tag": "use",
+      "id": "pawNear",
+      "attrs": {
+        "useRef": "paw",
+        "x": 100,
+        "y": -70
+      },
+      "box": [
+        112,
+        102,
+        16,
+        16
+      ]
+    },
+    {
+      "tag": "rect",
+      "id": "badge",
+      "attrs": {
+        "clipPathRef": "cut",
+        "fill": "#2f9e44",
+        "height": 20,
+        "width": 20,
+        "x": 90,
+        "y": 100
+      },
+      "box": [
+        90,
+        100,
+        20,
+        20
+      ]
+    },
+    {
+      "tag": "use",
+      "id": "echo",
+      "attrs": {
+        "useRef": "badge",
+        "x": -80,
+        "y": 70
+      },
+      "box": [
+        10,
+        170,
+        20,
+        20
+      ]
+    },
+    {
+      "tag": "rect",
+      "id": "touch",
+      "attrs": {
+        "fill": "#1c7ed6",
+        "height": 20,
+        "width": 20,
+        "x": 130,
+        "y": 110
+      },
+      "box": [
+        130,
+        110,
+        20,
+        20
+      ]
+    },
+    {
+      "tag": "rect",
+      "id": "miss",
+      "attrs": {
+        "fill": "#f08c00",
+        "height": 10,
+        "width": 20,
+        "x": 130.001,
+        "y": 40
+      },
+      "box": [
+        130.001,
+        40,
+        20,
+        10
+      ]
+    },
+    {
+      "tag": "circle",
+      "id": "spark",
+      "attrs": {
+        "cx": 66,
+        "cy": 114,
+        "fill": "#fab005",
+        "r": 2
+      },
+      "box": [
+        64,
+        112,
+        4,
+        4
+      ]
+    },
+    {
+      "tag": "circle",
+      "id": "halo",
+      "attrs": {
+        "cx": 140,
+        "cy": 40,
+        "fill": "#ffe066",
+        "r": 6
+      },
+      "box": [
+        134,
+        34,
+        12,
+        12
+      ]
+    },
+    {
+      "tag": "ellipse",
+      "id": "ring",
+      "attrs": {
+        "cx": 100,
+        "cy": 44,
+        "fill": "none",
+        "rx": 30,
+        "ry": 6,
+        "stroke": "#fcc419",
+        "strokeWidth": 2
+      },
+      "box": [
+        70,
+        38,
+        60,
+        12
+      ]
+    },
+    {
+      "tag": "rect",
+      "attrs": {
+        "fill": "#495057",
+        "height": 4,
+        "width": 30,
+        "x": 134,
+        "y": 60
+      }
+    },
+    {
+      "tag": "circle",
+      "id": "nose",
+      "attrs": {
+        "cx": 100,
+        "cy": 88,
+        "fill": "#000000",
+        "maskRef": "hole",
+        "r": 8
+      },
+      "box": [
+        92,
+        80,
+        16,
+        16
+      ]
+    },
+    {
+      "tag": "circle",
+      "id": "cheek",
+      "attrs": {
+        "cx": 80,
+        "cy": 95,
+        "fill": "#ff8787",
+        "filterRef": "blur",
+        "r": 5
+      },
+      "box": [
+        75,
+        90,
+        10,
+        10
+      ]
+    }
+  ],
+  "pivots": {},
+  "roles": {
+    "head": "head"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": [],
+  "gaze": null,
+  "parents": {
+    "halo": "head",
+    "ring": "head"
+  },
+  "drives": [
+    {
+      "input": "turn",
+      "target": "halo",
+      "prop": "translateX",
+      "values": [
+        -6,
+        4,
+        14
+      ]
+    }
+  ]
+}

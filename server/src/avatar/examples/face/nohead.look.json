@@ -1,0 +1,51 @@
+{
+  "viewBox": [
+    0,
+    0,
+    120,
+    160
+  ],
+  "nodes": [
+    {
+      "tag": "circle",
+      "id": "dot",
+      "attrs": {
+        "cx": 60,
+        "cy": 60,
+        "fill": "#4dabf7",
+        "r": 30
+      },
+      "box": [
+        30,
+        30,
+        60,
+        60
+      ]
+    },
+    {
+      "tag": "rect",
+      "id": "far",
+      "attrs": {
+        "fill": "#f03e3e",
+        "height": 20,
+        "width": 20,
+        "x": 0,
+        "y": 140
+      },
+      "box": [
+        0,
+        140,
+        20,
+        20
+      ]
+    }
+  ],
+  "pivots": {},
+  "roles": {
+    "body": "dot"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": [],
+  "gaze": null
+}

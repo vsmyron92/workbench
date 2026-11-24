@@ -375,6 +375,22 @@ pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 40 && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
+/// Whether this terminal is on disk: its `meta.json` exists. True also for a terminal that was
+/// not loaded (its `meta.json` could not be read or parsed at this start), and when whether it
+/// exists cannot be told (a permission problem): it is not gone, and what other slices keep for
+/// it waits for the start that reads it again. A directory without `meta.json` (one a server that
+/// died within seconds of starting a session leaves) is never loaded: it is not on disk.
+pub(crate) fn on_disk(state: &AppState, id: &str) -> bool {
+    if !valid_id(id) {
+        return false;
+    }
+    let meta = store::term_dir(&state.paths.data_dir.join("terminals"), id).join("meta.json");
+    match std::fs::metadata(meta) {
+        Ok(_) => true,
+        Err(e) => !matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory),
+    }
+}
+
 fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
 }

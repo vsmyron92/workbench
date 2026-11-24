@@ -2,7 +2,7 @@
 // the user is writing answers.
 
 import { describe, expect, it } from 'vitest'
-import { CHOICE_GUARD_MS, CLOSE_AFTER_MS, EMPTY, HOLD_MOVE_PX, HOLD_MS, HOVER_DWELL_MS, MAX_DRAFT_CHARS, NOTE_MS, NO_DRAFT, THROUGH_MS, armGuard, askChanged, askedToHear, choicesReady, clicksThrough, closeByUser, edited, guardStep, guardWake, holding, noteEdited, noteStep, noteWake, noted, openByUser, planChoice, planSend, pressed, questionChanged, readingMs, replyNoted, replyShown, sentNote, settle, voiceForm, whyDisabled } from './bubble'
+import { CHOICE_GUARD_MS, CLOSE_AFTER_MS, EMPTY, HOLD_MOVE_PX, HOLD_MS, HOVER_DWELL_MS, IN_BOX, MAX_DRAFT_CHARS, NOTE_MS, NO_DRAFT, THROUGH_MS, armGuard, askChanged, askedToHear, choicesReady, clicksThrough, closeByUser, edited, guardStep, guardWake, holding, noteEdited, noteStep, noteWake, noted, openByUser, planChoice, planSend, pressed, questionChanged, readingMs, replyNoted, replyShown, sentNote, settle, voiceForm, whyDisabled } from './bubble'
 import type { Facts, Presenting, Scene } from './bubble'
 import { SHRINK_AFTER_MS } from './stage'
 import type { Candidate } from './stage'
@@ -811,10 +811,17 @@ describe('the reply draft', () => {
   })
 
   it('says "Sent." or that the session reads it at its next step', () => {
-    expect(sentNote('prompt', false)).toBe('sent')
-    expect(sentNote('prompt', true)).toBe('sentLater')
-    expect(sentNote('answer', true)).toBe('sent')
-    expect(sentNote('answer', false)).toBe('sent')
+    expect(sentNote('prompt', false)).toEqual({ kind: 'sent' })
+    expect(sentNote('prompt', true)).toEqual({ kind: 'sentLater' })
+    expect(sentNote('answer', true)).toEqual({ kind: 'sent' })
+    expect(sentNote('answer', false)).toEqual({ kind: 'sent' })
+  })
+
+  it('says where a reply a dialog left in the session\'s input box is, and what the user does now', () => {
+    const note = { kind: 'info', text: "It is in the session's input box: answer its dialog, then press Enter there." }
+    expect(IN_BOX).toBe(note.text)
+    expect(sentNote('inBox', false)).toEqual(note)
+    expect(sentNote('inBox', true)).toEqual(note)
   })
 
   it('offers the first voice choice before voice was chosen, and the form Hear it led to', () => {
@@ -930,6 +937,19 @@ describe('the notes about a reply', () => {
     const first = replyNoted({ kind: 'error' as const, text: 'x' }, 1900, { line: null, since: 1000 }, null)
     expect(first.line).toBeNull()
     expect(noteStep(first, 3000, said('L1', 2500))).toBeNull()
+  })
+
+  it('show where a reply a dialog left in the input box is, also after a line said while it went in', () => {
+    // Sent at 1000 with L1 on screen; the avatar began L2 at 1200; "inBox" came back at 1900.
+    const sentAt = { line: 'L1', since: 1000 }
+    const meanwhile = said('L2', 1200)
+    const inBox = replyNoted(sentNote('inBox', false), 1900, sentAt, meanwhile)
+    expect(inBox).toEqual({ note: { kind: 'info', text: IN_BOX }, at: 1900, since: 1900, line: 'L2' })
+    // The user has something to do: it waits for them, and goes with the next line or an edit.
+    expect(noteStep(inBox, 900_000, meanwhile)).toBe(inBox)
+    expect(noteWake(inBox)).toBeNull()
+    expect(noteStep(inBox, 5000, said('L3', 4000))).toBeNull()
+    expect(noteEdited(inBox)).toBeNull()
   })
 
   it('keep "The question changed." while the new question is said, and let the next line take it away', () => {

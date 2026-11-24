@@ -1,0 +1,26 @@
+{
+  "name": "Refs",
+  "svg": "<svg viewBox='0 0 200 200'><circle id='head' cx='100' cy='80' r='30' fill='#ffd8a8'/><g id='paw'><circle cx='20' cy='180' r='8' fill='url(#pawPaint)'/><defs><linearGradient id='pawPaint'><stop offset='0' stop-color='#7048e8'/><stop offset='1' stop-color='#7048e8'/></linearGradient><clipPath id='cut'><rect x='90' y='100' width='10' height='20'/></clipPath><mask id='hole'><rect x='0' y='0' width='200' height='200' fill='#ffffff'/><circle cx='100' cy='88' r='3' fill='#000000'/></mask><filter id='blur'><feGaussianBlur stdDeviation='1'/></filter></defs></g><use id='pawNear' href='#paw' x='100' y='-70'/><rect id='badge' x='90' y='100' width='20' height='20' fill='#2f9e44' clip-path='url(#cut)'/><use id='echo' href='#badge' x='-80' y='70'/><rect id='touch' x='130' y='110' width='20' height='20' fill='#1c7ed6'/><rect id='miss' x='130.001' y='40' width='20' height='10' fill='#f08c00'/><circle id='spark' cx='66' cy='114' r='2' fill='#fab005'/><circle id='halo' cx='140' cy='40' r='6' fill='#ffe066'/><ellipse id='ring' cx='100' cy='44' rx='30' ry='6' fill='none' stroke='#fcc419' stroke-width='2'/><rect x='134' y='60' width='30' height='4' fill='#495057'/><circle id='nose' cx='100' cy='88' r='8' fill='#000000' mask='url(#hole)'/><circle id='cheek' cx='80' cy='95' r='5' fill='#ff8787' filter='url(#blur)'/></svg>",
+  "parents": {
+    "halo": "head",
+    "ring": "head"
+  },
+  "roles": {
+    "head": "head"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": [],
+  "drives": [
+    {
+      "input": "turn",
+      "target": "halo",
+      "prop": "translateX",
+      "values": [
+        -6,
+        4,
+        14
+      ]
+    }
+  ]
+}

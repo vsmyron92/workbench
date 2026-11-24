@@ -211,9 +211,13 @@ pub enum Delivered {
     Answer,
     /// Pasted into the session as a prompt.
     Prompt,
+    /// Pasted into the session's input box and not sent: a dialog opened while it went in
+    /// (`terminals::PASTED_NOT_SENT`). The user sends it there once the dialog is answered.
+    #[serde(rename = "inBox")]
+    InBox,
 }
 
-/// The answer of the reply route: `{delivered: "answer" | "prompt"}`.
+/// The answer of the reply route: `{delivered: "answer" | "prompt" | "inBox"}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Replied {
     pub delivered: Delivered,
@@ -265,7 +269,9 @@ struct Pasting {
 /// With a call waiting for the answer, the answer goes to that call. Otherwise it is pasted into
 /// the session as a prompt, which may take several seconds (the ask path waits for a pause in
 /// typing); a second reply meanwhile is refused (409 `busy`), and a refusal of the session is
-/// passed on with nothing recorded and the question open as before.
+/// passed on with nothing recorded and the question open as before. A reply whose Enter was
+/// withheld because a dialog opened while it was pasted went in all the same: it stands in the
+/// session's input box, and is recorded as delivered there (`inBox`).
 pub async fn reply(state: &AppState, tid: &str, req: ReplyRequest, now: i64) -> ApiResult<Replied> {
     terminal(state, tid)?;
     let clock = Clock::at(now);
@@ -356,16 +362,20 @@ pub async fn reply(state: &AppState, tid: &str, req: ReplyRequest, now: i64) -> 
 
 /// Pastes a reply into the session, then records it: a line of the user, and the question it
 /// answers closed. A refusal of the session is passed on as it is: nothing is recorded, and the
-/// question is open as before.
+/// question is open as before. A reply left in the session's input box by a dialog that opened
+/// while it was pasted went in: it is recorded as any other, so a second reply does not paste
+/// the same answer beside it.
 async fn delivered(mut delivery: Delivery, pasting: Pasting, clock: Clock) -> ApiResult<Replied> {
     let (state, tid, number) = (delivery.state.clone(), delivery.tid.clone(), delivery.number);
     let pasted = deliver(&state, &tid, &pasting.prompt).await;
     delivery.over = true;
     let now = clock.now();
+    let in_box = matches!(&pasted, Err(e) if e.message == terminals::PASTED_NOT_SENT);
+    let (pasted, delivered) = if in_box { (Ok(()), Delivered::InBox) } else { (pasted, Delivered::Prompt) };
 
     let mut guard = state.avatar.inner.lock();
     let Inner { records, boot, line_count, .. } = &mut *guard;
-    let Some(rec) = records.get_mut(&tid) else { return pasted.map(|()| Replied { delivered: Delivered::Prompt }) };
+    let Some(rec) = records.get_mut(&tid) else { return pasted.map(|()| Replied { delivered }) };
     if rec.delivering.as_ref().is_some_and(|(n, _)| *n == number) {
         rec.delivering = None;
     }
@@ -382,7 +392,7 @@ async fn delivered(mut delivery: Delivery, pasting: Pasting, clock: Clock) -> Ap
             emit_ask(&state, &tid, rec, "answered", None);
         }
     }
-    Ok(Replied { delivered: Delivered::Prompt })
+    Ok(Replied { delivered })
 }
 
 /// The user dismisses the open question without answering: the call that waits learns so.
@@ -412,7 +422,8 @@ pub struct TurnedOn {
 }
 
 /// Gives the session an avatar, or turns its avatar on again. Only agent sessions have one, and
-/// at most [`MAX_AVATARS`] of them.
+/// at most [`MAX_AVATARS`] of them. A session without a record whose stored file is there gets
+/// that avatar back, turned on, with its design (`store::take_over`).
 pub fn turn_on(state: &AppState, tid: &str, now: i64) -> ApiResult<TurnedOn> {
     let info = terminal(state, tid)?;
     if info.kind != TerminalKind::Agent {
@@ -426,11 +437,20 @@ pub fn turn_on(state: &AppState, tid: &str, now: i64) -> ApiResult<TurnedOn> {
         if records.len() >= MAX_AVATARS {
             return Err(ApiError::new(axum::http::StatusCode::TOO_MANY_REQUESTS, "rate_limited", format!("{MAX_AVATARS} sessions have an avatar already: remove sessions you no longer need from the history first")));
         }
-        let mut rec = Record::new(&info, now);
-        // A session that was started with the option was told at its start, unless its first
-        // prompt was a command of its CLI (`"avatarBrief": "later"`, as `store::created` reads it).
-        rec.unbriefed = !started_with || later;
-        save(state, tid, &rec);
+        // A stored file of its own is this session's avatar, as a start reads it: turned on
+        // below with the design it holds, never replaced by a new one.
+        let rec = match super::store::take_over(state, &info, now) {
+            Some(rec) => rec,
+            None => {
+                let mut rec = Record::new(&info, now);
+                // A session that was started with the option was told at its start, unless its
+                // first prompt was a command of its CLI (`"avatarBrief": "later"`, as
+                // `store::created` reads it).
+                rec.unbriefed = !started_with || later;
+                save(state, tid, &rec);
+                rec
+            }
+        };
         emit_changed(state, tid, &rec);
         asked.retain(|id| id != tid);
         records.insert(tid.to_string(), rec);
@@ -438,6 +458,8 @@ pub fn turn_on(state: &AppState, tid: &str, now: i64) -> ApiResult<TurnedOn> {
     let rec = records.get_mut(tid).ok_or_else(no_avatar)?;
     if !rec.on {
         rec.on = true;
+        // The user chose now: whatever could not be read of the stored file before is settled.
+        rec.unreadable = false;
         // Turning an avatar on always tells the session, also one that was told of it before: at
         // its last call it read that the user turned the avatar off, and it would not use it again.
         rec.unbriefed = true;

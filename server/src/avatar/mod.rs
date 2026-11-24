@@ -17,6 +17,8 @@
 //! gaze and voice validated and normalised, boxes, the geometry lint; the wire types of a look;
 //! its limits), `preview` (a look drawn as a PNG in one pose or as moments of an animation, so a
 //! session sees what it drew: the stored look read again as untrusted data and rendered),
+//! `builtin` (Workbench's built-in motion made from a stored look's roles, boxes and pivots as the
+//! browser makes it: what a look gets, and what its pictures show by those names),
 //! `draw` (the process of its own that every picture is drawn in, with a limit on its memory and
 //! its time, so that no look can take the server down with the renderer),
 //! `store` (`AvatarState`: the records, their transcript, open question and leases in memory,
@@ -53,6 +55,7 @@
 //! MCP tools: `avatar_status`, `avatar_design`, `avatar_say`, `avatar_ask`, `avatar_act`.
 
 mod brief;
+mod builtin;
 mod cli;
 pub mod device;
 pub mod look;
@@ -65,6 +68,8 @@ pub mod store;
 mod tests;
 #[cfg(test)]
 mod tests_http;
+#[cfg(test)]
+mod tests_answers;
 pub mod text;
 mod tools;
 

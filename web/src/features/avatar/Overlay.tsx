@@ -517,8 +517,7 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
         if (!handle) return
         if (typeof act.stop === 'string') handle.stop(act.stop)
         else if (typeof act.play === 'string') {
-          handle.play(act.play, 'once', act.times)
-          otherGesture.current(act.terminalId)
+          if (handle.play(act.play, 'once', act.times)) otherGesture.current(act.terminalId)
         }
       }),
     [],
@@ -574,10 +573,20 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
   const gestured = useRef(new Map<string, number>())
   /** The area the posts were found in: when it changes they are found again. */
   const postsArea = useRef('')
-  /** Another gesture was played on a figure: a walk loop of its own, if it played one, is over (the engine plays one gesture at a time). */
-  const otherGesture = useRef((id: string) => {
+  /**
+   * Figures a gesture was played on that stand for it (`Walker.gesture`): each stays in the set while a gesture other than its
+   * own walk loop plays on it.
+   */
+  const gesturing = useRef(new Set<string>())
+  /**
+   * Another gesture was played on a figure: a walk loop of its own, if it played one, is over (the engine plays one gesture at a
+   * time), and it stands until the gesture is over, so that the gesture shows (`stand`; not for what a meeting asks of it, which
+   * plays while it stands with its partner).
+   */
+  const otherGesture = useRef((id: string, stand = true) => {
     ownWalk.current.delete(id)
     gestured.current.set(id, clock() + AFTER_GESTURE_MS)
+    if (stand) gesturing.current.add(id)
   })
   /** Sessions that finished since the last step: those near them cheer. */
   const finished = useRef<string[]>([])
@@ -946,9 +955,9 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     try {
       const answer = await avatarApi.reply(id, body)
       if (clearDraft) setDraft(id, NO_DRAFT)
-      put(setNotes, id, replyNoted<BubbleNote>({ kind: sentNote(answer.delivered, working) }, clock(), sent, lastLines.current.get(id)))
-      // The avatar nods once: the reply arrived.
-      if (handles.current.get(id)?.play('nod', 'once')) otherGesture.current(id)
+      put(setNotes, id, replyNoted<BubbleNote>(sentNote(answer.delivered, working), clock(), sent, lastLines.current.get(id)))
+      // The avatar nods once: the reply arrived. Not for one a dialog left in the session's input box.
+      if (answer.delivered !== 'inBox' && handles.current.get(id)?.play('nod', 'once')) otherGesture.current(id)
     } catch (e) {
       // A refusal is shown where the user is looking, not as a toast, and stays until the next line.
       put(setNotes, id, replyNoted<BubbleNote>({ kind: 'error', text: errorText(e) }, clock(), sent, lastLines.current.get(id)))
@@ -1175,7 +1184,8 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     // A gesture the session holds is its own: nothing is played over it.
     if (!handle || castByIdRef.current.get(cue.id)?.record.held != null) return
     const played = cue.kind === 'cheer' || cue.kind === 'nod' ? handle.play(cue.kind, 'once') : handle.play(designedAs(cue.id, 'greet') ? 'greet' : 'wave', 'once')
-    if (played) otherGesture.current(cue.id)
+    // A cheer may come while it walks: it stands for it. A greeting, an answer and a nod play while it stands in its meeting.
+    if (played) otherGesture.current(cue.id, cue.kind === 'cheer')
   }
   /** What the walkers keep out of: bubbles (an open one, the app's own line beside a figure) and the large figure. */
   const inTheWay = (now: number): Obstacle[] => {
@@ -1213,11 +1223,13 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     const at = pointer.current
     const before = new Map<string, Point>()
     for (const [id, b] of world.current.bodies) before.set(id, { x: b.x, y: b.y })
+    // One a gesture plays on stands until it is over (a held one: until it is stopped); its own walk loop does not count.
+    for (const id of gesturing.current) if (!handles.current.get(id)?.playing().some((name) => name !== 'walk')) gesturing.current.delete(id)
     step(world.current, {
       now,
       dt,
       bounds: area,
-      walkers: drag ? walkers.current.map((w) => (w.id === drag.id ? { ...w, held: { x: drag.x, y: drag.y } } : w)) : walkers.current,
+      walkers: drag || gesturing.current.size > 0 ? walkers.current.map((w) => (drag && w.id === drag.id ? { ...w, held: { x: drag.x, y: drag.y } } : gesturing.current.has(w.id) ? { ...w, gesture: true } : w)) : walkers.current,
       spawn: (_id, index) => spawnAt(index),
       obstacles: inTheWay(now),
       // A pointer that was parked somewhere stops nobody: only one that moved lately may be on its way to a figure.
@@ -1613,6 +1625,7 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     const onStage = new Set(visible)
     // What is kept per figure is kept for the figures on stage only: one that comes back starts afresh.
     for (const kept of [posts.current, written.current, lastStates.current, gestured.current, ownWalk.current]) for (const id of kept.keys()) if (!onStage.has(id)) kept.delete(id)
+    for (const id of gesturing.current) if (!onStage.has(id)) gesturing.current.delete(id)
     for (const id of posted.current) if (!onStage.has(id)) posted.current.delete(id)
     // The area changed (a tool window opened, the window was resized): where the bubbles have room is found again.
     const area = `${walkArea.left} ${walkArea.top} ${walkArea.right} ${walkArea.bottom}`

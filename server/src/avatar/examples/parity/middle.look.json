@@ -1,0 +1,98 @@
+{
+  "viewBox": [
+    0,
+    0,
+    200,
+    200
+  ],
+  "nodes": [
+    {
+      "tag": "g",
+      "id": "body",
+      "box": [
+        60,
+        60,
+        80,
+        110
+      ],
+      "children": [
+        {
+          "tag": "rect",
+          "attrs": {
+            "fill": "#3d85c6",
+            "height": 110,
+            "rx": 20,
+            "width": 80,
+            "x": 60,
+            "y": 60
+          }
+        }
+      ]
+    },
+    {
+      "tag": "g",
+      "attrs": {
+        "stroke": "#4a6a94",
+        "strokeLinecap": "round",
+        "strokeWidth": 9
+      },
+      "children": [
+        {
+          "tag": "line",
+          "id": "armL",
+          "attrs": {
+            "x1": 100,
+            "x2": 100,
+            "y1": 110,
+            "y2": 150
+          },
+          "box": [
+            100,
+            110,
+            0,
+            40
+          ]
+        },
+        {
+          "tag": "line",
+          "id": "armR",
+          "attrs": {
+            "x1": 90,
+            "x2": 110,
+            "y1": 110,
+            "y2": 150
+          },
+          "box": [
+            90,
+            110,
+            20,
+            40
+          ]
+        }
+      ]
+    }
+  ],
+  "pivots": {
+    "armL": [
+      100,
+      110
+    ],
+    "armR": [
+      90,
+      110
+    ],
+    "body": [
+      100,
+      170
+    ]
+  },
+  "roles": {
+    "body": "body",
+    "armL": "armL",
+    "armR": "armR"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": [],
+  "gaze": null
+}

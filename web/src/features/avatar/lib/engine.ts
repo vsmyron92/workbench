@@ -23,7 +23,8 @@
 //
 // React-free; the frame scheduler, the clock and randomness are passed in.
 
-import { builtinAnimations, gazeTravel, rolePart, stateList } from './builtin'
+import { builtinAnimations, gazeTravel, rolePart, stateList, undoLinear } from './builtin'
+import type { Linear } from './builtin'
 import {
   IDENTITY,
   LIMITS,
@@ -146,6 +147,8 @@ export interface FigureHandle {
   /** Plays an animation as a gesture. false: the name means nothing for this look, or the figure no longer animates. */
   play(name: string, mode?: 'once' | 'hold' | 'loop', times?: number): boolean
   stop(name: string | 'all'): void
+  /** The names of the gestures that play now: played and not stopped, a `once` one until it has played and given way. Empty once the figure no longer animates. */
+  playing(): string[]
   /** `read` gives the openness wanted now, 0 to 1, or a negative number while no line of this avatar is presented. */
   setMouth(read: (() => number) | null): void
   /**
@@ -179,7 +182,7 @@ export interface Engine {
 
 /** A state animation fades in and out over this, and so does a finished one-shot's leftover pose. */
 export const STATE_FADE_MS = 200
-/** A gesture's values replace the state's over this, and give way again over this. */
+/** A gesture's values replace the state's over this (a short one over a third of its pass, `blendOf`), and give way again over this. */
 export const GESTURE_BLEND_MS = 150
 /** The mouth follows its target with this time constant, and stays applied this long after a line. */
 export const MOUTH_EASE_MS = 60
@@ -241,6 +244,14 @@ interface CAnim {
   maxDelayMs: number
 }
 
+/**
+ * How long a gesture of this animation blends in: `GESTURE_BLEND_MS`, or a third of one pass
+ * when that is shorter, so that a short one (a blink of 0.18 s) still reaches its keyframes.
+ * It gives way over the whole `GESTURE_BLEND_MS` when it has played or was stopped: that
+ * comes after what it plays, which it takes nothing from.
+ */
+const blendOf = (anim: CAnim): number => Math.min(GESTURE_BLEND_MS, anim.durationMs / 3)
+
 /** A drive: a track sampled at its input's position instead of at a moment. */
 interface CDrive {
   input: DriveInput
@@ -292,6 +303,8 @@ interface Full {
   mouth: readonly CMouth[]
   gazeTarget: string | null
   gazeTravel: number
+  /** The gaze is a vector on screen; this undoes the pupils' own matrix to the viewBox for it (`undoLinear`), null: used as it is. */
+  gazeUndo: Linear | null
   /** The parts that can cover much of the figure (`largeParts`): the frame loop limits every channel of theirs, not only their paint. */
   large: ReadonlySet<string>
   /** The pose with nothing playing: the artwork's own values, as the engine writes them back. */
@@ -862,6 +875,8 @@ function build(look: Look): Full {
     mouth,
     gazeTarget,
     gazeTravel: travel,
+    // The pupils move inside their own transform: undone through it, a mirrored figure looks where it is asked to.
+    gazeUndo: gazeTarget ? undoLinear(lookIndex(look).get(gazeTarget)?.matrix) : null,
     large: largeParts(b, anims, drives, mouth, skeleton),
     rest: new Map(),
   }
@@ -1201,8 +1216,9 @@ function corrections(full: Full, skeleton: Skeleton, index: ReadonlyMap<string, 
  * - State clips add up: translations, rotations and skews add, scales multiply, and for
  *   every other prop the clip started last wins. A weight `w` applies as `t*w`, `r*w` and
  *   `1 + (s-1)*w`.
- * - A gesture's value replaces that sum for the props it animates, blended in over 150 ms
- *   and, when a `once` gesture has played, out again over 150 ms.
+ * - A gesture's value replaces that sum for the props it animates, blended in over 150 ms (a
+ *   gesture shorter than 450 ms over a third of its pass, `blendOf`) and, when a `once`
+ *   gesture has played, out again over 150 ms.
  * - A one-shot in a state list leaves its relative props fading for 200 ms after its last frame.
  * - With `inputs`, the look's drives come next, each at its input's position: translations,
  *   rotations and skews add, scales multiply, every other prop is the drive's.
@@ -1304,6 +1320,7 @@ function accumulate(full: Full, clips: readonly Clip[], tMs: number, inputs?: Sa
     const lt = tMs - clip.startMs
     const passes = clip.mode === 'once' ? Math.min(Math.max(isNum(clip.times) ? Math.floor(clip.times) : 1, 1), 5) : 1
     const playMs = anim.durationMs * passes
+    const blend = blendOf(anim)
     let out150 = 1
     if (clip.mode === 'once') {
       const end = playMs + anim.maxDelayMs
@@ -1323,7 +1340,7 @@ function accumulate(full: Full, clips: readonly Clip[], tMs: number, inputs?: Sa
       else if (local >= playMs) p = 1
       else if (clip.mode === 'hold') p = local / anim.durationMs
       else p = frac(local / anim.durationMs)
-      const w = weight * out150 * (reduced ? 1 : clamp01(local / GESTURE_BLEND_MS))
+      const w = weight * out150 * (reduced ? 1 : clamp01(local / blend))
       if (w <= 0) continue
       for (const [id, frames] of track.frames) {
         const v = valueAt(track, frames, p)
@@ -1384,8 +1401,12 @@ function accumulate(full: Full, clips: readonly Clip[], tMs: number, inputs?: Sa
     const length = Math.hypot(gaze[0], gaze[1])
     const k = full.gazeTravel / (length > 1 ? length : 1)
     const a = acc(full.gazeTarget)
-    a.ch[0] += gaze[0] * k
-    a.ch[1] += gaze[1] * k
+    // Where it looks is on screen; the pupils' translation is written inside their own transform.
+    const u = full.gazeUndo
+    const x = u ? u[0] * gaze[0] + u[2] * gaze[1] : gaze[0]
+    const y = u ? u[1] * gaze[0] + u[3] * gaze[1] : gaze[1]
+    a.ch[0] += x * k
+    a.ch[1] += y * k
   }
   return accs
 }
@@ -1519,10 +1540,36 @@ function repose(nodes: ReadonlyMap<string, EngineNode>, from: ReadonlyMap<string
  * gaps of 150 ms, longer than a second, so no second holds more than seven turns, and between
  * seven turns lie six complete changes: at most three complete back-and-forth flashes in any
  * second, the usual threshold.
+ *
+ * A colour (fill, stroke) also turns when its brightness turns back, whatever its channels
+ * do: blended in sRGB, a change from one colour to another can dip below the darker of the
+ * two on its way, and a gesture blended over a colour that moves can make its brightness turn
+ * while its channels keep their way. Its brightness turns back once it has come back more
+ * than LUMA_BACK from the furthest it went since its last turn: a smooth change of hue dips a
+ * little near its keyframes, and that is no flash. Such a turn is dated when the brightness
+ * was furthest (or REVERSAL_MS after the turn before, if that is later), so a slow swing back
+ * does not crowd the next turn; a turn of the channels is dated at its frame. Both share one
+ * clock, so the count above still holds for the brightness too: between two turns it comes
+ * back no more than LUMA_BACK, a turn of the channels alone starts it afresh no more than
+ * LUMA_BACK back, so every turning point of it that a flash counts (a tenth either side) has
+ * a turn of its own, dated while the brightness was within LUMA_BACK of that point.
  */
 export const REVERSAL_MS = 150
 /** A change this small is no change: rounding, not motion. */
 const STILL_DELTA = 1e-9
+/** A change of a colour's relative luminance this small does not count as a direction of its brightness. */
+const LUMA_STILL = 1e-4
+/**
+ * How far a colour's relative luminance comes back from its extreme before its brightness
+ * turns: under half of a flash's tenth, as a colour written in whole channels is up to 0.0045
+ * off, and two of these and that rounding twice stay under a tenth.
+ */
+const LUMA_BACK = 0.045
+
+/** One colour channel (a share of 255) in linear light. */
+const linear = (v: number): number => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)
+/** The relative luminance of a colour lane's numbers (red, green and blue as shares of 255; sRGB, Rec. 709 weights). */
+const lumaOf = (n: readonly number[]): number => 0.2126 * linear(n[0]) + 0.7152 * linear(n[1]) + 0.0722 * linear(n[2])
 
 /** Whether the frame loop limits every channel of this part of a compiled look, not only its paint (see `largeParts`). false for a part the look never moves or changes. */
 export function isLarge(c: Compiled, id: string): boolean {
@@ -1547,8 +1594,14 @@ interface Lane {
   written: Abs | undefined
   /** The change accepted last; null: none yet, or the last one was to or from no value. */
   step: readonly number[] | null
-  /** When it last turned back, or went to or from no value. */
+  /** When it last turned back (a turn of its brightness alone: when it was furthest, see REVERSAL_MS), or went to or from no value. */
   turnAt: number
+  /** A colour's brightness: the way it goes (1 brighter, -1 darker), 0 none yet (also after a change to or from no value, or a turn of its channels alone). Always 0 for other lanes. */
+  ySign: number
+  /** A colour's relative luminance at the extreme of the way it goes; with `ySign` 0, where it was at rest or at its last turn. Always 0 for other lanes. */
+  yExt: number
+  /** When it was at `yExt`. */
+  yExtAt: number
 }
 
 const unitColour = (c: Rgba): number[] => [c[0] / 255, c[1] / 255, c[2] / 255, c[3]]
@@ -1566,6 +1619,23 @@ function laneTarget(lane: Lane, accs: ReadonlyMap<string, Acc>): { nums: readonl
   return { nums: rest.shape ? rest.nums : null, abs: undefined, shape: rest.shape }
 }
 
+/** The relative luminance of a colour lane's numbers; 0 for no value and for other lanes. */
+const lumaAt = (lane: Lane, nums: readonly number[] | null): number => (nums !== null && lane.prop !== null && isColourProp(lane.prop) ? lumaOf(nums) : 0)
+
+/** A colour lane's brightness after a change that is no turn: the way it goes once it has moved, and how far it went that way and when. */
+function followBrightness(lane: Lane, y: number, now: number): void {
+  if (lane.ySign === 0) {
+    if (Math.abs(y - lane.yExt) > LUMA_STILL) {
+      lane.ySign = Math.sign(y - lane.yExt)
+      lane.yExt = y
+      lane.yExtAt = now
+    }
+  } else if (lane.ySign * (y - lane.yExt) > 0) {
+    lane.yExt = y
+    lane.yExtAt = now
+  }
+}
+
 /**
  * The limiter of one figure: called with the numbers of each frame, before they are settled,
  * it puts back what a lane held where the lane may not change yet. Its lanes: the paint
@@ -1578,13 +1648,14 @@ function createLimiter(full: Full): (accs: Map<string, Acc>, now: number) => voi
   const none = new Map<string, Acc>()
   for (const [id, target] of full.targets) {
     const large = full.large.has(id)
-    if (large && target.moves) for (let ch = 0; ch < REST_CHANNELS.length; ch++) lanes.push({ id, ch, prop: null, rest: null, last: [REST_CHANNELS[ch]], shape: null, written: undefined, step: null, turnAt: Number.NEGATIVE_INFINITY })
+    if (large && target.moves) for (let ch = 0; ch < REST_CHANNELS.length; ch++) lanes.push({ id, ch, prop: null, rest: null, last: [REST_CHANNELS[ch]], shape: null, written: undefined, step: null, turnAt: Number.NEGATIVE_INFINITY, ySign: 0, yExt: 0, yExtAt: 0 })
     for (const [prop, rest] of target.rest) {
       if (!large && !isPaintProp(prop)) continue
-      const lane: Lane = { id, ch: -1, prop, rest, last: null, shape: null, written: undefined, step: null, turnAt: Number.NEGATIVE_INFINITY }
+      const lane: Lane = { id, ch: -1, prop, rest, last: null, shape: null, written: undefined, step: null, turnAt: Number.NEGATIVE_INFINITY, ySign: 0, yExt: 0, yExtAt: 0 }
       const at = laneTarget(lane, none)
       lane.last = at.nums
       lane.shape = at.shape
+      lane.yExt = lumaAt(lane, at.nums)
       lanes.push(lane)
     }
   }
@@ -1609,6 +1680,9 @@ function createLimiter(full: Full): (accs: Map<string, Acc>, now: number) => voi
       if (now - lane.turnAt < REVERSAL_MS) return false
       lane.turnAt = now
       take(null)
+      lane.ySign = 0
+      lane.yExt = lumaAt(lane, next.nums)
+      lane.yExtAt = now
       return true
     }
     const delta: number[] = []
@@ -1624,14 +1698,23 @@ function createLimiter(full: Full): (accs: Map<string, Acc>, now: number) => voi
       take(lane.step)
       return true
     }
-    if (lane.step === null || along >= 0) {
+    // A colour's brightness: come back more than LUMA_BACK from the furthest it went, it turns, whatever its channels do.
+    const y = lumaAt(lane, next.nums)
+    const yTurns = lane.ySign * (lane.yExt - y) > LUMA_BACK
+    const turns = !(lane.step === null || along >= 0)
+    if (!turns && !yTurns) {
       take(delta)
+      followBrightness(lane, y, now)
       return true
     }
-    // It turns back.
+    // It turns back: its channels now, its brightness alone when it was furthest.
     if (now - lane.turnAt < REVERSAL_MS) return false
-    lane.turnAt = now
+    lane.turnAt = turns ? now : Math.max(lane.yExtAt, lane.turnAt + REVERSAL_MS)
     take(delta)
+    // Its brightness goes the other way from here after it turned; after a turn of the channels alone, either way from here.
+    lane.ySign = yTurns ? -lane.ySign : 0
+    lane.yExt = y
+    lane.yExtAt = now
     return true
   }
 
@@ -1673,7 +1756,7 @@ interface Gesture {
   mode: 'once' | 'hold' | 'loop'
   times: number
   startMs: number
-  /** When it was told to stop (it then gives way over 150 ms). */
+  /** When it was told to stop (it then gives way over GESTURE_BLEND_MS). */
   stopAt: number | null
 }
 
@@ -1687,6 +1770,7 @@ const INERT: FigureHandle = Object.freeze({
   setState: () => {},
   play: () => false,
   stop: () => {},
+  playing: () => [],
   setMouth: () => {},
   setGaze: () => {},
   setInputs: () => {},
@@ -1827,6 +1911,12 @@ export function createEngine(host: EngineHost): Engine {
     let frames = 0
 
     const weightOf = (m: Member, now: number) => m.from + (m.to - m.from) * clamp01((now - m.fadeAt) / STATE_FADE_MS)
+    /** Whether a gesture still shows at `now`: a stopped one while it gives way, one played once until it has played and given way. */
+    const shows = (g: Gesture, anim: CAnim, now: number): boolean => {
+      if (g.stopAt !== null) return now - g.stopAt < GESTURE_BLEND_MS && !reduced
+      if (g.mode !== 'once') return true
+      return now - g.startMs <= anim.durationMs * g.times + anim.maxDelayMs + (reduced ? 0 : GESTURE_BLEND_MS)
+    }
 
     const write = (poses: ReadonlyMap<string, Pose>, careful: boolean) => {
       for (const [id, pose] of poses) {
@@ -1892,14 +1982,12 @@ export function createEngine(host: EngineHost): Engine {
             clips.push({ name: m.name, startMs: m.startMs, weight: w, mode: 'state', times: 1 })
           }
 
-          // Gestures: a stopped one gives way over 150 ms, a played one is dropped.
+          // Gestures: a stopped one gives way (over GESTURE_BLEND_MS), a played one is dropped.
           gestures = gestures.filter((g) => {
             const anim = full.anims.get(g.name)
             if (!anim) return false
             if (g.stopAt === null && g.mode !== 'once' && now - g.startMs > HOLD_MAX_MS) g.stopAt = now
-            if (g.stopAt !== null) return now - g.stopAt < GESTURE_BLEND_MS && !reduced
-            if (g.mode !== 'once') return true
-            return now - g.startMs <= anim.durationMs * g.times + anim.maxDelayMs + (reduced ? 0 : GESTURE_BLEND_MS)
+            return shows(g, anim, now)
           })
           for (const g of gestures) clips.push({ name: g.name, startMs: g.startMs, weight: g.stopAt === null ? 1 : 1 - (now - g.stopAt) / GESTURE_BLEND_MS, mode: g.mode, times: g.times })
 
@@ -2086,6 +2174,15 @@ export function createEngine(host: EngineHost): Engine {
       },
       stop(name) {
         for (const g of gestures) if (g.stopAt === null && (name === 'all' || g.name === name)) g.stopAt = clock
+      },
+      playing() {
+        if (stopped) return []
+        return gestures
+          .filter((g) => {
+            const anim = full.anims.get(g.name)
+            return g.stopAt === null && anim !== undefined && shows(g, anim, clock)
+          })
+          .map((g) => g.name)
       },
       setMouth(read) {
         mouthRead = typeof read === 'function' ? read : null

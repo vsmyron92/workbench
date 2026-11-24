@@ -1676,6 +1676,8 @@ interface Drawing {
   /** Elements still to draw: a `use` takes what it shows as well. */
   left: number
   shown: ReadonlyMap<string, Shown>
+  /** Elements drawn out of sight, each inside a `defs` of its own (`faceParts`). */
+  leave?: ReadonlySet<LookNode>
 }
 
 /** Every element with an id and what it holds, walked within the limits whatever the data. */
@@ -1784,26 +1786,36 @@ function renderNodes(nodes: unknown, parent: Tag | 'root', inMask: boolean, dept
       if (props.fontSize === undefined) props.fontSize = TEXT_SIZE
       // A text node, and never more of it than a checked look could hold.
       const text = typeof node.text === 'string' ? node.text : ''
-      out.push(createElement(tag, props, text.length > LIMITS.textChars ? Array.from(text.slice(0, LIMITS.textChars * 2)).slice(0, LIMITS.textChars).join('') : text))
+      out.push(outOfSight(createElement(tag, props, text.length > LIMITS.textChars ? Array.from(text.slice(0, LIMITS.textChars * 2)).slice(0, LIMITS.textChars).join('') : text), node, i, d))
       continue
     }
     const children = renderNodes(node.children, tag, inMask || tag === 'mask', depth + 1, d)
-    out.push(children.length > 0 ? createElement(tag, props, children) : createElement(tag, props))
+    out.push(outOfSight(children.length > 0 ? createElement(tag, props, children) : createElement(tag, props), node, i, d))
   }
   return out
+}
+
+/**
+ * An element that is left out (`d.leave`) inside a `defs` of its own: there it draws nothing,
+ * and its ids stay, so a `use` still shows it and a gradient, clip or mask in it still paints
+ * what refers to it.
+ */
+function outOfSight(element: ReactNode, node: LookNode, key: number, d: Drawing): ReactNode {
+  return d.leave?.has(node) ? createElement('defs', { key }, element) : element
 }
 
 /**
  * The children of the app's `<svg>` for a look. An id `X` renders as `idPrefix + X`, a
  * reference as `url(#idPrefix + X)` (and a `use` as `href="#idPrefix + X"`), the prefix as
  * `cleanIdPrefix` gives it. Tags and attribute names come from the tables in this file and
- * from nowhere else; text is a text node.
+ * from nowhere else; text is a text node. What `leave` holds (`faceParts`, for the small face) is
+ * drawn out of sight, inside a `defs` of its own.
  */
-export function lookElements(look: Look, idPrefix: string): ReactNode {
+export function lookElements(look: Look, idPrefix: string, leave?: ReadonlySet<LookNode>): ReactNode {
   const nodes: unknown = look?.nodes
   const shown = new Map<string, Shown>()
   measure(nodes, 1, shown, { left: LIMITS.elements })
-  return renderNodes(nodes, 'root', false, 1, { prefix: cleanIdPrefix(idPrefix), width: viewBoxOf(look)[2], left: LIMITS.elements, shown })
+  return renderNodes(nodes, 'root', false, 1, { prefix: cleanIdPrefix(idPrefix), width: viewBoxOf(look)[2], left: LIMITS.elements, shown, leave })
 }
 
 // ---------------------------------------------------------------- geometry of a look
@@ -1890,4 +1902,64 @@ export function faceViewBox(look: Look): [number, number, number, number] {
   const y = clamp(head[1] + head[3] / 2, view[1], view[3])
   const round = (n: number) => Math.round(n * 1000) / 1000
   return [round(x), round(y), round(side), round(side)]
+}
+
+/** What a small face leaves out, per look object. */
+const FACE_PARTS = new WeakMap<Look, ReadonlySet<LookNode>>()
+const NOTHING_LEFT_OUT: ReadonlySet<LookNode> = new Set()
+
+/**
+ * What a small face leaves out: the parts its square would only cut, such as the tip of a tail
+ * beside the head. A part is left out when its rest box neither meets the head's rest box
+ * (boxes that touch meet) nor lies wholly inside the face's square (`faceViewBox`). The head,
+ * what it is drawn inside and what it holds are never left out. Whole subtrees are judged:
+ * from the root, an element that holds the head is entered and its children are judged one by
+ * one; any other is kept or left out as a whole by its own box (a group's box spans all it
+ * holds). What has no box stays: `defs`, gradients, clips, masks, filters and an element
+ * without an id. Edges are compared at three decimals, as the square is rounded. A look
+ * without a head (its face is the whole viewBox) has nothing left out. The server's pictures
+ * leave out the same (preview.rs `face_left_out`); `lookElements` draws them inside a `defs`.
+ */
+export function faceParts(look: Look): ReadonlySet<LookNode> {
+  if (typeof look !== 'object' || look === null) return NOTHING_LEFT_OUT
+  const cached = FACE_PARTS.get(look)
+  if (cached) return cached
+  const out = new Set<LookNode>()
+  FACE_PARTS.set(look, out)
+  const index = lookIndex(look)
+  const headId: unknown = look.roles?.head
+  const entry = isId(headId) ? index.get(headId) : undefined
+  const head = isId(headId) ? rootBox(look, headId) : null
+  if (!entry || entry.inert || !ANIMATABLE.has(entry.tag) || !head || !(head[2] > 0) || !(head[3] > 0)) return out
+  const holders: ReadonlySet<LookNode> = new Set(entry.ancestors)
+  const [x, y, side] = faceViewBox(look)
+  const square = edges([x, y, side, side])
+  const near = edges(head)
+  const walk = (nodes: unknown, depth: number) => {
+    if (!Array.isArray(nodes) || depth > LIMITS.depth) return
+    for (const item of nodes) {
+      const node = item as LookNode | null
+      if (typeof node !== 'object' || node === null || node === entry.node) continue
+      if (holders.has(node)) {
+        walk(node.children, depth + 1)
+        continue
+      }
+      const tag = typeof node.tag === 'string' ? TAGS.get(node.tag) : undefined
+      if (!tag || !ANIMATABLE.has(tag) || !isId(node.id) || index.get(node.id)?.node !== node) continue
+      const box = rootBox(look, node.id)
+      if (!box) continue
+      const b = edges(box)
+      const meets = b[0] <= near[2] && near[0] <= b[2] && b[1] <= near[3] && near[1] <= b[3]
+      const inside = b[0] >= square[0] && b[1] >= square[1] && b[2] <= square[2] && b[3] <= square[3]
+      if (!meets && !inside) out.add(node)
+    }
+  }
+  walk(look.nodes, 1)
+  return out
+}
+
+/** A box's edges, left, top, right and bottom, at three decimals as `faceViewBox` rounds: what `faceParts` compares. */
+function edges(box: Readonly<Box>): Box {
+  const round = (n: number) => Math.round(n * 1000) / 1000
+  return [round(box[0]), round(box[1]), round(box[0] + box[2]), round(box[1] + box[3])]
 }

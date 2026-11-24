@@ -1,0 +1,632 @@
+{
+  "name": "Fox",
+  "svg": "<svg viewBox='0 0 200 200'><defs><filter id='soft' height='3' width='1.4' x='-0.2' y='-1'><feGaussianBlur stdDeviation='3'/></filter><linearGradient id='fur' x1='0' x2='0' y1='0' y2='1'><stop offset='0' stop-color='#f28c48'/><stop offset='1' stop-color='#dc6a2c'/></linearGradient><mask id='scarfCut'><path d='M 80 112 Q 100 122 120 112 L 120 120 Q 100 130 80 120 Z' fill='#ffffff'/></mask></defs><ellipse cx='100' cy='172' fill='#000000' filter='url(#soft)' opacity='0.22' rx='40' ry='5'/><g id='side' stroke='#7a3e1d' stroke-linejoin='round' stroke-width='3'><g id='sideIn'><g id='sideTail' fill='none' stroke-linecap='round'><path d='M 64 132 Q 34 130 38 98' stroke='#7a3e1d' stroke-width='23'/><path d='M 64 132 Q 34 130 38 98' stroke='#e8793a' stroke-width='18'/><path d='M 37 107 L 38 98' stroke='#fbead2' stroke-width='18'/></g><g stroke='#b9551b' stroke-linecap='round' stroke-width='9'><line id='legB1' x1='74' x2='74' y1='148' y2='166'/><line id='legF1' x1='108' x2='108' y1='148' y2='166'/></g><ellipse cx='92' cy='134' fill='url(#fur)' rx='32' ry='19'/><path d='M 70 142 Q 92 154 114 142 Q 92 150 70 142 Z' fill='#fbead2' stroke='none'/><g stroke='#e8793a' stroke-linecap='round' stroke-width='9'><line id='legB2' x1='82' x2='82' y1='148' y2='166'/><line id='legF2' x1='116' x2='116' y1='148' y2='166'/></g><g id='sideHead'><polygon fill='#c9601f' points='112 82 112 58 128 74'/><path d='M 106 98 Q 106 74 128 74 Q 144 74 150 88 L 166 99 Q 168 108 156 110 Q 146 119 130 119 Q 108 117 106 98 Z' fill='url(#fur)'/><polygon fill='#e8793a' points='120 82 124 54 144 76'/><path d='M 122 106 Q 140 100 156 110 Q 146 119 130 119 Q 122 116 122 106 Z' fill='#fbead2' stroke='none'/><path id='sideMouth' d='M 148 112 Q 156 111 163 106 Q 156 112 148 112 Z' fill='#7a2233' stroke='none'/><path d='M 108 112 Q 118 124 130 120 L 128 129 Q 114 132 104 119 Z' fill='#2a9d8f'/><ellipse cx='138' cy='92' fill='#ffffff' rx='5.5' ry='6.5' stroke-width='2'/><circle id='sidePupil' cx='140' cy='93' fill='#2b1a10' r='3' stroke='none'/><ellipse cx='165' cy='101' fill='#2b1a10' rx='4' ry='3' stroke='none'/></g></g></g><g id='front' stroke='#7a3e1d' stroke-linejoin='round' stroke-width='3'><g id='tail' fill='none' stroke-linecap='round'><path d='M 124 152 Q 160 158 158 118' stroke='#7a3e1d' stroke-width='23'/><path d='M 124 152 Q 160 158 158 118' stroke='#e8793a' stroke-width='18'/><path d='M 158 127 L 158 118' stroke='#fbead2' stroke-width='18'/></g><g id='body'><g stroke='#c9601f' stroke-linecap='round' stroke-width='10'><line id='armL' x1='80' x2='66' y1='128' y2='150'/><line id='armR' x1='120' x2='134' y1='128' y2='150'/></g><ellipse cx='100' cy='140' fill='url(#fur)' rx='28' ry='30'/><ellipse cx='100' cy='148' fill='#fbead2' rx='15' ry='19' stroke='none'/><g mask='url(#scarfCut)' stroke='none'><rect fill='#2a9d8f' height='24' width='44' x='78' y='108'/><path d='M 84 106 L 76 132 M 94 106 L 86 132 M 104 106 L 96 132 M 114 106 L 106 132 M 124 106 L 116 132' fill='none' stroke='#e9c46a' stroke-width='3'/></g><path d='M 80 112 Q 100 122 120 112 L 120 120 Q 100 130 80 120 Z' fill='none'/><g id='head'><polygon id='earL' fill='#e8793a' points='68 64 60 30 90 50'/><polygon id='earR' fill='#e8793a' points='132 64 140 30 110 50'/><path d='M 60 80 Q 60 50 100 50 Q 140 50 140 80 Q 136 102 100 114 Q 64 102 60 80 Z' fill='url(#fur)'/><path d='M 66 88 Q 100 78 134 88 Q 126 104 100 114 Q 74 104 66 88 Z' fill='#fbead2' stroke='none'/><circle id='blushL' cx='72' cy='91' fill='#e4572e' fill-opacity='0' r='6' stroke='none'/><circle id='blushR' cx='128' cy='91' fill='#e4572e' fill-opacity='0' r='6' stroke='none'/><g id='eyes' stroke-width='2'><ellipse id='eye' cx='84' cy='76' fill='#ffffff' rx='7' ry='8'/><use href='#eye' x='32'/><g id='pupils' fill='#2b1a10' stroke='none'><circle cx='84' cy='77' r='3.5'/><circle cx='116' cy='77' r='3.5'/></g></g><ellipse cx='100' cy='93' fill='#2b1a10' rx='5' ry='3.5' stroke='none'/><path id='mouth' d='M 92 100 Q 100 104 108 100 Q 100 105 92 100 Z' fill='#7a2233' stroke='none'/></g></g></g><ellipse id='ring' cx='100' cy='24' fill='none' opacity='0' rx='30' ry='6' stroke='#e9c46a' stroke-dasharray='6 8' stroke-dashoffset='0' stroke-linecap='round' stroke-width='3'/></svg>",
+  "pivots": {
+    "armL": [
+      80,
+      128
+    ],
+    "armR": [
+      120,
+      128
+    ],
+    "body": [
+      100,
+      170
+    ],
+    "earL": [
+      78,
+      58
+    ],
+    "earR": [
+      122,
+      58
+    ],
+    "eyes": [
+      100,
+      76
+    ],
+    "front": [
+      100,
+      170
+    ],
+    "head": [
+      100,
+      112
+    ],
+    "legB1": [
+      74,
+      148
+    ],
+    "legB2": [
+      82,
+      148
+    ],
+    "legF1": [
+      108,
+      148
+    ],
+    "legF2": [
+      116,
+      148
+    ],
+    "side": [
+      100,
+      170
+    ],
+    "sideHead": [
+      116,
+      120
+    ],
+    "sideIn": [
+      100,
+      170
+    ],
+    "sideTail": [
+      64,
+      132
+    ],
+    "tail": [
+      124,
+      152
+    ]
+  },
+  "parents": {
+    "ring": "head",
+    "tail": "body"
+  },
+  "roles": {
+    "armL": "armL",
+    "armR": "armR",
+    "body": "body",
+    "eyes": "eyes",
+    "head": "head",
+    "pupils": "pupils"
+  },
+  "animations": {
+    "bow": {
+      "duration": 1.1,
+      "ease": [
+        0.3,
+        0,
+        0.2,
+        1
+      ],
+      "tracks": [
+        {
+          "prop": "rotate",
+          "target": "head",
+          "values": [
+            0,
+            -4,
+            16,
+            16,
+            0
+          ]
+        },
+        {
+          "prop": "translateY",
+          "target": "body",
+          "values": [
+            0,
+            -2,
+            4,
+            4,
+            0
+          ]
+        }
+      ]
+    },
+    "flourish": {
+      "duration": 1,
+      "tracks": [
+        {
+          "ease": "inOut",
+          "prop": "rotate",
+          "target": "tail",
+          "values": [
+            0,
+            6,
+            -28,
+            0
+          ]
+        },
+        {
+          "ease": [
+            "out",
+            "out",
+            "inOut"
+          ],
+          "prop": "translateY",
+          "target": "body",
+          "values": [
+            0,
+            4,
+            -16,
+            0
+          ]
+        },
+        {
+          "ease": [
+            "out",
+            "outBounce"
+          ],
+          "prop": "rotate",
+          "target": "armL",
+          "values": [
+            0,
+            100,
+            0
+          ]
+        },
+        {
+          "ease": [
+            "out",
+            "outBounce"
+          ],
+          "prop": "rotate",
+          "target": "armR",
+          "values": [
+            0,
+            -100,
+            0
+          ]
+        }
+      ]
+    },
+    "glow": {
+      "duration": 2,
+      "tracks": [
+        {
+          "ease": "inOut",
+          "prop": "fillOpacity",
+          "target": [
+            "blushL",
+            "blushR"
+          ],
+          "values": [
+            0,
+            0.7,
+            0.7,
+            0
+          ]
+        }
+      ]
+    },
+    "greet": {
+      "duration": 1.4,
+      "tracks": [
+        {
+          "ease": [
+            "outBack",
+            "inOut",
+            "inOut",
+            "inOut",
+            "inOut",
+            "inOut"
+          ],
+          "prop": "rotate",
+          "target": "armR",
+          "values": [
+            0,
+            -115,
+            -90,
+            -120,
+            -90,
+            -115,
+            0
+          ]
+        },
+        {
+          "ease": "inOut",
+          "prop": "rotate",
+          "target": "head",
+          "values": [
+            0,
+            7,
+            7,
+            0
+          ]
+        },
+        {
+          "ease": "inOut",
+          "prop": "rotate",
+          "target": "sideHead",
+          "values": [
+            0,
+            -12,
+            5,
+            -8,
+            0
+          ]
+        },
+        {
+          "ease": "inOut",
+          "prop": "rotate",
+          "target": "sideTail",
+          "values": [
+            0,
+            16,
+            -8,
+            16,
+            -8,
+            0
+          ]
+        },
+        {
+          "ease": [
+            "out",
+            "out",
+            "inOut"
+          ],
+          "prop": "translateY",
+          "target": "sideIn",
+          "values": [
+            0,
+            3,
+            -10,
+            0
+          ]
+        }
+      ]
+    },
+    "perk": {
+      "duration": 0.7,
+      "every": [
+        4,
+        9
+      ],
+      "tracks": [
+        {
+          "ease": [
+            "out",
+            "outElastic"
+          ],
+          "prop": "rotate",
+          "target": "earL",
+          "values": [
+            0,
+            -14,
+            0
+          ]
+        },
+        {
+          "ease": [
+            "out",
+            "outElastic"
+          ],
+          "prop": "rotate",
+          "target": "earR",
+          "values": [
+            0,
+            14,
+            0
+          ]
+        }
+      ]
+    },
+    "ponder": {
+      "duration": 1.4,
+      "ease": "linear",
+      "loop": true,
+      "tracks": [
+        {
+          "prop": "strokeDashoffset",
+          "target": "ring",
+          "values": [
+            0,
+            -28
+          ]
+        },
+        {
+          "prop": "opacity",
+          "target": "ring",
+          "values": [
+            0.9,
+            0.9
+          ]
+        }
+      ]
+    },
+    "swish": {
+      "duration": 2.8,
+      "ease": "inOut",
+      "loop": true,
+      "tracks": [
+        {
+          "prop": "rotate",
+          "target": "tail",
+          "values": [
+            -7,
+            9,
+            -7
+          ]
+        }
+      ]
+    },
+    "walk": {
+      "duration": 0.8,
+      "ease": "inOut",
+      "loop": true,
+      "tracks": [
+        {
+          "prop": "rotate",
+          "target": "legB2",
+          "values": [
+            -24,
+            24,
+            -24
+          ]
+        },
+        {
+          "prop": "rotate",
+          "target": "legF2",
+          "values": [
+            24,
+            -24,
+            24
+          ]
+        },
+        {
+          "prop": "rotate",
+          "target": "legB1",
+          "values": [
+            24,
+            -24,
+            24
+          ]
+        },
+        {
+          "prop": "rotate",
+          "target": "legF1",
+          "values": [
+            -24,
+            24,
+            -24
+          ]
+        },
+        {
+          "prop": "translateY",
+          "target": "sideIn",
+          "values": [
+            0,
+            -3,
+            0,
+            -3,
+            0
+          ]
+        },
+        {
+          "prop": "rotate",
+          "target": "sideTail",
+          "values": [
+            -5,
+            7,
+            -5
+          ]
+        },
+        {
+          "prop": "rotate",
+          "target": "sideHead",
+          "values": [
+            -2,
+            3,
+            -2
+          ]
+        },
+        {
+          "prop": "rotate",
+          "target": "armL",
+          "values": [
+            -12,
+            12,
+            -12
+          ]
+        },
+        {
+          "prop": "rotate",
+          "target": "armR",
+          "values": [
+            12,
+            -12,
+            12
+          ]
+        }
+      ]
+    }
+  },
+  "states": {
+    "done": [
+      "breathe",
+      "blink",
+      "flourish",
+      "glow"
+    ],
+    "idle": [
+      "breathe",
+      "blink",
+      "swish",
+      "perk"
+    ],
+    "working": [
+      "breathe",
+      "blink",
+      "think",
+      "ponder"
+    ]
+  },
+  "mouth": [
+    {
+      "open": "M 92 100 Q 100 102 108 100 Q 100 116 92 100 Z",
+      "target": "mouth"
+    },
+    {
+      "open": "M 148 112 Q 156 111 163 106 Q 158 121 148 112 Z",
+      "target": "sideMouth"
+    }
+  ],
+  "gaze": 3,
+  "drives": [
+    {
+      "at": [
+        0,
+        0.4,
+        0.5,
+        0.6,
+        1
+      ],
+      "input": "turn",
+      "prop": "scaleX",
+      "target": "side",
+      "values": [
+        -1,
+        -1,
+        0,
+        1,
+        1
+      ]
+    },
+    {
+      "at": [
+        0,
+        0.4,
+        0.5,
+        0.6,
+        1
+      ],
+      "input": "turn",
+      "prop": "scaleX",
+      "target": "front",
+      "values": [
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "lookX",
+      "prop": "rotate",
+      "target": "head",
+      "values": [
+        -6,
+        0,
+        6
+      ]
+    },
+    {
+      "input": "lookX",
+      "prop": "rotate",
+      "target": "earL",
+      "values": [
+        -8,
+        0,
+        4
+      ]
+    },
+    {
+      "input": "lookX",
+      "prop": "rotate",
+      "target": "earR",
+      "values": [
+        -4,
+        0,
+        8
+      ]
+    },
+    {
+      "input": "lookY",
+      "prop": "translateY",
+      "target": "head",
+      "values": [
+        -2,
+        0,
+        3
+      ]
+    },
+    {
+      "input": "held",
+      "prop": "rotate",
+      "target": "armL",
+      "values": [
+        0,
+        40
+      ]
+    },
+    {
+      "input": "held",
+      "prop": "rotate",
+      "target": "armR",
+      "values": [
+        0,
+        -40
+      ]
+    },
+    {
+      "input": "held",
+      "prop": "rotate",
+      "target": "tail",
+      "values": [
+        0,
+        25
+      ]
+    },
+    {
+      "input": "held",
+      "prop": "rotate",
+      "target": "earL",
+      "values": [
+        0,
+        -20
+      ]
+    },
+    {
+      "input": "held",
+      "prop": "rotate",
+      "target": "earR",
+      "values": [
+        0,
+        20
+      ]
+    },
+    {
+      "input": "pace",
+      "prop": "rotate",
+      "target": "sideTail",
+      "values": [
+        0,
+        -25
+      ]
+    },
+    {
+      "input": "pace",
+      "prop": "skewX",
+      "target": "sideIn",
+      "values": [
+        0,
+        -6
+      ]
+    },
+    {
+      "input": "lookX",
+      "prop": "translateX",
+      "target": "sidePupil",
+      "values": [
+        -1.5,
+        0,
+        1.5
+      ]
+    },
+    {
+      "input": "lookY",
+      "prop": "translateY",
+      "target": "sidePupil",
+      "values": [
+        -1.5,
+        0,
+        1.5
+      ]
+    }
+  ]
+}

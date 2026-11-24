@@ -1,0 +1,70 @@
+{
+  "viewBox": [
+    -40,
+    -20,
+    280,
+    240
+  ],
+  "nodes": [
+    {
+      "tag": "g",
+      "attrs": {
+        "stroke": "#4a6a94",
+        "strokeLinecap": "round",
+        "strokeWidth": 9
+      },
+      "children": [
+        {
+          "tag": "line",
+          "id": "armL",
+          "attrs": {
+            "x1": 74,
+            "x2": 54,
+            "y1": 116,
+            "y2": 140
+          },
+          "box": [
+            54,
+            116,
+            20,
+            24
+          ]
+        },
+        {
+          "tag": "line",
+          "id": "armR",
+          "attrs": {
+            "x1": 126,
+            "x2": 146,
+            "y1": 116,
+            "y2": 140
+          },
+          "box": [
+            126,
+            116,
+            20,
+            24
+          ]
+        }
+      ]
+    }
+  ],
+  "pivots": {
+    "armL": [
+      74,
+      116
+    ],
+    "armR": [
+      126,
+      116
+    ]
+  },
+  "roles": {
+    "armL": "armL",
+    "armR": "armR"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": [],
+  "gaze": null
+}

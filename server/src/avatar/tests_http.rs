@@ -1224,11 +1224,12 @@ async fn a_session_is_shown_what_it_drew() {
         Err(e) => panic!("refused: {}", e.message),
     };
     let refused = |output: ApiResult<ToolOutput>| output.err().expect("refused").message;
-    // A status whose picture could not be drawn: the reason first, then the status all the same.
+    // A status whose picture could not be drawn: the reason first, then the status all the same,
+    // in the one line it has beside a picture.
     let unpictured = |output: ApiResult<ToolOutput>| match output {
         Ok(ToolOutput::Text(text)) => {
             let (why, status) = text.split_once('\n').expect("the reason, then the status");
-            assert!(status.starts_with('{') && status.contains("\"note\""), "{status}");
+            assert!(!status.is_empty() && !status.contains('\n') && !status.starts_with('{'), "{status}");
             why.strip_prefix("No picture: ").unwrap_or_else(|| panic!("no reason: {why}")).to_string()
         }
         Ok(_) => panic!("a picture"),
@@ -1253,8 +1254,19 @@ async fn a_session_is_shown_what_it_drew() {
     // The status shows it again, in a pose, close up, or one of its animations as a row of
     // moments: what the picture shows comes first, then the status.
     let (text, png) = pictured(out("avatar_status", json!({ "picture": true })).await);
-    assert!(text.starts_with("Picture: your avatar at rest") && text.contains("\"designed\": true"), "{text}");
+    assert!(text.starts_with("Picture: your avatar at rest"), "{text}");
+    // Beside a picture the status is one line: a session looks many times while it corrects.
+    let last = text.lines().last().unwrap();
+    assert!(last.starts_with("Dotty, revision ") && last.ends_with(session::BRIEF_MORE) && !text.contains("\"limits\""), "{text}");
     assert_eq!(png_size(&png[0]), sheet);
+    // A call that asks for the design too gets the whole status with its picture.
+    let (text, _) = pictured(out("avatar_status", json!({ "picture": true, "look": true })).await);
+    assert!(text.starts_with("Picture: your avatar at rest") && text.contains("\"designed\":true") && text.contains("\"limits\""), "{text}");
+    // What stands open is in the line: a gesture that stays, a question.
+    assert!(matches!(out("avatar_act", json!({ "play": "hop", "mode": "hold" })).await, Ok(_)));
+    let (text, _) = pictured(out("avatar_status", json!({ "picture": true })).await);
+    assert!(text.lines().last().unwrap().contains(" hop is held."), "{text}");
+    assert!(matches!(out("avatar_act", json!({ "stop": "all" })).await, Ok(_)));
     let (text, posed) = pictured(out("avatar_status", json!({ "picture": true, "pose": { "animation": "hop", "at": 0.5, "mouth": 1, "lookX": 1 } })).await);
     assert!(text.starts_with("Picture: your avatar in that pose"), "{text}");
     assert!(png_size(&posed[0]) == sheet && posed[0] != png[0], "a pose is another picture");
@@ -1270,16 +1282,39 @@ async fn a_session_is_shown_what_it_drew() {
     // A strip takes the inputs of a pose: a walk that shows only turned is seen turned.
     let (text, _) = pictured(out("avatar_status", json!({ "frames": "hop", "count": 3, "pose": { "mouth": 1, "lookX": -1 } })).await);
     assert!(text.contains("with those inputs held"), "{text}");
+    // Workbench's built-in motion is drawn by name as well, made from the roles, and the caption
+    // says it is Workbench's: a session sees how the built-in wave turns its arm.
+    let (text, waved) = pictured(out("avatar_status", json!({ "frames": "wave" })).await);
+    assert!(text.starts_with("Picture: 6 moments of wave, Workbench's built-in motion made from your roles, from its start on the left"), "{text}");
+    assert!(png_size(&waved[0]).0 >= 6 * preview::STRIP_FRAME_PX && waved[0] != six[0], "another animation");
+    let (text, nodded) = pictured(out("avatar_status", json!({ "pose": { "animation": "nod", "at": 0.25 } })).await);
+    assert!(text.starts_with("Picture: your avatar in that pose, inside Workbench's built-in nod at 0.25, on the light panel"), "{text}");
+    assert!(png_size(&nodded[0]) == sheet && nodded[0] != png[0], "a nod is another picture");
+    // Without at, the moment where it has moved furthest from rest, and the caption names it.
+    let (text, _) = pictured(out("avatar_status", json!({ "pose": { "animation": "nod", "zoom": "eyes" } })).await);
+    assert!(text.starts_with("Picture: a closer look at eyes in that pose, inside Workbench's built-in nod at 0.25, where it has moved furthest, on the light"), "{text}");
+    // Its own blink replaced the built-in one: that is the one drawn, and the caption says nothing of Workbench.
+    let (text, _) = pictured(out("avatar_status", json!({ "frames": "blink", "count": 2 })).await);
+    assert!(text.starts_with("Picture: 2 moments of blink, from its start"), "{text}");
+    let (text, _) = pictured(out("avatar_status", json!({ "pose": { "animation": "hop" } })).await);
+    assert!(text.starts_with("Picture: your avatar in that pose, inside hop at 0.5, where it has moved furthest, on the light panel"), "{text}");
 
     // A picture that cannot be drawn is said in a sentence, and the status comes all the same.
-    for (args, words) in [(json!({ "frames": "breathe" }), "built-in"), (json!({ "frames": "wink" }), "no animation \"wink\""), (json!({ "pose": { "zoom": "nose" } }), "zoom names \"nose\"")] {
+    for (args, words) in [
+        (json!({ "frames": "think" }), "think is Workbench's built-in motion and needs the head role, or the pupils role and a gaze above 0, which this look does not name"),
+        (json!({ "frames": "wink" }), "no animation \"wink\" in this look: its own animations are blink, fade, hop, spin; Workbench's built-in ones for its roles are breathe, talk, listen, alert, doze, wave, cheer, nod, shake"),
+        (json!({ "pose": { "zoom": "nose" } }), "zoom names \"nose\""),
+        (json!({ "frames": "hop", "pose": { "zoom": "nose" } }), "zoom names \"nose\""),
+    ] {
         let said = unpictured(out("avatar_status", args.clone()).await);
         assert!(said.contains(words), "{args}: {said}");
     }
     // What is wrong with the call itself refuses it.
     for (args, words) in [
         (json!({ "frames": "hop", "count": 9 }), "count is a whole number from 2 to 8"),
-        (json!({ "frames": "hop", "pose": { "animation": "hop" } }), "with frames, a pose holds inputs only"),
+        (json!({ "frames": "hop", "pose": { "animation": "hop" } }), "with frames, a pose holds inputs and zoom only"),
+        (json!({ "frames": "hop", "pose": { "at": 0.5 } }), "with frames, a pose holds inputs and zoom only"),
+        (json!({ "frames": "hop", "pose": { "zoom": 3 } }), "zoom in a pose is the id of the part to look at closely"),
         (json!({ "count": 3 }), "name the animation with frames"),
         (json!({ "pose": { "turn": 5 } }), "turn in a pose is a number from -1 to 1"),
         (json!({ "pose": { "spin": 1 } }), "pose has no spin"),
@@ -1304,11 +1339,90 @@ async fn a_session_is_shown_what_it_drew() {
     // What a filter costs is said beside the picture, so a session can tell before it is too much.
     let soft = json!({ "svg": "<svg viewBox='0 0 200 200'><defs><filter id='f'><feDropShadow dx='2' dy='3' stdDeviation='3'/></filter></defs><g id='body' filter='url(#f)'><circle id='face' cx='100' cy='100' r='60' fill='#3366cc'/></g></svg>" });
     let (text, _) = pictured(out("avatar_design", soft).await);
-    assert!(text.contains("\nDrawing cost: about ") && text.contains(" of 60 filter passes and "), "{text}");
+    assert!(text.contains("\nDrawing cost: about ") && text.contains(" of 60 for filters and "), "{text}");
 
     // An avatar the user turned off is not drawn for its session either.
     turn_off(&e.state, &tid, now_ms()).unwrap();
     assert_eq!(unpictured(out("avatar_status", json!({ "picture": true })).await), TURNED_OFF);
+}
+
+/// The caption says what the picture shows: one round of a loop, a close-up of each moment, the
+/// moment of a pose and when that moment is where the animation rests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_caption_says_what_the_picture_shows() {
+    let e = env().await;
+    let tid = e.with_avatar();
+    call(&e, &tid, "avatar_design", figure()).await.unwrap();
+    let caption = |args: Value| {
+        let (state, ctx) = (e.state.clone(), ctx(&e, &tid));
+        async move {
+            match (tool("avatar_status").handler)(state, ctx, args).await {
+                Ok(ToolOutput::Images { text, .. }) => text,
+                other => panic!("no picture: {:?}", other.map(|_| ()).map_err(|e| e.message)),
+            }
+        }
+    };
+    // A loop's moments are one round, evenly spaced: the last is not its end.
+    let text = caption(json!({ "frames": "spin" })).await;
+    assert!(text.starts_with("Picture: 6 moments of one round of spin, evenly spaced; after the last comes the first again.\n"), "{text}");
+    let text = caption(json!({ "frames": "spin", "count": 4, "pose": { "lookX": 1 } })).await;
+    assert!(text.starts_with("Picture: 4 moments of one round of spin, evenly spaced, with those inputs held; after the last comes the first again.\n"), "{text}");
+    // A one-shot runs from its start to its end; with a zoom each moment is the close-up.
+    let text = caption(json!({ "frames": "nod", "pose": { "zoom": "eyes" } })).await;
+    assert!(
+        text.starts_with("Picture: 6 moments of nod, Workbench's built-in motion made from your roles, close up on eyes, from its start on the left to its end on the right. A track that has played holds its last keyframe to the end, as in a gesture.\n"),
+        "{text}"
+    );
+    // A moment given where the animation rests is said to be one.
+    let text = caption(json!({ "pose": { "animation": "nod", "at": 0.5 } })).await;
+    assert!(text.starts_with("Picture: your avatar in that pose, inside Workbench's built-in nod at 0.5, on the light panel") && text.lines().next().unwrap().ends_with(" At 0.5 nod is where it rests: give another at."), "{text}");
+    let text = caption(json!({ "pose": { "animation": "nod" } })).await;
+    assert!(text.contains("nod at 0.25, where it has moved furthest,") && !text.contains("where it rests"), "{text}");
+}
+
+/// What drawing costs is said of the figure in its pose, in the large view: the design answer
+/// says it whole, a status picture only where the pose costs other than the look at rest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_cost_beside_a_picture_is_said_where_the_pose_changes_it() {
+    // The sentence is true to its units and short enough to read every time.
+    let most = session::cost_line(preview::Spent { filters: 60.0, layers: 60.0 }).unwrap();
+    assert!(most.len() <= 240 && most.contains("60 of 60 for filters and 60 of 60 for layers, both in areas of the viewBox"), "{} {most}", most.len());
+    assert_eq!(session::cost_line(preview::Spent { filters: 0.5, layers: 0.9 }), None);
+
+    let e = env().await;
+    let tid = e.with_avatar();
+    let shadowed = json!({
+        "name": "Puff",
+        "svg": "<svg viewBox='0 0 200 200'><defs><filter id='f'><feDropShadow dx='2' dy='3' stdDeviation='3'/></filter></defs><g id='body' filter='url(#f)'><circle id='face' cx='100' cy='100' r='40' fill='#3366cc'/></g></svg>",
+        "pivots": { "body": [100, 100] },
+        "animations": { "grow": { "duration": 1, "tracks": [{ "target": "body", "prop": "scale", "values": [1, 2] }] } }
+    });
+    let text = call(&e, &tid, "avatar_design", shadowed).await.unwrap();
+    let whole = text.lines().find(|line| line.starts_with("Drawing cost: about ")).unwrap_or_else(|| panic!("{text}"));
+    assert!(whole.len() <= 240, "{whole}");
+    let second = |text: &str| text.lines().nth(1).unwrap_or_default().to_string();
+    // At rest, and close up on a part at rest: the design answer said it already.
+    for args in [json!({ "picture": true }), json!({ "pose": { "zoom": "face" } })] {
+        let text = call(&e, &tid, "avatar_status", args.clone()).await.unwrap();
+        assert!(second(&text).starts_with("Puff, revision "), "{args}: {text}");
+    }
+    // Grown, the shadow costs more: both, in one line, the same with a close-up.
+    let grown = call(&e, &tid, "avatar_status", json!({ "pose": { "animation": "grow", "at": 1 } })).await.unwrap();
+    let line = second(&grown);
+    assert!(line.starts_with("In this pose drawing costs about ") && line.contains(" of 60 for filters and ") && line.contains("; at rest ") && line.ends_with('.'), "{grown}");
+    let close = call(&e, &tid, "avatar_status", json!({ "pose": { "animation": "grow", "at": 1, "zoom": "face" } })).await.unwrap();
+    assert_eq!(second(&close), line, "the zoom changes nothing of what the pose costs");
+    let strip = call(&e, &tid, "avatar_status", json!({ "frames": "grow", "count": 3 })).await.unwrap();
+    assert_eq!(second(&strip), line.replace("In this pose", "In its costliest moment"), "{strip}");
+
+    // The picture route says the same in its header: the caption, then the cost.
+    let addr = serve(&e).await;
+    let own = token(&e, &tid);
+    let posted = reqwest::Client::new().post(format!("http://{addr}/api/hooks/avatar/{tid}/picture")).bearer_auth(&own).body("{\"pose\": {\"animation\": \"grow\", \"at\": 1}}").send().await.unwrap();
+    assert_eq!(posted.status().as_u16(), 200);
+    let header = posted.headers()["x-workbench-caption"].to_str().unwrap().to_string();
+    let said = percent_encoding::percent_decode_str(&header).decode_utf8().unwrap().into_owned();
+    assert_eq!(said, format!("{} {line}", grown.lines().next().unwrap()));
 }
 
 /// Where sessions take an avatar themselves, one that has none yet is told to draw, not that it
@@ -1355,10 +1469,14 @@ async fn the_picture_route_answers_a_png_to_the_session_alone() {
     };
     let rest = post(own.clone(), "").await;
     assert_eq!((rest.status().as_u16(), rest.headers()["content-type"].to_str().unwrap()), (200, "image/png"));
+    // What it shows, in the words the tool says beside it.
+    let caption = |answer: &reqwest::Response| percent_encoding::percent_decode_str(answer.headers()["x-workbench-caption"].to_str().unwrap()).decode_utf8().unwrap().into_owned();
+    assert_eq!(caption(&rest), "Picture: your avatar at rest, on the light panel and on the dark one; under each, at its resting size and as a face.");
     let rest = rest.bytes().await.unwrap();
     png_size(&rest);
-    let strip = post(own.clone(), "{\"frames\": \"hop\", \"count\": 2}").await;
+    let strip = post(own.clone(), "{\"frames\": \"wave\", \"count\": 2}").await;
     assert_eq!(strip.status().as_u16(), 200);
+    assert!(caption(&strip).starts_with("Picture: 2 moments of wave, Workbench's built-in motion made from your roles, from its start"), "{}", caption(&strip));
     assert_eq!(png_size(&strip.bytes().await.unwrap()).1, preview::STRIP_FRAME_PX);
     // Its keys and no others; a session's token opens only its own avatar.
     let wrong = post(own.clone(), "{\"look\": true}").await;
@@ -1470,5 +1588,43 @@ async fn the_command_drives_the_avatar_like_the_tools_do() {
     assert_eq!(outputs.len(), 17);
     for (code, out, err) in &outputs {
         assert!(!out.contains(&own) && !err.contains(&own), "the token is in the output of a run that ended with {code}");
+    }
+}
+
+/// The command says what a picture shows in the server's words, the ones the tool says: that a
+/// strip is Workbench's built-in motion, that a pose is a close-up, which moment was drawn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_command_says_what_a_picture_shows_as_the_tool_does() {
+    let e = env().await;
+    let tid = e.with_avatar();
+    call(&e, &tid, "avatar_design", figure()).await.unwrap();
+    let addr = serve(&e).await;
+    let own = token(&e, &tid);
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("avatar.png");
+    let run = |words: Vec<String>, stdin: &'static str| {
+        let (url, tid, own) = (format!("http://{addr}"), tid.clone(), own.clone());
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let words: Vec<&str> = words.iter().map(String::as_str).collect();
+                cli::tests::run_with(cli::tests::parsed(&words).expect("a form of the command"), [Some(&url), Some(&tid), Some(&own)], stdin)
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let file = png.to_str().unwrap().to_string();
+    let f = file.as_str();
+    for (words, stdin, args) in [
+        (vec!["picture", f, "--frames", "wave"], "", json!({ "frames": "wave" })),
+        (vec!["picture", f, "--pose", "-"], "{\"animation\": \"nod\", \"zoom\": \"eyes\"}", json!({ "pose": { "animation": "nod", "zoom": "eyes" } })),
+        (vec!["picture", f, "--frames", "spin", "--count", "3"], "", json!({ "frames": "spin", "count": 3 })),
+    ] {
+        let (code, out, err) = run(words.iter().map(|w| w.to_string()).collect(), stdin).await;
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        let said = call(&e, &tid, "avatar_status", args).await.unwrap();
+        let caption = said.lines().next().unwrap().strip_prefix("Picture: ").unwrap();
+        assert_eq!(out, format!("Picture written to {file}: {caption} Open it and look.\n"));
+        assert!(std::fs::read(&png).unwrap().starts_with(b"\x89PNG"));
     }
 }

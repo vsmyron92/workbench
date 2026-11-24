@@ -21,7 +21,7 @@ import { ErrorBoundary } from '@/ui'
 import { defaultLook } from './lib/defaultLook'
 import { compile, writeStill } from './lib/engine'
 import type { Engine, FigureHandle, WalkInputs } from './lib/engine'
-import { checkLook, cleanIdPrefix, faceViewBox, lookElements, viewBoxOf } from './lib/look'
+import { checkLook, cleanIdPrefix, faceParts, faceViewBox, lookElements, viewBoxOf } from './lib/look'
 import type { AvatarState, Look, SessionTone } from './lib/types'
 import './avatar.css'
 
@@ -162,7 +162,7 @@ export function sizeStyle(size: number): CSSProperties {
 interface ArtworkProps {
   look: Look
   idPrefix: string
-  /** Only the head (`faceViewBox`), for the small face. */
+  /** Only the head (`faceViewBox`), for the small face, without what that square would only cut (`faceParts`). */
   face: boolean
   onSvg?: (svg: SVGSVGElement | null) => void
 }
@@ -173,7 +173,7 @@ interface ArtworkProps {
  * nodes); nothing else is put on the tree.
  */
 const Artwork = memo(function Artwork({ look, idPrefix, face, onSvg }: ArtworkProps) {
-  const elements = useMemo(() => lookElements(look, idPrefix), [look, idPrefix])
+  const elements = useMemo(() => lookElements(look, idPrefix, face ? faceParts(look) : undefined), [look, idPrefix, face])
   const viewBox = useMemo(() => (face ? faceViewBox(look) : viewBoxOf(look)).join(' '), [look, face])
   return (
     <svg key={keyOf(look)} ref={onSvg} className="wb-av-art" viewBox={viewBox} aria-hidden focusable="false">

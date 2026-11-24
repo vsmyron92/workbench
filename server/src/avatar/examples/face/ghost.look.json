@@ -1,0 +1,132 @@
+{
+  "viewBox": [
+    0,
+    0,
+    200,
+    200
+  ],
+  "nodes": [
+    {
+      "tag": "path",
+      "id": "sheet",
+      "attrs": {
+        "d": "M 40 180 L 40 80 Q 40 20 100 20 Q 160 20 160 80 L 160 180 L 140 165 L 120 180 L 100 165 L 80 180 L 60 165 Z",
+        "fill": "#e9ecef",
+        "stroke": "#868e96",
+        "strokeWidth": 3
+      },
+      "box": [
+        40,
+        20,
+        120,
+        160
+      ]
+    },
+    {
+      "tag": "path",
+      "id": "bow",
+      "attrs": {
+        "d": "M 130 40 L 150 48 L 130 56 Z",
+        "fill": "#e64980"
+      },
+      "box": [
+        130,
+        40,
+        20,
+        16
+      ]
+    },
+    {
+      "tag": "g",
+      "id": "features",
+      "box": [
+        72,
+        59,
+        56,
+        45
+      ],
+      "children": [
+        {
+          "tag": "g",
+          "id": "eyes",
+          "box": [
+            72,
+            59,
+            56,
+            22
+          ],
+          "children": [
+            {
+              "tag": "ellipse",
+              "attrs": {
+                "cx": 80,
+                "cy": 70,
+                "fill": "#212529",
+                "rx": 8,
+                "ry": 11
+              }
+            },
+            {
+              "tag": "ellipse",
+              "attrs": {
+                "cx": 120,
+                "cy": 70,
+                "fill": "#212529",
+                "rx": 8,
+                "ry": 11
+              }
+            }
+          ]
+        },
+        {
+          "tag": "ellipse",
+          "id": "mouth",
+          "attrs": {
+            "cx": 100,
+            "cy": 98,
+            "fill": "#495057",
+            "rx": 9,
+            "ry": 6
+          },
+          "box": [
+            91,
+            92,
+            18,
+            12
+          ]
+        }
+      ]
+    },
+    {
+      "tag": "circle",
+      "id": "wisp",
+      "attrs": {
+        "cx": 186,
+        "cy": 150,
+        "fill": "#adb5bd",
+        "r": 8
+      },
+      "box": [
+        178,
+        142,
+        16,
+        16
+      ]
+    }
+  ],
+  "pivots": {
+    "sheet": [
+      100,
+      180
+    ]
+  },
+  "roles": {
+    "body": "sheet",
+    "head": "features",
+    "eyes": "eyes"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": [],
+  "gaze": null
+}

@@ -5,13 +5,22 @@
 // What it produces are ordinary animations in the look format, so the engine plays them
 // like an agent's own; an agent animation with a built-in's name replaces the built-in.
 //
+// server/src/avatar/builtin.rs makes the same animations, number for number, for the
+// session's pictures and for which built-ins a look gets (its `needs` says the rule in
+// words). Change both together. golden.test.ts compares this file with the server's fixture
+// files: `<name>.builtin.json` beside each look of server/src/avatar/examples/ and of
+// examples/parity/. After a deliberate change, write them again from the server with
+// `AVATAR_WRITE_BUILTIN=1 cargo test --locked avatar::builtin::tests` and review the
+// difference. A new rule that no look there reaches gets a parity look of its own.
+//
 // Pure: no DOM, no globals.
 
-import { MORE_LIMITS, isId, lookIndex, rootBox, viewBoxOf } from './look'
+import { IDENTITY, MORE_LIMITS, isId, lookIndex, rootBox, viewBoxOf } from './look'
+import type { Matrix } from './look'
 import { deepFreeze } from './types'
 import type { Animation, AvatarState, Look, Role, Track } from './types'
 
-/** The built-in animations, by name. Which of them a look gets depends on its roles. */
+/** The built-in animations, by name. Which of them a look gets depends on its roles (and, for think, its gaze). */
 export const BUILTIN: readonly string[] = ['breathe', 'blink', 'think', 'talk', 'listen', 'alert', 'doze', 'wave', 'cheer', 'nod', 'shake']
 
 /** What a state plays when the agent's `states` has no entry for it. */
@@ -54,6 +63,34 @@ export function rolePart(look: Look, role: Role): string | null {
 
 const round = (n: number) => Math.round(n * 1000) / 1000
 
+/** The linear part of a matrix, [a, b, c, d] of [a, b, c, d, e, f]: how it turns, scales and mirrors a vector. */
+export type Linear = readonly [number, number, number, number]
+
+/**
+ * What undoes the linear part of a part's matrix to the viewBox (`lookIndex`'s, its own
+ * transform included): a vector on screen through it is that vector inside the part, where
+ * its motion is written. null where nothing needs undoing (the identity) or nothing can (a
+ * determinant within 1e-9 of 0): the vector is then used as it is. The gaze, think's drift
+ * and an arm's lift go through it.
+ */
+export function undoLinear(m: Matrix | undefined): Linear | null {
+  if (!m) return null
+  const [a, b, c, d] = m
+  if (a === 1 && b === 0 && c === 0 && d === 1) return null
+  const det = a * d - b * c
+  if (!(Math.abs(det) >= 1e-9)) return null
+  const out: Linear = [d / det, -b / det, -c / det, a / det]
+  return out.every((n) => Number.isFinite(n)) ? out : null
+}
+
+/** A vector on screen inside a part, through `undoLinear` of its matrix. */
+export function undone(u: Linear | null, x: number, y: number): [number, number] {
+  return u ? [u[0] * x + u[2] * y, u[1] * x + u[3] * y] : [x, y]
+}
+
+/** -1 where a matrix mirrors what is drawn in it (its determinant is below 0): a turn inside it shows the other way round on screen. */
+const flipOf = (m: Matrix): number => (m[0] * m[3] - m[1] * m[2] < 0 ? -1 : 1)
+
 /**
  * Which way an arm lifts: -1 turns it anticlockwise on screen, which raises an arm on the
  * right half of the figure; an arm on the left half is raised by +1.
@@ -68,17 +105,21 @@ function liftSign(look: Look, arm: string, role: 'armL' | 'armR', middle: number
 
 /**
  * How far an arm turns about its joint to point `above` degrees over the horizon, away
- * from the body: worked out from where the arm lies at rest (its box against its pivot).
- * null when the look gives the arm no joint or no box.
+ * from the body: worked out on screen from where the arm lies at rest (its box against its
+ * pivot, through `m`, its matrix to the viewBox with its own transform), then given as the
+ * turn written inside its own transform. null when the look gives the arm no joint or no box.
  */
-function raiseTurn(look: Look, arm: string, sign: number, above: number): number | null {
+function raiseTurn(look: Look, arm: string, sign: number, above: number, m: Matrix): number | null {
   const pivots: unknown = look?.pivots
   if (typeof pivots !== 'object' || pivots === null || !Object.hasOwn(pivots, arm)) return null
   const pivot: unknown = (pivots as Record<string, unknown>)[arm]
   const box: unknown = lookIndex(look).get(arm)?.node.box
   if (!Array.isArray(pivot) || !Array.isArray(box) || box.length !== 4 || ![pivot[0], pivot[1], ...box].every((n) => typeof n === 'number' && Number.isFinite(n))) return null
-  const dx = box[0] + box[2] / 2 - pivot[0]
-  const dy = box[1] + box[3] / 2 - pivot[1]
+  const ox = box[0] + box[2] / 2 - pivot[0]
+  const oy = box[1] + box[3] / 2 - pivot[1]
+  // From the joint to the box's centre on screen: through every transform around the arm and its own.
+  const dx = m[0] * ox + m[2] * oy
+  const dy = m[1] * ox + m[3] * oy
   if (Math.hypot(dx, dy) < 1e-6) return null
   // Screen angles: 0 points right, 90 down. The raised arm points up and outwards.
   const rest = (Math.atan2(dy, dx) * 180) / Math.PI
@@ -86,7 +127,8 @@ function raiseTurn(look: Look, arm: string, sign: number, above: number): number
   let turn = want - rest
   while (turn > 180) turn -= 360
   while (turn <= -180) turn += 360
-  return Math.abs(turn) < 15 ? sign * 15 : round(turn)
+  // The engine turns the arm inside its own transform: where that mirrors it, the other way round.
+  return flipOf(m) * (Math.abs(turn) < 15 ? sign * 15 : round(turn))
 }
 
 function build(look: Look): Map<string, Animation> {
@@ -115,19 +157,24 @@ function build(look: Look): Map<string, Animation> {
     out.set('blink', { duration: 0.18, every: [2.4, 6], tracks: [{ target: eyes, prop: 'scaleY', values: [1, 0.1, 1] }] })
   }
 
-  // A look that switched its gaze off keeps its pupils still where it has a head to tilt instead.
+  // The pupils think where they may travel. A look that switched its gaze off keeps them still:
+  // its head tilts instead, and without a head nothing thinks.
   const travel = gazeTravel(look)
-  if (pupils && (travel > 0 || !head)) {
-    const drift = travel > 0 ? travel : width * GAZE_DEFAULT
+  if (pupils && travel > 0) {
+    const drift = travel
     const times = [0, 0.2, 0.55, 0.8, 1]
+    // Up and aside on screen and as far as the gaze goes: undone through the pupils' own matrix, as the gaze is.
+    const u = undoLinear(lookIndex(look).get(pupils)?.matrix)
+    const ys = [0, -0.9, -0.9, -0.7, 0]
+    const keys = [0, -0.8, -0.8, 0.6, 0].map((x, i) => undone(u, x, ys[i]))
     out.set('think', {
       duration: 2.8,
       loop: true,
       ease: 'inOut',
       times,
       tracks: [
-        { target: pupils, prop: 'translateX', values: [0, -0.8, -0.8, 0.6, 0].map((k) => round(k * drift) || 0) },
-        { target: pupils, prop: 'translateY', values: [0, -0.9, -0.9, -0.7, 0].map((k) => round(k * drift) || 0) },
+        { target: pupils, prop: 'translateX', values: keys.map(([x]) => round(x * drift) || 0) },
+        { target: pupils, prop: 'translateY', values: keys.map(([, y]) => round(y * drift) || 0) },
       ],
     })
   } else if (head) {
@@ -186,19 +233,28 @@ function build(look: Look): Map<string, Animation> {
   const lift = round(height * 0.03)
   /**
    * One arm raised to `above` degrees over the horizon and swung `back` degrees from there
-   * and up again: about its joint when it has one, else a small wiggle in place.
+   * and up again: about its joint when it has one, else a small wiggle in place. Either is
+   * meant on screen, so an arm inside a mirrored or turned transform moves as one outside.
    */
   const armTracks = (arm: string, role: 'armL' | 'armR', above: number, back: number): Track[] => {
     const sign = liftSign(look, arm, role, middle)
-    const turn = raiseTurn(look, arm, sign, above)
+    const m = lookIndex(look).get(arm)?.matrix ?? IDENTITY
+    const turn = raiseTurn(look, arm, sign, above, m)
     if (turn !== null) {
       const eased = round(turn - Math.sign(turn) * back)
       return [{ target: arm, prop: 'rotate', values: [0, turn, eased, turn, eased, 0], ease: 'inOut' }]
     }
-    return [
-      { target: arm, prop: 'rotate', values: [0, sign * 16, sign * -10, sign * 16, sign * -10, 0], ease: 'inOut' },
-      { target: arm, prop: 'translateY', values: [0, -lift, -lift, -lift, -lift, 0], ease: 'inOut' },
+    // The wiggle turns the other way round inside a mirror, and lifts the arm up the screen.
+    const flip = flipOf(m)
+    const [ux, uy] = undone(undoLinear(m), 0, -lift)
+    const x = round(ux) || 0
+    const y = round(uy) || 0
+    const tracks: Track[] = [
+      { target: arm, prop: 'rotate', values: [0, flip * sign * 16, flip * sign * -10, flip * sign * 16, flip * sign * -10, 0], ease: 'inOut' },
+      { target: arm, prop: 'translateY', values: [0, y, y, y, y, 0], ease: 'inOut' },
     ]
+    if (x !== 0) tracks.push({ target: arm, prop: 'translateX', values: [0, x, x, x, x, 0], ease: 'inOut' })
+    return tracks
   }
 
   const waver: ['armL' | 'armR', string] | null = armR ? ['armR', armR] : armL ? ['armL', armL] : null

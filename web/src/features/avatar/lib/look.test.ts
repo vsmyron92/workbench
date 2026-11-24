@@ -15,6 +15,7 @@ import {
   checkLook,
   cleanIdPrefix,
   drivesOn,
+  faceParts,
   faceViewBox,
   fmt,
   formatPath,
@@ -989,6 +990,54 @@ describe('the geometry of a look', () => {
     expect(faceViewBox(dot)).toEqual([90, 88, 20, 20])
     const tall = checkLook({ viewBox: [0, 0, 100, 400], nodes: [{ tag: 'g', id: 'h', box: [50, 50, 1, 1] }], roles: { head: 'h' } }) as Look
     expect(faceViewBox(tall)).toEqual([45.5, 45.5, 10, 10])
+  })
+
+  it('leaves out of a face what its square would only cut, judging whole subtrees by their boxes', () => {
+    // A head of 60 at (70, 50): the face's square is [64, 44, 72, 72].
+    const head = { tag: 'circle', id: 'head', attrs: { cx: 100, cy: 80, r: 30 }, box: [70, 50, 60, 60] }
+    const rect = (id: string, box: number[]) => ({ tag: 'rect', id, attrs: { x: box[0], y: box[1], width: box[2], height: box[3] }, box })
+    const face = (nodes: unknown[], roles: Json = { head: 'head' }) => {
+      const look = checkLook({ viewBox: [0, 0, 200, 200], nodes, roles }) as Look
+      expect(look).not.toBeNull()
+      return [...faceParts(look)].map((node) => node.id)
+    }
+    expect(faceViewBox(checkLook({ viewBox: [0, 0, 200, 200], nodes: [head], roles: { head: 'head' } }) as Look)).toEqual([64, 44, 72, 72])
+    // Far from the head and cut by the square: left out. Wholly outside it, likewise (it showed nothing anyway).
+    expect(face([head, rect('sliver', [131, 40, 20, 10]), rect('far', [180, 180, 10, 10])])).toEqual(['sliver', 'far'])
+    // Touching the head's box meets it, at an edge or a corner; a thousandth apart does not; less than half of one rounds to touching.
+    expect(face([head, rect('side', [130, 60, 20, 10]), rect('corner', [130, 110, 20, 20]), rect('apart', [130.001, 60, 20, 10]), rect('rounds', [130.0004, 60, 20, 10])])).toEqual(['apart'])
+    // Wholly inside the square stays without meeting the head, its edges on the square's included.
+    expect(face([head, rect('inside', [64, 112, 4, 4]), rect('over', [64, 112, 4, 4.001])])).toEqual(['over'])
+    // A group is judged as a whole by its box: one that meets the head keeps a far part inside it,
+    // and one that does not is left out with all it holds.
+    const group = (id: string, box: number[], children: unknown[]) => ({ tag: 'g', id, box, children })
+    expect(face([head, group('near', [100, 100, 90, 90], [rect('reach', [180, 180, 10, 10])]), group('away', [150, 150, 40, 40], [rect('inner', [150, 150, 10, 10])])])).toEqual(['away'])
+    // What holds the head is entered and its children are judged one by one; what the head holds is never judged.
+    const holder = group('body', [0, 0, 200, 200], [rect('tail', [150, 10, 40, 30]), group('head', [70, 50, 60, 60], [rect('ear', [190, 190, 5, 5])]), rect('belly', [80, 100, 40, 90])])
+    expect(face([holder])).toEqual(['tail'])
+    expect(face([{ tag: 'g', box: [0, 0, 200, 200], children: [holder] }])).toEqual(['tail'])
+    // What cannot be measured stays: no id, no box, defs and what they hold.
+    const unnamed = { tag: 'rect', attrs: { x: 180, y: 0, width: 10, height: 10 } }
+    const defs = { tag: 'defs', children: [{ tag: 'linearGradient', id: 'paint', box: [0, 0, 0, 0] }, rect('kept', [190, 190, 5, 5])] }
+    expect(face([head, unnamed, { tag: 'circle', id: 'unboxed', attrs: { cx: 180, cy: 180, r: 4 } }, defs])).toEqual([])
+    // A use by its own box, whatever it repeats; a use the face keeps still finds what it repeats.
+    const uses = [head, rect('paw', [10, 170, 16, 16]), { tag: 'use', id: 'near', attrs: { useRef: 'paw', x: 100, y: -70 }, box: [110, 100, 16, 16] }, { tag: 'use', id: 'echo', attrs: { useRef: 'head', x: 90, y: 0 }, box: [160, 50, 60, 60] }]
+    expect(face(uses)).toEqual(['paw', 'echo'])
+    const look = checkLook({ viewBox: [0, 0, 200, 200], nodes: uses, roles: { head: 'head' } }) as Look
+    const html = renderToStaticMarkup(createElement('svg', null, lookElements(look, 'p-', faceParts(look))))
+    expect(html).toContain('<defs><rect id="p-paw"')
+    expect(html).toContain('<use id="p-near" href="#p-paw"')
+    expect(html).toContain('<defs><use id="p-echo" href="#p-head"')
+    // Without leaving out, the same look draws everything where it stands; the set is kept per look object.
+    expect(render(look)).not.toContain('<defs>')
+    expect(faceParts(look)).toBe(faceParts(look))
+    // No head, a head that is nothing wide or one that is not drawn: the face is the whole viewBox, nothing is left out.
+    const sliver = rect('sliver', [131, 40, 20, 10])
+    expect(face([head, sliver], {})).toEqual([])
+    expect(face([{ ...head, box: [100, 80, 0, 0] }, sliver])).toEqual([])
+    const hidden = { viewBox: [0, 0, 200, 200], nodes: [{ tag: 'defs', children: [{ tag: 'g', id: 'head', box: [70, 50, 60, 60] }] }, sliver], roles: { head: 'head' } }
+    expect(faceParts(hidden as unknown as Look).size).toBe(0)
+    expect(faceParts(null as unknown as Look).size).toBe(0)
   })
 
   it('reads transforms as numbers', () => {

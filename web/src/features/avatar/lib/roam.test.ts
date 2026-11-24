@@ -927,6 +927,59 @@ describe('what a walk tells the look', () => {
   })
 })
 
+describe('a gesture on a walking figure', () => {
+  it('stands where it is while a gesture plays on it, faces the user, and strolls on once it is over', () => {
+    const r = run([walker('a')], 3)
+    r.go(16)
+    // On its way somewhere, to one side.
+    let feel = { pace: 0, turn: 0, held: 0 }
+    for (let i = 0; i < 6000 && !(body(r, 'a').walking && feel.pace > 0.9 && feel.turn !== 0); i++) {
+      const was = { x: body(r, 'a').x, y: body(r, 'a').y }
+      r.go(16)
+      feel = walkFeel(body(r, 'a'), was, 16, r.world.bodies, false, feel.pace)
+    }
+    expect([body(r, 'a').walking, body(r, 'a').mode]).toEqual([true, 'walk'])
+    expect(Math.abs(feel.turn)).toBe(1)
+    // A gesture starts: it stands at once, where it is.
+    r.input.walkers = [walker('a', { gesture: true })]
+    const at = { x: body(r, 'a').x, y: body(r, 'a').y }
+    const paces: number[] = []
+    for (let t = 0; t < 2000; t += 16) {
+      const was = { x: body(r, 'a').x, y: body(r, 'a').y }
+      r.go(16)
+      const b = body(r, 'a')
+      feel = walkFeel(b, was, 16, r.world.bodies, false, feel.pace)
+      paces.push(feel.pace)
+      expect([b.x, b.y, b.walking, b.mode, b.to, b.stayed]).toEqual([at.x, at.y, false, 'rest', null, true])
+      // It faces the user; its pace falls away smoothly.
+      expect(feel.turn).toBe(0)
+    }
+    expect(paces[0]).toBeGreaterThan(0.5)
+    expect(paces.every((p, k) => k === 0 || p <= paces[k - 1])).toBe(true)
+    expect(paces.at(-1)).toBe(0)
+    expect([body(r, 'a').hop, body(r, 'a').lean]).toEqual([0, 0])
+    // Over: it rests a while where it stood, as one that was wanted does, then strolls on.
+    r.input.walkers = [walker('a')]
+    r.go(2000)
+    expect([body(r, 'a').x, body(r, 'a').y, body(r, 'a').mode]).toEqual([at.x, at.y, 'rest'])
+    let walked = false
+    r.go(30_000, () => void (walked ||= body(r, 'a').walking))
+    expect(walked).toBe(true)
+  })
+
+  it('ends a visit or a meeting it is in, and nobody visits it, as one that is wanted', () => {
+    const r = run([walker('a'), walker('b', { gesture: true })], 5)
+    r.go(240_000)
+    expect(r.cues.filter((c) => c.kind === 'greet')).toEqual([])
+    const m = run([walker('a'), walker('b')], 11)
+    m.go(180_000, (i) => {
+      if (m.world.bodies.get('a')?.mode === 'meet') i.walkers = [walker('a'), walker('b', { gesture: true })]
+    })
+    expect(body(m, 'b').partner).toBeNull()
+    expect(body(m, 'b').mode).toBe('rest')
+  })
+})
+
 describe('walkLoopStep', () => {
   it('starts the loop of its own design when it walks, and stops it once it has stood 340 ms', () => {
     expect(WALK_LOOP_HOLD_MS).toBe(340)

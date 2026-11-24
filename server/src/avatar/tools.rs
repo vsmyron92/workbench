@@ -94,7 +94,7 @@ pub(super) async fn design(state: &AppState, pass: Pass, args: Value) -> ApiResu
     let mut no_picture = None;
     if designed.drawn && picture.is_none() {
         match self::picture(state, &tid, PictureRequest::rest()).await {
-            Ok(drawn) => picture = Some(drawn),
+            Ok((drawn, _, _)) => picture = Some(drawn),
             Err(e) => no_picture = Some(e.message),
         }
     }
@@ -110,7 +110,7 @@ impl DesignAnswer {
         match (&self.picture, &self.no_picture) {
             (Some(picture), _) => {
                 if sees {
-                    text.push_str(&format!("\n{} Look at it and correct what is off.", PictureRequest::rest().caption()));
+                    text.push_str(&format!("\n{} Look at it and correct what is off.", PictureRequest::rest().caption(None, None)));
                 } else {
                     text.push_str("\nTo see it, ask for a picture and open the file.");
                 }
@@ -193,14 +193,20 @@ async fn draw_in_turn(tid: &str, look: &Value, want: &draw::Want, rests: bool) -
     drawn
 }
 
-/// A picture of the session's avatar as it asked for it.
-pub(super) async fn picture(state: &AppState, tid: &str, req: PictureRequest) -> ApiResult<Picture> {
+/// A picture of the session's avatar as it asked for it, its caption (what it shows, in words),
+/// and what drawing it costs where that is worth a line beside it (the pose costs other than the
+/// look at rest). Every way in gets these words: both are said once the picture is drawn, of the
+/// request, the look and what the drawing reported.
+pub(super) async fn picture(state: &AppState, tid: &str, req: PictureRequest) -> ApiResult<(Picture, String, Option<String>)> {
     let look = session::picture_look(state, tid)?;
-    draw_in_turn(tid, &look, &req.want(), true).await.map_err(|not| match not {
+    let drawn = draw_in_turn(tid, &look, &req.want(), true).await.map_err(|not| match not {
         NotDrawn::Unavailable(_) | NotDrawn::Busy(_) => session::too_busy(not.sentence()),
         // A sentence of the renderer may quote what the session wrote.
         other => ApiError::bad_request(state.terminals.redact_text(tid, &other.sentence())),
-    })
+    })?;
+    let caption = req.caption(Some(&look), drawn.played.as_ref());
+    let cost = req.cost(&drawn);
+    Ok((drawn, caption, cost))
 }
 
 // ---------------------------------------------------------------- avatar_status
@@ -212,13 +218,14 @@ fn status_tool() -> McpTool {
          lines with what became of them, the limits. With guide true the authoring guide comes first: read it once \
          before avatar_design. With look true the stored design comes back in full (the artwork as SVG). To see the \
          avatar: picture true draws it at rest, pose draws it under inputs, inside an animation or close up on one \
-         part, frames draws one of your own animations as a row of moments.",
+         part, frames draws one of your animations or a built-in one (wave, nod …) as a row of moments. Beside a \
+         picture the status is one line, unless guide or look is true.",
         json!({ "type": "object", "properties": {
             "guide": { "type": "boolean", "description": "Put the authoring guide before the status: how to draw, rig and animate the avatar, with an example. Read it once, before the first avatar_design." },
             "look": { "type": "boolean", "description": "Include the stored design as an avatar_design call would send it: svg, pivots, parents, roles, animations, states, drives, mouth, gaze, voice, name." },
             "picture": { "type": "boolean", "description": "Add a picture of the avatar at rest: on the light and the dark panel, and under each at its resting size and as a face." },
-            "pose": { "type": "object", "description": "Add a picture of the avatar in a pose: {animation?: one of your own, at?: 0 to 1 into it (default 0.5), lookX?, lookY?, turn?: -1 to 1, mouth?, pace?, held?: 0 to 1, zoom?: the id of a part to look at closely}. Shows what your drives, mouth and gaze do. With frames: its inputs are held in every moment." },
-            "frames": { "type": "string", "description": "Add a picture of one of your own animations as a row of moments, start to end; with pose, under that pose's inputs (a walk seen in a side view: turn 1, pace 1)." },
+            "pose": { "type": "object", "description": "Add a picture of the avatar in a pose: {animation?: one of yours or a built-in one your roles give, at?: 0 to 1 into it (without it: where it has moved furthest), lookX?, lookY?, turn?: -1 to 1, mouth?, pace?, held?: 0 to 1, zoom?: the id of a part to look at closely, in the square where it rests}. Shows what your drives, mouth and gaze do. With frames: its inputs are held in every moment, and zoom shows each moment close up." },
+            "frames": { "type": "string", "description": "Add a picture of one of your animations, or of a built-in one your roles give (wave, cheer, nod …), as a row of moments: a one-shot from start to end, a loop as one round. With pose, under that pose's inputs (a walk seen in a side view: turn 1, pace 1) and close up on its zoom, a square that stays where the part rests." },
             "count": { "type": "integer", "minimum": 2, "maximum": 8, "description": "With frames: how many moments, 2 to 8 (default 6)." }
         } }),
         false,
@@ -228,14 +235,23 @@ fn status_tool() -> McpTool {
             let wanted = PictureRequest::parse(&args, &pass.mask(&state))?;
             let status = session::status(&state, &pass, req)?;
             // The guide is for a session that may use its avatar: one that has none reads why instead.
-            let text = if req.guide && status.allowed { format!("{}\n## This session's avatar now\n\n{}", brief::guide(Via::Tools, false), status.text()) } else { status.text() };
+            // Beside a picture the status is one line, unless the call asks for more: the whole
+            // of it with every look at a drawing is the larger part of what the looking costs.
+            let text = if req.guide && status.allowed {
+                format!("{}\n## This session's avatar now\n\n{}", brief::guide(Via::Tools, false), status.text())
+            } else if wanted.is_some() && !req.guide && !req.look {
+                status.brief()
+            } else {
+                status.text()
+            };
             let Some(wanted) = wanted else { return Ok(ToolOutput::Text(text)) };
             // What the picture shows comes first: a long status is cut at its end. A picture
             // that cannot be drawn does not take the status (or the guide) with it.
-            let caption = wanted.caption();
             match picture(&state, pass.terminal_id(), wanted).await {
-                Ok(drawn) => {
-                    let cost = session::cost_line(drawn.spent).map(|line| format!("\n{line}")).unwrap_or_default();
+                Ok((drawn, caption, cost)) => {
+                    // Beside a status picture, what it costs only where the pose costs other than
+                    // the look at rest: the design answer said that.
+                    let cost = cost.map(|line| format!("\n{line}")).unwrap_or_default();
                     Ok(ToolOutput::Images { text: format!("{caption}{cost}\n{text}"), png: vec![drawn.png] })
                 }
                 Err(e) => Ok(ToolOutput::Text(format!("No picture: {}\n{text}", e.message))),
@@ -253,8 +269,8 @@ fn design_tool() -> McpTool {
          and roles (so Workbench's built-in breathing, blinking, gaze and gestures drive your character), parents (a \
          part that moves with another), animations (your own keyframe tracks), states, mouth (lip sync), drives (where \
          it looks, how it walks and turns, moving your parts), voice, name. Not CSS and not SMIL: read the guide first \
-         (avatar_status with guide true). A call with svg is a new look; without it the fields you send are merged. A \
-         refused call changes nothing and lists what to fix.",
+         (avatar_status with guide true). A call with svg is a new look; without it only the fields you send change \
+         (pivots, parents, roles, animations and states by key). A refused call changes nothing and lists what to fix.",
         json!({ "type": "object", "properties": {
             "name": { "type": "string", "description": "The avatar's own name, at most 32 characters." },
             "svg": { "type": "string", "description": "The artwork: one <svg viewBox='0 0 200 200'> of g, path, circle, ellipse, rect, line, polyline, polygon, text and use (href='#id' of a g, a shape or a text, also one in defs); in defs linearGradient, radialGradient, clipPath, mask and filter (feGaussianBlur, feDropShadow, feOffset, feFlood, feColorMatrix, feComposite, feBlend, feMerge, feMorphology, feTurbulence, feDisplacementMap), used with clip-path, mask and filter='url(#id)'; stroke-dasharray and stroke-dashoffset. Attribute values in single quotes, an id on every part that moves. At most 32 KiB and 300 elements, each use counting what it repeats." },
@@ -264,7 +280,7 @@ fn design_tool() -> McpTool {
             "animations": { "type": "object", "description": "Name to {duration, loop? | every?: [min, max], ease?, tracks: [{target, prop, values, times?, ease?, phase?, delay?}]}. prop: translateX, translateY, rotate, skewX, skewY, scale, scaleX, scaleY, opacity, fillOpacity, strokeOpacity, fill, stroke, strokeWidth, strokeDashoffset, d or a shape's own number. ease: linear, in, out, inOut, inBack, outBack, inOutBack, outElastic, outBounce, step, a bezier [x1, y1, x2, y2], or a list with one per segment. A name of the built-in motion (breathe, blink, talk, nod, wave…) replaces it; walk (loop: true) and greet are played when the avatar strolls and meets another. Merged by name; null removes one." },
             "states": { "type": "object", "description": "State (idle, working, speaking, listening, waiting, attention, error, done, sleeping) to a list of up to 6 animation names, yours or built in. [] is stillness, null the default." },
             "mouth": { "description": "Lip sync: {target, open} morphs a path (open is path data in the structure of the path's own d), {target, prop, open} moves one number (scaleY, scaleX, scale, translateY, ry, r or height). One drive, or a list of up to 4." },
-            "gaze": { "type": "number", "description": "How far the part with the pupils role travels when it looks at the pointer, in viewBox units, at most 5% of the width. 0 switches it off." },
+            "gaze": { "type": "number", "description": "How far the part with the pupils role travels when it looks at the pointer, in viewBox units, at most 5% of the width. 0 keeps the pupils still, also in think." },
             "drives": { "type": "array", "description": "Up to 16 {input, target, prop, values, at?, ease?}: the input moves the prop of the target part (or up to 16) through values placed along its range (at: rising, first 0 and last 1; evenly without it). input: lookX, lookY (-1 to 1, where it looks), mouth (0 to 1 while it speaks), pace (0 standing to 1 walking fast), turn (-1 left to 1 right), held (0 to 1 while dragged). fill, stroke and the opacities follow only pace, turn and held. Replaces the stored list; null or [] removes it." },
             "voice": { "type": "object", "description": "{lang: a tag such as en-GB, prefer: up to 5 pieces of browser voice names, pitch: 0.7 to 1.4, rate: 0.8 to 1.3}." },
             "keep": { "type": "boolean", "description": "With svg: keep the pivots, parents, roles, animations, states, mouth, gaze and drives whose parts still exist, where this call gives none." }
@@ -349,7 +365,7 @@ fn act_tool() -> McpTool {
         "avatar_act",
         "Play one of the avatar's animations as a gesture (play: a name from avatar_status; mode hold keeps the last \
          frame, loop repeats a looping animation; both end at stop, at the next play or after two minutes), or stop one \
-         (stop: a name or all).",
+         (stop: the name of a held or looping gesture, or all).",
         json!({ "type": "object", "properties": {
             "play": { "type": "string", "description": "The animation to play: one of yours or a built-in one (avatar_status lists both)." },
             "mode": { "type": "string", "enum": ["once", "hold", "loop"], "description": "once (default), hold (keep the last frame) or loop (only an animation declared loop: true)." },

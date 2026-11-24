@@ -28,7 +28,8 @@
 //!   (`Content-Type: image/svg+xml`, or a body that starts with `<`) → the design answer as
 //!   `text/plain`.
 //! * `POST …/picture`: nothing or `{}` (the avatar at rest), `{pose}` or `{frames, count?}` as
-//!   `avatar_status` takes them → the picture as `image/png`. It counts as a status call.
+//!   `avatar_status` takes them → the picture as `image/png`, and what it shows, percent-encoded,
+//!   in `X-Workbench-Caption`. It counts as a status call.
 //! * `POST …/say {text, gesture?, lang?, wait?}`, or the line itself as `text/plain` with
 //!   `gesture`, `lang` and `wait` as query parameters → `{lineId, outcome?, voice?, note}`.
 //! * `POST …/ask`: the arguments of `avatar_ask` → its answer; the request is held for the wait.
@@ -273,6 +274,8 @@ async fn hook_design(State(state): State<AppState>, Path(tid): Path<String>, hea
 
 /// A picture of the session's avatar as a PNG: the body is empty or `{}` for the look at rest,
 /// or `{pose}` or `{frames, count?}` as `avatar_status` takes them. It counts as a status call.
+/// What the picture shows comes in [`CAPTION_HEADER`], the words the tool says beside it: its
+/// caption, and after it what drawing costs where the pose costs other than the look at rest.
 async fn hook_picture(State(state): State<AppState>, Path(tid): Path<String>, headers: HeaderMap, body: Bytes) -> ApiResult<Response> {
     let pass = enter(&state, &tid, &headers, Call::Status)?;
     let mask = pass.mask(&state);
@@ -280,9 +283,24 @@ async fn hook_picture(State(state): State<AppState>, Path(tid): Path<String>, he
     // `picture` is taken as the tool takes it: here it says nothing new.
     session::fields(&args, "picture", &["picture", "pose", "frames", "count"], &mask)?;
     let wanted = PictureRequest::parse(&args, &mask)?.unwrap_or_else(PictureRequest::rest);
-    let picture = tools::picture(&state, &tid, wanted).await?;
-    Ok(([(header::CONTENT_TYPE, "image/png")], picture.png).into_response())
+    let (picture, caption, cost) = tools::picture(&state, &tid, wanted).await?;
+    let said = match cost {
+        Some(cost) => format!("{caption} {cost}"),
+        None => caption,
+    };
+    let mut response = ([(header::CONTENT_TYPE, "image/png")], picture.png).into_response();
+    // Percent-encoded UTF-8, so that whatever a name holds is safe in a header.
+    if let Ok(value) = header::HeaderValue::from_str(&percent_encoding::utf8_percent_encode(&said, CAPTION_ESCAPED).to_string()) {
+        response.headers_mut().insert(CAPTION_HEADER, value);
+    }
+    Ok(response)
 }
+
+/// The header of a picture's answer that says what it shows (`hook_picture`).
+pub const CAPTION_HEADER: &str = "x-workbench-caption";
+/// What the caption header escapes: controls, `%` itself and, as the encoding does, everything
+/// beyond ASCII.
+const CAPTION_ESCAPED: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS.add(b'%');
 
 async fn hook_say(State(state): State<AppState>, Path(tid): Path<String>, headers: HeaderMap, uri: Uri, body: Bytes) -> ApiResult<Json<session::SayAnswer>> {
     let pass = enter(&state, &tid, &headers, Call::Say)?;

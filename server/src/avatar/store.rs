@@ -6,21 +6,31 @@
 //! aloud, a held gesture and the rate limits.
 //!
 //! What a record keeps across restarts is one file, `data_dir/avatar/<terminalId>.json` (0600
-//! in a 0700 directory): `{version, on, name, designed, look, voice, via, unbriefed?}`, written
-//! compactly, so that it is never much larger than the look the validator measured. It is
-//! written when the record is created and whenever one of those fields changes, and removed with
-//! the terminal. A stored file is read through the same validator as a design call, so a
-//! hand-written one gets no further than a session's call would; one that fails is kept aside as
-//! `<terminalId>.json.corrupt` and the avatar shows the default look. Its `on` still holds when
-//! the file is JSON with a boolean `on`: a design that cannot be read never turns an avatar the
-//! user turned off back on.
+//! in a 0700 directory): `{version, on, name, designed, look, voice, via, unbriefed?,
+//! unreadable?}`, written compactly, so that it is never much larger than the look the validator
+//! measured. It is written when the record is created and whenever one of those fields changes,
+//! and removed with the terminal. A stored file is read through the same validator as a design
+//! call, so a hand-written one gets no further than a session's call would; one that fails is
+//! kept aside as `<terminalId>.json.corrupt` and the avatar shows the default look. Its `on`
+//! still holds when the file is JSON with a boolean `on`: a design that cannot be read never
+//! turns an avatar the user turned off back on. A file whose switch cannot be read either leaves
+//! the avatar off until the user turns it on, and the record says why (`unreadable`). A file
+//! whose terminal was not loaded at this start, while its `meta.json` is still on disk, is left
+//! alone: it gets no record, and waits for the start that reads the terminal again.
+//!
+//! Every stored file of a loaded agent terminal gets its record at a start, however many there
+//! are: [`MAX_AVATARS`] bounds new avatars only. A record made later for a terminal that has none
+//! (its first call, a device's on, its `terminal.created`) never replaces a file the terminal
+//! has: that file is read and taken over as a start reads it ([`take_over`]).
 //!
 //! Locks. [`AvatarState::inner`] is the one store lock: every change of a record, its file and
 //! its events happens under it, so events of one avatar leave in the order of its changes. It is
 //! never held across an await, and nothing is asked of another slice while it is held: terminal
 //! infos are read before it is taken, and a design is validated (which masks text with the
-//! session's secrets) under `designing` alone. A file name is only ever built from the id of a
-//! terminal the terminals slice knew.
+//! session's secrets) under `designing` alone. A stored file that a record takes over at run time
+//! is read and validated under the store lock: that masks nothing and asks no other slice, and it
+//! happens once for such a record. A file name is only ever built from an id that passes
+//! `terminals::valid_id`: a terminal's own, or one read from the directory and checked.
 //!
 //! Lifecycle: [`on_event`] follows `terminal.*` events (and tells a session that was not told of
 //! its avatar once it is idle, through `device::tell`), [`reconcile`] compares the records with
@@ -92,7 +102,8 @@ pub const HOLD_MAX_SECS: i64 = 120;
 pub const NUDGE_AFTER_SECS: i64 = 8;
 /// Such announcements per terminal in ten minutes.
 pub const NUDGES_PER_10_MIN: usize = 3;
-/// Sessions that have an avatar. One more is refused; none is evicted.
+/// Sessions that have an avatar. One more is refused; none is evicted, and every avatar stored
+/// for a loaded terminal is read at a start, also beyond this.
 pub const MAX_AVATARS: usize = 64;
 /// Sessions remembered as having asked for an avatar without having one.
 pub const MAX_ASKED: usize = 64;
@@ -404,6 +415,9 @@ pub(super) struct Record {
     /// The session has not been told of its avatar: a device gave it one, its first prompt was a
     /// command of its CLI, or a conversation started anew without the brief. Stored.
     pub unbriefed: bool,
+    /// It is off because its stored file could not be read (nobody knows what the user chose),
+    /// not because the user turned it off: until a device turns it on. Stored.
+    pub unreadable: bool,
     /// When the lifecycle last tried to tell the session, and whether it did so in the session's
     /// present idle: once per idle.
     pub brief_at: i64,
@@ -434,6 +448,7 @@ impl Record {
             delivering: None,
             delivered_at: 0,
             unbriefed: false,
+            unreadable: false,
             brief_at: 0,
             brief_idle: false,
             brief_refusals: 0,
@@ -721,6 +736,11 @@ struct Stored<'a> {
     /// Written only when it is true: absent reads as false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     unbriefed: bool,
+    /// Written only when it is true, as `unbriefed` is. A build that does not know it reads the
+    /// file all the same: neither `strictly` nor `look::check_stored` looks at keys they do not
+    /// know, and such a file is off with the default look.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    unreadable: bool,
 }
 
 /// What a stored file says of its record.
@@ -728,7 +748,15 @@ struct Kept {
     on: bool,
     via: Option<Via>,
     unbriefed: bool,
+    unreadable: bool,
     design: Design,
+}
+
+/// Why a stored file could not be used, and its `on` when the file is JSON with a boolean `on`.
+struct Unread {
+    on: Option<bool>,
+    /// What is wrong with it, as the log says it after the file's path.
+    why: String,
 }
 
 fn avatar_dir(state: &AppState) -> PathBuf {
@@ -748,7 +776,7 @@ fn stored_file(state: &AppState, tid: &str) -> Option<PathBuf> {
 /// keyframes would be several times larger, and be refused at the next start.
 pub(super) fn save(state: &AppState, tid: &str, rec: &Record) {
     let Some(file) = stored_file(state, tid) else { return };
-    let stored = Stored { version: STORED_VERSION, on: rec.on, name: &rec.design.name, designed: rec.designed(), look: rec.design.look.as_ref(), voice: &rec.design.voice, via: rec.via, unbriefed: rec.unbriefed };
+    let stored = Stored { version: STORED_VERSION, on: rec.on, name: &rec.design.name, designed: rec.designed(), look: rec.design.look.as_ref(), voice: &rec.design.voice, via: rec.via, unbriefed: rec.unbriefed, unreadable: rec.unreadable };
     let written = serde_json::to_vec(&stored).map_err(anyhow::Error::from).and_then(|bytes| crate::util::fs::write_atomic(&file, &bytes, 0o600));
     if let Err(e) = written {
         tracing::warn!(terminal = tid, "avatar: could not save {}: {e:#}", file.display());
@@ -762,17 +790,34 @@ fn remove_stored(state: &AppState, tid: &str) {
     let _ = std::fs::remove_file(file);
 }
 
-/// What a stored file holds, read strictly. `Err` when it is too large, is not JSON, is not
-/// version 1 of the format, or its design does not pass the validator a design call passes; the
-/// error carries the file's `on` when the file is JSON with a boolean `on`, which holds all the
-/// same.
-fn read_stored(file: &Path) -> Result<Kept, Option<bool>> {
-    if std::fs::metadata(file).ok().is_none_or(|meta| meta.len() > MAX_STORED_BYTES) {
-        return Err(None);
+/// What a stored file holds, read strictly. `Err` when it cannot be read, is too large, is not
+/// JSON (a byte order mark in front, which some editors write, is no part of it, as for a
+/// design's body), is not version 1 of the format, or its design does not pass the validator a
+/// design call passes. The error says which, and carries the file's `on` when the file is JSON
+/// with a boolean `on`, which holds all the same.
+fn read_stored(file: &Path) -> Result<Kept, Unread> {
+    let unread = |why: String| Unread { on: None, why };
+    let not_read = |e: std::io::Error| unread(format!("could not be read ({})", e.kind()));
+    let size = std::fs::metadata(file).map_err(not_read)?.len();
+    if size > MAX_STORED_BYTES {
+        return Err(unread(format!("is {size} bytes, larger than the {MAX_STORED_BYTES} a stored avatar may have")));
     }
-    let Some(value) = std::fs::read(file).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) else { return Err(None) };
+    let bytes = std::fs::read(file).map_err(not_read)?;
+    let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    let value = serde_json::from_slice::<Value>(text).map_err(|_| unread("is not JSON".to_string()))?;
     let on = value.get("on").and_then(Value::as_bool);
-    strictly(value).ok_or(on)
+    strictly(value).ok_or_else(|| Unread { on, why: "does not hold a valid avatar".to_string() })
+}
+
+/// The warning a stored file that could not be used is logged with: the file, what is wrong with
+/// it, and what the avatar is now.
+fn unread_warning(file: &Path, unread: &Unread) -> String {
+    let now = match unread.on {
+        None => "the avatar is off until you turn it on (with the default look)",
+        Some(true) => "the avatar is on with the default look",
+        Some(false) => "the avatar stays off as you left it (with the default look)",
+    };
+    format!("avatar: {} {}; it is kept as .corrupt, and {now}", file.display(), unread.why)
 }
 
 /// A stored file's JSON as its record, or `None` when any part of it is not what [`save`] writes.
@@ -794,16 +839,66 @@ fn strictly(value: Value) -> Option<Kept> {
         Some(Value::Bool(unbriefed)) => *unbriefed,
         Some(_) => return None,
     };
+    let unreadable = match stored.get("unreadable") {
+        None => false,
+        Some(Value::Bool(unreadable)) => *unreadable,
+        Some(_) => return None,
+    };
     if !matches!(stored.get("designed"), None | Some(Value::Bool(_))) {
         return None;
     }
     // Whether it is designed follows from the look that passes, never from the file's word.
-    Some(Kept { on, via, unbriefed, design: look::check_stored(value)? })
+    Some(Kept { on, via, unbriefed, unreadable, design: look::check_stored(value)? })
 }
 
-/// Reads the stored avatars, once: every entry point of the slice calls it first. A file whose
-/// terminal is gone is removed; one that does not hold a valid avatar is kept aside and its
-/// session shows the default look.
+/// The record a stored file of a loaded agent terminal gives, as a start reads it: what the file
+/// holds, or, for a file that does not hold a valid avatar, the default look with the file kept
+/// aside as `.corrupt` and a warning that says why. The user's switch holds where it can be
+/// read; where it cannot, nobody knows what the user chose, and the avatar is off until they
+/// turn it on (`unreadable`).
+fn from_file(state: &AppState, id: &str, info: &TerminalInfo, file: &Path, now: i64) -> Record {
+    let mut rec = Record::new(info, info.created_at.min(now));
+    rec.updated_at = now;
+    match read_stored(file) {
+        Ok(kept) => {
+            rec.on = kept.on;
+            rec.via = kept.via.unwrap_or(rec.via);
+            rec.unbriefed = kept.unbriefed;
+            rec.unreadable = kept.unreadable && !kept.on;
+            rec.design = kept.design;
+        }
+        Err(unread) => {
+            tracing::warn!(terminal = id, "{}", unread_warning(file, &unread));
+            let _ = std::fs::rename(file, file.with_extension("json.corrupt"));
+            rec.on = unread.on.unwrap_or(false);
+            rec.unreadable = unread.on.is_none();
+            save(state, id, &rec);
+        }
+    }
+    rec
+}
+
+/// The record of a terminal's own stored file, for a terminal that has no record: `None` when it
+/// has no file. A record made for a terminal is never a default one over the file it has (one a
+/// start left without a record), so the user's switch and the session's design are not lost:
+/// the file is read as a start reads it. Called with the store lock held, and only for a
+/// terminal of kind agent the terminals slice knows.
+pub(super) fn take_over(state: &AppState, info: &TerminalInfo, now: i64) -> Option<Record> {
+    let file = stored_file(state, &info.id).filter(|file| stored_there(file))?;
+    Some(from_file(state, &info.id, info, &file, now))
+}
+
+/// Whether something stands at a stored file's path. A path that cannot be looked at counts as
+/// there: it may hold what the user chose.
+fn stored_there(file: &Path) -> bool {
+    !matches!(std::fs::symlink_metadata(file), Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory))
+}
+
+/// Reads the stored avatars, once: every entry point of the slice calls it first. Every file of a
+/// loaded agent terminal gets its record, however many there are ([`from_file`]: one that does not
+/// hold a valid avatar is kept aside and its session shows the default look). A file whose
+/// terminal is gone (unknown, and without its `meta.json` on disk) is removed; one whose terminal
+/// was not loaded is kept. Each file that gets no record is logged once, with why.
 pub(super) fn ensure_loaded(state: &AppState) {
     let avatars = &state.avatar;
     if avatars.loaded.load(Ordering::Acquire) {
@@ -824,37 +919,26 @@ pub(super) fn ensure_loaded(state: &AppState) {
     let mut records = HashMap::new();
     for name in &names {
         let Some(id) = name.strip_suffix(".json").filter(|id| terminals::valid_id(id)) else { continue };
-        let Some(info) = state.terminals.info(id).filter(|info| info.kind == TerminalKind::Agent) else {
-            remove_stored(state, id);
+        let known = state.terminals.info(id);
+        let Some(info) = known.clone().filter(|info| info.kind == TerminalKind::Agent) else {
+            // A terminal that was not loaded this time (its meta.json could not be read) is not
+            // gone: its avatar stays in its file, without a record, for the start that reads it.
+            if known.is_none() && terminals::on_disk(state, id) {
+                tracing::warn!(terminal = id, "avatar: the stored avatar of terminal {id} is kept without a record: the terminal was not loaded at this start (its meta.json could not be read), and the start that loads it reads the avatar again");
+            } else {
+                let why = if known.is_some() { "the terminal is not an agent session" } else { "the terminal is gone" };
+                tracing::info!(terminal = id, "avatar: the stored avatar of terminal {id} is removed: {why}");
+                remove_stored(state, id);
+            }
             continue;
         };
-        if records.len() >= MAX_AVATARS {
-            continue;
-        }
-        let file = dir.join(name);
-        let mut rec = Record::new(&info, info.created_at.min(now));
-        rec.updated_at = now;
-        match read_stored(&file) {
-            Ok(kept) => {
-                rec.on = kept.on;
-                rec.via = kept.via.unwrap_or(rec.via);
-                rec.unbriefed = kept.unbriefed;
-                rec.design = kept.design;
-            }
-            Err(on) => {
-                tracing::warn!(terminal = id, "avatar: {} does not hold a valid avatar; it is kept as .corrupt and the session shows the default look", file.display());
-                let _ = std::fs::rename(&file, file.with_extension("json.corrupt"));
-                // The user's switch holds: a design that cannot be read never turns an avatar
-                // that was turned off back on.
-                rec.on = on.unwrap_or(rec.on);
-                save(state, id, &rec);
-            }
-        }
-        records.insert(id.to_string(), rec);
+        // No cap here: MAX_AVATARS bounds new avatars, and what the user and the session chose
+        // for this one is in its file.
+        records.insert(id.to_string(), from_file(state, id, &info, &dir.join(name), now));
     }
     for name in &names {
         let Some(id) = name.strip_suffix(".json.corrupt").filter(|id| terminals::valid_id(id)) else { continue };
-        if !records.contains_key(id) && state.terminals.info(id).is_none() {
+        if !records.contains_key(id) && state.terminals.info(id).is_none() && !terminals::on_disk(state, id) {
             remove_stored(state, id);
         }
     }
@@ -959,13 +1043,25 @@ pub(super) fn on_event(state: &AppState, event: &Event) {
 }
 
 /// A new session: it takes over the avatar of the terminal it moved from, or gets one of its own
-/// when it was started with the option. A terminal that has a record already keeps it.
+/// when it was started with the option. A terminal that has a record already keeps it, and one
+/// that has a stored file of its own takes that over ([`take_over`]), whatever its meta says.
+/// `reconcile` calls this as well, for a terminal whose `terminal.created` was missed.
 ///
 /// `"avatarBrief": "later"` in its meta: the session was started without the brief (its first
 /// prompt was a command of its CLI, which the brief would have become part of). It is told once
 /// it is idle. A session that moved here with an avatar the user had turned off was started
 /// without the brief as well (`brief_at_start` gives none): it is told once the avatar is on.
 fn created(state: &AppState, info: &TerminalInfo, now: i64) {
+    make_record(state, info, now, false);
+}
+
+/// [`created`], and with `made_up` what `reconcile` makes up for a `terminal.created` that was
+/// missed. Made up later, two things differ. A session that is not running and whose only claim
+/// is the option it was started with gets nothing: it was refused at the cap when it started (or
+/// its event came while avatars were off), and room the user freed since is for sessions that
+/// start now. And an avatar that is carried along on is told of once the session is idle: nobody
+/// knows whether its first prompt held the brief (it did not when avatars were off at that time).
+fn make_record(state: &AppState, info: &TerminalInfo, now: i64, made_up: bool) {
     if !super::enabled(state) {
         return;
     }
@@ -982,25 +1078,36 @@ fn created(state: &AppState, info: &TerminalInfo, now: i64) {
         if inner.records.contains_key(&info.id) {
             return;
         }
-        let carried = moved_from.and_then(|old| inner.records.get(old)).map(|old| (old.on, old.design.clone()));
-        if carried.is_none() && !wanted {
+        let carried = moved_from.and_then(|old| inner.records.get(old)).map(|old| (old.on, old.design.clone(), old.unreadable));
+        let stored = stored_file(state, &info.id).is_some_and(|file| stored_there(&file));
+        if carried.is_none() && !wanted && !stored {
+            return;
+        }
+        if made_up && carried.is_none() && !stored && info.status != TerminalStatus::Running {
             return;
         }
         if inner.records.len() >= MAX_AVATARS {
             tracing::info!(terminal = %info.id, "avatar: {MAX_AVATARS} sessions have an avatar already; this one gets none");
             return;
         }
-        let mut rec = Record::new(info, now);
-        // An avatar that moves along on is told of with the session's first prompt, also when the
-        // session it came from was not told of it yet.
-        rec.unbriefed = later || carried.as_ref().is_some_and(|(on, _)| !on);
-        if let Some((on, design)) = carried {
-            rec.on = on;
-            rec.design = design;
-        }
+        let mut rec = match take_over(state, info, now) {
+            Some(rec) => rec,
+            None => {
+                let mut rec = Record::new(info, now);
+                // An avatar that moves along on is told of with the session's first prompt, also
+                // when the session it came from was not told of it yet.
+                rec.unbriefed = later || carried.as_ref().is_some_and(|(on, ..)| !on || made_up);
+                if let Some((on, design, unreadable)) = carried {
+                    rec.on = on;
+                    rec.design = design;
+                    rec.unreadable = unreadable;
+                }
+                save(state, &info.id, &rec);
+                rec
+            }
+        };
         // Once, should the session be idle already.
         let tell = brief_due(&mut rec, info, now);
-        save(state, &info.id, &rec);
         emit_changed(state, &info.id, &rec);
         inner.asked.retain(|id| id != &info.id);
         inner.records.insert(info.id.clone(), rec);
@@ -1127,12 +1234,14 @@ fn remove(state: &AppState, tid: &str) {
 /// Compares the records with the terminals that exist: at start (terminals are loaded, and may
 /// have pruned, before this slice listens) and whenever events were missed. Avatars whose
 /// terminal is gone are dropped; for terminals that are not running, questions close and what
-/// was not presented is unheard.
+/// was not presented is unheard. An agent terminal without a record gets what its missed
+/// `terminal.created` would have given it ([`created`] decides, and tells).
 pub(super) fn reconcile(state: &AppState, now: i64) {
     ensure_loaded(state);
     let ids: Vec<String> = state.avatar.inner.lock().records.keys().cloned().collect();
     // Asked before the lock is taken again.
     let infos: Vec<(String, Option<TerminalInfo>)> = ids.into_iter().map(|id| { let info = state.terminals.info(&id).filter(|i| i.kind == TerminalKind::Agent); (id, info) }).collect();
+    let agents: Vec<TerminalInfo> = state.terminals.list().into_iter().filter(|info| info.kind == TerminalKind::Agent).collect();
     let mut changed = false;
     for (id, info) in infos {
         let Some(info) = info else {
@@ -1147,6 +1256,15 @@ pub(super) fn reconcile(state: &AppState, now: i64) {
             rec.close_ask(state, &id, Reason::SessionEnded, now);
             changed |= rec.pending_unheard(state, &id, now);
         }
+    }
+    // A moved or restarted session takes its avatar along, one started with the option gets
+    // its own, and one that was not told is told once it is idle.
+    let without: Vec<TerminalInfo> = {
+        let inner = state.avatar.inner.lock();
+        agents.into_iter().filter(|info| !inner.records.contains_key(&info.id)).collect()
+    };
+    for info in &without {
+        make_record(state, info, now, true);
     }
     if changed {
         state.avatar.bump();

@@ -71,8 +71,10 @@ with one the words "Designing its look…". When its own look arrives the figure
 The session does not see your browser, so Workbench shows it what it drew: each drawing is
 answered with a picture of the figure on a light and on a dark panel, at its resting size and as
 a face, and with the size and place of every part. A session corrects what looks wrong with a
-call or two more, and may ask for more pictures: one of its animations as a row of moments, the
-figure as it looks towards the pointer, turns, speaks or is held, or one part close up. A drawing
+call or two more, and may ask for more pictures: one of its animations as a row of moments (also
+Workbench's built-in ones, such as the wave, on its own character), the figure inside an animation
+(where it has moved furthest, unless the session names a moment), as it looks towards the pointer,
+turns, speaks or is held, or one part close up, also in each moment of an animation. A drawing
 that cannot be drawn at rest is refused before it reaches your screen, and the answer says what
 drawing the look costs.
 
@@ -121,7 +123,8 @@ motion it stays faint); the figure of a session that exited pales. A thin line i
 text colour keeps a resting figure readable on a light and on a dark panel. The tooltip says the
 same in words: the tab's (Working, Needs permission, Done, Error, Exited and the others),
 **Speaking** or **Listening**, and **Asks you** while a question is open. By default its motion
-follows the state too: it thinks while the session works and dozes once it has exited. An exited
+follows the state too: it thinks while the session works (unless it has no head and its session
+keeps its pupils still) and dozes once it has exited. An exited
 session's avatar sleeps for a minute and then leaves.
 
 **The bubble** opens beside the figure when the avatar says a line or asks a question, and closes
@@ -167,8 +170,10 @@ start next to the chip and keep off it. After a while in a hidden tab they do no
 the same moment.
 
 A figure stands still while it speaks or listens, has a question open, is the large one or has
-the focus, while its session needs you (a permission request) or failed, while the session holds
-a gesture, and as a guest from another project. A pointer that moves near a figure, or rests on
+the focus, while its session needs you (a permission request) or failed, while a gesture plays on
+it (a wave, a nod, a cheer: a walking figure stops, turns to you, plays it and then walks on; a
+gesture the session holds keeps it standing until it ends), and as a guest from another project.
+A pointer that moves near a figure, or rests on
 it, stops it so you can press it, but only where the figure stands on nothing you press or type
 into: over a button, a tab, an editor or a terminal it walks on, so it never covers what the
 pointer came for. A pointer parked beside it for a few seconds, or one the page moved under,
@@ -202,7 +207,9 @@ else it says is shown or said in this window.
 pixels, the avatar in front is a small face at the right end of the agents window's top bar, and
 its bubble a panel under that bar, at most 480 pixels wide. A face has no frame and does not
 walk or move, here or on a phone: it shows the head as the figure rests, with what the session
-tied to its walk at rest (a side view that shows only while it walks is hidden). The face counts the avatars behind it, and its menu lists them. While
+tied to its walk at rest (a side view that shows only while it walks is hidden). A part that neither
+touches the head nor fits wholly inside the face's square is left out, so nothing shows as a sliver
+cut at its edge. The face counts the avatars behind it, and its menu lists them. While
 the session on screen has a permission request the panel stays closed, and the face shows how
 many permission requests wait.
 
@@ -289,9 +296,10 @@ frame and your words.
 A prompt is never typed into a session that shows a dialog or is still starting: the reply box
 and the choices are then disabled with "Answer the dialog in the terminal first" or "The session
 is starting". Workbench also waits for a pause in your own typing in that session. If a dialog
-opens while your text is being pasted, the Enter is held back and the bubble says that the text is
-in the session's input box, not sent: answer the dialog, then press Enter in the terminal (do not
-click the choice again, or it is sent twice).
+opens while your text is being pasted, the Enter is held back and the bubble says "It is in the
+session's input box: answer its dialog, then press Enter there." until the avatar's next line or
+until you type. The reply counts as given: its question closes and the reply box is cleared, so
+clicking the choice or pressing Enter in the bubble again sends nothing a second time.
 
 When you answer in the terminal instead and the session goes on working, its open question closes
 by itself.
@@ -395,7 +403,7 @@ host) or the same calls through a command (every other CLI):
 | `avatar_say` | `workbench avatar say …` | Says one line of one or two plain sentences, optionally with a gesture. |
 | `avatar_ask` | `workbench avatar ask …` | Asks one question with up to four choices and waits for the answer; waits again, or withdraws the question. |
 | `avatar_act` | `workbench avatar act …` | Plays one of its animations as a gesture, holds or loops it, or stops it. |
-| `avatar_status` | `workbench avatar status`, `guide`, `picture` | Reads the avatar back: its parts, animations and drives, the open question, its last lines and what became of them, the limits, and the guide. On request a picture: the figure at rest or in a pose, or one of its own animations as a row of moments (the command writes it to a PNG file). |
+| `avatar_status` | `workbench avatar status`, `guide`, `picture` | Reads the avatar back: its parts, animations and drives, the open question, its last lines and what became of them, the limits, and the guide. On request a picture: the figure at rest or in a pose (inside an animation, where it has moved furthest unless the session names a moment), or one of its animations (its own or a built-in one such as wave) as a row of moments, also close up (the command writes it to a PNG file and prints what it shows); beside a picture the status is one line. |
 
 A drawing is shapes, groups, a few short texts and copies of them (`use`), with gradients, clip
 paths, masks, filters (blur, drop shadow, offset, flood, colour matrix, composite, blend, merge,
@@ -451,14 +459,20 @@ choose it:
   process of their own with limited memory and time, and go only to the session that asked: in
   its tool's answer (and from there to its model service, like any tool answer), or into a file
   its command writes (a new one in the system's temporary directory unless it names another).
-  None is drawn for an avatar you turned off.
+  None is drawn for an avatar that is off.
 
 Workbench keeps one file per avatar in its data folder, `avatar/<session id>.json` under
 `~/.local/share/workbench` (readable only by you): whether it is on, its name, look and voice, how
 the session drives it, and whether the session is still to be told of it. It is removed with the
-session. The last lines live in memory only, at most 30 per avatar. Your browser keeps its own
-choices (shown, voice, online voices, speed, volume, walking, motion, the column's place, which
-voice each avatar got, what you have seen).
+session; when the session itself could not be read at a start, the file is kept while the
+session's `meta.json` is still there, and the start that reads the session reads its avatar
+again. A file that cannot be read is kept beside it as `.json.corrupt` and the avatar shows the
+default look; its on or off still holds, and where that cannot be read either the avatar is off
+until you turn it on, and the session is told that Workbench could not read the avatar's stored
+file. Workbench's log says why: not JSON, too large, an I/O error, or not a valid avatar. A file
+that begins with a byte order mark is read as if it did not. The last lines live in memory only,
+at most 30 per avatar. Your browser keeps its own choices (shown, voice, online voices, speed,
+volume, walking, motion, the column's place, which voice each avatar got, what you have seen).
 
 ## CLIs without Workbench's tools
 
@@ -472,14 +486,16 @@ says so while **Avatar** is ticked:
   `ask --cancel`, `act <name> [--mode once|hold|loop] [--times n]`, `act --stop <name|all>`,
   `picture [<file.png>] [--frames <animation> [--count n]] [--pose <file|->]` (writes a picture
   of the avatar to that file, or to a new one in the system's temporary directory, and prints
-  where, for a session that can open an image; with both flags, the moments under the pose's
-  inputs). It works only inside an agent session: it reads the session's `WORKBENCH_URL`,
+  where and what it shows, in the words the tool uses; with both flags, the moments under the
+  pose's inputs, close up on its zoom). It works only inside an agent session: it reads the
+  session's `WORKBENCH_URL`,
   `WORKBENCH_TERMINAL_ID` and `WORKBENCH_AGENT_TOKEN`, and sends the token only to this computer.
   Exit status 0 means done, 1 refused or no answer (the reason is on standard error), 2 nothing
   was sent.
 - **In a dev container**, where that program does not exist, `curl` against
   `$WORKBENCH_URL/api/hooks/avatar/$WORKBENCH_TERMINAL_ID/` (`guide`, `status`, `design`,
-  `picture`, `say`, `ask`, `act`). The token goes in a header that the shell writes to curl's
+  `picture`, `say`, `ask`, `act`; `picture` says what it shows in its `X-Workbench-Caption`
+  header). The token goes in a header that the shell writes to curl's
   standard input, never on a command line. Claude Code keeps its tools in a container.
 
 **Such a CLI may ask you before it runs the command**, as it asks for any command, unless you
@@ -509,7 +525,9 @@ tool call and gets the same answer.
   stretched part, a shape drawn far too large, very fine dashes), or that does not finish within
   the memory (1 GiB) and the processor time (6 seconds) a picture may take. Two pictures are
   drawn at a time for all sessions and one at a time for each.
-- At most 64 sessions, running or in the history, have an avatar (none is taken away). Giving
+- At most 64 sessions, running or in the history, have an avatar (none is taken away). The
+  avatars kept in files are all read at a start, even more than 64, and no new one is made until
+  fewer than 64 have one. Giving
   one more, or a session taking one itself, is refused with a message (`avatar_status` of a
   session without one then says that none is to be had), and a session started with one (the
   **Avatar** option, or by another session) then starts without one, until you remove sessions you
@@ -519,8 +537,9 @@ tool call and gets the same answer.
   are at least 0.17 seconds apart and never jump, spring or bounce, and they follow only how
   fast a figure walks, which way it turns and whether you drag it, which change slowly, in at
   most two or three steps, never the pointer or the speech. Whatever a figure's motion adds up
-  to, no colour, opacity or movement of a large part turns back more often than three flashes a
-  second allow: the figure holds it until it may turn. A figure's animations are drawn at 30
+  to, no fill or stroke (its brightness included), opacity of one part or movement of a large part
+  turns back more often than three flashes a second allow: the figure holds it until it may turn. A
+  figure's animations are drawn at 30
   frames a second at most (its walk across the window follows the screen's rate), and a figure
   that takes too long to draw is held still in its rest pose.
 
@@ -589,8 +608,9 @@ avatar` command. Its terminal shows what it tried, and the refusal it got, if an
 - A session in a dev container.
 - Windows at run time: the server is type-checked for Windows only. There the process a picture
   is drawn in is only waited for and killed; it cannot limit its own memory or time.
-- Two opacities that cancel out on one part or down its tree, and two colours whose blend dips
-  in brightness: the flash limit does not see them.
+- Two opacities that work against each other on one part or down its tree, and a colour and an
+  opacity or fill-opacity of one part or down its tree that change together: the flash limit holds
+  each on its own, not what they show together.
 - Safari and iOS: speech needs a tap there, by design, but it was not tried.
 
 ## Not in this release

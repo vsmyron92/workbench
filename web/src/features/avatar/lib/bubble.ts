@@ -480,9 +480,13 @@ export function planChoice(ask: Ask | null, index: number, scene: Scene, now: nu
   return { askId: ask.id, choice: index, via: 'click' }
 }
 
-/** What the bubble says after a reply was delivered. */
-export function sentNote(delivered: 'answer' | 'prompt', working: boolean): 'sent' | 'sentLater' {
-  return delivered === 'prompt' && working ? 'sentLater' : 'sent'
+/** What the bubble says of a reply a dialog left in the session's input box: the user sends it there. */
+export const IN_BOX = "It is in the session's input box: answer its dialog, then press Enter there."
+
+/** What the bubble says after a reply was delivered (`inBox`: pasted, and its Enter withheld by a dialog). */
+export function sentNote(delivered: 'answer' | 'prompt' | 'inBox', working: boolean): { kind: 'sent' } | { kind: 'sentLater' } | { kind: 'info'; text: string } {
+  if (delivered === 'inBox') return { kind: 'info', text: IN_BOX }
+  return delivered === 'prompt' && working ? { kind: 'sentLater' } : { kind: 'sent' }
 }
 
 // ---------------------------------------------------------------- the notes about a reply
@@ -534,10 +538,11 @@ export function noteStep<N extends { kind: NoteKind }>(n: Noted<N> | null | unde
  * presented last when the reply was sent, and when that was; `last`: the one it presented
  * last now. "Sent." is about the reply, so a line the avatar began while it was on its way
  * comes after it and takes it away. An error is about now: the user sees that the reply was
- * refused, until the next line.
+ * refused, until the next line. So is an info (the reply waits in the session's input box):
+ * the user has something to do.
  */
 export function replyNoted<N extends { kind: NoteKind }>(note: N, now: number, sent: { line: string | null; since: number }, last: LastLine | null | undefined): Noted<N> {
-  if (note.kind === 'error') return noted(note, now, last?.lineId ?? null)
+  if (note.kind === 'error' || note.kind === 'info') return noted(note, now, last?.lineId ?? null)
   return noted(note, now, sent.line, sent.since)
 }
 

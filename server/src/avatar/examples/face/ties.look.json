@@ -1,0 +1,71 @@
+{
+  "viewBox": [
+    -100,
+    -100,
+    200,
+    200
+  ],
+  "nodes": [
+    {
+      "tag": "rect",
+      "id": "head",
+      "attrs": {
+        "fill": "#74c0fc",
+        "height": 50,
+        "width": 60.062,
+        "x": -30.062,
+        "y": -30
+      },
+      "box": [
+        -30.062,
+        -30,
+        60.062,
+        50
+      ]
+    },
+    {
+      "tag": "rect",
+      "id": "edge",
+      "attrs": {
+        "fill": "#e03131",
+        "height": 20,
+        "transform": "scale(0.5)",
+        "width": 20,
+        "x": -80.125,
+        "y": -20
+      },
+      "box": [
+        -80.125,
+        -20,
+        20,
+        20
+      ]
+    },
+    {
+      "tag": "rect",
+      "id": "past",
+      "attrs": {
+        "fill": "#e03131",
+        "height": 20,
+        "transform": "scale(0.5)",
+        "width": 20,
+        "x": -80.127,
+        "y": -20
+      },
+      "box": [
+        -80.127,
+        -20,
+        20,
+        20
+      ]
+    }
+  ],
+  "pivots": {},
+  "roles": {
+    "head": "head"
+  },
+  "animations": {},
+  "states": {},
+  "mouth": [],
+  "gaze": null
+}

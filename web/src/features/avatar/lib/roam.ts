@@ -103,6 +103,13 @@ export interface Walker {
    * session needs the user, or it holds a gesture.
    */
   stays: boolean
+  /**
+   * A gesture plays on it (not its own walk loop, nor what a meeting asks of it): it stands
+   * where it is until the gesture is over, as one that `stays` does, and may then stroll on.
+   * Walking, it would slide along on legs the gesture stilled, and a side view would hide the
+   * parts the built-in gestures move.
+   */
+  gesture?: boolean
   /** Where it stands instead (a place where its bubble has room). Only with `stays`. */
   post: Point | null
   /** The user drags it: it is at this point. */
@@ -481,7 +488,8 @@ export function step(world: World, i: StepInput): World {
   const pause = finite(i.dt, 0)
   const dt = clamp(pause, 0, MAX_STEP_MS)
   const facts = new Map<string, Walker>()
-  for (const w of i.walkers) facts.set(w.id, w)
+  // One that plays a gesture stands as one that is wanted does: the same `stays`, without a post.
+  for (const w of i.walkers) facts.set(w.id, w.gesture === true && !w.stays ? { ...w, stays: true, post: null } : w)
   const bodies = world.bodies
   const list = [...bodies.values()]
   const quiet = (p: Point): boolean => !i.quiet || i.quiet(p)
