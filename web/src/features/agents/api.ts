@@ -4,8 +4,8 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { qk } from '@/api/queries'
 import type { AgentProvider, TerminalInfo } from '@/api/types'
-import { openPanel, toastError } from '@/shell/actions'
-import { terminalPanelId } from './lib/sessions'
+import { openPanel, toast, toastError } from '@/shell/actions'
+import { noAvatarNote, terminalPanelId } from './lib/sessions'
 import { updateCachedTerminal } from './queryAccess'
 
 /** GET /api/agents/history?projectId=&provider= */
@@ -253,6 +253,9 @@ export async function startAgent(req: NewAgentRequest): Promise<TerminalInfo | n
     const t = await terminalsApi.createAgent(req)
     updateCachedTerminal(t)
     openTerminal(t)
+    // Asked for with an avatar and started without one: the server says why.
+    const noAvatar = noAvatarNote(t)
+    if (noAvatar) toast('warning', noAvatar, { timeout: 9000 })
     return t
   } catch (e) {
     toastError(e, 'Could not start the session')

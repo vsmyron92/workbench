@@ -932,6 +932,19 @@ impl Terminals {
             Some(old) => ask_avatars(state, move |s| crate::avatar::carried(s, &old)).await.flatten(),
             None => None,
         };
+        // An avatar at this start (the option, or one carried along) needs room, asked before the
+        // brief and the option are decided: without, the session starts with neither, and the
+        // answer says why. With room, it is held for this terminal until its record is made.
+        let id = new_id();
+        let room = if launch.avatar || carried.is_some() {
+            let id = id.clone();
+            ask_avatars(state, move |s| crate::avatar::room_at_start(s, &id)).await.unwrap_or(false)
+        } else {
+            true
+        };
+        let mut launch = launch;
+        launch.avatar &= room;
+        let carried = carried.filter(|_| room);
         let brief = brief_at_start(launch.avatar, carried);
         // The brief joins the prompt the CLI is started with and nothing else: the title above, the
         // launch's name and what History shows of the session are the user's own words (`own_prompt`).
@@ -942,7 +955,6 @@ impl Terminals {
         let (first_prompt, brief_later) = first_prompt(prompt, brief, kind, in_container, batch);
         let (cols, rows) = pty::clamp_size(req.cols.unwrap_or(120), req.rows.unwrap_or(32));
         let now = util::now_ms();
-        let id = new_id();
         let info = TerminalInfo {
             id: id.clone(),
             kind: TerminalKind::Agent,
@@ -1012,8 +1024,8 @@ impl Terminals {
                 if brief_later {
                     m["avatarBrief"] = json!("later");
                 }
-                // The terminal whose session this one continues: its avatar moves along.
-                if let Some(old) = &req.moved_from {
+                // The terminal whose session this one continues: its avatar moves along, where there is room.
+                if let Some(old) = req.moved_from.as_ref().filter(|_| room) {
                     m["movedFrom"] = json!(old);
                 }
                 m
@@ -1035,7 +1047,13 @@ impl Terminals {
         }
         let _l = entry.lifecycle.lock().await;
         self.launch_agent(state, &entry, cont, first_prompt, true, false, brief).await?;
-        Ok(entry.info())
+        let mut info = entry.info();
+        // Asked for an avatar and started without one: the answer says why. Only the answer: the
+        // terminal's own meta does not keep it.
+        if !room {
+            info.meta["noAvatar"] = json!(crate::avatar::no_room_at_start());
+        }
+        Ok(info)
     }
 
     /// Whether the session `id` runs without its CLI's guard rails: a dangerous permission
@@ -3485,8 +3503,19 @@ pub async fn restore(state: AppState) {
                     }
                 }
             }
-            // Hold the slot until the session is up, so startups do not pile up.
-            let _ = tokio::time::timeout(Duration::from_secs(20), e.started.notified()).await;
+            // Hold the slot until the session is up, so startups do not pile up. A session given a
+            // prompt to deliver (an avatar's brief, `deliver_later`) waits for `started` itself, and
+            // `notify_one` wakes one waiter: the slot is held until that prompt went in instead, so
+            // the delivery is not left to wait for its own time-out.
+            let delivering = || e.rt.lock().first_prompt.as_ref().is_some_and(|p| p.strong_count() > 0);
+            if delivering() {
+                let until = tokio::time::Instant::now() + Duration::from_secs(20);
+                while delivering() && tokio::time::Instant::now() < until {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            } else {
+                let _ = tokio::time::timeout(Duration::from_secs(20), e.started.notified()).await;
+            }
             drop(permit);
         });
     }

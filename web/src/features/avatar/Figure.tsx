@@ -334,9 +334,9 @@ export const Figure = memo(function Figure({ look, seed, revision, ...rest }: Fi
 export interface FigureButtonProps extends FigureProps {
   /** `ringFor(state, tone)`. */
   ring: Ring
-  /** Under the figure: the agent's name, else the session's title. */
-  label: string
-  /** The session's title, for the tooltip. */
+  /** The agent's own name, or "": under the figure and in its accessible name it follows the session's title, in quotation marks. */
+  name: string
+  /** The session's title: Workbench's own name for the session, first under the figure, in its accessible name and in the tooltip. */
   title: string
   /** `stateWords(state, stateLabel(t))`. */
   stateLabel: string
@@ -360,18 +360,25 @@ function onceForHeldEnter(e: { key: string; repeat: boolean; preventDefault(): v
   if (e.key === 'Enter' && e.repeat) e.preventDefault()
 }
 
+/** Who a figure is, as the bubble's header says it: the session's title, then the agent's own name in quotation marks. */
+function figureName(name: string, title: string): string {
+  return name ? `${title} “${name}”` : title
+}
+
 /**
  * The figure with what the app shows around it: the glow of its state, the unseen dot, and,
  * with the large figure, the label under it and the "Voice off" chip; the controls on hover.
- * The figure itself is a button, named with the label and the state.
+ * The figure itself is a button, named with the label and the state. The label is the
+ * bubble's header in short: the session's title, which gives way, then the agent's own name
+ * in quotation marks, so a name never reads as Workbench's own words.
  */
-export function FigureButton({ ring, label, title, stateLabel, active, unseen, voiceOff, designing, controls, onPress, buttonRef, ...figure }: FigureButtonProps) {
+export function FigureButton({ ring, name, title, stateLabel, active, unseen, voiceOff, designing, controls, onPress, buttonRef, ...figure }: FigureButtonProps) {
   const drawn = useMemo(() => drawnLook(figure.look, figure.seed), [figure.look, figure.seed])
   // "Designing its look…" only while the default look stands in for a design that is still to come.
   const drawing = designing === true && !drawn.own && !drawn.rejected
   return (
     <div className={['wb-av-figure', ringClass(ring), active && 'active', unseen && 'unseen'].filter(Boolean).join(' ')} style={sizeStyle(figure.size)}>
-      <button ref={buttonRef} type="button" className="wb-av-figure-btn" aria-label={`${label}, ${stateLabel}`} title={`${title} · ${stateLabel}`} onPointerDown={keepFocus} onMouseDown={keepFocus} onKeyDown={onceForHeldEnter} onClick={onPress}>
+      <button ref={buttonRef} type="button" className="wb-av-figure-btn" aria-label={`${figureName(name, title)}, ${stateLabel}`} title={`${title} · ${stateLabel}`} onPointerDown={keepFocus} onMouseDown={keepFocus} onKeyDown={onceForHeldEnter} onClick={onPress}>
         <span className="wb-av-ring">
           <Figure {...figure} />
         </span>
@@ -381,8 +388,17 @@ export function FigureButton({ ring, label, title, stateLabel, active, unseen, v
         {drawing ? (
           <span className="wb-av-label designing">{DESIGNING}</span>
         ) : (
-          <span className="wb-av-label" dir="auto">
-            {label}
+          <span className="wb-av-label">
+            <span className="wb-av-label-in">
+              <span className="wb-av-label-title" dir="auto">
+                {title}
+              </span>
+              {name ? (
+                <span className="wb-av-label-name" dir="auto">
+                  {`“${name}”`}
+                </span>
+              ) : null}
+            </span>
           </span>
         )}
         {voiceOff && (

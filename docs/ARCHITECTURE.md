@@ -198,7 +198,7 @@ A project is a directory, and it may hold **several git repositories**: a folder
 - **Voice input** uses the browser's own speech recognition: the microphone permission is the browser's, Workbench receives no audio and has no endpoint for it, and a transcript is only text in the new-session prompt until the user starts the session, so a misheard word never reaches an agent by itself. See "Voice input" under TypeScript.
 - **Avatars** (`/api/avatar/**`, `/api/hooks/avatar/**`, MCP `avatar_*`) show and say what a session writes, so all of it is untrusted, and a session acts on nothing but its own avatar. See "Avatar".
   - **Who may do what.** A tool takes no terminal id: it acts on the calling session's avatar (`McpCtx::terminal_id`), and a caller that is not a running agent session gets 400. A hook route accepts only the agent token of the terminal in its path; another session's token and the master token get 401 there. What answers for the user (a reply, dismissing a question, turning an avatar on or off, resetting its look, claiming a line and reporting what became of it) is a POST under `/api/avatar/{terminalId}` for signed-in devices only (`Caller::Device`, so also the device key and the same origin): the master token, a file a session could read, and in-process calls get 403, agent tokens 401. The two GETs only read. With `[avatar] sessions = "any"` (the default) a session gets an avatar with its first design, say, ask or act call and may start another session with one (`workbench_start_session` `avatar`); with `sessions = "asked"` only the user gives one to a session that has none (the Avatar option, or "give" from a device; avatars sessions have already stay until the user turns each off), and a session that asks to start another with one gets 409, as does a session whose own avatar the user turned off. That refusal concerns the `avatar` argument only: under `any` a session started without it may still take one itself. The master token is the user's own: `POST /api/agents` with it and `avatar: true` starts a session with one, as the composer does. A session never turns on one the user turned off.
-  - **What a session sends is bounded and masked.** Its artwork never reaches a browser as markup: the server parses it into a closed, typed tree and stores and sends only that, and the browser checks the tree again and builds elements from literal tables. The pictures a session asks for of its own avatar are drawn from the stored tree, read again as untrusted data: the SVG the renderer reads is written from its own tables and nothing outside the look is resolved (no files, images or network). The server never renders: each picture is drawn in a process of its own (`workbench avatar-draw`) that limits its own memory and processor time, is killed after a few seconds and with a caller that goes away, so whatever a look does to the renderer loses one picture. A design call draws the new look there before it stores it, and refuses one that cannot be drawn. Two pictures are drawn at a time for all sessions, one per session, and none for an avatar the user turned off. Every text (a name, a line, a question, a choice, SVG `text`) is one line of plain text with the session's secrets masked (`text::plain` with `Terminals::redact_text`). A refusal that quotes what the session sent masks the quote before it is cut, a refused design that holds a secret is answered from a masked copy of the call (`look::apply_masked`), and the platform masks the error of a failed MCP call in the Activity view and `mcp.call` as it masks the argument summary. Every size, count, rate and wait has a named limit, refused attempts count, and a hook body (256 KiB at most) is parsed only after the token and the rate were checked. The session's identity around its words is Workbench's (provider icon, tab title, project); the agent's own name only follows it, in quotation marks, and a notification of a question nobody saw has Workbench's own title.
+  - **What a session sends is bounded and masked.** Its artwork never reaches a browser as markup: the server parses it into a closed, typed tree and stores and sends only that, and the browser checks the tree again and builds elements from literal tables. The pictures a session asks for of its own avatar are drawn from the stored tree, read again as untrusted data: the SVG the renderer reads is written from its own tables and nothing outside the look is resolved (no files, images or network). The server never renders: each picture is drawn in a process of its own (`workbench avatar-draw`) that limits its own memory and processor time, is killed after a few seconds and with a caller that goes away, so whatever a look does to the renderer loses one picture. A design call draws the new look there before it stores it, and refuses one that cannot be drawn at rest or would cost more than a picture may at the costliest moment its motion moves it to. Two pictures are drawn at a time for all sessions, one per session, and none for an avatar the user turned off. Every text (a name, a line, a question, a choice, SVG `text`) is one line of plain text with the session's secrets masked (`text::plain` with `Terminals::redact_text`). A refusal that quotes what the session sent masks the quote before it is cut, a refused design that holds a secret is answered from a masked copy of the call (`look::apply_masked`), and the platform masks the error of a failed MCP call in the Activity view and `mcp.call` as it masks the argument summary. Every size, count, rate and wait has a named limit, refused attempts count, and a hook body (256 KiB at most) is parsed only after the token and the rate were checked. The session's identity around its words is Workbench's (provider icon, tab title, project); the agent's own name only follows it, in quotation marks, and a notification of a question nobody saw has Workbench's own title.
   - **What reaches a session.** Nothing under the hook routes puts text into one. A reply pastes a fixed frame, the question's id and the user's own words or the choice that was clicked, never the question or other text the session wrote, through `POST /api/agents/ask` (refused while the session shows a dialog or is starting; the Enter is withheld when a dialog opened during the paste; the echo of what Workbench typed there is not taken for a dialog, one beside it is). Telling a running session of its avatar (given or turned on from a device, or once it is idle when it was not told yet) pastes Workbench's fixed brief; turning an avatar off pastes nothing. The avatar never shows Allow or Deny: while its session needs a permission or an answer, `say` and `ask` answer 409 and the bubble offers to open the session.
   - **Voice is the browser's.** Workbench sends and receives no audio and has no speech endpoint. A line is said aloud only after the user chose voice in that browser with a click, with an online voice (which sends the line to the browser maker's speech service) only after the user allowed online voices, and never while a dictation is live. A dictated reply is text until the user sends it. Hidden means silent: a browser that hides its avatars shows no figure or caption and says nothing, and its visible tabs report the lines `hidden`.
 - **Updates** replace the program Workbench runs from, so only config.toml (or the release build itself) says where releases come from, never a repository's config; the source is https (plain http only for this computer), no token is sent, and redirects go to https only. Nothing is installed without a click or `workbench update`: `POST /api/platform/update/install` and `POST /api/platform/restart` refuse in-process callers (agents over MCP get 403; agent tokens are not valid under `/api`), and there is no MCP tool for either. A download is installed only when its SHA-256 matches the release's checksum file (and GitHub's own digest when the API gives one), the archive holds the program as a regular file, and that program reports the release's version when run. The checksum comes from the same release as the archive: it catches a damaged download; TLS to the release host is what vouches for the publisher (releases are not signed). See "Updates".
@@ -216,7 +216,7 @@ A project is a directory, and it may hold **several git repositories**: a folder
 | `terminals::in_container(&TerminalInfo)`, `terminals::PASTED_NOT_SENT` (the refusal of `POST /api/agents/ask` whose text went in and whose Enter was withheld) | terminals | files (local history: a dev-container agent's paths), avatar (how a session drives its avatar, the form of its brief and guide; a brief left in the input box counts as told, and a reply left there as delivered, `inBox`) |
 | `terminals::{valid_id, on_disk}` (whether a string has the form of a terminal id; whether a terminal's `meta.json` is on disk, true also when that cannot be told) | terminals | avatar (a stored file is named only by a valid id; the file of a terminal that was not loaded at a start is kept while it is on disk), devcontainer (`valid_id`: a wrapped terminal's pid file) |
 | `Terminals::redact_text(terminal_id, text)` (the session's secret values and what looks like a credential masked, as permission details are; it answers from `text` alone, an unknown terminal's text unchanged) | terminals | avatar (every text a session sends, every quote of it in a refusal, a reply as it is stored and broadcast), platform (the Activity summary and error of a session's MCP call, `mcp.call.summary` and `mcp.call.error`) |
-| `avatar::{enabled, sessions, active, carried, conversation_started, via_for, session_brief}`, `Sessions` (`Asked`, `Any`), `Brief`, `BriefVariant` (`First`, `Moved`, `Again`, `Given`), `Carried {on, designed}`, `Via`, `PREALLOWED`, `BRIEF_MARK`, `BRIEF_TAGS`, `avatar::session::{SWITCHED_OFF, NOT_YOURS_TO_GIVE, NOT_WITH_YOURS_OFF}`. `active`, `carried` and `conversation_started` may read the stored avatars, which asks the terminals slice for terminal infos: never call them with a terminal's record lock held | avatar | terminals (the Avatar option, refused with `SWITCHED_OFF` while avatars are off; `workbench_start_session`'s `avatar` (400 for a value that is neither true nor false), refused with `NOT_YOURS_TO_GIVE` (409) while avatars are on and `sessions` is not `Any`, and with `NOT_WITH_YOURS_OFF` (409) when `carried` of the caller says its own avatar is off; `supports.avatar`, `avatarVia`, `avatarViaContainer` in the defaults; the brief joined into a first prompt, or `meta.avatarBrief: "later"` for a first prompt that is a command, and cut from titles and History rows; Claude Code's `permissions.allow`; the brief of a moved or restarted session, asked on a blocking thread; `conversation_started(state, terminal_id, told)` whenever a restart starts a new conversation; failover keeps the option) |
+| `avatar::{enabled, sessions, active, carried, conversation_started, room_at_start, no_room_at_start, via_for, session_brief}`, `Sessions` (`Asked`, `Any`), `Brief`, `BriefVariant` (`First`, `Moved`, `Again`, `Given`), `Carried {on, designed}`, `Via`, `PREALLOWED`, `BRIEF_MARK`, `BRIEF_TAGS`, `avatar::session::{SWITCHED_OFF, NOT_YOURS_TO_GIVE, NOT_WITH_YOURS_OFF}`. `active`, `carried`, `conversation_started` and `room_at_start` may read the stored avatars, which asks the terminals slice for terminal infos: never call them with a terminal's record lock held; `active` (asked at a restart) holds room for a session back from History, or puts its avatar away when there is none, and `room_at_start` holds room for the new terminal | avatar | terminals (`room_at_start` before the brief and `meta.avatar` of a start with the option or a carried avatar: without room no brief, no option, no `meta.movedFrom`, and the answer's `meta.noAvatar` (`no_room_at_start`, never stored), which `workbench_start_session` answers as `avatar`; the Avatar option, refused with `SWITCHED_OFF` while avatars are off; `workbench_start_session`'s `avatar` (400 for a value that is neither true nor false), refused with `NOT_YOURS_TO_GIVE` (409) while avatars are on and `sessions` is not `Any`, and with `NOT_WITH_YOURS_OFF` (409) when `carried` of the caller says its own avatar is off; `supports.avatar`, `avatarVia`, `avatarViaContainer` in the defaults; the brief joined into a first prompt, or `meta.avatarBrief: "later"` for a first prompt that is a command, and cut from titles and History rows; Claude Code's `permissions.allow`; the brief of a moved or restarted session, asked on a blocking thread; `conversation_started(state, terminal_id, told)` whenever a restart starts a new conversation; failover keeps the option) |
 | `terminals::agent_accounts(&AgentsConfig) -> Vec<AgentAccount>` (id, kind, label, enabled, `installed`: a PATH lookup, the configured folder, whether it gets MCP tools), `terminals::claude_project_dir(claude_dir, cwd)` | terminals | skills (the accounts whose folders are read; where Claude Code keeps a project's transcripts) |
 | `files::history::agent_hook(state, terminal_id, payload)` (every Claude hook payload: Write/Edit attribution) | files | terminals (hook route) |
 | `files::history::auto_label(state, pid, text)` ("Before git checkout main", best effort) | files | git (before every operation that rewrites the working tree) |
@@ -557,7 +557,9 @@ interface GitBlame { lines: { line: number; sha: string; author: string; time: n
 //             container?: boolean (true: in the project's dev container; false: on the host; absent: the project's default)} → TerminalInfo
 // terminals — POST /api/agents/ask → see above; POST /api/agents {projectId, prompt?, name?, model?, effort?,
 //             permissionMode?, remoteControl?, resume?: sessionId, fork?: boolean, inContainer?: boolean,
-//             avatar?: true (a live avatar; 400 "avatars are switched off in Settings" while [avatar] enabled = false)} → TerminalInfo
+//             avatar?: true (a live avatar; 400 "avatars are switched off in Settings" while [avatar] enabled = false; while
+//             MAX_AVATARS open or running sessions have one it starts without, and only this answer's meta.noAvatar
+//             says why)} → TerminalInfo
 // terminals — GET /api/agents/defaults providers[]: supports.avatar (every CLI; false for all while avatars are switched off),
 //             avatarVia, avatarViaContainer: 'tools' | 'command' (avatar::via_for on the host and in a dev container)
 // core — ProjectSummary.devcontainer: {configs: string[], state: 'none'|'stopped'|'running'|'building'|'error', inContainer: boolean} | null
@@ -608,7 +610,7 @@ Added in the third phase and since (the project tools confined with `McpCtx::pro
 | `jira_boards`, `jira_board_issues` | atlassian | read-only Jira Software boards |
 | `gitlab_test_failures {pipelineId}` | gitlab | read-only: the failed and errored tests of a pipeline's JUnit report, with file and output |
 | `avatar_status {guide?, look?, picture?, pose?, frames?, count?}` | avatar | read-only: whether the session has an avatar and may use it, its name, parts (`id tag x y w h pivot x y`, `parent id`), animation names, drives, the built-in motion it may name, the open question, the last 6 lines with what became of them, the limits; `guide` puts the authoring guide first, `look` adds the stored design as a design call; `picture: true` (the look at rest), `pose {animation?, at?, lookX?, lookY?, turn?, mouth?, pace?, held?, zoom?}` (without `at`: where the animation has moved furthest) or `frames` (one of the look's animations or a built-in one, `count` 2 to 8 moments; with `pose`, under its inputs and close up on its zoom) add a picture (`ToolOutput::Images`, its caption first); beside a picture the status is one line unless `guide` or `look` is set; a picture that cannot be drawn leaves a status that begins "No picture: …" |
-| `avatar_design {name?, svg?, pivots?, parents?, roles?, animations?, states?, mouth?, gaze?, drives?, voice?, keep?}` | avatar | `acts`: draws or changes the look; a call with `svg` is a new look, one without merges; a changed look is drawn at rest before it is stored; refused whole with what to fix (also a look that cannot be drawn), or answered with the parts, drives, what else is stored, usage, warnings, the drawing cost and a picture of the look at rest |
+| `avatar_design {name?, svg?, pivots?, parents?, roles?, animations?, states?, mouth?, gaze?, drives?, voice?, keep?}` | avatar | `acts`: draws or changes the look; a call with `svg` is a new look, one without merges; a changed look is drawn at rest, and its costliest moment while it moves is estimated, before it is stored; refused whole with what to fix (also a look that cannot be drawn at rest, or costs too much at that moment), or answered with the parts, drives, what else is stored, usage, warnings, the drawing cost and a picture of the look at rest |
 | `avatar_say {text, gesture?, lang?, wait?}` | avatar | `acts`, `quiet`: one line, queued at once; the answer says what became of the earlier lines; `wait` returns with this line's outcome, or that a tab still holds it to present it |
 | `avatar_ask {text, choices?, freeText?, waitSeconds?, gesture?, lang?}`, `{askId, waitSeconds?}`, `{cancel: true}` | avatar | `acts`: asks one question and waits for the answer (default 45 s, at most 50), waits again for the open one, or withdraws it |
 | `avatar_act {play, mode?, times?}` or `{stop}` | avatar | `acts`, `quiet`: plays an animation once (up to 5 times), held or looping (until stopped, the next play or 2 minutes), or stops one or `all` |
@@ -638,7 +640,7 @@ Only expose what an agent cannot do easily with its own shell, or what needs Wor
   account (`carry_request` leaves it behind for another CLI: a preference, unlike `restricted`). `meta.ultracode` lets the tab and card show a badge. `workbench_start_session`
   has no such parameter and its children do not inherit it: the token spend is the user's choice per session.
 - **Restricted starters** (Claude Code's `--restricted`, `AgentLaunch.restricted`, `AgentRequest.restricted`, never a config default): the tool passes `restricted` on for a Claude child and `check_spawn` refuses every other child (`Terminals::is_restricted`). `resolve_launch` refuses `restricted` for another CLI and with `bypassPermissions`; failover (`switch_account`) carries it, so an account that cannot honour it refuses the session instead of starting it open. `Terminals::sandboxed_agent` also answers for a restricted session, so MCP `run_start` refuses it (its command comes from repository files and would run outside the restriction); the debug tools are gated for no confined session, a sandboxed Codex one included.
-- **Avatar:** `avatar: true` becomes `AgentRequest.avatar`, as the composer's option: `meta.avatar`, the brief joined into the prompt, and `PREALLOWED` for a Claude Code child. The tool asks for it only where sessions take avatars themselves (`avatar::sessions` is `Any`, the default): otherwise 409 `NOT_YOURS_TO_GIVE` ("Not started: here the user decides which sessions have an avatar …"); a caller whose own avatar is off (`avatar::carried` of its terminal, `on: false`) gets 409 `NOT_WITH_YOURS_OFF` ("Not started: this session's avatar is off, and only the user turns it on, so it does not give one to a session it starts. Start it without avatar."); while avatars are switched off `spawn_agent` answers 400 `SWITCHED_OFF`. Nothing is started in any of these. A child never inherits its starter's avatar.
+- **Avatar:** `avatar: true` becomes `AgentRequest.avatar`, as the composer's option: `meta.avatar`, the brief joined into the prompt, and `PREALLOWED` for a Claude Code child. The tool asks for it only where sessions take avatars themselves (`avatar::sessions` is `Any`, the default): otherwise 409 `NOT_YOURS_TO_GIVE` ("Not started: here the user decides which sessions have an avatar …"); a caller whose own avatar is off (`avatar::carried` of its terminal, `on: false`) gets 409 `NOT_WITH_YOURS_OFF` ("Not started: this session's avatar is off, and only the user turns it on, so it does not give one to a session it starts. Start it without avatar."); while avatars are switched off `spawn_agent` answers 400 `SWITCHED_OFF`. Nothing is started in any of these. Without room for one (`avatar::room_at_start`) the child starts without an avatar, its brief or `PREALLOWED`, and the answer carries `avatar` with `no_room_at_start`'s sentence. A child never inherits its starter's avatar.
 - **Messaging.** Claude Code 2.1.3xx lets sessions on one machine message each other by name (`ListAgents`, `SendMessage`, `notify_when_idle`; `~/.claude/sessions/<pid>.json` carries `messagingSocketPath`). Verified with 2.1.325 against a Workbench-style session: the message arrives as a `UserPromptSubmit` whose prompt is `<cross-session-message from="…" from-name="…" from-mode="…">`, and a session in `manual` mode answered one from an `auto` session. The tool result names the address (`SendMessage` to the title) when the starter gave a `name` and the child is Claude Code; a derived name (`nameSource: "derived"`) is not known to Workbench.
 
 Agents never enable code intelligence, answer a permission request, stage, commit, shelve, rebase or bisect, update or restart Workbench through MCP, and never answer for the user through an avatar (reply, dismiss a question, turn an avatar on or off, report a line heard). They do drive the debugger (the owner's decision, 0.7.1, no opt-in): start, attach, rerun, steer, evaluate and set conditional breakpoints, through `mutating` tools (see the debug slice).
@@ -1660,7 +1662,9 @@ itself (an SVG subset, with JSON for pivots, parents, roles, animations, states,
 as captions and, where the user chose voice in that browser, aloud with the browser's speech synthesis, asks the user questions
 and takes the answer (a click on a choice, typed text or dictation), and mirrors the session's state. In the wide form the
 figures walk about the dock area and meet. By default (`[avatar] sessions = "any"`) a session gets one with its first design,
-say, ask or act call; it also starts with one from the composer's **Avatar** option or `workbench_start_session` with `avatar`,
+say, ask or act call (`avatar_status`'s description asks it to make that call only when the user asked for an avatar or its
+instructions say to use one); it also starts with one from the composer's **Avatar** option or `workbench_start_session` with
+`avatar`,
 and the user gives one later with "Avatar: Give This Session an Avatar" or the status-bar widget's menu. With `sessions =
 "asked"` only the user gives one; switching to it takes no avatar away (each is turned off for itself). The user turns any
 avatar off, and no session turns it on again. Claude Code (anywhere) and Codex (on the host) drive it with five MCP tools,
@@ -1679,7 +1683,10 @@ every 5 s); `session.rs`: what a session may do with its own avatar, and every a
 `routes.rs`, `tools.rs`, `cli.rs`, `brief.rs` with the `guide*.md` files; `examples/`: golden designs. One store lock covers a
 record, its file and its events (an avatar's events leave in the order of its changes); it is never held across an await and
 nothing is asked of another slice under it (a design is validated under a `designing` lock of its own). A record (one per agent
-terminal; at most 64 are made, and every stored file of a loaded agent terminal is read at a start, also beyond that) holds
+terminal; a new one is made, and one of a session back from History is kept, only while there is room: fewer than
+`MAX_AVATARS` records of terminals that are open or not exited (`store::live`, kept in `Record.live`) with the room held for
+starts (`Inner.held`), as `store::room` counts; History records stay and take none, and every stored file of a loaded agent
+terminal is read at a start, also beyond that) holds
 `on` (false: off; nothing is shown or said, the session's calls are refused), `unreadable` (it is off because the switch of its
 stored file could not be read, until a device turns it on),
 the design (`name`; `look`, `null` for the built-in default; `voice` `{lang, prefer, pitch, rate}`), `designed` (exactly while
@@ -1690,8 +1697,9 @@ avatar: see *Telling*), `held`, `ask` and `lines` (newest last, at most 30; the 
 at most 64; empty under `any`, where none waits for the user to give one). `data_dir/avatar/<terminalId>.json` keeps `{version,
 on, via, name, designed, look, voice}`, and `unbriefed` and `unreadable` only while they are true, as compact JSON (a few
 hundred bytes more than the look the validator measured). It is read back, after a leading byte order mark, through the
-validator a design call passes: one that fails is kept as `.corrupt` and the default look shown, but a file that is JSON with a
-boolean `on` keeps that `on` (an unreadable design never turns an avatar back on); a file whose `on` cannot be read (not JSON,
+validator a design call passes: one that fails is kept as `.corrupt` and the record starts from the default design (no name,
+the default voice, `designed` false), but a file that is JSON with a boolean `on` keeps that `on` (an unreadable design never
+turns an avatar back on); a file whose `on` cannot be read (not JSON,
 larger than 256 KiB, an I/O error, a switch that is no boolean) leaves the avatar off and `unreadable`, and the log's warning
 names the cause and what the avatar is now. A record made later for a terminal without one (`session::gate`,
 `device::turn_on`, `store::created`) takes over that terminal's stored file as a start reads it (`store::take_over`, under the
@@ -1700,14 +1708,15 @@ lines, questions, leases and rate windows are memory only.
 
 **Calls and lines.** A call has two steps. `session::gate(state, tid, call, via, now) -> Pass` needs no body: avatars enabled
 (else 403 "avatars are switched off in Settings"), a running agent session (400), an avatar (with `sessions = "any"`, the
-default, one is made: the one its stored file holds, else the default look with `via` of this call, unless `MAX_AVATARS` exist
-(429); otherwise the session joins `asked` and gets 409 naming the Avatar option and the command), on (409 `TURNED_OFF`, or
+default, one is made: the one its stored file holds, else the default look with `via` of this call, unless there is
+no room (`store::room`, 429); otherwise the session joins `asked` and gets 409 naming the Avatar option and
+the command), on (409 `TURNED_OFF`, or
 `UNREADABLE` "Workbench could not read this avatar's stored file, so it is off until the user turns it on. Say it in the
 terminal instead." while the record is `unreadable`; the same words are the status note and a picture's refusal), within its
 rate (429, refused attempts
 counted); a status call needs only the first two and its rate, and makes no record: a session without an avatar reads "This
 session has no avatar yet: it gets one with its first design, say, ask or act call." with `allowed: true` under `any` (the
-429's words with `allowed: false` while `MAX_AVATARS` exist), the 409's words with `allowed: false` under `asked`. Then `design`, `say`, `ask`, `act` or `status` checks its whole request
+429's words with `allowed: false` while there is no room for one), the 409's words with `allowed: false` under `asked`. Then `design`, `say`, `ask`, `act` or `status` checks its whole request
 before anything changes; while the session needs a permission or an answer, `say` and `ask` answer 409. `say` queues a line (`L<boot>-<n>`; `<boot>`, four base-36 characters of the start time, keeps ids unique across
 restarts), emits `avatar.say` and returns at once with what became of earlier lines (each told once); with `wait` it returns
 when a device reported the line spoken, skipped or failed, 1.5 s after it was only shown with no tab holding it, or after its
@@ -1783,7 +1792,8 @@ scale, 0.5 and 2 degrees, 0.02 and 0.1 of an opacity, 0.2 and 1 percent of the v
 scales, for the absolute props the artwork's own value or what the part inherits, a plain colour, `none` or a number that
 something it draws shows; `rest_value`), except a keyframe at the rest that hides the part with a scale or an opacity of 0; such
 drives are one warning, the first in full and the others by their place. Then the changed look is drawn at rest,
-in a process of its own, before it is stored (*Pictures*): one that cannot be drawn is refused whole, "… Nothing was changed."
+in a process of its own, before it is stored (*Pictures*): one that cannot be drawn is refused whole, "… Nothing was changed.",
+and so is one that would cost more than a picture may at the costliest moment its motion moves it to.
 Only the tree is stored and sent (the wire format writes `parents` and `drives` only when they hold something); the browser
 checks it again (`checkLook`: a fresh object from allow-listed keys) and builds React elements from literal tables
 (`lookElements`), so no markup a session wrote reaches the DOM. A call with `svg` is a new look (`keep: true` keeps what still
@@ -1856,9 +1866,21 @@ for all sessions (`PICTURES_AT_ONCE`), at most `PICTURE_WAIT` (20 s) for a turn,
 (429 "A picture of this avatar is being drawn…"); after a drawing that died of its look the session's pictures pause
 `AFTER_A_COSTLY_ONE` (30 s), its design calls do not. An avatar that is off is not drawn (`TURNED_OFF`, or `UNREADABLE`); a
 session without an avatar, where sessions take one themselves, is told to draw one (`NO_LOOK_TO_DRAW`). A design call has three
-steps (`tools::design`): `session::design_check` validates and applies the call, a changed look is drawn at rest in the child,
-and only then does `session::design_store` store it. A look that cannot be drawn is refused and nothing changes (when the call
-left the artwork as it was, the refusal says that the stored artwork is what costs too much); a design another call changed in
+steps (`tools::design`): `session::design_check` validates and applies the call; the child, asked `draw::Want::Design` (request
+key `design`), draws a changed look at rest and then estimates its costliest moment while it moves (`preview::moving`); and only
+then does `session::design_store` store it. `moving` draws nothing: it takes each animation alone (the look's own and the
+built-in ones) at its tracks' keyframe moments, `PEAK_MOMENTS` + 1 even moments, the moment a pose calls furthest and halfway
+between all of these, and each input that drives or lip sync read at its ends, at the drives' own keyframes and halfway
+between; ranks them by `Model::grown` (the area of the filtered, masked, clipped or half-transparent groups under their live
+matrices and sizes); estimates in full, as a picture would be, the `PEAK_TRIES` best per animation, with its furthest moment,
+and per input; and, only when nothing alone is over, one pose for each state that lists two or more animations, with those
+animations and every input at their costliest at once, since a state's animations and the drives play together and their
+scales multiply (gestures replace one another and are not combined). Over the same budgets as at rest
+the child ends with `EXIT_MOVING` (4) and `Over::moving`'s sentence, which names where ("in its animation <name> at <t>", "in
+Workbench's built-in <name> at <t>", "in its drives on <input> at <v>", "with its mouth open <v>", "when the animations of
+its state <state> play together, each at its costliest") and what to change; `NotDrawn::Moving` makes it a 400 that ends "Nothing was
+changed.". A look that cannot be drawn at rest is refused too and nothing changes (when the call left the artwork as it was,
+that refusal says that the stored artwork is what costs too much); a design another call changed in
 between answers 409 (`CHANGED_MEANWHILE`, "… send this call again"). The design answer ends with the picture's caption and,
 when filters or layers come to one area of the viewBox or more, "Drawing cost: about N of 60 for filters and M of 60 for
 layers, both in areas of the viewBox: …" (`session::cost_line`, at most 238 characters); `avatar_design` returns it as
@@ -1926,14 +1948,17 @@ minute `SAY_PER_MINUTE` 6 (lines and new questions), `DESIGN_PER_MINUTE` 6, `ACT
 `ASK_CALLS_PER_MINUTE` 30; `LINE_STALE_SECS` 60, `LINE_HELD_MAX_SECS` 240, `DEFAULT_WAIT_SECS` 45, `MAX_WAIT_TOOL_SECS` 50,
 `MAX_WAIT_HOOK_SECS` 110, `UNSEEN_SECS` 5, `HOLD_MAX_SECS` 120, `MAX_ACT_TIMES` 5, `ACT_GAP_MS` 250 (four `avatar.act` a
 second; a newer gesture takes the place of one that waits), `LEASE_EXTRA_SECS` 15, `NUDGE_AFTER_SECS` 8, `NUDGES_PER_10_MIN` 3,
-`BRIEF_RETRY_SECS` 30, `BRIEF_REFUSALS` 5, `MAX_AVATARS` 64 (none is evicted; it bounds new records, not those read from files
-at a start), `MAX_ASKED` 64; `MAX_DESIGN_BYTES` 256 KiB,
+`BRIEF_RETRY_SECS` 30, `BRIEF_REFUSALS` 5, `MAX_AVATARS` 64 (records of terminals that are open or not exited, with the room
+held for starts; none is evicted; it bounds new records and sessions back from History, not files read at a start),
+`ROOM_HELD_SECS` 300 (the longest room is held for a start, or a restart from History, whose session never shows live),
+`MAX_ASKED` 64; `MAX_DESIGN_BYTES` 256 KiB,
 `MAX_SVG_BYTES` 32 KiB (also as stored), `MAX_LOOK_BYTES` 128 KiB, `MAX_ELEMENTS` 300, `MAX_DEPTH` 10, `MAX_TEXTS` 6,
 `MAX_ANIMATIONS` 32, `MAX_TRACKS` 16, `MAX_KEYFRAMES` 16, `MAX_STATE_NAMES` 6, `MAX_MOUTH_DRIVES` 4, `MAX_FILTERS` 8,
 `MAX_FILTER_PRIMITIVES` 8 (`feMergeNode` not counted), `MAX_DASHES` 8, `MAX_PARENTS` 64, `MAX_DRIVES` 16; pictures
 (`preview.rs`): `STRIP_FRAMES_MIN` 2, `STRIP_FRAMES_MAX` 8, `STRIP_FRAMES_DEFAULT` 6, `FILTER_WORK` 60 passes over a panel,
 `LAYER_WORK` 60 panel-sized layers, `LAYER_MOST` 30 panels for one layer, `LAYER_COORDINATES` 1e8 px, `REACH_MOST` 400 panel
-widths, `MAX_DASHES_DRAWN` 100,000; the drawing process (`draw.rs`): `CHILD_MEMORY_BYTES` 1 GiB, `CHILD_CPU_SECS` 6,
+widths, `MAX_DASHES_DRAWN` 100,000, `PEAK_TRIES` 3, `PEAK_MOMENTS` 16; the drawing process (`draw.rs`): `CHILD_MEMORY_BYTES`
+1 GiB, `CHILD_CPU_SECS` 6,
 `DRAW_WAIT` 8 s; turns (`tools.rs`): `PICTURES_AT_ONCE` 2, `PICTURE_WAIT` 20 s, `AFTER_A_COSTLY_ONE` 30 s, one drawing per
 session at a time.
 
@@ -1944,8 +1969,15 @@ stored file is taken over whenever there is one; else `meta.avatar` (the option,
 gives a record with the default look; `meta.movedFrom`
 takes `on` and the design of that terminal's avatar whatever the option says, and `avatar::carried` picks the brief (`Moved`;
 `First` without a look; none when off, and the record is `unbriefed`); `"avatarBrief": "later"` makes the record `unbriefed`
-too; a session that takes an avatar itself gets its record at the gate, not `unbriefed`. *Restarted*: the record decides (`avatar::active`):
-on, the tools are pre-allowed again and a new conversation is told (`Again`, or `First` without a look); off, nothing. Whenever
+too; a session that takes an avatar itself gets its record at the gate, not `unbriefed`. A start with the option or a carried
+avatar asked `avatar::room_at_start` first, which holds room under the new terminal's id until its record is made (at most
+`ROOM_HELD_SECS`; `created` checks room again for a terminal that holds none); without room the session starts without
+`meta.avatar`, `meta.movedFrom` and the brief, and the answer of `POST /api/agents` carries `meta.noAvatar`. *Restarted*: the record decides
+(`avatar::active`): on, the tools are pre-allowed again and a new conversation is told (`Again`, or `First` without a look);
+off, nothing. A session back from History (ended, its tab closed) needs room: with room it is held for it until the terminal
+is live; without, `put_away` takes the record out of memory (its file stays, `unbriefed` true; `avatar.changed`) and `active`
+says false. A reopened tab of an ended session without room is put away the same way; `take_over` brings a put-away avatar
+back, at the session's own call, a device's on or its next restart, each with room. Whenever
 a restart starts a NEW conversation, the terminals slice calls `avatar::conversation_started(state, terminal_id, told)`, and the
 record, on or off, takes `unbriefed = !told`; a restarted Aider session that restores its chat history goes on with its
 conversation and is not sent the brief again. *Telling*: `unbriefed` (stored) is set when a device gives an avatar to a session
@@ -1954,11 +1986,13 @@ time an avatar is turned on (also for a session told before: its last call read 
 brief went in (`device::briefed`). A session with `on && unbriefed` is told by `device::tell(state, tid, now)`: at once by `POST
 …/on`, and by the lifecycle when the session becomes idle (`terminal.updated`, and `terminal.created` should it be idle
 already), once per idle, at most every `BRIEF_RETRY_SECS`, until `BRIEF_REFUSALS` refusals (counted again from the next `on`),
-only while it runs and its tab is open. One telling at a time per session (the `briefing` set); the brief is pasted by itself
-through the ask path in a task of its own, and one the Enter guard left in the input box (`terminals::PASTED_NOT_SENT`) counts
+only while avatars are enabled and the session runs with its tab open; `settings.changed` from off to on tells every idle
+session that is due, once. One telling at a time per session (the `briefing` set);
+the brief is pasted by itself through the ask path in a task of its own, and one the Enter guard left in the input box (`terminals::PASTED_NOT_SENT`) counts
 as told. Turning an avatar off pastes nothing: the session's next call is refused with `TURNED_OFF`. *Tab closed*: the question
 closes `session_ended`, unpresented lines become `unheard` and leave the transcript; *exited*: the same, the lines kept;
-*removed*: the record and its files go (`avatar.changed {removed: true}`); *server restart*: records return with revision 0 and
+*removed*: the record and its files go (`avatar.changed {removed: true}`), and so does the file of a put-away avatar; *server
+restart*: records return with revision 0 and
 no lines or question; every file of a loaded agent terminal gets its record, files of gone terminals (unknown, and without
 their `meta.json` on disk) are removed, each with an info line, and the file of a terminal that was not loaded is kept without
 a record, with a warning. `avatar::shutdown`, right before `terminals::shutdown`, returns every
@@ -1976,7 +2010,12 @@ answer part by part against newer events (`mergeFetched`). It decides who is on 
 the lines a visible tab with hidden avatars would present, answers the bridge, and mounts `Overlay.tsx`, a lazy chunk in an
 error boundary of its own: nothing loaded with the app imports a look, the engine or speech (`loaded.test.ts`). The overlay
 owns the window's one engine (`lib/engine.ts`: at most 30 frames a second, visible time only; a figure whose frames average
-over 4 ms across 30 frames is frozen at rest), speaker (`lib/speech.ts`: one line at a time, by the browser's synthesis or the
+over 4 ms across 30 frames is frozen at rest; when the page's frames come late, a frame `LATE_MS` (100 ms) or more after the
+one before, and `LATE_FRAMES` (8) or more of them add up to `LATE_SPAN_MS` (8 s, each counting at most `LATE_MOST_MS`, 1 s)
+with no `ON_TIME_MS` (1 s) of frames on time between them, the costliest figure that moved meanwhile and has a filter, a mask
+or a clip is frozen the same way, one at a time, never one without (`heavyOf`: a filtered element 4 and 1 per step, a mask 2,
+a clip 1); the count starts again after each freeze and when the loop halts), speaker (`lib/speech.ts`: one line at a time, by
+the browser's synthesis or the
 silent engine, which keeps the caption up as long as the line would take, with the same lip sync) and arbiter
 (`lib/arbiter.ts`: which tab says a line). The engine applies a look's animations, then its drives, then its mouth and gaze (a
 vector on screen, mapped through the
@@ -1991,9 +2030,9 @@ has played or is stopped; `FigureHandle.playing()` names the gestures that play 
 looping paint track to close. The inputs of drives:
 `lookX` and `lookY` from the gaze's reader, `mouth` from the mouth's, `pace`, `turn` and `held` from the walk (`walkFeel` of
 `lib/roam.ts`), eased towards their targets, the last three at most `INPUT_RATE` (4) units a second, `pace` smoothed over about
-250 ms; outside the walk they are 0, and with reduced motion every input but `mouth` stays at rest. **Nothing flashes**,
-enforced where everything passes: between sampling and writing, a limiter (`REVERSAL_MS` 150) lets a colour or an opacity on
-any part, and every other channel on a large part, turn back only 150 ms after its last turn; until then the channel holds its
+250 ms; outside the walk they are 0, and with reduced motion every input but `mouth` stays at rest. **Flashing is limited**, each
+channel on its own, where everything passes: between sampling and writing, a limiter (`REVERSAL_MS` 150) lets a colour or an
+opacity on any part, and every other channel on a large part, turn back only 150 ms after its last turn; until then the channel holds its
 value, then takes the current one. A colour (fill, stroke) also turns when its brightness turns back, whatever its
 channels do: when its relative luminance (sRGB channels in linear light, Rec. 709 weights) has come back more than 0.045
 (`LUMA_BACK`, under half a flash's tenth) from the furthest it went since its last turn, so the small dips of a smooth change
@@ -2023,9 +2062,9 @@ as its place (28 px, phone 40) and fading out at its
 lower edge; it is still, drawn without an engine in the rest pose with what the look's drives set at rest written once
 (`writeStill`), so a side view that a `turn` drive hides at rest is hidden there too. A part whose box at rest neither meets
 the head part's box nor lies wholly inside the face's square is left out (the head, what it is drawn inside and what is
-inside it always stay), so nothing shows as a cut sliver at the edge; the pictures' face leaves out the same parts. The name and
-"Voice off" stand only
-under the large figure ("Designing its look…" under any), and the name under
+inside it always stay), so nothing shows as a cut sliver at the edge; the pictures' face leaves out the same parts. The label (the
+session's title, which gives way first, then the agent's name in quotation marks; the figure's accessible name is the same
+with its state) and "Voice off" stand only under the large figure ("Designing its look…" under any), and the label under
 a walking figure that is hovered or holds the focus; the unseen dot sits at the upper right of the figure's outline; the
 "+n" chip is the one stage with a box, as large as a resting figure and drawn above walking figures. **Wide** (desktop shell, workspace
 window open and at least 480 x 320 px): the figures walk (below) while `roam` is on and motion is not reduced, up to 8
@@ -2092,10 +2131,21 @@ the figures do not all set off at the same moment. Walking off (the switch, redu
 walk, so the next one begins in the column again.
 
 **The bubble** (`Bubble.tsx`, its timeline in `lib/bubble.ts`) is a Workbench component: the provider icon, session title and
-project come first, the agent's name follows in quotation marks; captions, names, choices and replies are text nodes. Only the
-active avatar's is open. It opens by itself for a line presented here and for an open question, and closes 4 s after its last
+project come first, the agent's name follows in quotation marks; captions, names, choices and replies are text nodes. The
+app's phrases name an avatar the same way (`calledAs`: `<title> “<name>”`, in menus, the confirm dialog, the face, the Reply
+control and, through `words.ts`'s `called`, the palette); the bubble's own phrases quote the name alone (`calledHere`: "Reply
+to “<name>”…", "Click to hear “<name>”"). Only the active avatar's is open.
+It opens by itself for a line presented here and for an open question, and closes 4 s after its last
 reason (a silent line stays 2 s and 1 s per 15 characters first); what the user closed stays closed for that line or question,
-remembered per avatar; opened by the user it shows the last 6 lines. Stray clicks: for 500 ms (`THROUGH_MS`) after it opened or
+remembered per avatar; opened by the user it shows the last 6 lines. The user opening one (`openByUser`: the figure,
+its Reply control, the face, a menu, the palette) sets `Scene.focus`: the overlay moves focus into its reply box once
+(`focusTaken`), and back where it was when the box goes within `RETURN_FOCUS_MS` (1 s) of the user closing the bubble or of
+their reply going (`endedByUser`); a box that goes by itself (a permission request, the avatar turned off, a withdrawn
+question) leaves focus nowhere, so that the rest of a reply reaches no other session's terminal; a bubble that opens by itself
+never takes focus. Esc in the overlay
+closes any open bubble; from a terminal or with nothing focused it closes only a bubble the user opened (`escapeCloses`, a
+capture-phase window listener that stops the key, so the terminal never sees it), and an open menu or modal keeps its Esc.
+Stray clicks: for 500 ms (`THROUGH_MS`) after it opened or
 changed by itself clicks pass through; then, while the pointer has stayed inside, it takes the pointer but its controls look
 inactive and do not act, until the pointer leaves it once or, from 1,000 ms (`HOLD_MS`) after the change, moves 16 px
 (`HOLD_MOVE_PX`); choices take no click for 600 ms (`CHOICE_GUARD_MS`) after a question appeared or changed. There is no guard
@@ -2106,8 +2156,10 @@ session's input box: answer its dialog, then press Enter there." for a reply del
 nod. The avatar shows no Allow or Deny: a
 session that needs the user gets "Waiting for your decision in the session" with **Open** (a press on the figure still opens its
 transcript, the reply disabled), and while it shows a dialog or is starting and nothing waits, the reply box and choices are
-disabled with the reason. A typed or dictated answer equal to a choice (case and punctuation aside) is sent as that choice; a
-question that changed under a draft says "The question changed." and needs another Enter. Dictation is the agents feature's
+disabled with the reason. The choices are the session's words; above them and the reply box Workbench writes where the
+answer goes (`answerGoesTo`: "Your answer goes to <session title> as a message."). A typed or dictated answer equal to a choice
+(case and punctuation aside) is
+sent as that choice; a question that changed under a draft says "The question changed." and needs another Enter. Dictation is the agents feature's
 `useDictation`, in the language of the question line, else of the avatar's voice; a dictated reply belongs to the question on
 screen when the microphone was pressed, and the dictation ends when its reply box goes or is disabled, or a choice is clicked.
 An Enter held on a button of the bubble clicks it once. The figure's menu: Stop speaking (the bubble's Stop has its icon), Voice
@@ -2122,18 +2174,21 @@ the browser maker’s speech service to be spoken." with **Allow online voices**
 has no voices: avatars show captions." With voice on, a line nothing here may say shows the same forms (`voiceForm` in
 `lib/bubble.ts`): `online` when the browser has only online voices for its language and they are not allowed, `none` when it has
 none, and that only once the browser has listed its voices; the status-bar widget's tooltip still says "voice on". Speech waits
-for the page's first user gesture (`Click to hear <name>`), never starts while a dictation is live (`dictationLive()`) and stops
+for the page's first user gesture (`Click to hear “<name>”`, which stays under the line it stood under until that line is
+heard, `offersToHear`, and says it), never starts while a dictation is live (`dictationLive()`) and stops
 when one starts; turning voice off stops the line being said, and so does withdrawing Allow online voices while an online voice
 says it. One tab speaks: every tab shows the caption, only the lease holder says the line, and a tab claims only when it could
 speak, after 900 ms when hidden or a two-hundredth of its idle time (at most 600 ms) when visible, so the tab in use wins. The
 tab that says a line renews its lease while it speaks, as each chunk starts and on a timer (`RENEW_EVERY_MS` 10 s, or half the
 lease when that is sooner; not within `RENEW_FRESH_MS` 2 s of the last renewal; 2 s after one that failed), so another tab does
-not say it again. A line that waited 20 s is presented silently; on `pagehide` a tab gives its leases back (`fetch` with
+not say it again. A line is spoken as written, the same text as its caption. A line that waited 20 s for
+its turn is presented silently; on `pagehide` a tab gives its leases back (`fetch` with
 `keepalive`). Preferences (`store.ts`, `wb.avatar.v1`, shared by a browser's windows through `storage` events, except `pos`):
 `show` (true; false: nothing is shown or said here), `voice`, `online` (false), `volume` (0 to 1), `speed` (0.7 to 1.5, times
 the avatar's own rate), `reduceMotion` (figures keep still but for the mouth, and stand in their column; the system setting
 does the same), `roam` (true: the figures walk in the wide form; never with reduced motion), `pos` (the column's place, per
-window), `voices` (each session's browser voice) and `seen` (its newest line seen), the last two for at most 256 sessions and
+window), `voices` (each session's browser voice, used only while it speaks the wanted language exactly or the browser has no
+voice that does) and `seen` (its newest line seen), the last two for at most 256 sessions and
 pruned with them.
 
 **Settings, widget, commands, composer.** Settings › Avatar (the platform's `sections/Avatar.tsx`): "Sessions may show an
@@ -2145,7 +2200,7 @@ face with the number shown, a crossed speaker while voice is off or not chosen, 
 speaking, Voice in this browser, Show avatars, for each open agent session of the project `<title>: give an avatar` (`(asked)`
 for one in `asked`) or `<title>: turn avatar off` (12 at most), and Avatar settings. Palette commands, each listed only while it
 has something to act on: Avatar: Show or Hide Avatars, Avatar: Voice On or Off, Avatar: Stop Speaking, `Avatar: Reply to
-<name>…` (the one thing that moves focus into a reply box), Avatar: Give This Session an Avatar, Avatar: Turn Off for This
+<title> “<name>”…`, Avatar: Give This Session an Avatar, Avatar: Turn Off for This
 Session, Avatar Settings (always listed); no shortcut. Giving and turning on are `POST …/on`, which tells a running session that
 is still to be told (`device::tell`); when that paste is refused it answers `briefed: false`, and a toast says the session
 "could not be told now. Workbench tells it when it is next idle." with "Tell it again", which posts `on` once more (the lifecycle
@@ -2168,25 +2223,29 @@ of a session's card and header follows `useAvatarOn`, else `meta.avatar`; a sess
 9. **What is pasted into a session holds no agent-written text but a clicked choice**: a fixed frame, the question's id and the user's own words.
 10. **Everything is bounded**: every size, count, rate and wait is a named constant, a request is checked whole before anything changes, refused attempts count, and a refusal states the limit.
 11. **The stage is the app's**: a clipped box of a fixed size, itself not seen, below the app's palette, dialogs, toasts and menus, never over the agents column in the wide form (walking figures keep to the dock); the session's identity comes first, the agent's name after it.
-12. **Flash and cost are bounded**: a stage is at most 132 px; the validators keep paint and opacity keyframes 0.17 s apart, never stepping, springing, bouncing or following a bezier that leaves 0 to 1, and paint and opacity drives on the slow inputs only (a full swing in at least 0.25 s), in at most 2 values along `pace` or `held` and 3 along `turn`; the engine's limiter holds each fill and stroke (its channels and its brightness), each opacity and every channel of a large part to three flashes a second, whatever combines in it (not two of them that change together); the engine draws at most 30 frames a second and freezes a figure that costs too much; a look that cannot be drawn at rest is refused at design time; every picture is drawn in a process with limited memory and time that is killed after 8 s.
+12. **Flash and cost are bounded**: a stage is at most 132 px; the validators keep paint and opacity keyframes 0.17 s apart, never stepping, springing, bouncing or following a bezier that leaves 0 to 1, and paint and opacity drives on the slow inputs only (a full swing in at least 0.25 s), in at most 2 values along `pace` or `held` and 3 along `turn`; the engine's limiter holds each fill and stroke (its channels and its brightness), each opacity and every channel of a large part to three flashes a second, whatever combines in it (not two of them that change together); the engine draws at most 30 frames a second and freezes a figure whose script costs too much, and, while the page's frames keep coming late, the costliest moving one with a filter, mask or clip; a look that cannot be drawn at rest, or that costs more than a picture may at the costliest moment its motion moves it to, is refused at design time; every picture is drawn in a process with limited memory and time that is killed after 8 s.
 
 **Verified.** Unit and integration tests: Rust tests in the slice (the validator with hostile and oversized input and the
 golden examples; the picture renderer: the SVG it writes from its tables, the pose math against numbers worked out by hand, the
 eases, sheets and strips of the example looks, its refusals and cost checks; the drawing process: a look drawn by a process of
 its own, the limits holding whatever the renderer does, a drawing nobody waits for killed, a collection of looks that broke the
-renderer before breaking nothing now; a design refused when it cannot be drawn; pictures refused for an avatar turned off;
+renderer before breaking nothing now; a design refused when it cannot be drawn, and where an animation, a drive, the mouth or
+all of them together make it cost too much; pictures refused for an avatar turned off;
 `text::plain`; the built-in motion number for number against the fixtures of `examples/` and `examples/parity/` (mirrored,
 turned and skewed arms, a gaze of 0); the state functions with the clock passed in: gate, rates, leases, outcomes, waits,
 hand-offs, an answer racing a call that leaves, restart (files beyond `MAX_AVATARS`, an unreadable switch, a terminal that
-was not loaded, a stored file a later record takes over), sweep, nudge, the telling of a session that was not told, a reply
-left in the input box; every route through the real router with
+was not loaded, a stored file a later record takes over), the cap over open and running sessions only, a start that holds its
+room, a session back from History without room, sweep, nudge, the telling of a session that was not told, nobody told while
+avatars are off, a reply left in the input box; every route through the real router with
 each kind of caller; the command against a real listener; briefs and guide), tests in terminals (end to end through its fake
-CLIs: the brief in argv and pasted, a first prompt that is a command, the pre-allowed tools, moved and restarted sessions, the
-withheld Enter and the echo of texts sent before, titles and History without the brief), platform (a tool's pictures as image
+CLIs: the brief in argv and pasted, a first prompt that is a command, the pre-allowed tools, moved and restarted sessions, a
+start without room, a restored session told as soon as it is up, the withheld Enter and the echo of texts sent before, titles
+and History without the brief), platform (a tool's pictures as image
 blocks after its text, none in the Activity record) and config; web unit tests (the lib, the engine's flash limiter with
 brightness, the blend of a short gesture, the gaze through mirrored
-and turned pupils, the walk of a figure a gesture is played on, the built-in motion against the same fixtures, cache,
-stage, layout, the bubble's timeline, widget, commands, preferences, voices, render tests of figure, face and bubble, what
+and turned pupils, the walk of a figure a gesture is played on, the late-frame hold, the built-in motion against the same
+fixtures, cache, stage, layout, the bubble's timeline (focus, Esc, Click to hear), widget,
+commands, preferences, voices, render tests of figure, face and bubble, what
 loads with the app). A real browser: headless Chrome against a scratch instance running the real binary, with the tests'
 stand-in CLIs as sessions and a stand-in speech synthesizer in the page (Chrome's own engine only where named): the brief and
 the five allowed tools; every `workbench avatar` form as a real process; an agent token refused on `/api/avatar/**`, the master
@@ -2199,17 +2258,21 @@ caption until they were allowed, then a line said and acknowledged `spoken`); th
 later, a guest; a server restart (records and looks back, no transcript, restarted sessions told with `Again`). The walk and
 `workbench_start_session` with `avatar`: unit tests of `lib/roam.ts`, an end-to-end test of that start, and in a real browser
 three and eight figures walking, a meeting, a line said where the figure stands (its bubble inside the dock), a drag, a click
-and walking switched off (the column), with no page error and none of 53 observed rests on a control.
+and walking switched off (the column), with no page error and none of 53 observed rests on a control. Also:
+Reply to and Esc with another session's terminal focused, Click to hear after a reload, a voice that follows a changed
+language, the label and the line over a question's choices, wide and on a phone; two costly looks refused at design, a costly
+stored look held still while the other figures kept 60 frames a second, and four ordinary looks walking for two minutes
+without a hold.
 
 **Not verified.** Sound leaving a loudspeaker (the browser's own speech engine was driven once in headless Chrome and reported
 the line spoken; nobody heard it); real dictation with a microphone (a stand-in recognizer was used); a real Claude Code
 reading the `permissions.allow` entries of its settings file and using the tools (the tests' stand-in for Claude Code was
 used); real Codex, Kimi Code, Gemini CLI and Aider sessions; a dev container session; a real model looking at the pictures (the
 tests check the PNG and the image blocks, not what a model makes of them); Windows at run time (the server is type-checked for
-Windows only; there the drawing process has only the wait and the kill, no limit on its memory or time of its own); two
-opacities in antiphase on one part or down the tree, and a colour and an opacity or fill-opacity of one part or down the tree
-that change together, which the flash limiter does not cover; the bubble's note for a reply a
-dialog left in the input box in a real browser; Safari and iOS (speech needs a tap there, by design, but it was not tried).
+Windows only); the bubble's note for a reply a
+dialog left in the input box in a real browser; the start-without-room toast in a real browser; the cost limits in a browser
+that draws with the graphics card, and in Firefox (they were measured in headless Chrome drawing in software); Safari and iOS
+(speech needs a tap there, by design, but it was not tried).
 
 **Deferred on purpose.** Voices made by a command on the server; hands-free listening (a microphone that stays open); a pop-out
 window for the avatar; spoken attention announcements; a session changing where or whether avatars are shown.

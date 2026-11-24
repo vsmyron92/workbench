@@ -1390,6 +1390,47 @@ pub(super) fn unbriefed(state: &AppState, id: &str) -> bool {
     stored.get("unbriefed") == Some(&Value::Bool(true))
 }
 
+/// A Workbench restart (`restore_on_start`) of a session whose avatar is on and whose CLI starts a
+/// new conversation (a custom CLI): the brief is pasted as soon as the session is up. The restore
+/// waits for the same signal of a session being up, and does not take it from the brief.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restored_session_is_told_of_its_avatar_as_soon_as_it_is_up() {
+    use crate::avatar::{BriefVariant, Via};
+    let dir = tempfile::tempdir().unwrap();
+    let heard = dir.path().join("heard.log");
+    let mut scripted = python_argv(&format!(
+        "import json, sys\nprint('ready', flush=True)\nfor l in sys.stdin:\n    with open({}, 'a', encoding='utf-8') as f:\n        f.write(json.dumps(l.rstrip('\\r\\n')) + '\\n')\n    print('noted', flush=True)",
+        py_str(&heard.display().to_string())
+    ));
+    let custom = crate::config::global::ProviderConfig { command: Some(scripted.remove(0)), args: scripted, label: Some("Scripted".into()), ..Default::default() };
+    let (state, pid) = provider_state(dir.path(), vec![("scripted", custom)]).await;
+    let _router = app::build_router(state.clone());
+    crate::avatar::start(&state).await;
+    let t = &state.terminals;
+    let lines = || -> Vec<String> { std::fs::read_to_string(&heard).unwrap_or_default().lines().map(|l| serde_json::from_str::<String>(l).unwrap()).collect() };
+    let c = t
+        .spawn_agent(&state, super::agent::AgentRequest { project_id: pid.clone(), provider: Some("scripted".into()), avatar: Some(true), ..Default::default() })
+        .await
+        .unwrap();
+    let whole = avatar_brief(BriefVariant::First, Via::Command, true);
+    wait_long("the brief at its start", 30, || lines().len() == 1).await;
+    assert_eq!(lines()[0], whole);
+    wait_long("the session idle", 20, || agent_of(&state, &c.id).state == super::AgentState::Idle).await;
+
+    // As a start of Workbench finds it: it was running when Workbench stopped.
+    t.kill(&c.id).await.unwrap();
+    t.update(&t.get(&c.id).unwrap(), |r| {
+        r.was_running = true;
+        true
+    });
+    state.config.write().agents.restore_on_start = true;
+    super::agent::restore(state.clone()).await;
+    // The brief waits for the session to be up (at most a minute), not for its own time-out.
+    wait_long("the brief of the restored conversation", 10, || lines().len() == 2).await;
+    assert_eq!(lines()[1], whole);
+    t.kill(&c.id).await.unwrap();
+}
+
 /// A CLI without Workbench's tools has its first prompt pasted: the brief follows the user's
 /// prompt on the same line, or is the whole prompt in its wrapped form, and never names the
 /// tab. A restart of such a CLI starts a new conversation, which is told of the avatar for as

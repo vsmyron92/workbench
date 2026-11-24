@@ -107,15 +107,15 @@ describe('commandPlan', () => {
     })
 
     it('is the active one first, called by its own name or its session’s title', () => {
-      expect(reply({ active: 'b' })).toEqual({ id: 'b', called: 'Pip' })
+      expect(reply({ active: 'b' })).toEqual({ id: 'b', called: 'Write the docs “Pip”' })
       expect(reply({ active: 'c', onScreen: 'a' })).toEqual({ id: 'c', called: 'Review' })
     })
 
     it('else one that waits with a question, the session on screen’s before others', () => {
       const asking = [avatar('a'), avatar('b', { name: 'Pip', ask: ask('Q1') }), avatar('c', { ask: ask('Q2') })]
-      expect(reply({ list: list(asking) })).toEqual({ id: 'b', called: 'Pip' })
+      expect(reply({ list: list(asking) })).toEqual({ id: 'b', called: 'Write the docs “Pip”' })
       expect(reply({ list: list(asking), onScreen: 'c' })).toEqual({ id: 'c', called: 'Review' })
-      expect(reply({ list: list(asking), onScreen: 'a' })).toEqual({ id: 'b', called: 'Pip' })
+      expect(reply({ list: list(asking), onScreen: 'a' })).toEqual({ id: 'b', called: 'Write the docs “Pip”' })
     })
 
     it('does not count a question of a session that needs a permission or an answer first', () => {
@@ -129,7 +129,7 @@ describe('commandPlan', () => {
       expect(reply({ onScreen: null })).toEqual({ id: 'a', called: 'Fix the tests' })
       expect(reply({ onScreen: 'not-on-stage' })).toEqual({ id: 'a', called: 'Fix the tests' })
       // An active id that left the stage counts for nothing.
-      expect(reply({ active: 'left', onScreen: 'b' })).toEqual({ id: 'b', called: 'Pip' })
+      expect(reply({ active: 'left', onScreen: 'b' })).toEqual({ id: 'b', called: 'Write the docs “Pip”' })
     })
 
     it('cuts a long title to a few words', () => {
@@ -188,10 +188,10 @@ describe('avatarCommands', () => {
     stage([avatar('b', { name: 'Pip' })], [term('a'), term('b')])
     useAgentsUi.setState({ columnTab: { shop: 'a' } })
     useAvatarRuntime.getState().tell({ shown: ['b'], active: 'b', presenting: { terminalId: 'b', lineId: 'L1', aloud: false } })
-    expect(titles()).toEqual(['Avatar: Show or Hide Avatars', 'Avatar: Voice On or Off', 'Avatar: Stop Speaking', 'Avatar: Reply to Pip…', 'Avatar: Give This Session an Avatar', 'Avatar Settings'])
+    expect(titles()).toEqual(['Avatar: Show or Hide Avatars', 'Avatar: Voice On or Off', 'Avatar: Stop Speaking', 'Avatar: Reply to Session b “Pip”…', 'Avatar: Give This Session an Avatar', 'Avatar Settings'])
     // The session on screen is b now: its avatar can be turned off, and nothing is left to give.
     useAgentsUi.setState({ columnTab: { shop: 'b' } })
-    expect(titles()).toEqual(['Avatar: Show or Hide Avatars', 'Avatar: Voice On or Off', 'Avatar: Stop Speaking', 'Avatar: Reply to Pip…', 'Avatar: Turn Off for This Session', 'Avatar Settings'])
+    expect(titles()).toEqual(['Avatar: Show or Hide Avatars', 'Avatar: Voice On or Off', 'Avatar: Stop Speaking', 'Avatar: Reply to Session b “Pip”…', 'Avatar: Turn Off for This Session', 'Avatar Settings'])
     const all = avatarCommands(ctx)
     expect(all.map((c) => c.id)).toEqual(['avatar.show', 'avatar.voice', 'avatar.stop', 'avatar.reply', 'avatar.give', 'avatar.off', 'avatar.settings'])
     for (const c of all) {
@@ -239,7 +239,7 @@ describe('avatarCommands', () => {
     stage([avatar('a'), avatar('b', { name: 'Pip', ask: ask('Q1') })], [term('a', { title: 'Fix the tests' }), term('b')])
     useAvatarRuntime.getState().tell({ shown: ['a', 'b'] })
     // Pip waits with a question: the reply is for it, although a comes first.
-    expect(byId('avatar.reply').title).toBe('Avatar: Reply to Pip…')
+    expect(byId('avatar.reply').title).toBe('Avatar: Reply to Session b “Pip”…')
     await byId('avatar.reply').run(ctx)
     expect(done).toEqual(['reply b'])
     // The user turned to a: it is the active one.

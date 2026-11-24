@@ -17,8 +17,9 @@
 //!
 //! The answer of the child: status 0 and the PNG on standard output, with what it cost and what
 //! it showed as one line of JSON on standard error ([`report`]); status [`EXIT_REFUSED`] and a
-//! sentence for the session on standard error; anything else (a signal, another status) means
-//! the drawing died of the look.
+//! sentence for the session on standard error; for a design ([`Want::Design`]), status
+//! [`EXIT_MOVING`] and a sentence when the look at rest was drawn but a moment it moves to costs
+//! too much; anything else (a signal, another status) means the drawing died of the look.
 
 use std::io::{Read, Write};
 use std::process::Stdio;
@@ -33,6 +34,9 @@ use super::preview::{self, Chosen, Inputs, Moment, Picture, Played, Pose, Spent}
 pub const COMMAND: &str = "avatar-draw";
 /// The child's status for a picture it refuses with a sentence.
 pub const EXIT_REFUSED: i32 = 3;
+/// The child's status for a design whose rest pose it drew but that costs too much to draw at
+/// its costliest moment while it moves, with a sentence.
+pub const EXIT_MOVING: i32 = 4;
 
 /// The address space a drawing may have. The program itself takes a tenth of it; the layers of
 /// a picture that `preview` lets through take a few megabytes.
@@ -59,12 +63,17 @@ pub enum Want {
     /// Moments of one of its animations (its own, or a built-in one), with these inputs held, and
     /// close up on the part `zoom` names, where it names one.
     Strip { animation: String, frames: usize, inputs: Inputs, zoom: Option<String> },
+    /// What a design call stores: the figure at rest, as `Sheet` draws it, and only when what
+    /// it costs at its costliest while it moves stays within what a picture may cost
+    /// (`preview::moving`).
+    Design,
 }
 
 impl Want {
     fn to_json(&self) -> (&'static str, Value) {
         match self {
             Want::Sheet(pose) => ("sheet", pose.to_json()),
+            Want::Design => ("design", json!({})),
             Want::Strip { animation, frames, inputs, zoom } => {
                 let mut strip = json!({ "animation": animation, "frames": frames, "inputs": Value::Object(inputs.to_json()) });
                 if let Some(zoom) = zoom {
@@ -78,6 +87,9 @@ impl Want {
     fn from_json(request: &Value) -> Result<Want, String> {
         if let Some(pose) = request.get("sheet") {
             return Pose::from_json(pose).map(Want::Sheet);
+        }
+        if request.get("design").is_some() {
+            return Ok(Want::Design);
         }
         let strip = request.get("strip").ok_or("nothing to draw was named")?;
         let animation = strip.get("animation").and_then(Value::as_str).ok_or("a strip names an animation")?.to_string();
@@ -143,6 +155,9 @@ fn reported(png: Vec<u8>, line: &str) -> Picture {
 pub enum NotDrawn {
     /// The renderer's own answer: a sentence the session can act on (it may quote the session).
     Refused(String),
+    /// A design's rest pose was drawn, but a moment it moves to costs too much to draw: the
+    /// sentence says where and what to change (it may quote the session).
+    Moving(String),
     /// The drawing ran out of the memory or the time a picture may take, or died of the look.
     TooCostly,
     /// The drawing could not be started or read: nothing is known about the look.
@@ -158,7 +173,7 @@ impl NotDrawn {
     /// The sentence for the session.
     pub fn sentence(&self) -> String {
         match self {
-            NotDrawn::Refused(why) => why.clone(),
+            NotDrawn::Refused(why) | NotDrawn::Moving(why) => why.clone(),
             NotDrawn::TooCostly => TOO_COSTLY.to_string(),
             NotDrawn::Unavailable(why) => format!("Workbench could not draw the picture just now ({why}): ask again in a moment"),
             NotDrawn::Busy(why) => why.clone(),
@@ -229,6 +244,7 @@ fn read_answer(status: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<Pict
             Ok(reported(stdout[from..].to_vec(), last))
         }
         Some(EXIT_REFUSED) if !last.is_empty() => Err(NotDrawn::Refused(last.chars().take(600).collect())),
+        Some(EXIT_MOVING) if !last.is_empty() => Err(NotDrawn::Moving(last.chars().take(600).collect())),
         // A signal (no status), the status of an abort or of a panic: the drawing died of the look.
         _ => Err(NotDrawn::TooCostly),
     }
@@ -236,8 +252,9 @@ fn read_answer(status: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<Pict
 
 // ---------------------------------------------------------------- the child
 
-/// `workbench avatar-draw`: reads `{look, sheet | strip}` from standard input, draws, writes the
-/// PNG to standard output, and ends the process with the status that says what happened.
+/// `workbench avatar-draw`: reads `{look, sheet | strip | design}` from standard input, draws,
+/// writes the PNG to standard output, and ends the process with the status that says what
+/// happened.
 pub fn child() -> ! {
     limit_this_process();
     // A panic of the renderer is an answer like any other here: no trace on standard error.
@@ -245,8 +262,8 @@ pub fn child() -> ! {
     let mut request = Vec::new();
     let read = std::io::stdin().lock().take(MAX_REQUEST_BYTES).read_to_end(&mut request);
     let drawn = match read {
-        Ok(_) => std::panic::catch_unwind(|| answer(&request)).unwrap_or_else(|_| Err(String::new())),
-        Err(_) => Err(String::new()),
+        Ok(_) => std::panic::catch_unwind(|| answer(&request)).unwrap_or_else(|_| Err((EXIT_REFUSED, String::new()))),
+        Err(_) => Err((EXIT_REFUSED, String::new())),
     };
     match drawn {
         Ok(picture) => {
@@ -256,22 +273,32 @@ pub fn child() -> ! {
             std::process::exit(if written.is_ok() { 0 } else { 1 })
         }
         // No sentence: the drawing failed in a way that says nothing to a session.
-        Err(why) if why.is_empty() => std::process::exit(1),
-        Err(why) => {
+        Err((_, why)) if why.is_empty() => std::process::exit(1),
+        Err((status, why)) => {
             eprintln!("{}", why.replace(['\n', '\r'], " "));
-            std::process::exit(EXIT_REFUSED)
+            std::process::exit(status)
         }
     }
 }
 
-fn answer(request: &[u8]) -> Result<Picture, String> {
-    let request: Value = serde_json::from_slice(request).map_err(|_| String::new())?;
+/// The picture, or the status to end with and its sentence (none: the drawing failed in a way
+/// that says nothing to a session).
+fn answer(request: &[u8]) -> Result<Picture, (i32, String)> {
+    let refused = |why: String| (EXIT_REFUSED, why);
+    let request: Value = serde_json::from_slice(request).map_err(|_| refused(String::new()))?;
     #[cfg(test)]
     tests::misbehave(&request);
-    let look = request.get("look").ok_or_else(String::new)?;
-    match Want::from_json(&request)? {
-        Want::Sheet(pose) => preview::draw_sheet(look, &pose),
-        Want::Strip { animation, frames, inputs, zoom } => preview::draw_strip(look, &animation, frames, &inputs, zoom.as_deref()),
+    let look = request.get("look").ok_or_else(|| refused(String::new()))?;
+    match Want::from_json(&request).map_err(refused)? {
+        Want::Sheet(pose) => preview::draw_sheet(look, &pose).map_err(refused),
+        Want::Strip { animation, frames, inputs, zoom } => preview::draw_strip(look, &animation, frames, &inputs, zoom.as_deref()).map_err(refused),
+        Want::Design => {
+            let picture = preview::draw_sheet(look, &Pose::default()).map_err(refused)?;
+            match preview::moving(look).map_err(refused)?.refused {
+                Some(why) => Err((EXIT_MOVING, why)),
+                None => Ok(picture),
+            }
+        }
     }
 }
 
@@ -477,6 +504,7 @@ mod tests {
             let in_here = match &want {
                 Want::Sheet(pose) => preview::draw_sheet(&hazy, pose).unwrap(),
                 Want::Strip { animation, frames, inputs, zoom } => preview::draw_strip(&hazy, animation, *frames, inputs, zoom.as_deref()).unwrap(),
+                Want::Design => unreachable!("not asked here"),
             };
             let there = draw(&hazy, &want).await.unwrap();
             assert!(in_here.spent.layers > in_here.rest.layers && in_here.played.is_some(), "{want:?}: {in_here:?}");
@@ -554,6 +582,38 @@ mod tests {
         }
         // A strip of an older request has no zoom.
         assert_eq!(Want::from_json(&json!({ "strip": { "animation": "walk", "frames": 2 } })).unwrap(), Want::Strip { animation: "walk".into(), frames: 2, inputs: Inputs::default(), zoom: None });
+    }
+
+    /// A design is drawn at rest as a sheet is, and refused in a status of its own where a
+    /// moment it moves to costs too much: a session is told where, and nothing of its artwork is
+    /// blamed for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_design_is_drawn_at_rest_and_refused_where_it_moves_too_dear() {
+        let (key, value) = Want::Design.to_json();
+        assert_eq!(Want::from_json(&json!({ "look": {}, key: value })).unwrap(), Want::Design);
+        let rest = draw(&dot(), &Want::Design).await.unwrap();
+        assert_eq!(rest, draw(&dot(), &Want::Sheet(Pose::default())).await.unwrap(), "the same picture and words as the look at rest");
+        // A blurred dot inside groups that one loop scales: cheap at rest, not at its middle.
+        let mut grows = look(json!([
+            { "tag": "defs", "children": [{ "tag": "filter", "id": "soft", "children": [{ "tag": "feGaussianBlur", "attrs": { "stdDeviation": 2 } }] }] },
+            { "tag": "g", "id": "a", "box": [96, 96, 8, 8], "children": [{ "tag": "g", "id": "b", "box": [96, 96, 8, 8], "children": [
+                { "tag": "circle", "id": "dot", "attrs": { "cx": 100, "cy": 100, "r": 4, "fill": "#3366cc", "filterRef": "soft" }, "box": [96, 96, 8, 8] }
+            ] }] }
+        ]));
+        grows["pivots"] = json!({ "a": [100, 100], "b": [100, 100] });
+        grows["animations"] = json!({ "swell": { "duration": 1, "loop": true, "tracks": [{ "target": "a", "prop": "scale", "values": [1, 12, 1] }, { "target": "b", "prop": "scale", "values": [1, 12, 1] }] } });
+        assert!(draw(&grows, &Want::Sheet(Pose::default())).await.is_ok(), "drawn at rest");
+        match draw(&grows, &Want::Design).await {
+            Err(NotDrawn::Moving(why)) => assert!(why.starts_with("this look's filters cost too much to draw in its animation swell at 0.5 (about "), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        // What cannot be drawn at rest is refused as a sheet is.
+        let mut dear = grows.clone();
+        dear["nodes"][1]["attrs"] = json!({ "transform": "translate(100 100) scale(200) translate(-100 -100)" });
+        assert!(matches!(draw(&dear, &Want::Design).await, Err(NotDrawn::Refused(_))));
+        assert_eq!(read_answer(Some(EXIT_MOVING), b"", b"in its animation x at 0.5\n"), Err(NotDrawn::Moving("in its animation x at 0.5".into())));
+        assert_eq!(read_answer(Some(EXIT_MOVING), b"", b""), Err(NotDrawn::TooCostly));
+        assert_eq!(NotDrawn::Moving("why".into()).sentence(), "why");
     }
 
     /// What the child says beside a picture is read back as it said it; what it leaves out

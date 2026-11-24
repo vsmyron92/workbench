@@ -3280,6 +3280,202 @@ async fn at_most_sixty_four_sessions_have_an_avatar_and_none_is_evicted() {
     assert!(turn_on(&e.state, &late, T0 + 2).unwrap().info.on);
 }
 
+/// The session ended and its tab was closed: it is in History, as the terminals slice says it.
+fn to_history(e: &Env, tid: &str, ts: i64) {
+    e.change(tid, |info| {
+        info.status = TerminalStatus::Exited;
+        info.open = false;
+    });
+    e.event("terminal.updated", tid, ts);
+}
+
+#[tokio::test]
+async fn only_avatars_of_open_or_running_sessions_count_against_the_cap() {
+    let e = env_with(|cfg| cfg.avatar.sessions = Some(Sessions::Any)).await;
+    let ended: Vec<String> = (0..MAX_AVATARS).map(|_| e.with_avatar()).collect();
+    for tid in &ended {
+        to_history(&e, tid, T0 + 1);
+    }
+    // 64 avatars of sessions in History take no room: the option, a device and a session's own
+    // call each give one, and the ones in History are kept, not evicted.
+    let opted = e.with_avatar();
+    assert!(e.avatar(&opted).on && e.file(&opted).exists());
+    let given = e.agent(json!({}));
+    assert!(turn_on(&e.state, &given, T0 + 2).unwrap().info.on);
+    let own = e.agent(json!({}));
+    let pass = gate(&e.state, &own, Call::Status, Via::Tools, T0 + 2).unwrap();
+    assert!(status(&e.state, &pass, StatusRequest::default()).unwrap().allowed);
+    gate(&e.state, &own, Call::Say, Via::Tools, T0 + 2).unwrap();
+    assert_eq!(list(&e.state).avatars.len(), MAX_AVATARS + 3);
+    assert!(ended.iter().all(|tid| e.file(tid).exists() && get(&e.state, tid).is_ok()));
+
+    // A session whose tab is open counts, ended or not, and so does a running one whose tab is
+    // closed: with 64 of them, no new one.
+    let stopped = e.with_avatar();
+    e.change(&stopped, |info| info.status = TerminalStatus::Exited);
+    e.event("terminal.exited", &stopped, T0 + 3);
+    let hidden = e.with_avatar();
+    e.change(&hidden, |info| info.open = false);
+    e.event("terminal.updated", &hidden, T0 + 3);
+    while list(&e.state).avatars.len() < 2 * MAX_AVATARS {
+        e.with_avatar();
+    }
+    let late = e.with_avatar();
+    assert!(get(&e.state, &late).is_err() && !e.file(&late).exists());
+    let by_device = turn_on(&e.state, &late, T0 + 4).unwrap_err();
+    assert_eq!((by_device.status.as_u16(), by_device.message.as_str()), (429, "64 sessions have an avatar already: close sessions you no longer need first"));
+    assert_eq!(gate(&e.state, &late, Call::Say, Via::Tools, T0 + 4).unwrap_err().message, "No avatar: 64 sessions have one already. Say it in the terminal instead.");
+    let pass = gate(&e.state, &late, Call::Status, Via::Tools, T0 + 4).unwrap();
+    assert!(!status(&e.state, &pass, StatusRequest::default()).unwrap().allowed);
+    // Closing one makes room.
+    to_history(&e, &stopped, T0 + 5);
+    assert!(turn_on(&e.state, &late, T0 + 6).unwrap().info.on);
+}
+
+#[tokio::test]
+async fn a_start_holds_its_room_until_its_record_is_made() {
+    let e = env_with(|cfg| cfg.avatar.sessions = Some(Sessions::Any)).await;
+    while list(&e.state).avatars.len() < MAX_AVATARS - 1 {
+        e.with_avatar();
+    }
+    // One place is left: the first start takes it, before its terminal is even made known.
+    let first = e.agent(json!({ "avatar": true }));
+    let second = e.agent(json!({ "avatar": true }));
+    assert!(super::room_at_start(&e.state, &first));
+    assert!(!super::room_at_start(&e.state, &second), "the held room counts");
+    // Meanwhile no session's call, device or other start takes it.
+    let other = e.agent(json!({}));
+    assert_eq!(gate(&e.state, &other, Call::Say, Via::Tools, T0).unwrap_err().status.as_u16(), 429);
+    assert_eq!(turn_on(&e.state, &other, T0).unwrap_err().status.as_u16(), 429);
+    // Its terminal.created makes its record in that room, also when the event comes late.
+    e.event("terminal.created", &first, T0 + 1);
+    assert!(e.avatar(&first).on);
+    assert_eq!(list(&e.state).avatars.len(), MAX_AVATARS);
+    assert!(!super::room_at_start(&e.state, &second));
+    // Room held for a start that never makes its record is free again after a while.
+    to_history(&e, &first, T0 + 2);
+    assert!(super::room_at_start(&e.state, &second));
+    assert!(!super::room_at_start(&e.state, &other));
+    // (The room is held from the wall clock's time: the sweep is given one past it.)
+    sweep(&e.state, crate::util::now_ms() + super::store::ROOM_HELD_SECS * SECOND);
+    assert!(super::room_at_start(&e.state, &other));
+    assert_eq!(super::no_room_at_start(), "Started without an avatar: 64 sessions have one already. Close sessions you no longer need, then give it one.");
+}
+
+#[tokio::test]
+async fn a_session_back_from_history_needs_room_and_its_avatar_waits_in_its_file() {
+    let e = env_with(|cfg| cfg.avatar.sessions = Some(Sessions::Any)).await;
+    let back = e.with_avatar();
+    e.design(&back, figure(), T0).unwrap();
+    briefed(&e.state, &back, T0);
+    to_history(&e, &back, T0 + 1);
+    let kept = std::fs::read(e.file(&back)).unwrap();
+    let others: Vec<String> = (0..MAX_AVATARS).map(|_| e.with_avatar()).collect();
+    let mut events = Events::of(&e);
+
+    // Restarted from History while 64 open sessions have one: it starts without its avatar (no
+    // brief, no tools), and the avatar waits in its file, to be told of once it has it back.
+    assert!(!active(&e.state, &back));
+    assert!(get(&e.state, &back).is_err());
+    assert_eq!(events.drain().iter().map(|ev| (ev.kind.as_str(), ev.data["terminalId"].as_str() == Some(back.as_str()))).collect::<Vec<_>>(), [("avatar.changed", true)]);
+    let stored: Value = serde_json::from_slice(&std::fs::read(e.file(&back)).unwrap()).unwrap();
+    let was: Value = serde_json::from_slice(&kept).unwrap();
+    assert_eq!((&stored["look"], &stored["name"], &stored["on"], &stored["unbriefed"]), (&was["look"], &was["name"], &json!(true), &json!(true)));
+    // It runs again: its call is refused for want of room, and no default avatar replaces its file.
+    e.change(&back, |info| {
+        info.status = TerminalStatus::Running;
+        info.open = true;
+    });
+    e.event("terminal.updated", &back, T0 + 2);
+    assert!(get(&e.state, &back).is_err());
+    assert_eq!(gate(&e.state, &back, Call::Say, Via::Tools, T0 + 3).unwrap_err().status.as_u16(), 429);
+    assert_eq!(turn_on(&e.state, &back, T0 + 3).unwrap_err().status.as_u16(), 429);
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(e.file(&back)).unwrap()).unwrap(), stored);
+    // Room frees: its next restart takes its avatar back, look and all, and it is to be told.
+    to_history(&e, &others[0], T0 + 4);
+    assert!(active(&e.state, &back));
+    let avatar = e.avatar(&back);
+    assert!(avatar.on && avatar.designed && avatar.name == "Dot");
+    assert!(unbriefed(&e, &back));
+
+    // A tab of a session in History opened again needs room too: without, its avatar waits in its
+    // file the same way; with, it stays.
+    let reopened = others[1].clone();
+    to_history(&e, &reopened, T0 + 5);
+    e.with_avatar();
+    e.change(&reopened, |info| info.open = true);
+    e.event("terminal.updated", &reopened, T0 + 6);
+    assert!(get(&e.state, &reopened).is_err() && e.file(&reopened).exists());
+    // A terminal that is removed takes such a file along.
+    on_event(&e.state, &Event { kind: "terminal.removed".into(), project_id: None, data: json!({ "id": reopened }), ts: T0 + 7 });
+    assert!(!e.file(&reopened).exists());
+    let roomy = others[2].clone();
+    to_history(&e, &roomy, T0 + 8);
+    to_history(&e, &others[3], T0 + 8);
+    e.change(&roomy, |info| info.open = true);
+    e.event("terminal.updated", &roomy, T0 + 9);
+    assert!(e.avatar(&roomy).on);
+
+    // A restart from History with room holds it until the session runs: no other takes it.
+    let held = others[4].clone();
+    to_history(&e, &held, T0 + 10);
+    e.with_avatar();
+    let fresh = e.agent(json!({}));
+    assert!(active(&e.state, &held));
+    assert_eq!(gate(&e.state, &fresh, Call::Say, Via::Tools, T0 + 11).unwrap_err().status.as_u16(), 429);
+    e.change(&held, |info| {
+        info.status = TerminalStatus::Running;
+        info.open = true;
+    });
+    e.event("terminal.updated", &held, T0 + 12);
+    assert!(e.avatar(&held).on);
+    assert_eq!(gate(&e.state, &fresh, Call::Say, Via::Tools, T0 + 13).unwrap_err().status.as_u16(), 429);
+}
+
+#[tokio::test]
+async fn while_avatars_are_off_nobody_is_told_and_switching_them_on_tells_who_is_due_once() {
+    let e = env().await;
+    let mut pastes = e.pastes();
+    // A session whose avatar is on, restarted with a new conversation that was not told of it.
+    let tid = e.with_avatar();
+    let working = e.with_avatar();
+    conversation_started(&e.state, &tid, false);
+    conversation_started(&e.state, &working, false);
+    assert!(unbriefed(&e, &tid) && unbriefed(&e, &working));
+    e.goes(&tid, AgentState::Working, T0 + SECOND);
+    e.goes(&working, AgentState::Working, T0 + SECOND);
+    let settings = |e: &Env, ts: i64| on_event(&e.state, &Event { kind: "settings.changed".into(), project_id: None, data: json!({}), ts });
+
+    // Avatars are switched off: the idle that follows tells nothing, nor does a device's tell.
+    e.state.config.write().avatar.enabled = Some(false);
+    settings(&e, T0 + 2 * SECOND);
+    e.goes(&tid, AgentState::Idle, T0 + 3 * SECOND);
+    assert!(next_paste(&mut pastes).await.is_none(), "a brief went in while avatars are off");
+    assert_eq!(tell(&e.state, &tid, T0 + 3 * SECOND).await, None);
+    assert!(next_paste(&mut pastes).await.is_none());
+    // A restart meanwhile keeps the session to be told.
+    conversation_started(&e.state, &tid, false);
+    assert!(unbriefed(&e, &tid) && unbriefed(&e, &working));
+
+    // Switched on again: the session that is idle is told now, once; the working one at its next idle.
+    e.state.config.write().avatar.enabled = Some(true);
+    settings(&e, T0 + MINUTE);
+    let paste = next_paste(&mut pastes).await.expect("the due session is told");
+    assert_eq!(paste.tid, tid);
+    let _ = paste.done.send(Ok(()));
+    settle().await;
+    assert!(!unbriefed(&e, &tid) && unbriefed(&e, &working));
+    settings(&e, T0 + 2 * MINUTE);
+    e.event("terminal.updated", &tid, T0 + 2 * MINUTE);
+    assert!(next_paste(&mut pastes).await.is_none(), "told once");
+    e.goes(&working, AgentState::Idle, T0 + 3 * MINUTE);
+    let paste = next_paste(&mut pastes).await.expect("the working session is told when it is idle");
+    assert_eq!(paste.tid, working);
+    let _ = paste.done.send(Ok(()));
+    settle().await;
+    assert!(!unbriefed(&e, &working));
+}
+
 #[tokio::test]
 async fn time_ends_what_nobody_acknowledged() {
     let e = env().await;

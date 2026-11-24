@@ -453,6 +453,151 @@ pub fn strip(look: &Value, animation: &str, frames: usize) -> Result<Vec<u8>, St
     draw_strip(look, animation, frames, &Inputs::default(), None).map(|picture| picture.png)
 }
 
+// ---------------------------------------------------------------- what a look costs while it moves
+
+/// Where a look costs the most to draw while it moves.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Moving {
+    /// Nothing it moves costs more than its rest pose.
+    Rest,
+    /// One of its animations played alone, at this moment of it: its own, or Workbench's built-in
+    /// one of that name.
+    Animation { name: String, builtin: bool, at: f64 },
+    /// Its drives (and, for `mouth`, its lip sync) with this input at this value, the others at rest.
+    Input { input: &'static str, value: f64 },
+    /// The animations one of its states lists, each at its own costliest moment, and every input
+    /// at its own costliest value, at once.
+    Together { state: String },
+}
+
+impl Moving {
+    /// Where it is, as a refusal says it.
+    fn words(&self) -> String {
+        match self {
+            Moving::Rest => "at rest".to_string(),
+            Moving::Animation { name, builtin: false, at } => format!("in its animation {name} at {}", short(*at)),
+            Moving::Animation { name, builtin: true, at } => format!("in Workbench's built-in {name} at {}", short(*at)),
+            Moving::Input { input: "mouth", value } => format!("with its mouth open {}", short(*value)),
+            Moving::Input { input, value } => format!("in its drives on {input} at {}", short(*value)),
+            Moving::Together { state } => format!("when the animations of its state {state} play together, each at its costliest"),
+        }
+    }
+}
+
+/// A moment or an input's value as a sentence writes it: at most four decimals, no "-0".
+fn short(v: f64) -> String {
+    let rounded = (v * 10_000.0).round() / 10_000.0;
+    format!("{}", if rounded == 0.0 { 0.0 } else { rounded })
+}
+
+/// What a look costs to draw at its costliest while it moves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Peak {
+    /// The costliest pose found, in the full view at the large size (as [`Picture::spent`]).
+    pub spent: Spent,
+    pub at: Moving,
+    /// Why the look cannot be stored: a pose of it costs more than a picture may, said with where.
+    pub refused: Option<String>,
+    /// Poses estimated in full (parsed, not drawn): what the search cost.
+    pub estimated: usize,
+}
+
+/// How many moments of one animation, or values of one input, are estimated in full: those the
+/// size of its layers ranks highest ([`Model::grown`]), and the moment a pose calls furthest.
+/// Every other candidate is only ranked, which takes no parse.
+const PEAK_TRIES: usize = 3;
+/// Even moments of an animation that are ranked besides those its tracks reach a keyframe at;
+/// each moment halfway between two of them is ranked too (where two tracks cross, or an ease
+/// overshoots).
+const PEAK_MOMENTS: usize = 16;
+
+/// What `look` costs at its costliest while it moves, and whether that is more than a picture
+/// may cost: every animation (its own and Workbench's built-in ones) alone, at the moments its
+/// tracks reach a keyframe, at even moments and halfway between them, and at the moment a pose
+/// calls furthest; every input its drives (and its lip sync) read, at both ends, at the drives'
+/// own keyframes and halfway between; and, where none of those alone is over the budget, the
+/// animations each of its states lists at once, each at its costliest, with every input at its
+/// costliest: a state's animations and the drives play together and their scales multiply.
+/// (Animations that no state lists together are gestures, which replace one another: taking
+/// them all at once refused honest looks for a pose the browser never shows.) Nothing
+/// is drawn: each candidate is ranked by how large its isolated groups are drawn, and only the
+/// few that rank highest are parsed and estimated as a picture would be (at most
+/// [`PEAK_TRIES`] and the furthest moment per animation, [`PEAK_TRIES`] per input, and one
+/// pose for each state that lists two or more). The rest pose is not refused here: drawing it
+/// says that first.
+pub fn moving(look: &Value) -> Result<Peak, String> {
+    let model = Model::read(look)?;
+    let mut search = Search { peak: Spent::default(), at: Moving::Rest, refused: None, estimated: 0 };
+    let rest = model.drive(HashMap::new(), &Inputs::default());
+    model.estimate_posed(&rest, Moving::Rest, &mut search);
+    // The rest pose stands: what it costs too much for is said by the picture at rest.
+    search.refused = None;
+
+    let own = model.look.get("animations").and_then(Value::as_object);
+    let mut names: Vec<(&str, bool)> = own.into_iter().flat_map(|a| a.keys()).map(String::as_str).filter(|n| is_id(n)).take(MAX_ANIMATIONS).map(|n| (n, false)).collect();
+    for (name, _) in model.builtins() {
+        if !own.is_some_and(|a| a.contains_key(*name)) {
+            names.push((name, true));
+        }
+    }
+    let mut costliest: Vec<(&str, Anim<'_>, f64)> = vec![];
+    for (name, builtin) in names {
+        let Ok(anim) = model.animation(name) else { continue };
+        let at = model.costliest_moment(&anim, &mut search, |at| Moving::Animation { name: name.to_string(), builtin, at });
+        costliest.push((name, anim, at));
+    }
+
+    let mut inputs = Inputs::default();
+    let mut moved_inputs = 0;
+    for input in INPUTS {
+        if let Some(value) = model.costliest_value(input, &mut search) {
+            moved_inputs += 1;
+            match input {
+                "lookX" => inputs.look_x = value,
+                "lookY" => inputs.look_y = value,
+                "mouth" => inputs.mouth = Some(value),
+                "pace" => inputs.pace = value,
+                "turn" => inputs.turn = value,
+                _ => inputs.held = value,
+            }
+        }
+    }
+
+    // Together only where nothing alone is refused already (the sentence names what to change),
+    // and only what a state lists together: a state's animations play at once, under the drives.
+    if search.refused.is_none() {
+        let states = model.look.get("states").and_then(Value::as_object);
+        for (state, listed) in states.into_iter().flatten().take(16) {
+            let Some(listed) = listed.as_array() else { continue };
+            let plays: Vec<(&Anim<'_>, f64)> = costliest.iter().filter(|(name, ..)| listed.iter().any(|l| l.as_str() == Some(*name))).map(|(_, anim, at)| (anim, *at)).collect();
+            if plays.len() + moved_inputs < 2 || plays.is_empty() {
+                continue;
+            }
+            let together = model.posed_with(&plays, &inputs);
+            model.estimate_posed(&together, Moving::Together { state: state.clone() }, &mut search);
+            if search.refused.is_some() {
+                break;
+            }
+        }
+    }
+    Ok(Peak { spent: search.peak, at: search.at, refused: search.refused.map(|(_, why)| why), estimated: search.estimated })
+}
+
+/// The costliest pose found so far, and the costliest refusal.
+struct Search {
+    peak: Spent,
+    at: Moving,
+    /// How far over the budget, and the sentence: a refusal that is not a number of filters or
+    /// layers is as far over as can be, and the first of those is kept.
+    refused: Option<(f64, String)>,
+    estimated: usize,
+}
+
+/// A cost as a part of what a picture may cost: the larger of its two shares.
+fn share(spent: Spent) -> f64 {
+    (spent.filters / FILTER_WORK).max(spent.layers / LAYER_WORK)
+}
+
 fn canvas(width: u32, height: u32) -> Result<Pixmap, String> {
     let mut canvas = Pixmap::new(width, height).ok_or("the picture could not be made")?;
     canvas.fill(Color::from_rgba8(GAP_COLOUR[0], GAP_COLOUR[1], GAP_COLOUR[2], 255));
@@ -653,6 +798,35 @@ impl Over {
             Over::Dashes(_) => return self.sentence(),
         };
         format!("the close-up of {part} costs too much to draw ({what}): look at a larger part, or at the whole figure without zoom")
+    }
+
+    /// The same said of a look whose rest pose is drawn, at the costliest moment it moves to
+    /// (`at`): the browser draws that moment again on every frame, as long as it lasts.
+    fn moving(self, at: &Moving) -> String {
+        let at = at.words();
+        match self {
+            Over::Stretched => format!("a filter sits on a part that is stretched or skewed too far to draw {at}: animate less scale or skew on that part and on what holds it, or put the filter on a part that is not stretched"),
+            Over::Reach(times) => format!("a stroked shape or a text reaches about {times:.0} times the picture's width {at}: animate a smaller scale"),
+            Over::Filters(passes) => format!(
+                "this look's filters cost too much to draw {at} (about {:.0} passes over the whole figure, at most {FILTER_WORK:.0}): animate a smaller scale, or put the filter on a part that does not grow",
+                passes.ceil()
+            ),
+            Over::Layers(layers) => format!(
+                "this look has too many masked, clipped, filtered or half-transparent groups to draw {at} (about {:.0} layers the size of the figure, at most {LAYER_WORK:.0}): animate a smaller scale, or mask or clip one group that does not grow instead of every part",
+                layers.ceil()
+            ),
+            Over::Dashes(dashes) => format!("this look's dashes are too fine to draw {at} (about {dashes:.0} dashes, at most {MAX_DASHES_DRAWN:.0}): make the dashes longer or dash fewer strokes"),
+        }
+    }
+
+    /// How far over the budget: a number of filters or layers by its share of it, the others as
+    /// far as can be.
+    fn by(self) -> f64 {
+        match self {
+            Over::Filters(passes) => passes / FILTER_WORK,
+            Over::Layers(layers) => layers / LAYER_WORK,
+            _ => f64::INFINITY,
+        }
     }
 }
 
@@ -2678,7 +2852,6 @@ impl<'a> Model<'a> {
     /// a state animation and these inputs.
     fn pose(&self, pose: &Pose) -> Result<Posed, String> {
         let mut accs: HashMap<usize, Acc> = HashMap::new();
-        let body = self.role("body");
 
         if let Some((name, at)) = &pose.animation {
             let anim = self.animation(name)?;
@@ -2687,7 +2860,14 @@ impl<'a> Model<'a> {
             self.play(&anim, at.clamp(0.0, 1.0), &mut accs);
         }
 
-        let inputs = pose.inputs;
+        Ok(self.drive(accs, &pose.inputs))
+    }
+
+    /// What comes after the animations of a pose: the drives, the look's `mouth` entries and the
+    /// gaze under these inputs, then what is written.
+    fn drive(&self, mut accs: HashMap<usize, Acc>, inputs: &Inputs) -> Posed {
+        let body = self.role("body");
+        let inputs = *inputs;
         // Where it looks is a vector at most one long, as the browser's is.
         let far = inputs.look_x.hypot(inputs.look_y).max(1.0);
         let input = |name: &str| match name {
@@ -2738,7 +2918,7 @@ impl<'a> Model<'a> {
             }
         }
 
-        Ok(self.settle(&accs, body))
+        self.settle(&accs, body)
     }
 
     /// The animation as a state animation at `at` of its run: a loop over its duration (each track
@@ -3166,6 +3346,257 @@ impl<'a> Model<'a> {
                 false
             })
             .collect()
+    }
+}
+
+impl<'a> Model<'a> {
+    /// Several animations at once, each at its moment (scales multiply, the rest adds or is set,
+    /// in this order), then the drives, the mouth and the gaze under `inputs`.
+    fn posed_with(&self, plays: &[(&Anim<'_>, f64)], inputs: &Inputs) -> Posed {
+        let mut accs: HashMap<usize, Acc> = HashMap::new();
+        for (anim, at) in plays {
+            self.play(anim, at.clamp(0.0, 1.0), &mut accs);
+        }
+        self.drive(accs, inputs)
+    }
+
+    /// A pose estimated as a picture of it would be, in the full view at the large size, and
+    /// kept in `search` where it costs the most or is over the budget. Its share of the budget
+    /// (as far as can be where it cannot be drawn at all).
+    fn estimate_posed(&self, posed: &Posed, at: Moving, search: &mut Search) -> f64 {
+        search.estimated += 1;
+        // What a body finds that cannot be written is said of this body alone.
+        self.unwritable.set(false);
+        let body = self.body(posed);
+        let parsed = self.parsed(&body, self.view, SHEET_FIGURE_PX, LIGHT);
+        self.unwritable.set(false);
+        let (shared, refusal) = match parsed {
+            Err(why) => (f64::INFINITY, Some((f64::INFINITY, format!("{why} ({})", at.words())))),
+            Ok((_, cost)) => {
+                let spent = cost.spent();
+                if share(spent) > share(search.peak) {
+                    search.peak = spent;
+                    search.at = at.clone();
+                }
+                (share(spent), cost.over().map(|over| (over.by(), over.moving(&at))))
+            }
+        };
+        if let Some((by, why)) = refusal {
+            if search.refused.as_ref().is_none_or(|(had, _)| by > *had) {
+                search.refused = Some((by, why));
+            }
+        }
+        shared
+    }
+
+    /// The moment of `anim` that costs the most: of the moments its tracks reach a keyframe,
+    /// [`PEAK_MOMENTS`] + 1 even ones, the furthest, and each halfway between two of them, the
+    /// [`PEAK_TRIES`] whose isolated groups are drawn largest, and the furthest, each estimated
+    /// in full; `at` says where a moment is.
+    fn costliest_moment(&self, anim: &Anim<'_>, search: &mut Search, at: impl Fn(f64) -> Moving) -> f64 {
+        let (tracks, run) = anim.tracks();
+        let mut moments: Vec<f64> = (0..=PEAK_MOMENTS).map(|k| k as f64 / PEAK_MOMENTS as f64).collect();
+        for track in &tracks {
+            if let Some(keys) = keys(track, &[track.get("times"), anim.map.get("times")], &[track.get("ease"), anim.map.get("ease")]) {
+                moments.extend(keys.times.iter().map(|t| anim.moment_of(track, run, *t)));
+            }
+        }
+        let furthest = self.furthest(anim);
+        moments.extend(furthest);
+        let candidates = halved(moments);
+        let tries = top(&candidates, furthest, |m| self.grown(&self.posed_with(&[(anim, m)], &Inputs::default())));
+        let mut best = (f64::NEG_INFINITY, tries.first().copied().unwrap_or(0.5));
+        for m in tries {
+            let cost = self.estimate_posed(&self.posed_with(&[(anim, m)], &Inputs::default()), at(m), search);
+            if cost > best.0 {
+                best = (cost, m);
+            }
+        }
+        best.1
+    }
+
+    /// The value of `input` that costs the most, the others at rest: of both ends of its range,
+    /// each position a drive on it has a keyframe at, and each halfway between, the
+    /// [`PEAK_TRIES`] that rank highest, estimated in full. `None` when nothing reads the input
+    /// (the mouth: no drive on it and no lip sync).
+    fn costliest_value(&self, input: &'static str, search: &mut Search) -> Option<f64> {
+        let drives: Vec<&Map<String, Value>> =
+            self.look.get("drives").and_then(Value::as_array).into_iter().flatten().take(MAX_DRIVES).filter_map(Value::as_object).filter(|d| d.get("input").and_then(Value::as_str) == Some(input)).collect();
+        let lip_sync = input == "mouth" && self.look.get("mouth").and_then(Value::as_array).is_some_and(|m| !m.is_empty());
+        if drives.is_empty() && !lip_sync {
+            return None;
+        }
+        // Positions along the input's range, 0 to 1, as the drives read them.
+        let mut positions = vec![0.0, 1.0];
+        for drive in &drives {
+            if let Some(keys) = keys(drive, &[drive.get("at")], &[drive.get("ease")]) {
+                positions.extend(keys.times);
+            }
+        }
+        let signed = matches!(input, "lookX" | "lookY" | "turn");
+        let values: Vec<f64> = halved(positions).into_iter().map(|p| if signed { 2.0 * p - 1.0 } else { p }).collect();
+        let inputs = |v: f64| {
+            let mut inputs = Inputs::default();
+            match input {
+                "lookX" => inputs.look_x = v,
+                "lookY" => inputs.look_y = v,
+                "mouth" => inputs.mouth = Some(v),
+                "pace" => inputs.pace = v,
+                "turn" => inputs.turn = v,
+                _ => inputs.held = v,
+            }
+            inputs
+        };
+        let tries = top(&values, None, |v| self.grown(&self.posed_with(&[], &inputs(v))));
+        let mut best = (f64::NEG_INFINITY, tries.first().copied().unwrap_or(0.0));
+        for v in tries {
+            let cost = self.estimate_posed(&self.posed_with(&[], &inputs(v)), Moving::Input { input, value: v }, search);
+            if cost > best.0 {
+                best = (cost, v);
+            }
+        }
+        Some(best.1)
+    }
+
+    /// How large a pose draws the groups the renderer draws into layers of their own, for
+    /// ranking the moments of one animation: per group that is filtered, masked, clipped or not
+    /// opaque, the area its parts cover there (their boxes through their live matrices and their
+    /// live sizes), weighed by its filter's primitives; first within the room a layer has, then
+    /// in full, which tells apart moments that both fill the room. Not a cost: it only says which
+    /// moments to estimate, and in which order.
+    fn grown(&self, posed: &Posed) -> (f64, f64) {
+        let n = self.els.len();
+        let [vx, vy, w, h] = self.view;
+        let room = [vx - 2.0 * w, vy - 2.0 * h, vx + 3.0 * w, vy + 3.0 * h];
+        let mut world = vec![IDENTITY; n];
+        for i in 0..n {
+            let outer = self.els[i].parent.map_or(IDENTITY, |p| world[p]);
+            world[i] = posed.transform.get(i).copied().flatten().map_or(outer, |m| mul(outer, m));
+        }
+        // Each part's own box where it is drawn now (corners), and, for what has none, that of the
+        // nearest part around it that has one.
+        let own: Vec<Option<[f64; 4]>> = (0..n).map(|i| self.els[i].bbox.map(|b| corners(box_through(world[i], self.live_box(i, b, posed))))).collect();
+        let mut around: Vec<Option<[f64; 4]>> = vec![None; n];
+        for i in 0..n {
+            around[i] = own[i].or_else(|| self.els[i].parent.and_then(|p| around[p]));
+        }
+        // What a group covers: its own box and everything inside it, children first.
+        let mut covers: Vec<Option<[f64; 4]>> = own.clone();
+        for i in (0..n).rev() {
+            for &c in &self.els[i].children {
+                covers[i] = union(covers[i], covers[c]);
+            }
+        }
+        let (mut within, mut whole) = (0.0, 0.0);
+        for i in 0..n {
+            let el = &self.els[i];
+            if el.inert || !el.tag.is_drawn() {
+                continue;
+            }
+            let weight = self.isolation(i, posed);
+            if weight == 0.0 {
+                continue;
+            }
+            let [x0, y0, x1, y1] = covers[i].or(around[i]).unwrap_or([vx, vy, vx + w, vy + h]);
+            let area = (x1.min(room[2]) - x0.max(room[0])).max(0.0) * (y1.min(room[3]) - y0.max(room[1])).max(0.0);
+            let full = (x1 - x0).max(0.0) * (y1 - y0).max(0.0);
+            if area.is_finite() && full.is_finite() {
+                within += weight * area;
+                whole += weight * full;
+            }
+        }
+        (within, whole)
+    }
+
+    /// A part's own box with the sizes a pose sets on it: a radius, a width or a height grown or
+    /// shrunk about the box's middle.
+    fn live_box(&self, i: usize, b: [f64; 4], posed: &Posed) -> [f64; 4] {
+        let Some(set) = posed.set.get(&i) else { return b };
+        let ratio = |prop: Prop| -> Option<f64> {
+            let live: f64 = set.iter().find(|(name, _)| *name == prop.svg())?.1.parse().ok()?;
+            let rest = self.rest_num(i, prop);
+            (rest > 0.0 && live.is_finite()).then(|| (live / rest).abs())
+        };
+        let (mut kx, mut ky) = (1.0f64, 1.0f64);
+        if let Some(k) = ratio(Prop::R) {
+            kx = kx.max(k);
+            ky = ky.max(k);
+        }
+        for prop in [Prop::Rx, Prop::Width] {
+            kx = kx.max(ratio(prop).unwrap_or(1.0));
+        }
+        for prop in [Prop::Ry, Prop::Height] {
+            ky = ky.max(ratio(prop).unwrap_or(1.0));
+        }
+        let [x, y, w, h] = b;
+        [x + w / 2.0 - w * kx / 2.0, y + h / 2.0 - h * ky / 2.0, w * kx, h * ky]
+    }
+
+    /// Whether the renderer draws a part into a layer of its own in this pose, and how much that
+    /// weighs: a filter one more for each of its primitives, a mask and a clip one each; a group
+    /// that is only not opaque, one.
+    fn isolation(&self, i: usize, posed: &Posed) -> f64 {
+        let attrs = self.els[i].attrs;
+        let named = |key: &str| attrs.and_then(|a| a.get(key)).and_then(Value::as_str).and_then(|id| self.ids.get(id).copied());
+        let mut weight = 0.0;
+        if let Some(filter) = named("filterRef").filter(|f| self.els[*f].tag == Tag::Filter) {
+            weight += 1.0 + self.els[filter].children.len() as f64;
+        }
+        if named("maskRef").is_some() {
+            weight += 1.0;
+        }
+        if named("clipPathRef").is_some() {
+            weight += 1.0;
+        }
+        if weight == 0.0 {
+            let live = posed.set.get(&i).and_then(|set| set.iter().find(|(name, _)| *name == "opacity")).and_then(|(_, v)| v.parse::<f64>().ok());
+            if live.unwrap_or_else(|| self.rest_num(i, Prop::Opacity)) < 1.0 {
+                weight = 1.0;
+            }
+        }
+        weight
+    }
+}
+
+/// Sorted candidates, each once, with every one halfway between two neighbours added: the
+/// moments (or positions) of a search, all from 0 to 1.
+fn halved(mut points: Vec<f64>) -> Vec<f64> {
+    points.retain(|p| p.is_finite());
+    for p in &mut points {
+        *p = p.clamp(0.0, 1.0);
+    }
+    points.sort_by(f64::total_cmp);
+    points.dedup_by(|later, earlier| *later - *earlier < 1e-9);
+    let halves: Vec<f64> = points.windows(2).map(|w| (w[0] + w[1]) / 2.0).collect();
+    points.extend(halves);
+    points.sort_by(f64::total_cmp);
+    points.dedup_by(|later, earlier| *later - *earlier < 1e-9);
+    points
+}
+
+/// The [`PEAK_TRIES`] candidates `rank` puts highest, highest first (by its first number, then
+/// its second; the earliest of equals first), and `also` where it is not among them.
+fn top(candidates: &[f64], also: Option<f64>, rank: impl Fn(f64) -> (f64, f64)) -> Vec<f64> {
+    let mut ranked: Vec<((f64, f64), f64)> = candidates.iter().map(|&c| (rank(c), c)).collect();
+    ranked.sort_by(|a, b| b.0.0.total_cmp(&a.0.0).then(b.0.1.total_cmp(&a.0.1)));
+    let mut out: Vec<f64> = ranked.into_iter().take(PEAK_TRIES).map(|(_, c)| c).collect();
+    if let Some(also) = also.filter(|a| !out.iter().any(|c| (c - a).abs() < 1e-9)) {
+        out.push(also);
+    }
+    out
+}
+
+/// A box `[x, y, width, height]` as its corners `[x0, y0, x1, y1]`.
+fn corners(b: [f64; 4]) -> [f64; 4] {
+    [b[0], b[1], b[0] + b[2], b[1] + b[3]]
+}
+
+/// The box around two boxes of corners, where there are any.
+fn union(a: Option<[f64; 4]>, b: Option<[f64; 4]>) -> Option<[f64; 4]> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some([a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]),
+        (a, None) => a,
+        (None, b) => b,
     }
 }
 

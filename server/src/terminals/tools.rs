@@ -70,7 +70,8 @@ pub fn mcp_tools() -> Vec<McpTool> {
              hand you. The same CLI starts in your permission mode; it never runs without asking when you ask first, and its permission \
              requests go to the user like yours. Sessions may start sessions \
              a few levels deep and only a few at a time. The prompt is all it knows of this conversation. \
-             `avatar: true` gives it a live avatar of its own, which it draws itself.",
+             `avatar: true` gives it a live avatar of its own, which it draws itself; while too many sessions \
+             have one already it starts without one, and the answer's `avatar` says so.",
             json!({
                 "type": "object",
                 "properties": {
@@ -152,7 +153,7 @@ pub fn mcp_tools() -> Vec<McpTool> {
                 } else {
                     "It runs on its own. Follow it with workbench_sessions and workbench_terminal_output.".to_string()
                 };
-                Ok(ToolOutput::Json(json!({
+                let mut out = json!({
                     "terminalId": info.id,
                     "title": info.title,
                     "project": info.project_id,
@@ -161,7 +162,12 @@ pub fn mcp_tools() -> Vec<McpTool> {
                     "permissionMode": agent.and_then(|a| a.permission_mode.clone()),
                     "limits": { "depth": MAX_SPAWN_DEPTH, "running": MAX_SPAWNED_RUNNING },
                     "next": next,
-                })))
+                });
+                // Asked for an avatar and started without one (no room): why.
+                if let Some(why) = info.meta.get("noAvatar") {
+                    out["avatar"] = why.clone();
+                }
+                Ok(ToolOutput::Json(out))
             },
         ),
         tool(

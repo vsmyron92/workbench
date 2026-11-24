@@ -2,8 +2,6 @@
 // says, and is listed only while it has something to act on: `commandPlan` decides that
 // from the avatar list, the terminals, the session on screen and what is on stage, and
 // `avatarCommands` reads those from where they live when the palette asks.
-//
-// "Avatar: Reply to …" is the only thing in the app that moves focus into a reply box.
 
 import { CircleStop, Eye, PowerOff, Reply, Settings, Smile, Volume2 } from 'lucide-react'
 import type { TerminalInfo } from '@/api/types'

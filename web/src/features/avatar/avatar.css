@@ -236,6 +236,27 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* As in the bubble's header: the session's title gives way, the agent's name in quotation marks
+   after it stays as long as it can. */
+.wb-av-label-in {
+  display: flex;
+  gap: 3px;
+  min-width: 0;
+}
+.wb-av-label-title,
+.wb-av-label-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wb-av-label-title {
+  flex: 0 1 auto;
+  font-weight: 600;
+}
+.wb-av-label-name {
+  flex: 0 0 auto;
+  max-width: 55%;
+}
 /* The app's own words while a session draws its look: read in full, on two lines under a small figure. */
 .wb-av-label.designing {
   height: auto;
@@ -573,6 +594,7 @@
 }
 .wb-av-reason,
 .wb-av-notice,
+.wb-av-where,
 .wb-av-blocked {
   color: var(--fg-muted);
   font-size: var(--fs-sm);

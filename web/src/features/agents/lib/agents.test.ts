@@ -24,6 +24,7 @@ import {
   lingering,
   needsAttention,
   nextAttention,
+  noAvatarNote,
   quotePath,
   removeTerminal,
   restartMode,
@@ -345,6 +346,15 @@ describe('avatar sessions', () => {
     expect(avatarNote({ id: 't' } as unknown as TerminalInfo)).toBeNull()
     // The two badges do not depend on each other.
     expect([avatarNote(t({ avatar: true, ultracode: true }))?.label, ultracodeNote(t({ avatar: true, ultracode: true }))?.label]).toEqual(['Avatar', 'Ultracode'])
+  })
+
+  it('say why a start asked for with one has none, as the answer of the start says it', () => {
+    const t = (meta: Record<string, unknown>) => ({ id: 't', meta, agent: agent() }) as unknown as TerminalInfo
+    const why = 'Started without an avatar: 64 sessions have one already. Close sessions you no longer need, then give it one.'
+    expect(noAvatarNote(t({ noAvatar: why }))).toBe(why)
+    for (const meta of [{}, { avatar: true }, { noAvatar: '' }, { noAvatar: ' ' }, { noAvatar: true }, { noAvatar: 64 }]) expect(noAvatarNote(t(meta))).toBeNull()
+    expect(noAvatarNote(null)).toBeNull()
+    expect(noAvatarNote({ id: 't' } as unknown as TerminalInfo)).toBeNull()
   })
 
   it('wear the badge by the live record once it is known, and by how they were started until then', () => {

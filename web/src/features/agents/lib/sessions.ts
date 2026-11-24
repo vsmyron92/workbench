@@ -279,6 +279,15 @@ export function avatarNote(t: TerminalInfo | null | undefined): { label: string;
 }
 
 /**
+ * Why a session asked for with the Avatar control started without one: the answer of
+ * `POST /api/agents` says so in `meta.noAvatar` (no room left). `null`: nothing to say.
+ */
+export function noAvatarNote(t: TerminalInfo | null | undefined): string | null {
+  const why = t?.meta?.noAvatar
+  return typeof why === 'string' && why.trim() !== '' ? why : null
+}
+
+/**
  * The Avatar badge of a session's card and header. It follows the live record: `on` is what
  * the avatar feature tells through `useAvatarOn` (shell/avatarBridge.ts). true: the session's
  * avatar is on, also when it was given one after its start. false: it has none, or the user

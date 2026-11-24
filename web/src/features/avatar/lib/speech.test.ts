@@ -247,6 +247,18 @@ describe('voices', () => {
     expect(pickVoice(pool, { prefer: ['c'] }, 't1', { taken: taken(), remembered: 'B' })?.name).toBe('C')
   })
 
+  it('drops a remembered voice that no longer speaks the avatar’s language, where the browser has one that does', () => {
+    // The avatar spoke before it chose a voice of its own (en-US), then designed one in en-GB.
+    const pool = [voice('Stub English', 'en-US'), voice('Stub British', 'en-GB')]
+    expect(pickVoice(pool, { lang: 'en-GB' }, 't1', { taken: taken(), remembered: 'Stub English' })?.name).toBe('Stub British')
+    expect(pickVoice(pool, {}, 't1', { lang: 'en-gb', taken: taken(), remembered: 'Stub English' })?.name).toBe('Stub British')
+    // Still the language's: it stays.
+    expect(pickVoice(pool, { lang: 'en-US' }, 't1', { taken: taken({ 'Stub English': 3 }), remembered: 'Stub English' })?.name).toBe('Stub English')
+    // No voice of the exact language here: one of the base language that was remembered stays.
+    expect(pickVoice([voice('Stub English', 'en-US'), voice('Other', 'en-US')], { lang: 'en-GB' }, 't1', { taken: taken(), remembered: 'Stub English' })?.name).toBe('Stub English')
+    expect(pickVoice(pool, { lang: 'en' }, 't1', { taken: taken(), remembered: 'Stub British' })?.name).toBe('Stub British')
+  })
+
   it('gives nothing when no usable voice speaks the language', () => {
     expect(pickVoice([voice('Anna', 'de-DE')], { lang: 'en-US' }, 't1', { taken: taken() })).toBeNull()
     expect(pickVoice([], {}, 't1', { taken: taken() })).toBeNull()
@@ -1176,6 +1188,25 @@ describe('createSpeaker: voices of several avatars', () => {
     // And the first one is a new avatar again when it comes back: it joins the back of the row.
     s.speaker.enqueue(item({ terminalId: 't0' }))
     expect(s.synth.last.pitch).toBeCloseTo([1, 0.85, 1.15][256 % 3], 1)
+  })
+
+  it('takes a voice of the avatar’s new language when it designs one after it spoke with another', () => {
+    const s = setup()
+    s.synth.voices = [voice('Stub English', 'en-US'), voice('Stub British', 'en-GB')]
+    // The greeting, before the design: the default language.
+    s.speaker.enqueue(item({ terminalId: 't1', lang: 'en-US' }))
+    expect((s.synth.last.voice as VoiceLike).name).toBe('Stub English')
+    s.sayIt()
+    // Designed with an en-GB voice: the next lines are said with the British one.
+    s.speaker.enqueue(item({ terminalId: 't1', lang: 'en-GB', voice: { lang: 'en-GB' } }))
+    expect((s.synth.last.voice as VoiceLike).name).toBe('Stub British')
+    expect(s.synth.last.lang).toBe('en-GB')
+    s.sayIt()
+    // Also when the preferences remember the first voice from an earlier page load.
+    const later = setup({ voices: { t1: 'Stub English' } })
+    later.synth.voices = [voice('Stub English', 'en-US'), voice('Stub British', 'en-GB')]
+    later.speaker.enqueue(item({ terminalId: 't1', lang: 'en-GB', voice: { lang: 'en-GB' } }))
+    expect((later.synth.last.voice as VoiceLike).name).toBe('Stub British')
   })
 
   it('uses the voice the preferences remember for a terminal', () => {

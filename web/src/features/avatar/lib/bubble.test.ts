@@ -2,7 +2,7 @@
 // the user is writing answers.
 
 import { describe, expect, it } from 'vitest'
-import { CHOICE_GUARD_MS, CLOSE_AFTER_MS, EMPTY, HOLD_MOVE_PX, HOLD_MS, HOVER_DWELL_MS, IN_BOX, MAX_DRAFT_CHARS, NOTE_MS, NO_DRAFT, THROUGH_MS, armGuard, askChanged, askedToHear, choicesReady, clicksThrough, closeByUser, edited, guardStep, guardWake, holding, noteEdited, noteStep, noteWake, noted, openByUser, planChoice, planSend, pressed, questionChanged, readingMs, replyNoted, replyShown, sentNote, settle, voiceForm, whyDisabled } from './bubble'
+import { CHOICE_GUARD_MS, CLOSE_AFTER_MS, EMPTY, HOLD_MOVE_PX, HOLD_MS, HOVER_DWELL_MS, IN_BOX, MAX_DRAFT_CHARS, NOTE_MS, NO_DRAFT, THROUGH_MS, armGuard, askChanged, askedToHear, choicesReady, clicksThrough, closeByUser, edited, escapeCloses, focusTaken, guardStep, guardWake, holding, noteEdited, noteStep, noteWake, noted, offersToHear, openByUser, planChoice, planSend, pressed, questionChanged, readingMs, replyNoted, replyShown, sentNote, settle, voiceForm, whyDisabled } from './bubble'
 import type { Facts, Presenting, Scene } from './bubble'
 import { SHRINK_AFTER_MS } from './stage'
 import type { Candidate } from './stage'
@@ -996,5 +996,91 @@ describe('constants of the contract', () => {
     // D11 and D13.
     expect([HOLD_MS, HOLD_MOVE_PX, NOTE_MS]).toEqual([1000, 16, 4000])
     expect(HOLD_MS).toBeGreaterThan(THROUGH_MS)
+  })
+})
+
+describe('focus: a bubble the user opened takes it, one that opened by itself never does', () => {
+  it('asks for focus whenever the user opens a bubble, by a press, a control, a menu or the palette', () => {
+    // Every way the user opens one goes through openByUser (a press on the figure or the face goes through pressed).
+    expect(openByUser(EMPTY, 'b').focus).toBe(true)
+    expect(pressed(EMPTY, 'b', 100).focus).toBe(true)
+    // A bubble that is open by itself, opened again by the user (its Reply control): focus too.
+    const self = run(EMPTY, [0, 600], { presenting: saying('a', 'L1') })
+    expect([self.bubble, self.focus]).toEqual(['self', false])
+    expect(openByUser(self, 'a').focus).toBe(true)
+    // It stays asked for while the scene settles, until the overlay took it.
+    const asked = settle(openByUser(EMPTY, 'b'), facts(100, { presenting: saying('a', 'L1') }))
+    expect([asked.bubble, asked.focus]).toEqual(['user', true])
+    const taken = focusTaken(asked)
+    expect(taken.focus).toBe(false)
+    expect(settle(taken, facts(200)).focus).toBe(false)
+    expect(focusTaken(taken)).toBe(taken)
+  })
+
+  it('never asks for it when a line or a question opens the bubble by itself', () => {
+    const line = run(EMPTY, [0, 600, 900], { presenting: saying('a', 'L1') })
+    expect([line.bubble, line.focus]).toEqual(['self', false])
+    const question = run(EMPTY, [0, 600], { shown: [c('a', { askId: 'Q1' }), c('b')] })
+    expect([question.bubble, question.focus]).toEqual(['self', false])
+    // A line of another avatar takes the stage from a bubble that opened by itself: no focus either.
+    const other = run(line, [1000, 1600], { presenting: saying('b', 'L2') })
+    expect([other.active.id, other.bubble, other.focus]).toEqual(['b', 'self', false])
+  })
+
+  it('forgets it once the bubble closes, by the user or by a block', () => {
+    expect(closeByUser(openByUser(EMPTY, 'b'), 50).focus).toBe(false)
+    const needs = { shown: [c('a', { blocked: true }), c('b')] }
+    // A block that arrives closes the bubble: nothing is asked of it any more.
+    const blocking = settle(openByUser(EMPTY, 'a'), facts(100, needs))
+    expect([blocking.bubble, blocking.focus]).toEqual(['closed', false])
+    // Opened on a session that needs the user: it stays open (its reply box is disabled, and the overlay finds nothing to focus).
+    expect(settle(openByUser(EMPTY, 'a', true), facts(100, needs)).focus).toBe(true)
+    // An avatar that left the stage: nothing is asked of it.
+    expect(settle(openByUser(EMPTY, 'z'), facts(100)).focus).toBe(false)
+  })
+})
+
+describe('escapeCloses', () => {
+  const user = openByUser(EMPTY, 'b')
+  const self = run(EMPTY, [0, 600], { presenting: saying('a', 'L1') })
+
+  it('closes a bubble the user opened with an Esc from a terminal or from nothing focused, and keeps that Esc from the terminal', () => {
+    expect(escapeCloses(user, 'terminal')).toBe(true)
+    expect(escapeCloses(user, 'nowhere')).toBe(true)
+  })
+
+  it('leaves the Esc of a bubble that opened by itself where it was going: a bare Esc interrupts the agent in the terminal', () => {
+    expect(self.bubble).toBe('self')
+    for (const from of ['terminal', 'nowhere', 'elsewhere', 'overlay'] as const) expect(escapeCloses(self, from), from).toBe(false)
+    expect(escapeCloses(EMPTY, 'terminal')).toBe(false)
+    expect(escapeCloses(closeByUser(user, 10), 'terminal')).toBe(false)
+  })
+
+  it('leaves a menu, a dialog, an editor or a field its own Esc, and the overlay its own keys', () => {
+    expect(escapeCloses(user, 'elsewhere')).toBe(false)
+    expect(escapeCloses(user, 'overlay')).toBe(false)
+  })
+})
+
+describe('offersToHear', () => {
+  const at = (over: Partial<Parameters<typeof offersToHear>[0]> = {}) => offersToHear({ voice: true, unlocked: false, spoke: true, line: 'L1', stoodUnder: undefined, ...over })
+
+  it('offers "Click to hear" while voice is on and speech is locked, under what the avatar said', () => {
+    expect(at()).toBe(true)
+    expect(at({ voice: null })).toBe(false)
+    expect(at({ voice: false })).toBe(false)
+    expect(at({ spoke: false })).toBe(false)
+    expect(at({ unlocked: true })).toBe(false)
+  })
+
+  it('keeps it under the line it stood under once the press on it unlocked speech, until that line is heard', () => {
+    // The press is the gesture that unlocks speech: the button stays for its click, which says the line.
+    expect(at({ unlocked: true, stoodUnder: 'L1' })).toBe(true)
+    // Under another line, or once the line was heard (the overlay forgets where it stood), it goes.
+    expect(at({ unlocked: true, stoodUnder: 'L0' })).toBe(false)
+    expect(at({ unlocked: true, stoodUnder: undefined })).toBe(false)
+    expect(at({ unlocked: true, line: null, stoodUnder: 'L1' })).toBe(false)
+    // Voice turned off meanwhile: nothing to hear.
+    expect(at({ voice: false, unlocked: true, stoodUnder: 'L1' })).toBe(false)
   })
 })

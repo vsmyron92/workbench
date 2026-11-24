@@ -167,6 +167,12 @@ export interface Scene {
   guard: Guard | null
   /** A line the user asked to hear (Hear it): when it is presented, that is the user's doing and no change of the bubble by itself. Until the next line starts. */
   toHear: string | null
+  /**
+   * The user opened it: its reply box takes focus once it is on screen, so that what the user
+   * types goes to this avatar and not to the terminal that had focus (`focusTaken` after). Never
+   * for a bubble that opened by itself: the user is typing somewhere else then.
+   */
+  focus: boolean
   /** The question on screen, and since when: its choices take no click at first. */
   askId: string | null
   askAt: number
@@ -203,6 +209,7 @@ export const EMPTY: Scene = Object.freeze({
   gripped: false,
   guard: null,
   toHear: null,
+  focus: false,
   askId: null,
   askAt: 0,
   shut: NOTHING_SHUT,
@@ -321,6 +328,8 @@ function pass(prev: Scene, f: Facts): Scene {
   // A user who writes in the reply box works in the bubble: no click of theirs is on its way to something else.
   s.guard = s.bubble === 'closed' || f.focusInReply ? null : guardStep(s.guard, now, f.inBubble, f.pointer)
   if (s.bubble === 'closed') s.toHear = null
+  // Only a bubble the user opened takes focus.
+  if (s.bubble !== 'user') s.focus = false
   const guardAt = guardWake(s.guard, now)
   if (guardAt !== null) wakes.push(guardAt)
   if (s.active.idleSince !== null && s.bubble === 'closed') wakes.push(Math.max(s.active.idleSince + SHRINK_AFTER_MS, now))
@@ -344,14 +353,44 @@ export function settle(prev: Scene, f: Facts): Scene {
 }
 
 /**
- * The user opened this avatar's bubble (a click on its figure or its face): it becomes the
- * active one, whatever else holds. `blocked`: its session needs the user now. The bubble
- * the user opened stays all the same; only a block that arrives later closes it. What the
- * user had closed of this avatar is open again; what was closed of the others stays so.
+ * The user opened this avatar's bubble (a click on its figure, its face, its Reply control, a
+ * menu, the palette): it becomes the active one, whatever else holds, and its reply box takes
+ * focus (`focus`). `blocked`: its session needs the user now. The bubble the user opened stays
+ * all the same; only a block that arrives later closes it. What the user had closed of this
+ * avatar is open again; what was closed of the others stays so.
  */
 export function openByUser(prev: Scene, id: string, blocked = false): Scene {
   const base = prev.active.id === id ? prev : { ...fresh(prev, { id, idleSince: null }), blocked }
-  return { ...base, active: { id, idleSince: null }, bubble: 'user', guard: null, gripped: false, shut: unshut(prev.shut, id) }
+  return { ...base, active: { id, idleSince: null }, bubble: 'user', guard: null, gripped: false, focus: true, shut: unshut(prev.shut, id) }
+}
+
+/** The overlay moved focus into the reply box the user opened, or found none to move it into: it is not moved again. */
+export const focusTaken = (prev: Scene): Scene => (prev.focus ? { ...prev, focus: false } : prev)
+
+/** Where an Esc was pressed: inside the overlay (its bubble, a figure, the face), in a terminal, with nothing focused, or anywhere else. */
+export type EscapeFrom = 'overlay' | 'terminal' | 'nowhere' | 'elsewhere'
+
+/**
+ * Whether an Esc pressed outside the overlay closes the bubble and goes no further (inside it,
+ * the overlay's own keys close any open bubble). Only a bubble the user opened: one that opened
+ * by itself leaves the key to whatever has focus, as a bare Esc interrupts an agent CLI. And
+ * only from a terminal or from nothing focused: a menu, a dialog, an editor or a field keeps
+ * its own Esc.
+ */
+export function escapeCloses(scene: Scene, from: EscapeFrom): boolean {
+  return scene.bubble === 'user' && (from === 'terminal' || from === 'nowhere')
+}
+
+/**
+ * Whether the bubble offers "Click to hear <name>" under the line it would say (`line`):
+ * while voice is on and the page has had no gesture yet (`unlocked` false). And after a
+ * gesture unlocked speech, still under the line it stood under then (`stoodUnder`), until
+ * that line is heard: the press on the button is itself such a gesture, and the button must
+ * not go from under the pointer before its click says the line.
+ */
+export function offersToHear(i: { voice: boolean | null; unlocked: boolean; spoke: boolean; line: string | null; stoodUnder: string | null | undefined }): boolean {
+  if (i.voice !== true || !i.spoke) return false
+  return !i.unlocked || (i.line !== null && i.stoodUnder === i.line)
 }
 
 /**
@@ -366,7 +405,7 @@ export function closeByUser(prev: Scene, now: number): Scene {
   const line = prev.lineId ?? was?.line ?? null
   const ask = prev.askId ?? was?.ask ?? null
   const shut = id === null || (line === null && ask === null) ? prev.shut : [{ id, line, ask }, ...unshut(prev.shut, id)].slice(0, SHUT_KEPT)
-  return { ...prev, bubble: 'closed', guard: null, gripped: false, releasedAt: now, shut }
+  return { ...prev, bubble: 'closed', guard: null, gripped: false, focus: false, releasedAt: now, shut }
 }
 
 /**

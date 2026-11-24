@@ -3,8 +3,9 @@
 // It is a Workbench component around agent-written text (rule 11). The session's identity
 // comes first and is the app's (provider icon, session title, project); the agent's own
 // name follows in quotation marks. Captions, names, choices and replies are text nodes:
-// never Markdown, never HTML. The choices have a style of their own, so a question of the
-// avatar is never mistaken for a permission request, and the bubble never shows one: for a
+// never Markdown, never HTML. The choices have a style of their own, and over them the app
+// says in its own words that an answer goes to the session as a message, so a question of the
+// avatar is never mistaken for a permission request; the bubble never shows one: for a
 // session that needs a decision it says so and offers to open the session.
 //
 // A pure view: everything it shows comes in as props, everything the user does goes out
@@ -47,14 +48,38 @@ export const WORDS = {
 
 /** The longest name the app's own phrases carry whole: an agent's name fits, a long session title is cut. */
 const MAX_CALLED_CHARS = 32
+/** As much of the session's title as goes in front of the agent's name in them. */
+const MAX_CALLED_TITLE_CHARS = 28
 
-/** What the avatar is called in the app's phrases: the agent's own name, else the session's title, cut to a few words. */
+const cutTo = (text: string, max: number): string => {
+  const chars = Array.from(text)
+  return chars.length > max ? `${chars.slice(0, max - 1).join('').trimEnd()}…` : chars.join('')
+}
+
+/**
+ * What the avatar is called in the app's phrases (menus, dialogs, the palette, the figure's
+ * controls and its face): as the bubble's header names it, the session's title, then the
+ * agent's own name in quotation marks, so that a name never reads as the app's own words.
+ * The session's title alone while the agent has no name. Both cut to a few words.
+ */
 export function calledAs(name: string, title: string): string {
-  const chars = Array.from(name || title)
-  return chars.length > MAX_CALLED_CHARS ? `${chars.slice(0, MAX_CALLED_CHARS - 1).join('').trimEnd()}…` : chars.join('')
+  if (!name) return cutTo(title, MAX_CALLED_CHARS)
+  const session = cutTo(title, MAX_CALLED_TITLE_CHARS)
+  const quoted = `“${cutTo(name, MAX_CALLED_CHARS)}”`
+  return session ? `${session} ${quoted}` : quoted
+}
+
+/**
+ * What the bubble calls its avatar in its own phrases, under the header that names the
+ * session: the agent's own name in quotation marks, else the session's title, cut.
+ */
+export function calledHere(name: string, title: string): string {
+  return name ? `“${cutTo(name, MAX_CALLED_CHARS)}”` : cutTo(title, MAX_CALLED_CHARS)
 }
 
 export const clickToHear = (called: string): string => `Click to hear ${called}`
+/** Workbench's own line over a question's choices and its reply box: what an answer is and where it goes. */
+export const answerGoesTo = (title: string): string => `Your answer goes to ${title.trim() || 'the session'} as a message.`
 /** The reply box's placeholder. A name that was cut already ends in the ellipsis this phrase ends in. */
 export const replyTo = (called: string): string => `Reply to ${called.replace(/…$/, '')}…`
 
@@ -347,7 +372,7 @@ function NoteLine({ note }: { note: BubbleNote }) {
 
 export function Bubble(props: BubbleProps) {
   const { provider, title, project, name, blocked, caption, aloud, log, unseenFrom, ask, disabled, reply, note, voiceChoice, locked, tail, panel, clickThrough, holding, figure } = props
-  const called = calledAs(name, title)
+  const called = calledHere(name, title)
   const reason = disabled === 'dialog' ? WORDS.dialog : disabled === 'starting' ? WORDS.starting : null
   const off = reason !== null
   const sending = reply?.sending === true
@@ -399,6 +424,8 @@ export function Bubble(props: BubbleProps) {
                     {ask.text}
                   </div>
                 )}
+                {/* The app's own words between the session's question and its choices: what an answer is, and where it goes. */}
+                <div className="wb-av-where">{answerGoesTo(title)}</div>
                 {choices.length > 0 && (
                   <div className="wb-av-choices" role="group" aria-label={WORDS.answers}>
                     {choices.map((choice, i) => (

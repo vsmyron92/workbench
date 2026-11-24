@@ -1189,6 +1189,99 @@ async fn an_agent_starts_a_session_with_an_avatar_where_sessions_may_have_one() 
     assert_eq!(count(), before + 1);
 }
 
+/// While 64 open sessions have an avatar, a start with the Avatar option (the composer, REST,
+/// `workbench_start_session`) starts the session without one: no brief in its first prompt, no
+/// option on its tab or launch, no tools allowed unasked, and the answer says why. Sessions in
+/// History take no room: once one is closed, a start has its avatar again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_start_with_the_option_and_no_room_starts_without_it_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), "claude");
+    let log = dir.path().join("claude.log");
+    let (state, addr, pid) = served_with(dir.path(), &fake, |cfg| {
+        let home = dir.path().join("claude-home");
+        std::fs::create_dir_all(&home).unwrap();
+        cfg.agents.providers.insert(
+            "claude".into(),
+            crate::config::global::ProviderConfig {
+                env: [("CLAUDE_CONFIG_DIR".to_string(), home.display().to_string()), ("FAKE_CLAUDE_LOG".to_string(), log.display().to_string())].into(),
+                ..Default::default()
+            },
+        );
+    })
+    .await;
+    crate::avatar::start(&state).await;
+    let t = &state.terminals;
+    let now = crate::util::now_ms;
+    let mark = crate::avatar::BRIEF_MARK;
+    let why = crate::avatar::no_room_at_start();
+    // 64 open sessions have an avatar (stand-ins: running, idle, no process).
+    let holders: Vec<String> = (0..crate::avatar::store::MAX_AVATARS)
+        .map(|_| {
+            let id = t.insert_test_agent(Some(&pid), json!({})).id;
+            crate::avatar::device::turn_on(&state, &id, now()).unwrap();
+            id
+        })
+        .collect();
+    let ask = |prompt: &str| super::agent::AgentRequest { project_id: pid.clone(), prompt: Some(prompt.into()), avatar: Some(true), ..Default::default() };
+
+    // The composer's start: told nothing of an avatar, and the answer says why. Only the answer:
+    // the terminal's meta does not keep it.
+    let a = t.spawn_agent(&state, ask("fix the parser")).await.unwrap();
+    assert_eq!((&a.meta["noAvatar"], a.meta.get("avatar")), (&json!(why), None));
+    wait_long("the start", 10, || log_lines(&log, "ARGS ").len() == 1).await;
+    let args = log_lines(&log, "ARGS ");
+    assert!(args[0].ends_with(" -- fix the parser") && !args[0].contains(mark), "{args:?}");
+    assert_eq!(log_lines(&log, "ALLOW"), ["ALLOW <unset>"]);
+    assert!(!t.get(&a.id).unwrap().rec.lock().launch.as_ref().unwrap().avatar);
+    assert!(t.info(&a.id).unwrap().meta.get("noAvatar").is_none());
+    wait_long("the session to start", 10, || agent_of(&state, &a.id).state == AgentState::Idle).await;
+    assert!(crate::avatar::store::get(&state, &a.id).is_err(), "no avatar was made for it");
+
+    // Over REST, as the web composer starts one.
+    let master = state.auth.master_token().to_string();
+    let r = reqwest::Client::new().post(format!("http://{addr}/api/agents")).bearer_auth(&master).json(&json!({ "projectId": pid, "prompt": "and this", "avatar": true })).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let b: Value = r.json().await.unwrap();
+    assert_eq!((&b["meta"]["noAvatar"], b["meta"].get("avatar")), (&json!(why), None), "{b}");
+    // By a session, which is told why in the tool's answer.
+    let out = start_session(&state, &a.id, &pid, json!({ "prompt": "say hello", "avatar": true })).await.unwrap();
+    assert_eq!(out["avatar"], json!(why), "{out}");
+    wait_long("the three starts", 10, || log_lines(&log, "ARGS ").len() == 3).await;
+    assert!(log_lines(&log, "ARGS ").iter().all(|l| !l.contains(mark)), "{:?}", log_lines(&log, "ARGS "));
+    assert_eq!(log_lines(&log, "ALLOW"), ["ALLOW <unset>"; 3]);
+
+    // One of the 64 ends and its tab is closed: it is in History, and takes no room.
+    // (A status call of a session without an avatar says whether there is room; it has a rate.)
+    let probe = t.insert_test_agent(Some(&pid), json!({})).id;
+    let room = || {
+        let pass = crate::avatar::session::gate(&state, &probe, crate::avatar::session::Call::Status, crate::avatar::Via::Tools, now());
+        pass.ok().and_then(|pass| crate::avatar::session::status(&state, &pass, Default::default()).ok()).is_some_and(|s| s.allowed)
+    };
+    assert!(!room());
+    t.update(&t.get(&holders[0]).unwrap(), |r| {
+        r.info.status = super::TerminalStatus::Exited;
+        r.info.open = false;
+        true
+    });
+    for tries in 0.. {
+        if room() {
+            break;
+        }
+        assert!(tries < 25, "the session in History still takes room");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    let c = t.spawn_agent(&state, ask("with one now")).await.unwrap();
+    assert_eq!((c.meta.get("noAvatar"), &c.meta["avatar"]), (None, &json!(true)));
+    wait_long("the fourth start", 10, || log_lines(&log, "ARGS ").len() == 4).await;
+    assert!(log_lines(&log, "ARGS ")[3].contains(mark), "{:?}", log_lines(&log, "ARGS "));
+    assert_eq!(log_lines(&log, "ALLOW")[3], format!("ALLOW {}", crate::avatar::PREALLOWED.join(" ")));
+    wait_long("its avatar", 10, || crate::avatar::store::get(&state, &c.id).is_ok_and(|a| a.on)).await;
+    for id in [a.id.as_str(), b["id"].as_str().unwrap(), out["terminalId"].as_str().unwrap(), c.id.as_str()] {
+        let _ = t.kill(id).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_starts_sessions_within_its_project_its_mode_and_the_limits() {
     let dir = tempfile::tempdir().unwrap();

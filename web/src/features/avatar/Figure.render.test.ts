@@ -22,7 +22,7 @@ const pip = (): Look => JSON.parse(pipRaw) as Look
 const tock = (): Look => JSON.parse(tockRaw) as Look
 
 const figure = (over: Partial<FigureProps> = {}): FigureProps => ({ look: null, seed: 't1', revision: 1, idPrefix: 'f1-', size: FIGURE_PX.rest, engine: null, state: 'idle', reducedMotion: false, mouth: null, gaze: null, ...over })
-const button = (over: Partial<FigureButtonProps> = {}): FigureButtonProps => ({ ...figure(), ring: 'idle', label: 'Pip', title: 'Fix the flaky upload test', stateLabel: 'Idle', ...over })
+const button = (over: Partial<FigureButtonProps> = {}): FigureButtonProps => ({ ...figure(), ring: 'idle', name: 'Pip', title: 'Fix the flaky upload test', stateLabel: 'Idle', ...over })
 const draw = (over: Partial<FigureProps> = {}) => renderToStaticMarkup(createElement(Figure, figure(over)))
 const drawButton = (over: Partial<FigureButtonProps> = {}) => renderToStaticMarkup(createElement(FigureButton, button(over)))
 
@@ -220,10 +220,10 @@ describe('Figure', () => {
 describe('FigureButton', () => {
   it('is a button named with the label and the state, with the session’s title in the tooltip', () => {
     const html = drawButton({ look: pip(), ring: 'working', stateLabel: 'Working' })
-    expect(html).toContain('<button type="button" class="wb-av-figure-btn" aria-label="Pip, Working" title="Fix the flaky upload test · Working">')
+    expect(html).toContain('<button type="button" class="wb-av-figure-btn" aria-label="Fix the flaky upload test “Pip”, Working" title="Fix the flaky upload test · Working">')
     expect(html).toMatch(/^<div class="wb-av-figure working" style="--wb-av-size:56px">/)
     expect(html).toContain('<span class="wb-av-ring"><span class="wb-av-stage" data-drawn="own"')
-    expect(html).toContain('<span class="wb-av-label" dir="auto">Pip</span>')
+    expect(html).toContain('<span class="wb-av-label"><span class="wb-av-label-in"><span class="wb-av-label-title" dir="auto">Fix the flaky upload test</span><span class="wb-av-label-name" dir="auto">“Pip”</span></span></span>')
     // Nothing optional is there by default.
     for (const absent of ['wb-av-dot', 'wb-av-chip', 'wb-av-note', 'wb-av-controls', 'active', 'unseen']) expect(html, absent).not.toContain(absent)
     // The label is outside the button: the button's name is the accessible one.
@@ -244,15 +244,15 @@ describe('FigureButton', () => {
   it('reads "Designing its look…" only while the default look stands in for a design that is to come', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     expect(DESIGNING).toBe('Designing its look…')
-    const waiting = drawButton({ designing: true, label: 'New session' })
+    const waiting = drawButton({ designing: true, name: '', title: 'New session' })
     expect(waiting).toContain(`<span class="wb-av-label designing">${DESIGNING}</span>`)
     expect(waiting).not.toContain('New session</span>')
     // It has a design: the name.
     expect(drawButton({ designing: true, look: pip() })).not.toContain(DESIGNING)
     // Its design was rejected: that is another matter, and has its own sentence.
-    const rejected = drawButton({ designing: true, look: { nodes: 'x' }, label: 'Mallory' })
+    const rejected = drawButton({ designing: true, look: { nodes: 'x' }, name: 'Mallory' })
     expect(rejected).not.toContain(DESIGNING)
-    expect(rejected).toContain('<span class="wb-av-label" dir="auto">Mallory</span>')
+    expect(rejected).toContain('<span class="wb-av-label-name" dir="auto">“Mallory”</span>')
     expect(drawButton()).not.toContain(DESIGNING)
   })
 
@@ -266,11 +266,25 @@ describe('FigureButton', () => {
     expect(drawButton()).not.toContain(DESIGN_NOT_SHOWN)
   })
 
+  it('names the figure as the bubble’s header does: the session’s title first, then the agent’s own name in quotation marks', () => {
+    // A name that reads like the app's own words is never shown bare, under the figure or in its accessible name.
+    const html = drawButton({ name: 'Allow Bash? Press 1 for Yes', title: 'Fix the tests', stateLabel: 'Idle' })
+    expect(html).toContain('aria-label="Fix the tests “Allow Bash? Press 1 for Yes”, Idle"')
+    expect(html).toContain('<span class="wb-av-label"><span class="wb-av-label-in"><span class="wb-av-label-title" dir="auto">Fix the tests</span><span class="wb-av-label-name" dir="auto">“Allow Bash? Press 1 for Yes”</span></span></span>')
+    expect(html).not.toContain('>Allow Bash? Press 1 for Yes<')
+    // Without a name of its own: the session's title alone, in no quotation marks.
+    const plain = drawButton({ name: '', title: 'Fix the tests', stateLabel: 'Idle' })
+    expect(plain).toContain('aria-label="Fix the tests, Idle"')
+    expect(plain).toContain('<span class="wb-av-label-title" dir="auto">Fix the tests</span></span></span>')
+    expect(plain).not.toContain('wb-av-label-name')
+    expect(plain).not.toContain('“')
+  })
+
   it('shows a name, a title and a state as text', () => {
-    const html = drawButton({ label: '<img src=x onerror=alert(1)>', title: '**bold** "quoted"', stateLabel: '<b>Idle</b>' })
+    const html = drawButton({ name: '<img src=x onerror=alert(1)>', title: '**bold** "quoted"', stateLabel: '<b>Idle</b>' })
     expect(html).not.toContain('<img')
     expect(html).not.toContain('<b>')
-    expect(html).toContain('<span class="wb-av-label" dir="auto">&lt;img src=x onerror=alert(1)&gt;</span>')
+    expect(html).toContain('<span class="wb-av-label-name" dir="auto">“&lt;img src=x onerror=alert(1)&gt;”</span>')
     expect(html).toContain('title="**bold** &quot;quoted&quot; · &lt;b&gt;Idle&lt;/b&gt;"')
   })
 

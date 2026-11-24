@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
 use super::draw::{self, NotDrawn};
-use super::preview::{Picture, Pose};
+use super::preview::Picture;
 use super::session::{self, ActRequest, AskArgs, Call, Pass, PictureRequest, SayRequest, StatusRequest};
 use super::store::MAX_WAIT_TOOL_SECS;
 use super::{Via, brief};
@@ -62,9 +62,10 @@ pub(super) struct DesignAnswer {
 
 /// A design call, in three steps: the arguments are validated and applied (on a thread of its
 /// own: reading artwork takes time in proportion to its size); a look that changed is drawn at
-/// rest, in a process of its own; only then is the design stored. A look that cannot be drawn
-/// within what a picture may cost is refused and nothing changes: the browser would pay for it on
-/// every frame, and the session could not be shown it.
+/// rest and its costliest moment while it moves is estimated, in a process of its own; only then
+/// is the design stored. A look that cannot be drawn within what a picture may cost, at rest or
+/// at a moment its animations or drives move it to, is refused and nothing changes: the browser
+/// would pay for it on every frame, and the session could not be shown it.
 pub(super) async fn design(state: &AppState, pass: Pass, args: Value) -> ApiResult<DesignAnswer> {
     let tid = pass.terminal_id().to_string();
     let (checked, pass) = {
@@ -74,9 +75,12 @@ pub(super) async fn design(state: &AppState, pass: Pass, args: Value) -> ApiResu
     let mut picture = None;
     if let Some(look) = checked.to_draw() {
         let look = serde_json::to_value(look)?;
-        match draw_in_turn(&tid, &look, &draw::Want::Sheet(Pose::default()), false).await {
+        match draw_in_turn(&tid, &look, &draw::Want::Design, false).await {
             Ok(drawn) => picture = Some(drawn),
             Err(not @ (NotDrawn::Unavailable(_) | NotDrawn::Busy(_))) => return Err(session::too_busy(format!("{}\nNothing was changed.", not.sentence()))),
+            // What costs too much is a moment the animations or drives move it to, whatever the
+            // artwork: the sentence says where.
+            Err(NotDrawn::Moving(why)) => return Err(ApiError::bad_request(format!("{}\nNothing was changed.", state.terminals.redact_text(&tid, &why)))),
             Err(not) => {
                 let mut why = state.terminals.redact_text(&tid, &not.sentence());
                 if checked.same_artwork() {
@@ -215,11 +219,12 @@ fn status_tool() -> McpTool {
     tool(
         "avatar_status",
         "This session's avatar: whether it has one, its name, parts, animation names, the open question, the last \
-         lines with what became of them, the limits. With guide true the authoring guide comes first: read it once \
-         before avatar_design. With look true the stored design comes back in full (the artwork as SVG). To see the \
-         avatar: picture true draws it at rest, pose draws it under inputs, inside an animation or close up on one \
-         part, frames draws one of your animations or a built-in one (wave, nod …) as a row of moments. Beside a \
-         picture the status is one line, unless guide or look is true.",
+         lines with what became of them, the limits. Where the user lets sessions take one, a session without an \
+         avatar gets one with its first design, say, ask or act call: make that call only when the user asked for an \
+         avatar or your instructions say to use one. With guide true the authoring guide comes first: read it once \
+         before avatar_design. look true adds the stored design. To see the avatar: picture true draws it at rest, \
+         pose draws it under inputs, inside an animation or close up on one part, frames draws one of your \
+         animations or a built-in one (wave, nod …) as a row of moments.",
         json!({ "type": "object", "properties": {
             "guide": { "type": "boolean", "description": "Put the authoring guide before the status: how to draw, rig and animate the avatar, with an example. Read it once, before the first avatar_design." },
             "look": { "type": "boolean", "description": "Include the stored design as an avatar_design call would send it: svg, pivots, parents, roles, animations, states, drives, mouth, gaze, voice, name." },

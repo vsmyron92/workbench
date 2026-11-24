@@ -118,9 +118,11 @@ const base = (lang: string): string => lang.split('-')[0]
 /**
  * The voice an avatar speaks with. `voices` are the usable ones. In order: the first
  * `prefer` fragment that matches a voice of the base language; the voice remembered for
- * this terminal, while it is still there; else, from the voices of the base language (the
- * ones of the exact language first), the one the fewest other avatars use, ties decided by
- * a stable hash of the seed. null: no usable voice of that language.
+ * this terminal, while it is still there and still speaks the language (the exact one,
+ * where the browser has a voice of it: an avatar that spoke before it chose en-GB does not
+ * keep the en-US voice it got then); else, from the voices of the base language (the ones
+ * of the exact language first), the one the fewest other avatars use, ties decided by a
+ * stable hash of the seed. null: no usable voice of that language.
  */
 export function pickVoice<V extends VoiceLike>(voices: readonly V[], voice: Voice, seed: string, opts: { lang?: string; taken: ReadonlyMap<string, number>; remembered?: string }): V | null {
   if (!Array.isArray(voices)) return null
@@ -136,11 +138,11 @@ export function pickVoice<V extends VoiceLike>(voices: readonly V[], voice: Voic
       if (hit) return hit
     }
   }
+  const exact = pool.filter((v) => tag(v.lang) === want)
   if (typeof opts?.remembered === 'string') {
     const kept = pool.find((v) => v.name === opts.remembered)
-    if (kept) return kept
+    if (kept && (exact.length === 0 || tag(kept.lang) === want)) return kept
   }
-  const exact = pool.filter((v) => tag(v.lang) === want)
   const from = exact.length > 0 ? exact : pool
   const used = (v: V): number => {
     const n = opts?.taken instanceof Map ? opts.taken.get(v.name) : undefined

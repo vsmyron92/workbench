@@ -34,7 +34,7 @@ import { Bubble, WORDS, calledAs, type BubbleCaption, type BubbleNote } from './
 import { Face, MoreFaces } from './Face'
 import { FACE_PX, FIGURE_PX, FIGURE_PX_PHONE, FIGURE_RING_PX, FigureButton, drawnLook, keepFocus, ringFor, stateWords, type Ring } from './Figure'
 import { lineKey, type ArbiterState } from './lib/arbiter'
-import { EMPTY, HOVER_DWELL_MS, NO_DRAFT, armGuard, askChanged, askedToHear, clicksThrough, closeByUser, edited, guardStep, guardWake, holding, noteEdited, noteStep, noteWake, noted, openByUser, planChoice, planSend, questionChanged, replyNoted, replyShown, sentNote, settle, voiceForm, whyDisabled, type Draft, type Facts, type Guard, type LastLine, type Noted, type ReplyBody, type Scene } from './lib/bubble'
+import { EMPTY, HOVER_DWELL_MS, NO_DRAFT, armGuard, askChanged, askedToHear, clicksThrough, closeByUser, edited, escapeCloses, focusTaken, guardStep, guardWake, holding, noteEdited, noteStep, noteWake, noted, offersToHear, openByUser, planChoice, planSend, questionChanged, replyNoted, replyShown, sentNote, settle, voiceForm, whyDisabled, type Draft, type EscapeFrom, type Facts, type Guard, type LastLine, type Noted, type ReplyBody, type Scene } from './lib/bubble'
 import type { FigureHandle, WalkInputs } from './lib/engine'
 import { EDGE_PX, SIDE_EDGE_PX, bubbleShift, corner, defaultAnchor, dragStarts, dragged, layoutMode, panelPlace, panelTop, phoneFace, place, smallFigures, storedAnchor, toStored, type Anchor, type Corner, type Placement } from './lib/layout'
 import { drivesOn } from './lib/look'
@@ -58,6 +58,8 @@ const figurePrefix = (id: string): string => `av-f-${id}-`
 const facePrefix = (id: string): string => `av-c-${id}-`
 const errorText = (e: unknown): string => (e instanceof Error && e.message ? e.message : 'The reply could not be sent.')
 /** How far the pointer has to be from a figure for its pupils to look all the way towards it. */
+/** How long after the user ended a reply themselves a reply box that goes still gives focus back where it was. */
+const RETURN_FOCUS_MS = 1000
 const GAZE_FULL_PX = 260
 /** Where the pupils look while a question is open: at the bubble beside the figure. */
 const GAZE_AT_BUBBLE = 0.85
@@ -550,10 +552,12 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
   const moreRef = useRef<HTMLButtonElement | null>(null)
   /** Where focus was before it went into the reply box. */
   const returnTo = useRef<HTMLElement | null>(null)
+  /** When the user last ended a reply themselves (closed the bubble, or a reply of theirs went): only then does focus go back where it was. */
+  const endedByUser = useRef(Number.NEGATIVE_INFINITY)
   /** The reply box that holds focus now, if one does. */
   const replyFocused = useRef<HTMLTextAreaElement | null>(null)
-  /** The palette asked for the reply box of this avatar: focus goes into it once it is there. */
-  const wantsReply = useRef<string | null>(null)
+  /** The line "Click to hear" stood under, per avatar, while speech was locked: it stays there until that line is heard (`offersToHear`). */
+  const lockedUnder = useRef(new Map<string, string>())
   const gaze = useRef(new Map<string, readonly [number, number]>())
   const atBubble = useRef(new Map<string, readonly [number, number]>())
   // The walk (lib/roam.ts): where every figure is, what each is told at the next step, and what a frame wrote last.
@@ -749,14 +753,19 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     // Where focus goes is known only after it left.
     window.setTimeout(() => noteFocus.current(), 0)
   }
-  // The reply box closed while it held focus (the question was answered, the bubble closed, another avatar took the stage): focus returns to the element that had it before.
+  // The reply box went while it held focus. When the user ended it (they closed the bubble, or their reply went and the
+  // question closed with it), focus returns to the element that had it before. When it went by itself (the session asked
+  // for a permission, the avatar was turned off, the question was withdrawn, another avatar took the stage) the user may
+  // be in the middle of a word: focus then stays nowhere, so that what they type next reaches no other session's terminal.
   useLayoutEffect(() => {
     const field = replyFocused.current
     if (field === null || field.isConnected) return
     replyFocused.current = null
     const back = returnTo.current
     returnTo.current = null
-    if (back?.isConnected) back.focus({ preventScroll: true })
+    const mine = performance.now() - endedByUser.current < RETURN_FOCUS_MS
+    endedByUser.current = Number.NEGATIVE_INFINITY
+    if (mine && back?.isConnected) back.focus({ preventScroll: true })
     noteFocus.current()
   })
 
@@ -768,7 +777,10 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     act(openByUser(sceneRef.current, id, m.view.blocked))
     return true
   }
-  const closeBubble = () => act(closeByUser(sceneRef.current, clock()))
+  const closeBubble = () => {
+    endedByUser.current = performance.now()
+    act(closeByUser(sceneRef.current, clock()))
+  }
   const press = (id: string) => {
     if (sceneRef.current.active.id === id && sceneRef.current.bubble !== 'closed') closeBubble()
     else openFor(id)
@@ -818,6 +830,7 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     return () => {
       setNotes((prev) => (prev.has(openKey) ? new Map([...prev].filter(([id]) => id !== openKey)) : prev))
       setVoiceForms((prev) => (prev.has(openKey) ? new Map([...prev].filter(([id]) => id !== openKey)) : prev))
+      lockedUnder.current.delete(openKey)
     }
   }, [openKey])
 
@@ -909,6 +922,8 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     replay(m, line)
   }
   const unlock = (m: Member, line: Line | null) => {
+    // The press on the button unlocked speech already (`onGesture`): this click says the line it stood under.
+    lockedUnder.current.delete(m.id)
     applyVoice()
     replay(m, line)
   }
@@ -954,6 +969,8 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     setNote(id, null)
     try {
       const answer = await avatarApi.reply(id, body)
+      // Their reply went: a box that closes with it gives focus back.
+      endedByUser.current = performance.now()
       if (clearDraft) setDraft(id, NO_DRAFT)
       put(setNotes, id, replyNoted<BubbleNote>(sentNote(answer.delivered, working), clock(), sent, lastLines.current.get(id)))
       // The avatar nods once: the reply arrived. Not for one a dialog left in the session's input box.
@@ -1012,11 +1029,8 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
       open: (id) => openForRef.current(id),
       reply: (id) => {
         const target = id ?? sceneRef.current.active.id ?? frontRef.current
-        if (!target || !openForRef.current(target)) return false
-        // The one thing that moves focus into the reply box by itself: the user asked for it by name.
-        wantsReply.current = target
-        setTick((n) => n + 1)
-        return true
+        // Opened by the user, so its reply box takes focus (`openByUser`).
+        return !!target && openForRef.current(target)
       },
       voice: (on) => turnVoice.current(on),
     })
@@ -1025,14 +1039,19 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
       tell({ staged: [], active: null, open: null, presenting: null, locked: false })
     }
   }, [tell, stopSpeaking, openForRef, frontRef, turnVoice])
+  // A bubble the user opened: focus goes into its reply box, and back where it was when the box goes (above).
   useEffect(() => {
-    if (wantsReply.current === null || wantsReply.current !== openKey) return
-    // Asked once, for the bubble that opened for it: a reply box that appears some time later takes no focus by itself.
-    wantsReply.current = null
-    if (!fieldRef.current) return
+    if (!scene.focus) return
+    // Once, for the bubble as it opened: a reply box that appears some time later takes no focus by itself.
+    act(focusTaken(sceneRef.current))
+    const field = fieldRef.current
+    if (!field || !field.isConnected || field.disabled || scene.bubble !== 'user') return
     const from = document.activeElement
-    if (from instanceof HTMLElement && from !== fieldRef.current && !within(bubbleEl, from)) returnTo.current = from
-    fieldRef.current.focus({ preventScroll: true })
+    if (from instanceof HTMLElement && from !== field && !within(bubbleEl, from)) returnTo.current = from
+    field.focus({ preventScroll: true })
+    // A draft that was kept: the next words go after it, not in front of it.
+    const end = field.value.length
+    field.setSelectionRange(end, end)
   })
 
   // The frame loop runs only while the tab is visible and a figure is on screen.
@@ -1376,6 +1395,32 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     e.preventDefault()
     closeBubble()
   }
+  /** Where a key was pressed, as `escapeCloses` weighs it. */
+  const escapeFrom = useLatest((target: EventTarget | null): EscapeFrom => {
+    const el = target instanceof Element ? target : null
+    if (el && (el.closest('.wb-av-layer') || within(faceEl, el) || within(bubbleEl, el))) return 'overlay'
+    // A menu or a dialog that is open takes its own Esc, wherever focus is.
+    if (document.querySelector('[role="menu"], [aria-modal="true"]')) return 'elsewhere'
+    if (!el || el === document.body || el === document.documentElement) return 'nowhere'
+    return el.closest('.xterm') ? 'terminal' : 'elsewhere'
+  })
+  const closeNow = useLatest(closeBubble)
+  // A bubble the user opened closes with Esc also while focus is outside it, in a terminal or
+  // nowhere, and the key goes no further: a bare Esc interrupts an agent CLI. Taken before the
+  // terminal sees it. A bubble that opened by itself leaves every key where it was going.
+  const userOpened = scene.bubble === 'user'
+  useEffect(() => {
+    if (!userOpened) return
+    const onEscape = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.isComposing || e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey) return
+      if (!escapeCloses(sceneRef.current, escapeFrom.current(e.target))) return
+      e.preventDefault()
+      e.stopPropagation()
+      closeNow.current()
+    }
+    window.addEventListener('keydown', onEscape, true)
+    return () => window.removeEventListener('keydown', onEscape, true)
+  }, [userOpened, escapeFrom, closeNow])
 
   // ---- stable readers for the engine (a new function would bind the figure again)
 
@@ -1483,7 +1528,7 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
         held={m.record.held}
         onHandle={r.handle}
         ring={ringOf(m, state)}
-        label={m.record.name || m.view.title}
+        name={m.record.name}
         title={m.view.title}
         stateLabel={stateWords(state, m.view.label)}
         active={active}
@@ -1524,6 +1569,10 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
     const spoke = caption !== null || ask !== null || (log !== null && log.some((l) => l.from === 'agent'))
     /** The line "Hear it" and "Click to hear" say: the one on screen, else the question, else the newest. */
     const toSay = (shownLine?.from === 'agent' ? shownLine : undefined) ?? asked ?? newestAgentLine(m.record.lines)
+    // "Click to hear" stays under the line it stood under while speech was locked: the press on it unlocks speech before its click.
+    if (prefs.voice !== true) lockedUnder.current.delete(m.id)
+    else if (!unlocked && spoke && toSay) lockedUnder.current.set(m.id, toSay.id)
+    const locked = offersToHear({ voice: prefs.voice, unlocked, spoke, line: toSay?.id ?? null, stoodUnder: lockedUnder.current.get(m.id) })
     const draft = drafts.get(m.id) ?? NO_DRAFT
     // The reply box: with a question that takes typed answers, and in the transcript the user opened.
     const replies = replyShown(scene, m.id, ask)
@@ -1547,7 +1596,7 @@ export function Overlay({ staged }: { staged: readonly Staged[] }) {
         sending={sending.has(m.id)}
         note={note}
         voiceChoice={voiceForm({ voice: prefs.voice, online: prefs.online, can: voicesFor(voices, toSay?.lang ?? m.record.voice?.lang ?? 'en-US'), listed: voicesListed, asked: voiceForms.get(m.id), spoke })}
-        locked={prefs.voice === true && !unlocked && spoke}
+        locked={locked}
         tail={tail}
         panel={panel}
         clickThrough={clicksThrough(scene)}

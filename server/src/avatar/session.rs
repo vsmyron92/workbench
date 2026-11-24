@@ -177,7 +177,7 @@ pub fn gate(state: &AppState, tid: &str, call: Call, via: Via, now: i64) -> ApiR
     let any = super::sessions(state) == Sessions::Any;
 
     let mut guard = state.avatar.inner.lock();
-    let Inner { records, asked, limits, .. } = &mut *guard;
+    let Inner { records, asked, limits, held, .. } = &mut *guard;
     if !records.contains_key(tid) {
         if call == Call::Status {
             charge(limits, tid, call, now)?;
@@ -194,9 +194,11 @@ pub fn gate(state: &AppState, tid: &str, call: Call, via: Via, now: i64) -> ApiR
             }
             return Err(ApiError::conflict(NO_AVATAR));
         }
-        if records.len() >= MAX_AVATARS {
+        // Only avatars of open or running sessions take room (`store::room`).
+        if !super::store::room(records, held, tid) {
             return Err(too_many(no_room()));
         }
+        held.remove(tid);
         // A stored file of its own is this session's avatar, as a start reads it: never replaced
         // by a new one. One the user turned off stays off, and this call is refused below.
         let rec = match super::store::take_over(state, &info, now) {
@@ -1667,7 +1669,7 @@ pub fn status(state: &AppState, pass: &Pass, req: StatusRequest) -> ApiResult<St
     let Some(rec) = inner.records.get(&pass.tid).filter(|_| pass.avatar) else {
         // Where sessions take one themselves, the first call gives it one only while there is
         // room: with MAX_AVATARS sessions holding one, that call is refused, and this says so.
-        let full = !inner.records.contains_key(&pass.tid) && inner.records.len() >= MAX_AVATARS;
+        let full = !inner.records.contains_key(&pass.tid) && !super::store::room(&inner.records, &inner.held, &pass.tid);
         let (note, allowed) = match (any, full) {
             (true, false) => (NOTE_ANY.to_string(), true),
             (true, true) => (no_room(), false),

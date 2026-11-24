@@ -174,14 +174,37 @@ pub fn via_for(kind: ProviderKind, in_container: bool) -> Via {
 /// without the brief and with `"avatarBrief": "later"` beside `"avatar": true` in its meta: it is
 /// told once it is idle.
 ///
+/// Asked at a restart. A session that ended and whose tab is closed comes back from History with
+/// it, and needs room as a new avatar does ([`store::MAX_AVATARS`] counts open and running
+/// sessions only): with room, the room is held for it; without, its avatar waits in its file
+/// until there is room, and this says no. A session whose avatar waits so takes it back here
+/// when there is room.
+///
 /// It may read the stored avatars on first use, which asks the terminals slice for each
-/// terminal: never call it with a terminal's record lock held.
+/// terminal, and it asks for this terminal: never call it with a terminal's record lock held.
 pub fn active(state: &AppState, terminal_id: &str) -> bool {
     if !enabled(state) {
         return false;
     }
-    store::ensure_loaded(state);
-    state.avatar.inner.lock().records.get(terminal_id).is_some_and(|rec| rec.on)
+    store::at_restart(state, terminal_id, crate::util::now_ms())
+}
+
+/// Whether a session that starts now may have the avatar it is to start with (the Avatar option,
+/// or one carried along from the terminal it moves from): fewer than [`store::MAX_AVATARS`] open
+/// or running sessions have one. Asked before its brief and `meta.avatar` are decided: with room,
+/// the room is held for `terminal_id` (the new terminal's id) until its record is made; without,
+/// it starts without an avatar and without the brief, and the start's answer says why
+/// ([`no_room_at_start`]).
+///
+/// Like [`active`], never call it with a terminal's record lock held.
+pub fn room_at_start(state: &AppState, terminal_id: &str) -> bool {
+    store::hold_for_start(state, terminal_id, crate::util::now_ms())
+}
+
+/// What the answer to a start that asked for an avatar and got none says
+/// (`meta.noAvatar` of the answer of `POST /api/agents`, `avatar` of `workbench_start_session`'s).
+pub fn no_room_at_start() -> String {
+    format!("Started without an avatar: {} sessions have one already. Close sessions you no longer need, then give it one.", store::MAX_AVATARS)
 }
 
 /// A NEW conversation of the session started (a restart that does not continue the earlier

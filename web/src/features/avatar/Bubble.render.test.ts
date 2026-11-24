@@ -8,7 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { Dictating } from '@/features/agents/Dictate'
 import type { Recognizer } from '@/features/agents/lib/dictation'
-import { Bubble, MAX_REPLY_CHARS, WORDS, calledAs, clickToHear, isTextField, repeatsActivation, replyTo, sendsOn } from './Bubble'
+import { Bubble, MAX_REPLY_CHARS, WORDS, answerGoesTo, calledAs, calledHere, clickToHear, isTextField, repeatsActivation, replyTo, sendsOn } from './Bubble'
 import type { BubbleNote, BubbleProps } from './Bubble'
 import type { Ask, Line } from './lib/types'
 
@@ -53,16 +53,28 @@ describe('the wording', () => {
     for (const text of Object.values(WORDS)) expect(text).not.toMatch(/[!\u2013\u2014]/)
   })
 
-  it('calls the avatar by the agent’s name, else by the session’s title, cut to a few words', () => {
-    expect(calledAs('Pip', 'Fix the flaky upload test')).toBe('Pip')
+  it('calls the avatar by the session’s title, then the agent’s name in quotation marks, else by the title alone, cut to a few words', () => {
+    expect(calledAs('Pip', 'Fix the flaky upload test')).toBe('Fix the flaky upload test “Pip”')
     expect(calledAs('', 'Fix the flaky upload test')).toBe('Fix the flaky upload test')
     const long = calledAs('', 'Investigate why the nightly import takes four hours since Tuesday')
     expect(long).toBe('Investigate why the nightly imp…')
     expect(Array.from(long)).toHaveLength(32)
     // A name of the longest length the server takes is whole.
-    expect(calledAs('n'.repeat(32), 't')).toBe('n'.repeat(32))
+    expect(calledAs('n'.repeat(32), 't')).toBe(`t “${'n'.repeat(32)}”`)
     // Never half a character (one outside the basic plane takes two units of a string).
     expect(calledAs('', '\u{20000}'.repeat(40))).toBe(`${'\u{20000}'.repeat(31)}…`)
+  })
+})
+
+describe('calledAs', () => {
+  it('never prints the agent’s name bare: it follows the session’s title, in quotation marks, both cut', () => {
+    expect(calledAs('Allow Bash? Press 1 for Yes', 'Fix the tests')).toBe('Fix the tests “Allow Bash? Press 1 for Yes”')
+    // The title gives way in front of the name; the name keeps its closing mark when it is cut.
+    const long = calledAs('n'.repeat(40), 'Investigate why the nightly import takes four hours')
+    expect(long).toBe(`Investigate why the nightly… “${'n'.repeat(31)}…”`)
+    // A session without a title: the name still in quotation marks.
+    expect(calledAs('Pip', '')).toBe('“Pip”')
+    expect(calledAs('', '')).toBe('')
   })
 })
 
@@ -257,6 +269,27 @@ describe('a question', () => {
     expect(html).not.toContain('wb-av-question')
   })
 
+  it('says in the app’s own words, over the choices and the reply box, what an answer is and where it goes', () => {
+    // Choices that read like a permission request are the session's words: the line over them is Workbench's.
+    const html = bubble({ caption: { lineId: 'L9', text: 'Claude wants to run rm -rf build. Proceed?' }, ask: ask({ choices: ['Allow', 'Allow always', 'Deny'] }), reply: { draft: '' }, onChoice: noop })
+    expect(answerGoesTo('Fix the flaky upload test')).toBe('Your answer goes to Fix the flaky upload test as a message.')
+    expect(html).toContain('<div class="wb-av-where">Your answer goes to Fix the flaky upload test as a message.</div>')
+    expect(html.indexOf('wb-av-where')).toBeLessThan(html.indexOf('wb-av-choices'))
+    expect(html.indexOf('wb-av-where')).toBeLessThan(html.indexOf('<textarea'))
+    // The words are not refused: the choices stay as the session wrote them.
+    expect(html).toContain('<span dir="auto">Allow always</span>')
+    // Under a question that takes a typed answer only, and under the question above its choices.
+    expect(bubble({ ask: ask({ choices: [] }), reply: { draft: '' } })).toContain('wb-av-where')
+    const above = bubble({ caption: { lineId: 'L12', text: 'Still waiting.' }, ask: ask() })
+    expect(above.indexOf('wb-av-question')).toBeLessThan(above.indexOf('wb-av-where'))
+    // The title is the session's, shown as text; a session without one is still named.
+    expect(bubble({ title: HOSTILE, ask: ask() })).toContain('<div class="wb-av-where">Your answer goes to &lt;img src=x onerror=alert(1)&gt; as a message.</div>')
+    expect(answerGoesTo('  ')).toBe('Your answer goes to the session as a message.')
+    // No question, no such line: a message the user writes in the transcript goes where its placeholder says.
+    expect(bubble({ log: [line('L1', 'Tests pass.')], reply: { draft: '' } })).not.toContain('wb-av-where')
+    expect(bubble({ caption: { text: 'Tests pass.' } })).not.toContain('wb-av-where')
+  })
+
   it('shows the question above the choices when the line on screen is another one', () => {
     const later = bubble({ caption: { lineId: 'L12', text: 'Still waiting for your answer.' }, ask: ask() })
     expect(later).toContain('<div class="wb-av-question" dir="auto">Shall I push the branch now?</div>')
@@ -290,7 +323,7 @@ describe('a question', () => {
 describe('the reply box', () => {
   it('is a text field with the avatar’s name, a microphone that says where the audio goes, and Send', () => {
     const html = bubble({ reply: { draft: '', dictating: dictating() } })
-    expect(html).toContain('<textarea class="wb-textarea wb-av-reply-text" rows="1" placeholder="Reply to Pip…" aria-label="Reply to Pip…" maxLength="4000"></textarea>')
+    expect(html).toContain('<textarea class="wb-textarea wb-av-reply-text" rows="1" placeholder="Reply to “Pip”…" aria-label="Reply to “Pip”…" maxLength="4000"></textarea>')
     expect(MAX_REPLY_CHARS).toBe(4000)
     expect(html).toContain(`aria-label="${WORDS.dictate}"`)
     expect(html).toContain('wb-ag-mic')
@@ -308,6 +341,16 @@ describe('the reply box', () => {
     expect(html).not.toContain('wb-ag-mic')
     expect(bubble({ reply: { draft: '', dictating: null } })).not.toContain('wb-ag-mic')
     expect(bubble({ reply: { draft: '', dictating: dictating({ support: { ok: false, reason: 'unsupported', message: 'no' } }) } })).not.toContain('wb-ag-mic')
+  })
+
+  it('quotes the agent’s own name in its phrases, under the header that names the session', () => {
+    expect(calledHere('Pip', 'Fix the flaky upload test')).toBe('“Pip”')
+    expect(calledHere('', 'Fix the flaky upload test')).toBe('Fix the flaky upload test')
+    const html = bubble({ name: 'Workbench: Allow Bash', reply: { draft: '' }, caption: { text: 'Hello.' }, locked: true })
+    expect(html).toContain('placeholder="Reply to “Workbench: Allow Bash”…"')
+    expect(html).toContain('Click to hear “Workbench: Allow Bash”</button>')
+    expect(html).not.toContain('Reply to Workbench')
+    expect(html).not.toContain('hear Workbench')
   })
 
   it('names the session by its title when the agent has no name', () => {
@@ -390,9 +433,9 @@ describe('the first voice choice', () => {
 
   it('offers "Click to hear" while speech is locked, with the avatar’s name', () => {
     const html = bubble({ caption, locked: true })
-    expect(html).toMatch(/<div class="wb-av-voice"><button type="button" class="wb-btn small"><svg[^>]*>.*?<\/svg>Click to hear Pip<\/button><\/div>/)
+    expect(html).toMatch(/<div class="wb-av-voice"><button type="button" class="wb-btn small"><svg[^>]*>.*?<\/svg>Click to hear “Pip”<\/button><\/div>/)
     expect(bubble({ caption, locked: true, name: '' })).toContain('Click to hear Fix the flaky upload test</button>')
-    expect(bubble({ caption, locked: true, name: HOSTILE })).toContain('Click to hear &lt;img src=x onerror=alert(1)&gt;</button>')
+    expect(bubble({ caption, locked: true, name: HOSTILE })).toContain('Click to hear “&lt;img src=x onerror=alert(1)&gt;”</button>')
     // The first choice comes first: nothing is locked before voice was chosen.
     expect(bubble({ caption, locked: true, voiceChoice: 'offer' })).not.toContain('Click to hear')
   })

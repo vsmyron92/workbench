@@ -18,12 +18,14 @@ avatar"), saved as `[avatar]` in `config.toml`:
 
 | Choice | What it means |
 | --- | --- |
-| **Off** | No session has an avatar. The composer shows no Avatar option, and a session that tries to use one, or to start another session with one, is refused. Avatars that existed come back when you switch it on again. |
+| **Off** | No session has an avatar. The composer shows no Avatar option, and a session that tries to use one, or to start another session with one, is refused. Nothing is typed into a session about its avatar meanwhile, also when it or Workbench restarts. Avatars that existed come back when you switch it on again, and a session still to be told of its avatar is told once, when it is idle. |
 | **When I give them one** | A session gets an avatar when it is started with the Avatar option or you give it one later. Sessions that have one already keep it, also those that took one under **Whenever they want**: turn it off for each of them. A session that tries to use one without it is refused and marked "(asked)" in the status bar's menu, so you can give it one. A session that tries to start another session with one is refused, and nothing is started. |
 | **Whenever they want** (the default) | A session gets an avatar the first time it uses one (it draws, says, asks or plays a gesture), and may start another session with one. You can still turn it off for each session, and the session never turns it on again. |
 
-A repository's `.workbench.toml` cannot change this. Unless Settings say **Off**, you can also
-give a session an avatar yourself:
+A repository's `.workbench.toml` cannot change this. Whatever the setting, every Claude Code
+session, and Codex on the host, lists the five avatar tools (about 10 KB of tool definitions);
+while avatars are Off they refuse. Unless Settings say **Off**, you can also give a session an
+avatar yourself:
 
 - **When you start it.** Tick **Avatar** among the options of the new-session composer (after
   **Ultracode**; the tooltip reads "Avatar: this session gets a live avatar"). It is offered for
@@ -63,7 +65,8 @@ two plain sentences when it starts, when something happens that you should know,
 finishes.
 
 A session that takes an avatar itself is told nothing: it may read the guide first, and its first
-call gives it the avatar.
+call gives it the avatar. The tools' descriptions ask a session to make that call only when you
+asked it for an avatar or its instructions say to use one.
 
 Until the drawing arrives the figure shows Workbench's default look, and for a session started
 with one the words "Designing its look…". When its own look arrives the figure waves once.
@@ -75,8 +78,8 @@ call or two more, and may ask for more pictures: one of its animations as a row 
 Workbench's built-in ones, such as the wave, on its own character), the figure inside an animation
 (where it has moved furthest, unless the session names a moment), as it looks towards the pointer,
 turns, speaks or is held, or one part close up, also in each moment of an animation. A drawing
-that cannot be drawn at rest is refused before it reaches your screen, and the answer says what
-drawing the look costs.
+that would cost too much to draw, at rest or at the costliest moment of its motion, is refused
+before it reaches your screen, and the answer says what drawing the look costs.
 
 Claude Code is allowed the five avatar tools without a permission request while its avatar is
 on (Workbench writes them into the `permissions.allow` list of the settings file it gives the
@@ -95,8 +98,10 @@ The avatar stays with the session:
   sentence that says so, and it is told nothing when it restarts or moves meanwhile. Turning the
   avatar on again always tells the session, once, in a pasted message.
 - After a Workbench restart each avatar is read back from its file: whether it is on, its name,
-  look and voice (a drawing that no longer passes shows the default look, and an avatar you turned
-  off stays off). What it said is not kept.
+  look and voice. An avatar you turned off stays off. A file that no longer passes (edited by hand,
+  or refused by the stricter check of a later release) is set aside: the avatar keeps its on or
+  off but loses its look, name and voice, and the session is told to draw it again when it next
+  starts a conversation. What it said is not kept.
 
 The session's tab and card show an **Avatar** badge ("This session has a live avatar") while its
 avatar is on: given later, the badge appears; turned off, it goes.
@@ -106,13 +111,15 @@ avatar is on: given later, the badge appears; turned off, it goes.
 **The figure.** Only the character is seen: no tile, frame or backdrop. At rest it is 56 pixels
 tall. A walking figure grows to 132 pixels while its bubble is open (it says a line, asks a
 question, or you opened it); under the pointer or with the focus it stays small and shows its
-name. In the column (below) a figure also grows while the pointer rests on it or it has the
-focus, and shrinks again 6 seconds after. The large figure has the avatar's name under it (or
-the session's title, while it has none), and "Voice off" until you have chosen voice in this
-browser. Its pupils follow the pointer, and whatever else its session tied to where it looks,
-how it walks or whether you drag it moves too (a head that turns, a side view while it walks,
-legs that dangle). A dot at the upper right of its outline marks a line you have not seen yet. Hovering shows three controls: **Reply to** *<name>*, **Open the session** and **Avatar
-menu**. The tooltip is the session's title and its state.
+label. In the column (below) a figure also grows while the pointer rests on it or it has the
+focus, and shrinks again 6 seconds after. The large figure has its label under it: the session's
+title, shortened to fit, then the avatar's own name in quotation marks (the title alone while it
+has none), and "Voice off" until you have chosen voice in this browser. Its pupils follow the
+pointer, and whatever else its session tied to where it looks, how it walks or whether you drag
+it moves too (a head that turns, a side view while it walks, legs that dangle). A dot at the upper
+right of its outline marks a line you have not seen yet. Hovering shows three controls: **Reply
+to** *<title> “<name>”*, **Open the session** and **Avatar menu**. The tooltip is the session's
+title and its state.
 
 **The glow** around the figure's outline shows the session's state in the colours of its tab and
 card: a figure glows while its session needs you, failed or has news you have not read, and while
@@ -132,8 +139,17 @@ a few seconds after the line was said (a caption stays long enough to read), unl
 or the focus is in it or a question is open. Its header is Workbench's: the CLI's icon, the
 session's title, the project when it is another one, then the avatar's own name in quotation
 marks. Captions are plain text, never links or formatting. A click on the figure opens the
-bubble with the last six lines and a reply box, or closes it; **Esc** closes it. While a line is
-said aloud, a click on the figure stops it.
+bubble with the last six lines and a reply box, or closes it. While a line is said aloud, a click
+on the figure stops it.
+
+A bubble you open yourself (the figure, its **Reply to** control, the face, a menu entry, the
+palette) puts the focus in its reply box. The focus goes back where it was when you close the
+bubble or your reply has gone. When the reply box goes by itself while you type (the session asks
+for a permission, the avatar is turned off, the question is withdrawn), the focus stays nowhere,
+so that the rest of your words reaches no other session. **Esc** closes such a bubble, also while the focus is in a terminal or nowhere, and that
+Esc does not reach the terminal, so it does not interrupt the session. A bubble that opens by
+itself never takes the focus or a key: Esc then goes where you are typing. Inside a bubble, Esc
+closes it either way.
 
 A bubble that opens or changes by itself under a resting pointer does not act on a click meant for
 something else: for half a second clicks pass through it to what is under it; after that, while
@@ -240,23 +256,35 @@ devices only one says a line aloud: a tab you can see goes first, and of those t
 last. A tab that was closed while it spoke hands the next line to another.
 
 A browser speaks only after a click or a key press in the page since it was loaded. After a reload
-the bubble shows **Click to hear** *<name>*; that click, or any click in the page, lets it speak
-again. No line is said in a tab while a dictation listens in that tab, and a line being said there
-stops when one starts.
+the bubble shows **Click to hear** “*<name>*”, which says the line it stands under. A click
+anywhere else in the page lets the next lines be spoken, and the button stays under its line until
+that line is heard or another one takes its place. No line is said in a tab while a dictation
+listens in that tab, and a line being said there stops when one starts.
 
 **Stop** is in the bubble's header while a line is said; **Stop speaking** is in the avatar's menu
 and the status bar's, and **Avatar: Stop Speaking** in the palette. Stop acts on what this tab
 presents, and the session learns that you skipped the line.
 
+**One line at a time.** A window says one line at a time: a line waits while the one before it is
+said. A line that waited 20 seconds for its turn (behind another avatar's long line, say) is shown
+as a caption without being spoken, and its session reads that it was shown as a caption, not
+spoken.
+
 Each avatar speaks at the pitch and pace its session chose, with a voice of this browser that fits
-its language; the browser remembers which voice it gave each avatar. **Speed** (0.7× to 1.5×, a
-factor on the avatar's own pace) and **Volume** are in Settings, with **Test voice**, which says
-"This is how an avatar sounds in this browser." with the voice you pick, at that speed and volume.
+its language; the browser remembers which voice it gave each avatar, as long as that voice speaks
+the avatar's language exactly (en-GB is not en-US) or the browser has none that does. A line is
+handed to the voice exactly as its caption shows it. A session is told to use plain words, but
+what a voice makes of anything else, markup for instance, is up to the browser. **Speed** (0.7×
+to 1.5×, a factor on the avatar's own pace) and **Volume** are in Settings, with **Test voice**,
+which says "This is how an avatar sounds in this browser." with the voice you pick, at that speed
+and volume.
 
 ## Answering
 
 A question shows its choices as buttons and, unless the session asked for a choice only, a reply
-box with the placeholder "Reply to *<name>*…".
+box with the placeholder "Reply to “*<name>*”…". The question and its choices are the session's own
+words; above the choices Workbench says where your answer goes: "Your answer goes to *<session
+title>* as a message."
 
 - **A choice** is sent with one click.
 - **Typed text** is sent with Enter or **Send (Enter)**; Shift+Enter breaks the line. A typed
@@ -289,8 +317,8 @@ next line or after 4 seconds. An error stays until the next line, until you chan
 send again.
 
 **Messages without a question.** The reply box of a bubble you opened (a click on the figure, the
-figure's **Reply to** control, or **Avatar: Reply to** *<name>*… in the palette, which also puts
-the focus there) sends a message to the session at any time. It arrives as a prompt with the same
+figure's **Reply to** control, the face, or **Avatar: Reply to** … in the palette) sends a message
+to the session at any time. It arrives as a prompt with the same
 frame and your words.
 
 A prompt is never typed into a session that shows a dialog or is still starting: the reply box
@@ -319,8 +347,10 @@ opens its last lines, with the reply box disabled. The session cannot say or ask
 the avatar until you have answered.
 
 Decisions are made in the session (its card, its tab, a toast, your phone), never through the
-avatar: it shows no **Allow** or **Deny** of its own, its choice buttons look unlike a permission
-request, and a reply to the avatar never answers one.
+avatar: Workbench gives it no **Allow** or **Deny** of its own, and a reply to the avatar never
+answers a permission request. A question's choices are words the session chose, and they may read
+like anything, "Allow" too: its buttons have a style of their own, and a click on one only sends
+that choice to the session as a message, as the line above them says.
 
 ## Moving, hiding and turning off
 
@@ -371,7 +401,7 @@ Settings always). None of them has a keyboard shortcut.
 | Avatar: Show or Hide Avatars | Shows or hides every avatar in this browser. |
 | Avatar: Voice On or Off | Turns voice on or off in this browser. |
 | Avatar: Stop Speaking | Stops the line this tab presents. |
-| Avatar: Reply to *<name>*… | Opens the bubble of the avatar in front and puts the focus in its reply box. |
+| Avatar: Reply to *<title> “<name>”*… | Opens the bubble of the avatar in front and puts the focus in its reply box. |
 | Avatar: Give This Session an Avatar | Gives the session on screen an avatar, or turns its avatar on again. |
 | Avatar: Turn Off for This Session | Turns the avatar of the session on screen off. |
 | Avatar Settings | Opens Settings › Avatar. |
@@ -429,8 +459,8 @@ A session cannot:
   accept only the session's own token;
 - show or hide avatars, move them, or decide whether a browser speaks: voice, online voices and
   the microphone are yours to switch on, per browser;
-- say or ask anything while a permission request or a question is open in the session, show
-  **Allow** or **Deny**, or answer a permission request;
+- say or ask anything while a permission request or a question is open in the session, or answer
+  a permission request: a choice it words "Allow" is only a message to the session itself;
 - put markup, scripts, images, links or formatting on screen: its drawing is read by the server
   into a closed, bounded set of shapes, gradients, masks and filters that refer only to each
   other, and only that set reaches the page; its text is one line of plain text with the
@@ -466,10 +496,11 @@ Workbench keeps one file per avatar in its data folder, `avatar/<session id>.jso
 the session drives it, and whether the session is still to be told of it. It is removed with the
 session; when the session itself could not be read at a start, the file is kept while the
 session's `meta.json` is still there, and the start that reads the session reads its avatar
-again. A file that cannot be read is kept beside it as `.json.corrupt` and the avatar shows the
-default look; its on or off still holds, and where that cannot be read either the avatar is off
-until you turn it on, and the session is told that Workbench could not read the avatar's stored
-file. Workbench's log says why: not JSON, too large, an I/O error, or not a valid avatar. A file
+again. A file that cannot be read, or whose look no longer passes, is kept beside it as
+`.json.corrupt`, and the avatar starts again from the default look, with no name and the default
+voice; its on or off still holds, and where that cannot be read either the avatar is off until you
+turn it on, and the session is told that Workbench could not read the avatar's stored file.
+Workbench's log says why: not JSON, too large, an I/O error, or not a valid avatar. A file
 that begins with a byte order mark is read as if it did not. The last lines live in memory only,
 at most 30 per avatar. Your browser keeps its own choices (shown, voice, online voices, speed,
 volume, walking, motion, the column's place, which voice each avatar got, what you have seen).
@@ -520,28 +551,46 @@ tool call and gets the same answer.
 - A drawing is at most 32 KiB of artwork with 300 elements (a repeated part counts with what it
   repeats), 8 filters of 8 steps each, 32 animations of 16 tracks of 16 keyframes, 64 parts
   that move with another, 16 drives, and 256 KiB for the whole call. A drawing is drawn before
-  it is stored, and one that cannot be drawn at rest is refused: one that would cost too much on
-  every frame (heavy filters, many masked, clipped or half-transparent groups, a filter on a
-  stretched part, a shape drawn far too large, very fine dashes), or that does not finish within
-  the memory (1 GiB) and the processor time (6 seconds) a picture may take. Two pictures are
-  drawn at a time for all sessions and one at a time for each.
-- At most 64 sessions, running or in the history, have an avatar (none is taken away). The
-  avatars kept in files are all read at a start, even more than 64, and no new one is made until
-  fewer than 64 have one. Giving
-  one more, or a session taking one itself, is refused with a message (`avatar_status` of a
-  session without one then says that none is to be had), and a session started with one (the
-  **Avatar** option, or by another session) then starts without one, until you remove sessions you
-  no longer need from the history.
+  it is stored, and refused when it would cost too much on every frame (heavy filters, many
+  masked, clipped or half-transparent groups, a filter on a stretched part, a shape drawn far too
+  large, very fine dashes), at rest or at the costliest moment its animations (its own and the
+  built-in ones), drives or lip sync move it to, or when it does not finish within the memory
+  (1 GiB) and the processor time (6 seconds) a picture may take. The check samples moments rather
+  than trying every one. Scales of nested parts multiply: a filter or a mask on a part that an
+  animation scales up is the usual cause. Such a refusal names the animation or input and the moment, and
+  says what to change. Two pictures are drawn at a time for all sessions and one at a time for
+  each.
+- Pictures follow the browser's pose rules but are drawn by another renderer, with the system's
+  sans-serif font and a few to fall back on for text: a character none of them has is drawn as a
+  box in the picture. On Windows the process a picture is drawn in is only waited for and killed;
+  it cannot limit its own memory or time.
+- At most 64 sessions that are open or running have an avatar at once. Sessions in the history
+  keep theirs and take no room, and every stored avatar is read at a start, however many. While
+  64 are taken, giving one more, or a session taking one itself, is refused with a message, and a
+  session started with one (the **Avatar** option, or by another session) starts without it.
+  Workbench says why, in a toast when you started it or in the answer to the session that started
+  it: "Started without an avatar: 64 sessions have one already. Close sessions you no longer need,
+  then give it one." A session that comes back from the history (restarted, or its tab opened
+  again) needs room as a new one does: without room it runs without its avatar, which is kept and
+  comes back when there is room, at its next restart, its own first avatar call under **Whenever
+  they want**, or when you give it one. Closing sessions you no longer need makes room.
 - On screen: 56 pixels at rest, 132 active (48 and 96 on a phone), a face of 28 pixels in the top
   bar (40 on a phone), eight walking figures, or four in the column. Colour and opacity changes
   are at least 0.17 seconds apart and never jump, spring or bounce, and they follow only how
   fast a figure walks, which way it turns and whether you drag it, which change slowly, in at
-  most two or three steps, never the pointer or the speech. Whatever a figure's motion adds up
-  to, no fill or stroke (its brightness included), opacity of one part or movement of a large part
-  turns back more often than three flashes a second allow: the figure holds it until it may turn. A
-  figure's animations are drawn at 30
-  frames a second at most (its walk across the window follows the screen's rate), and a figure
-  that takes too long to draw is held still in its rest pose.
+  most two or three steps, never the pointer or the speech.
+- Flashing: the browser limits each fill or stroke (its brightness included), each opacity and
+  the movement of each large part on its own, so that none of them turns back more often than
+  three flashes a second allow; the figure holds it until it may turn. Two of them that change
+  together, such as two opacities on nested parts or a colour and an opacity of one part, are not
+  limited as a pair, and what they show together can still flash faster.
+- A figure's animations are drawn at 30 frames a second at most (its walk across the window
+  follows the screen's rate). A figure whose own frames take too long to work out is held still in
+  its rest pose. While the page's frames keep arriving late (eight or more frames that each come a
+  tenth of a second or more after the one before and together last eight seconds, with no second
+  of frames on time between them), the costliest figure that moves and has a filter, a mask or a clip is held still too, one at a
+  time; a figure without any of these is never held still for that. A reload, a new design, or
+  hiding and showing the avatars starts a figure again.
 
 ## Troubleshooting
 
@@ -557,12 +606,14 @@ tool call and gets the same answer.
 - The browser has no voice for the line's language: once it has listed its voices, the bubble says
   "This browser has no voices: avatars show captions." under the line.
 - Another tab or device said the line: only one does.
+- Another avatar was speaking: a line that waited 20 seconds behind another one is shown as a
+  caption without being spoken.
 - A dictation is listening, or **Volume** is at 0%.
 - **Test voice** in Settings tells you what this browser can do ("Only an online voice could say
   it: allow online voices first.", "This browser has no voice to say it with.").
 
-**"Click to hear <name>".** The page was loaded and has had no click or key press yet, and
-browsers speak only after one. Click it, or anywhere in the page.
+**"Click to hear “<name>”".** The page was loaded and has had no click or key press yet, and
+browsers speak only after one. Click it to hear the line it stands under.
 
 **The avatar says nothing while a dialog is open.** The session waits for a permission request
 or a question of its own CLI: the avatar is quiet until you answer it in the session (**Open**
@@ -602,15 +653,11 @@ avatar` command. Its terminal shows what it tried, and the refusal it got, if an
   tools: the tests' stand-in for Claude Code was used.
 - Real Codex, Kimi Code, Gemini CLI and Aider sessions.
 - A real model looking at the pictures of its avatar: the tests check the PNG and the image
-  blocks the tools send, not what a model makes of them. The picture follows the browser's pose
-  rules but is drawn by another renderer, with the system's sans-serif font and a few to fall
-  back on for text (a character none of them has is drawn as a box in the picture).
+  blocks the tools send, not what a model makes of them.
 - A session in a dev container.
-- Windows at run time: the server is type-checked for Windows only. There the process a picture
-  is drawn in is only waited for and killed; it cannot limit its own memory or time.
-- Two opacities that work against each other on one part or down its tree, and a colour and an
-  opacity or fill-opacity of one part or down its tree that change together: the flash limit holds
-  each on its own, not what they show together.
+- Windows at run time: the server is type-checked for Windows only.
+- The cost limits in a browser that draws with the graphics card, and in Firefox: the refusals at
+  design time and the hold for late frames were measured in headless Chrome drawing in software.
 - Safari and iOS: speech needs a tap there, by design, but it was not tried.
 
 ## Not in this release

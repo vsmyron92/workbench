@@ -422,7 +422,7 @@ pub struct TurnedOn {
 }
 
 /// Gives the session an avatar, or turns its avatar on again. Only agent sessions have one, and
-/// at most [`MAX_AVATARS`] of them. A session without a record whose stored file is there gets
+/// at most [`MAX_AVATARS`] open or running ones. A session without a record whose stored file is there gets
 /// that avatar back, turned on, with its design (`store::take_over`).
 pub fn turn_on(state: &AppState, tid: &str, now: i64) -> ApiResult<TurnedOn> {
     let info = terminal(state, tid)?;
@@ -432,11 +432,14 @@ pub fn turn_on(state: &AppState, tid: &str, now: i64) -> ApiResult<TurnedOn> {
     let started_with = info.meta.get("avatar") == Some(&Value::Bool(true));
     let later = info.meta.get("avatarBrief").and_then(Value::as_str) == Some("later");
     let mut guard = state.avatar.inner.lock();
-    let Inner { records, asked, .. } = &mut *guard;
+    let Inner { records, asked, held, .. } = &mut *guard;
     if !records.contains_key(tid) {
-        if records.len() >= MAX_AVATARS {
-            return Err(ApiError::new(axum::http::StatusCode::TOO_MANY_REQUESTS, "rate_limited", format!("{MAX_AVATARS} sessions have an avatar already: remove sessions you no longer need from the history first")));
+        // Only avatars of open or running sessions take room (`store::room`): closing a session
+        // frees its room.
+        if !super::store::room(records, held, tid) {
+            return Err(ApiError::new(axum::http::StatusCode::TOO_MANY_REQUESTS, "rate_limited", format!("{MAX_AVATARS} sessions have an avatar already: close sessions you no longer need first")));
         }
+        held.remove(tid);
         // A stored file of its own is this session's avatar, as a start reads it: turned on
         // below with the design it holds, never replaced by a new one.
         let rec = match super::store::take_over(state, &info, now) {
@@ -532,6 +535,11 @@ impl Drop for Telling {
 /// nothing to tell (it was told, its avatar is off, it is not running), or another telling of it
 /// is under way.
 pub async fn tell(state: &AppState, tid: &str, now: i64) -> Option<bool> {
+    // While avatars are switched off nobody is told: the session stays to be told, once they are
+    // on again and it is idle.
+    if !super::enabled(state) {
+        return None;
+    }
     let telling = Telling::begin(state, tid)?;
     // Looked at now that no other telling can be in between; the terminal is asked once the
     // store lock is free again.
@@ -541,7 +549,7 @@ pub async fn tell(state: &AppState, tid: &str, now: i64) -> Option<bool> {
     let clock = Clock::at(now);
     let told = tokio::spawn(async move {
         let Telling { state, tid } = &telling;
-        let still = state.avatar.inner.lock().records.get(tid.as_str()).is_some_and(|rec| rec.on && rec.unbriefed);
+        let still = super::enabled(state) && state.avatar.inner.lock().records.get(tid.as_str()).is_some_and(|rec| rec.on && rec.unbriefed);
         if !still {
             return None;
         }

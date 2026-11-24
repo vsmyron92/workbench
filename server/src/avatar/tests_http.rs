@@ -1628,3 +1628,36 @@ async fn the_command_says_what_a_picture_shows_as_the_tool_does() {
         assert!(std::fs::read(&png).unwrap().starts_with(b"\x89PNG"));
     }
 }
+
+/// A look that is cheap at rest and dear where its animations move it is not stored: the design
+/// call says where and what to change, through the tool and through the hook route alike, and a
+/// call that only adds the motion to stored artwork is not told that its artwork is to blame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_design_that_costs_too_much_where_it_moves_is_not_stored() {
+    let e = env().await;
+    let tid = e.with_avatar();
+    let artwork = json!({
+        "svg": "<svg viewBox='0 0 200 200'><defs><filter id='soft'><feGaussianBlur stdDeviation='2'/></filter></defs><g id='body'><g id='a'><g id='b'><g id='c'><circle id='dot' cx='100' cy='100' r='4' fill='#3366cc' filter='url(#soft)'/></g></g></g><circle id='head' cx='100' cy='40' r='20' fill='#ffcc00'/></g></svg>",
+        "pivots": { "a": [100, 100], "b": [100, 100], "c": [100, 100] },
+        "roles": { "body": "body", "head": "head" }
+    });
+    call(&e, &tid, "avatar_design", artwork).await.unwrap();
+    let before = e.avatar(&tid).revision;
+    let swell = |most: u32| {
+        let tracks: Vec<Value> = ["a", "b", "c"].iter().map(|t| json!({ "target": t, "prop": "scale", "values": [1, most, 1] })).collect();
+        json!({ "animations": { "swell": { "duration": 1, "loop": true, "tracks": tracks } }, "states": { "idle": ["swell"] } })
+    };
+    let said = call(&e, &tid, "avatar_design", swell(10)).await.unwrap_err().message;
+    assert!(said.starts_with("this look's filters cost too much to draw in its animation swell at 0.5 (about "), "{said}");
+    assert!(said.ends_with(", at most 60): animate a smaller scale, or put the filter on a part that does not grow\nNothing was changed."), "{said}");
+    assert!(!said.contains("artwork this avatar already has"), "{said}");
+    assert_eq!(e.avatar(&tid).revision, before);
+    // The hook route of a session without the tools says the same.
+    let sent = request(&e, Method::POST, &hook(&tid, "design"), Some(&token(&e, &tid)), JSON, swell(10).to_string()).await;
+    assert_eq!((sent.status, sent.message()), (400, said.clone()));
+    assert_eq!(e.avatar(&tid).revision, before);
+    // A smaller scale is stored.
+    let text = call(&e, &tid, "avatar_design", swell(2)).await.unwrap();
+    assert!(text.starts_with("Saved as revision "), "{text}");
+    assert_eq!(e.avatar(&tid).revision, before + 1);
+}

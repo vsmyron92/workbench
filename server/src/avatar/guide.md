@@ -12,7 +12,7 @@ Drawn: g, path, circle, ellipse, rect, line, polyline, polygon, text, and use (h
 
 Refused: script, style, image, a, pattern, symbol, an href to anything but '#id', on… attributes, and what the answer names. Dropped with a warning: class, animate…, font-family, transform-origin. Numbers stay within 4 times the viewBox, the pen of path data too (relative steps too); nothing passes 1,000,000 units through nested scales; a numeric font-weight is 100, 200 … 900. What stands inside defs, a mask or a clipPath never moves: move the part that is masked.
 
-A filter is drawn again on every frame its part moves: a soft shadow under the figure is cheap, a blur on a swinging arm is not. The design answer says what drawing costs, and a look that costs too much is refused. A filter's region is the part's box and a tenth around it: widen it (y='-100%' height='300%') where a blur would be cut off.
+A filter is drawn again on every frame its part moves: a soft shadow under the figure is cheap, a blur on a swinging or growing arm is not. The design answer says what drawing costs, and a look that costs too much, at rest or as it moves, is refused. A filter's region is the part's box and a tenth around it: widen it (y='-100%' height='300%') where a blur would be cut off.
 
 ## The rig
 
@@ -36,7 +36,7 @@ Every one of these names is yours to take: an animation you call breathe, blink,
 4. `loop: true` repeats, `every: [min, max]` restarts after a random pause, neither is a one-shot. `phase` (0..1) is for a loop's track, `delay` for a one-shot's.
 5. An animation plays where a state lists it or as a gesture. `states`: state to up to 6 names, yours or built-in, replacing that state's default.
 6. fill, stroke and opacity keyframes: 0.17 s apart or more, never step, outElastic, outBounce or a bezier that leaves 0..1, and in a loop the track ends on the value it starts with. d keyframes: the same commands with the same count of numbers as each other and as the element's own d.
-7. Nothing flashes: a colour (also its brightness, which dips halfway from green to magenta), an opacity, and whatever moves a large part turn back at most about six times a second; faster, Workbench holds the value until it may turn.
+7. Flashing is limited: each colour (also its brightness, which dips halfway from green to magenta), opacity and whatever moves a large part turns back at most about six times a second on its own; faster, Workbench holds the value until it may turn.
 
 A blink is scaleY 1, 0.1, 1 in 0.18 s; loops of different durations never line up; a gesture is anticipation, action, overshoot, settle.
 

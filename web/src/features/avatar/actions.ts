@@ -61,7 +61,7 @@ export function stopSpeaking(): boolean {
   return avatarActions.stop()
 }
 
-/** Opens this avatar's bubble and moves focus into its reply box. The one thing that does. */
+/** Opens this avatar's bubble and moves focus into its reply box, as every bubble the user opens does. */
 export function replyTo(terminalId: string): boolean {
   return avatarActions.reply(terminalId)
 }

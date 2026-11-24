@@ -35,7 +35,7 @@ Say names as words ("the login page", "the upload test"), round numbers ("about 
 | The answer says the line was | Means | Do |
 | --- | --- | --- |
 | spoken aloud by <voice> | The user heard it. | Go on. |
-| shown as a caption, not spoken | A window showed it and no tab said it aloud; Workbench does not know why (the voice may be off there, or no browser could say it). | Keep lines short. |
+| shown as a caption, not spoken | A window showed it and no tab said it aloud; Workbench does not know why (the voice may be off there, no browser could say it, or the line waited 20 s behind another avatar's line). | Keep lines short. |
 | shown as a caption: the browser's voice failed | The voice did not work; the caption showed. | Go on; do not repeat the line. |
 | skipped by the user | The user stopped it. | Say less, and less often. |
 | not shown: the user has hidden the avatars | Nothing is on screen. | The terminal is where the user reads now: speak rarely. |
@@ -44,7 +44,7 @@ Say names as words ("the login page", "the upload test"), round numbers ("about 
 
 ## Questions
 
-`avatar_ask` shows one question with up to `limits.choices` choices as buttons and, unless `freeText` is false, a box for a typed or dictated answer. Ask decisions that the task needs from the user, one at a time:
+`avatar_ask` shows one question with up to `limits.choices` choices as buttons and, unless `freeText` is false, a box for a typed or dictated answer. Above the choices Workbench writes "Your answer goes to <session title> as a message.", so word them as answers to your question, never as a permission request. Ask decisions that the task needs from the user, one at a time:
 
 ```json
 { "text": "Should I update the old API as well, or leave it for later?", "choices": ["Update it too", "Leave it"], "freeText": false }

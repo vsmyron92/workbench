@@ -1785,3 +1785,254 @@ fn calibrate_filter_work() {
         eprintln!("{name}: work {:.1} panels, {per:?} per render, {:.2} ms per panel of work", work / (264.0 * 264.0), per.as_secs_f64() * 1000.0 / (work / (264.0 * 264.0)));
     }
 }
+
+// ---------------------------------------------------------------- what a look costs while it moves
+
+/// The reviewer's look of the pre-release check, as a design: eight small circles, each with a
+/// filter of eight primitives, each inside three nested groups that one loop scales tenfold at
+/// its middle (`churn` the first five, `churn2` the rest, both in the idle state). Cheap at rest,
+/// millions of passes where the scales coincide.
+fn nested_heavy() -> Value {
+    let filter = |i: usize| {
+        format!(
+            "<filter id='f{i}' x='-50%' y='-50%' width='200%' height='200%'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' seed='{i}' result='t'/><feMorphology in='SourceGraphic' operator='dilate' radius='20' result='m'/><feDisplacementMap in='m' in2='t' scale='50' xChannelSelector='R' yChannelSelector='G' result='d'/><feGaussianBlur in='d' stdDeviation='50' result='b'/><feMorphology in='b' operator='erode' radius='20' result='e'/><feDropShadow in='e' dx='3' dy='3' stdDeviation='50' flood-color='#ff00ff' result='s'/><feComposite in='s' in2='t' operator='arithmetic' k1='1' k2='1' k3='1' k4='0' result='c'/><feBlend in='c' in2='SourceGraphic' mode='difference'/></filter>"
+        )
+    };
+    let defs: String = (0..8).map(filter).collect();
+    let parts: String = (0..8).map(|i| format!("<g id='a{i}'><g id='b{i}'><g id='c{i}'><circle id='p{i}' cx='{}' cy='100' r='3' fill='#3366ff' filter='url(#f{i})'/></g></g></g>", 30 + 20 * i)).collect();
+    let mut tracks = vec![];
+    let mut pivots = Map::new();
+    for i in 0..8 {
+        for level in ["a", "b", "c"] {
+            tracks.push(json!({ "target": format!("{level}{i}"), "prop": "scale", "values": [1, 10, 1] }));
+            pivots.insert(format!("{level}{i}"), json!([30 + 20 * i, 100]));
+        }
+    }
+    let second = tracks.split_off(16);
+    stored(json!({
+        "name": "Heavier",
+        "svg": format!("<svg viewBox='0 0 200 200'><defs>{defs}</defs><g id='body'>{parts}<circle id='head' cx='100' cy='40' r='20' fill='#ffcc00'/></g></svg>"),
+        "pivots": pivots,
+        "animations": { "churn": { "duration": 1, "loop": true, "ease": "linear", "tracks": tracks }, "churn2": { "duration": 1, "loop": true, "ease": "linear", "tracks": second } },
+        "states": { "idle": ["churn", "churn2"] },
+        "roles": { "body": "body", "head": "head" }
+    }))
+}
+
+/// A blurred dot inside groups `a`, `b` and `c`, and the animations, states and drives given.
+fn blurred(extra: Value) -> Value {
+    let mut design = json!({
+        "svg": "<svg viewBox='0 0 200 200'><defs><filter id='soft'><feGaussianBlur stdDeviation='2'/></filter></defs><g id='a'><g id='b'><g id='c'><circle id='dot' cx='100' cy='100' r='4' fill='#3366cc' filter='url(#soft)'/></g></g></g><circle id='head' cx='100' cy='40' r='20' fill='#ffcc00'/></svg>",
+        "pivots": { "a": [100, 100], "b": [100, 100], "c": [100, 100] }
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        design[key] = value.clone();
+    }
+    stored(design)
+}
+
+/// What a look costs where its animations move it: the rest pose is cheap, the moment where
+/// nested scales coincide is not, and the refusal says where and what to change, as a pose
+/// picture of that moment would be refused.
+#[test]
+fn a_look_that_costs_too_much_where_it_moves_is_refused_with_where() {
+    let look = nested_heavy();
+    affordable(&look).expect("cheap at rest");
+    let peak = moving(&look).unwrap();
+    let why = peak.refused.clone().expect("refused");
+    assert!(why.starts_with("this look's filters cost too much to draw in its animation churn at 0.5 (about "), "{why}");
+    assert!(why.ends_with(", at most 60): animate a smaller scale, or put the filter on a part that does not grow"), "{why}");
+    assert_eq!(peak.at, Moving::Animation { name: "churn".into(), builtin: false, at: 0.5 });
+    assert!(peak.spent.filters > 1e6, "{peak:?}");
+    // A pose picture of that moment is refused for the same number.
+    let posed = sheet(&look, &at("churn", 0.5)).unwrap_err();
+    let number = |s: &str| s.split("(about ").nth(1).and_then(|r| r.split(' ').next()).map(str::to_string);
+    assert_eq!(number(&posed), number(&why), "{posed} / {why}");
+
+    // The same at a tenth of the scale is within it, and its peak is that moment.
+    let mild = blurred(json!({ "animations": { "grow": { "duration": 1, "loop": true, "tracks": [{ "target": "a", "prop": "scale", "values": [1, 2, 1] }] } } }));
+    let peak = moving(&mild).unwrap();
+    assert_eq!((peak.refused.as_deref(), &peak.at), (None, &Moving::Animation { name: "grow".into(), builtin: false, at: 0.5 }), "{peak:?}");
+    let rest = model_spent(&mild);
+    assert!(peak.spent.filters > 3.0 * rest.filters, "{peak:?} against {rest:?} at rest");
+}
+
+/// What the rest pose of a look costs, as a picture says it.
+fn model_spent(look: &Value) -> Spent {
+    let model = Model::read(look).unwrap();
+    model.estimate(&model.body(&model.pose(&Pose::default()).unwrap())).unwrap()
+}
+
+/// Scales of nested groups multiply where they coincide, also when no keyframe of one lies where
+/// the other peaks: two tracks that cross halfway, and an ease that overshoots between keyframes.
+#[test]
+fn the_peak_is_found_between_keyframes_where_tracks_cross_and_eases_overshoot() {
+    // Each at most 10 times as large, together 30 times at the middle: no keyframe there.
+    let crossing = blurred(json!({ "animations": { "cross": { "duration": 1, "times": [0, 1], "tracks": [
+        { "target": "a", "prop": "scale", "values": [1, 10] },
+        { "target": "b", "prop": "scale", "values": [10, 1] }
+    ] } } }));
+    let peak = moving(&crossing).unwrap();
+    assert!(matches!(&peak.at, Moving::Animation { at, .. } if (at - 0.5).abs() < 0.07), "{peak:?}");
+    let ends = moving(&blurred(json!({ "animations": { "end": { "duration": 1, "tracks": [{ "target": "a", "prop": "scale", "values": [1, 10] }] } } }))).unwrap();
+    assert!(peak.spent.filters > 2.0 * ends.spent.filters, "{peak:?} against {ends:?}");
+    // An ease that goes beyond its last keyframe before it settles there.
+    let back = blurred(json!({ "animations": { "pop": { "duration": 1, "tracks": [{ "target": "a", "prop": "scale", "values": [1, 10], "ease": "outBack" }] } } }));
+    let peak = moving(&back).unwrap();
+    let last = Model::read(&back).unwrap().estimate(&{
+        let model = Model::read(&back).unwrap();
+        model.body(&model.pose(&at("pop", 1.0)).unwrap())
+    }).unwrap();
+    assert!(peak.spent.filters > last.filters * 1.1, "{peak:?} against its last keyframe {last:?}");
+}
+
+/// A drive is looked at along its input, at its ends and at its own keyframes, and the refusal
+/// names the input and its value.
+#[test]
+fn a_drive_that_grows_a_filtered_part_is_refused_where_its_input_puts_it() {
+    // Three drives on one input, one for each of the nested groups: they play together. (Below
+    // the room a layer has, so that one value costs the most.)
+    let drive = |values: Value, at: Value| {
+        let drives: Vec<Value> = ["a", "b", "c"].iter().map(|t| json!({ "input": "turn", "target": t, "prop": "scale", "values": values, "at": at })).collect();
+        blurred(json!({ "drives": drives }))
+    };
+    let why = moving(&drive(json!([1, 1, 4.5]), json!([0, 0.5, 1]))).unwrap().refused.expect("refused");
+    assert!(why.starts_with("this look's filters cost too much to draw in its drives on turn at 1 (about "), "{why}");
+    // Its peak in the middle of the input's range, where a keyframe of the drive lies.
+    let why = moving(&drive(json!([1, 4.5, 1]), json!([0, 0.75, 1]))).unwrap().refused.expect("refused");
+    assert!(why.starts_with("this look's filters cost too much to draw in its drives on turn at 0.5 (about "), "{why}");
+    // The lip sync grows what it opens.
+    let mouth = blurred(json!({ "mouth": [{ "target": "dot", "prop": "r", "open": 300 }] }));
+    let why = moving(&mouth).unwrap().refused.expect("refused");
+    assert!(why.starts_with("this look's filters cost too much to draw with its mouth open 1 (about "), "{why}");
+    // Within it, its peak is said all the same.
+    let peak = moving(&blurred(json!({ "drives": [{ "input": "turn", "target": "a", "prop": "scale", "values": [1, 1, 3], "at": [0, 0.5, 1] }] }))).unwrap();
+    assert_eq!((peak.refused, peak.at), (None, Moving::Input { input: "turn", value: 1.0 }));
+}
+
+/// The animations a state lists play together, under the drives, so they are also taken at once,
+/// each at its costliest: three that each scale one of the nested groups are cheap alone and
+/// multiply together. Animations no state lists together are gestures, which replace one another.
+#[test]
+fn animations_that_each_cost_little_are_refused_when_they_play_together() {
+    let level = |target: &str| json!({ "duration": 1, "loop": true, "tracks": [{ "target": target, "prop": "scale", "values": [1, 5, 1] }] });
+    let look = blurred(json!({ "animations": { "ga": level("a"), "gb": level("b"), "gc": level("c") }, "states": { "idle": ["ga", "gb", "gc"] } }));
+    for name in ["ga", "gb", "gc"] {
+        assert!(sheet(&look, &at(name, 0.5)).is_ok(), "{name} alone is drawn");
+    }
+    let peak = moving(&look).unwrap();
+    let why = peak.refused.expect("refused");
+    assert!(why.starts_with("this look's filters cost too much to draw when the animations of its state idle play together, each at its costliest (about "), "{why}");
+    assert_eq!(peak.at, Moving::Together { state: "idle".to_string() });
+    // Two of them together are within it.
+    let two = blurred(json!({ "animations": { "ga": level("a"), "gb": level("b") }, "states": { "idle": ["ga", "gb"] } }));
+    assert_eq!(moving(&two).unwrap().refused, None);
+    // The same three with no state that lists them together: each is a gesture of its own, and
+    // gestures replace one another, so nothing is refused for a pose the browser never shows.
+    let apart = blurred(json!({ "animations": { "ga": level("a"), "gb": level("b"), "gc": level("c") }, "states": { "idle": ["ga"], "working": ["gb"], "done": ["gc"] } }));
+    assert_eq!(moving(&apart).unwrap().refused, None);
+}
+
+/// Workbench's built-in motion scales a part by a few hundredths at most: it never makes a look
+/// that is cheap at rest dear. A look of filtered roles, at rest and at its peak.
+#[test]
+fn the_built_in_motion_scales_by_a_few_hundredths_at_most() {
+    let look = stored(json!({
+        "svg": "<svg viewBox='0 0 200 200'><defs><filter id='soft' x='-20%' y='-20%' width='140%' height='140%'><feDropShadow dx='2' dy='2' stdDeviation='3'/></filter></defs><g id='body' filter='url(#soft)'><ellipse cx='100' cy='130' rx='50' ry='45' fill='#3366cc'/><g id='head' filter='url(#soft)'><circle cx='100' cy='60' r='35' fill='#ffcc00'/><g id='eyes'><circle id='pupils' cx='100' cy='60' r='5' fill='#222222'/></g></g><rect id='armL' x='40' y='110' width='12' height='40' fill='#3366cc' filter='url(#soft)'/><rect id='armR' x='148' y='110' width='12' height='40' fill='#3366cc' filter='url(#soft)'/></g></svg>",
+        "roles": { "body": "body", "head": "head", "eyes": "eyes", "pupils": "pupils", "armL": "armL", "armR": "armR" }
+    }));
+    let model = Model::read(&look).unwrap();
+    for (name, animation) in model.builtins() {
+        for track in animation["tracks"].as_array().unwrap() {
+            if track["prop"].as_str().unwrap().starts_with("scale") {
+                for v in track["values"].as_array().unwrap() {
+                    assert!(v.as_f64().unwrap() <= 1.05, "{name}: {track}");
+                }
+            }
+        }
+    }
+    // Alone, each costs at most about a tenth more than the look at rest (arms turned up widen
+    // the body's filter more than its stretch does); everything at once, a third.
+    let rest = model_spent(&look);
+    for (name, _) in model.builtins() {
+        let most = (0..=16).map(|k| model.estimate(&model.body(&model.pose(&at(name, k as f64 / 16.0)).unwrap())).unwrap().filters).fold(0.0, f64::max);
+        eprintln!("{name}: {most:.2} against {:.2} at rest", rest.filters);
+        assert!(most <= rest.filters * 1.15, "{name}: {most} against {rest:?} at rest");
+    }
+    let peak = moving(&look).unwrap();
+    assert_eq!(peak.refused, None);
+    assert!(peak.spent.filters <= rest.filters * 1.34, "{peak:?} against {rest:?} at rest");
+}
+
+/// The search is bounded whatever a look holds: at most 32 animations of 16 tracks of 16
+/// keyframes and 16 drives give a few hundred estimates, each a parse and no drawing.
+#[test]
+fn the_search_for_the_costliest_moment_is_bounded() {
+    let parts: String = (0..16).map(|i| format!("<g id='g{i}' opacity='0.9'><circle id='d{i}' cx='{}' cy='100' r='3' fill='#3366cc' filter='url(#soft)'/></g>", 10 + 11 * i)).collect();
+    let track = |i: usize| json!({ "target": format!("g{i}"), "prop": "scale", "values": (0..16).map(|k| 1.0 + ((k * 7 + i) % 5) as f64 * 0.1).collect::<Vec<_>>() });
+    let animations: Map<String, Value> = (0..32).map(|a| (format!("m{a}"), json!({ "duration": 1 + a % 3, "loop": a % 2 == 0, "tracks": (0..16).map(|i| track((i + a) % 16)).collect::<Vec<_>>() }))).collect();
+    let drives: Vec<Value> = (0..16).map(|i| json!({ "input": INPUTS[i % 6], "target": format!("g{i}"), "prop": "scale", "values": [1, 1.2, 1.1, 1.3, 1], "at": [0, 0.1, 0.5, 0.7, 1] })).collect();
+    let mut pivots = Map::new();
+    for i in 0..16 {
+        pivots.insert(format!("g{i}"), json!([10 + 11 * i, 100]));
+    }
+    let look = stored(json!({
+        "svg": format!("<svg viewBox='0 0 200 200'><defs><filter id='soft'><feGaussianBlur stdDeviation='1'/></filter></defs><g id='body'>{parts}</g></svg>"),
+        "pivots": pivots, "animations": animations, "drives": drives, "roles": { "body": "body" }
+    }));
+    let started = std::time::Instant::now();
+    let peak = moving(&look).unwrap();
+    let took = started.elapsed();
+    let builtins = Model::read(&look).unwrap().builtins().len();
+    let most = (32 + builtins) * (PEAK_TRIES + 1) + INPUTS.len() * PEAK_TRIES + 2;
+    assert!(peak.estimated <= most, "{} estimates, at most {most}", peak.estimated);
+    eprintln!("the largest look: {} estimates in {took:?}, peak {:?} at {:?}", peak.estimated, peak.spent, peak.at);
+}
+
+/// Every example the documentation and the tests hold (`examples/`, `examples/parity/`,
+/// `examples/face/`) moves within what a picture may cost, with room to spare; each one's
+/// costliest moment is printed (`--nocapture`).
+#[test]
+fn the_example_looks_move_within_what_a_picture_may_cost() {
+    let dir = examples_dir();
+    let mut looks: Vec<(String, Value)> = vec![];
+    for sub in [dir.clone(), dir.join("parity"), dir.join("face")] {
+        for file in files_in(&sub).into_iter().filter(|f| f.ends_with(".look.json")) {
+            looks.push((file.clone(), serde_json::from_str(&std::fs::read_to_string(sub.join(&file)).unwrap()).unwrap()));
+        }
+    }
+    assert!(looks.len() >= 20, "{}", looks.len());
+    for (name, look) in looks {
+        let peak = moving(&look).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let rest = model_spent(&look);
+        eprintln!("{name}: rest {:.2} filters {:.2} layers; peak {:.2} filters {:.2} layers {:?}", rest.filters, rest.layers, peak.spent.filters, peak.spent.layers, peak.at);
+        assert_eq!(peak.refused, None, "{name}");
+        assert!(share(peak.spent) < 0.5, "{name}: {peak:?}");
+    }
+}
+
+/// What a design costs at rest and at its costliest moment, for designs of a directory or files:
+/// `AVATAR_PEAK_LOOKS=/a/look.json:/some/dir cargo test avatar::preview::tests::peaks_of -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn peaks_of_the_designs_named() {
+    let named = std::env::var("AVATAR_PEAK_LOOKS").expect("AVATAR_PEAK_LOOKS");
+    for path in named.split(':').map(std::path::PathBuf::from) {
+        let files = if path.is_dir() { files_in(&path).into_iter().filter(|f| f.ends_with(".json")).map(|f| path.join(f)).collect() } else { vec![path] };
+        for file in files {
+            let design: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            let look = match crate::avatar::look::apply(None, &design) {
+                Ok(applied) => serde_json::to_value(applied.design.look.unwrap()).unwrap(),
+                Err(_) => design,
+            };
+            let started = std::time::Instant::now();
+            match moving(&look) {
+                Ok(peak) => {
+                    let rest = Model::read(&look).ok().and_then(|model| model.estimate(&model.body(&model.pose(&Pose::default()).ok()?)).ok());
+                    eprintln!("{}: rest {rest:?}; peak {:?} at {:?} ({} estimates, {:?}); {}", file.display(), peak.spent, peak.at, peak.estimated, started.elapsed(), peak.refused.as_deref().unwrap_or("accepted"));
+                }
+                Err(e) => eprintln!("{}: {e}", file.display()),
+            }
+        }
+    }
+}

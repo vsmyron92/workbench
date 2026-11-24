@@ -19,9 +19,14 @@
 //! alone: it gets no record, and waits for the start that reads the terminal again.
 //!
 //! Every stored file of a loaded agent terminal gets its record at a start, however many there
-//! are: [`MAX_AVATARS`] bounds new avatars only. A record made later for a terminal that has none
-//! (its first call, a device's on, its `terminal.created`) never replaces a file the terminal
-//! has: that file is read and taken over as a start reads it ([`take_over`]).
+//! are: [`MAX_AVATARS`] bounds new avatars only, and counts only those of sessions that are open
+//! (a tab) or running ([`live`]); a session that ended and whose tab is closed keeps its record
+//! and takes no room. A record made later for a terminal that has none (its first call, a
+//! device's on, its `terminal.created`, its restart) never replaces a file the terminal has: that
+//! file is read and taken over as a start reads it ([`take_over`]). A session that comes back from
+//! History (restarted or opened again) needs room as a new one does; without room its avatar is
+//! put away ([`put_away`]): the record leaves memory, its file stays, and it is taken over again
+//! once there is room.
 //!
 //! Locks. [`AvatarState::inner`] is the one store lock: every change of a record, its file and
 //! its events happens under it, so events of one avatar leave in the order of its changes. It is
@@ -102,9 +107,13 @@ pub const HOLD_MAX_SECS: i64 = 120;
 pub const NUDGE_AFTER_SECS: i64 = 8;
 /// Such announcements per terminal in ten minutes.
 pub const NUDGES_PER_10_MIN: usize = 3;
-/// Sessions that have an avatar. One more is refused; none is evicted, and every avatar stored
-/// for a loaded terminal is read at a start, also beyond this.
+/// Sessions that have an avatar and are open or running ([`live`]). One more is refused; none is
+/// evicted, every avatar stored for a loaded terminal is read at a start, also beyond this, and
+/// the avatars of sessions that ended and whose tab is closed (History) do not count.
 pub const MAX_AVATARS: usize = 64;
+/// How long room is held for a session that starts or restarts with its avatar, should its
+/// terminal never show it running (its start failed).
+pub const ROOM_HELD_SECS: i64 = 300;
 /// Sessions remembered as having asked for an avatar without having one.
 pub const MAX_ASKED: usize = 64;
 /// How often a gesture may play in a row.
@@ -429,11 +438,15 @@ pub(super) struct Record {
     /// When `avatar.act` was last emitted, and a newer one that waits its turn.
     pub act_at: i64,
     pub act_queued: Option<Value>,
+    /// Its terminal is open or running, as the last look at it showed ([`live`]): only such
+    /// avatars count against [`MAX_AVATARS`].
+    pub live: bool,
 }
 
 impl Record {
     pub(super) fn new(info: &TerminalInfo, now: i64) -> Record {
         Record {
+            live: live(info),
             project_id: info.project_id.clone(),
             on: true,
             design: Design::default(),
@@ -562,6 +575,22 @@ pub(super) fn running_agent(info: &TerminalInfo) -> bool {
     info.kind == TerminalKind::Agent && info.status == TerminalStatus::Running
 }
 
+/// Whether an avatar of this terminal takes room ([`MAX_AVATARS`]): its tab is open
+/// (`TerminalInfo::open`), or its process has not exited (starting or running). A session that
+/// ended and whose tab is closed is in History, and takes none.
+pub(super) fn live(info: &TerminalInfo) -> bool {
+    info.open || info.status != TerminalStatus::Exited
+}
+
+/// Whether one more session may have an avatar: fewer than [`MAX_AVATARS`] records of open or
+/// running sessions, with the room held for sessions that are starting with one. `tid`'s own
+/// record and hold are left out. Pure: it asks no other slice and takes no lock.
+pub(super) fn room(records: &HashMap<String, Record>, held: &HashMap<String, i64>, tid: &str) -> bool {
+    let live = records.iter().filter(|(id, rec)| rec.live && id.as_str() != tid).count();
+    let starting = held.keys().filter(|id| id.as_str() != tid && !records.get(id.as_str()).is_some_and(|rec| rec.live)).count();
+    live + starting < MAX_AVATARS
+}
+
 // ---------------------------------------------------------------- rate limits
 
 /// The attempts of one kind within the last minute. Refused attempts count as well.
@@ -610,6 +639,13 @@ pub(super) struct Inner {
     /// Running sessions that called for their avatar without having one, oldest first.
     pub asked: VecDeque<String>,
     pub limits: HashMap<String, Windows>,
+    /// Room held for a session that starts with an avatar (the option, or one carried along) or
+    /// comes back from History with one, by terminal id, since when: until its record counts
+    /// itself, at most [`ROOM_HELD_SECS`].
+    pub held: HashMap<String, i64>,
+    /// Whether avatars were switched on when this slice last looked (at the start, and at each
+    /// `settings.changed`): switching them on tells the sessions that are due.
+    pub enabled: Option<bool>,
     /// The server is stopping: no call waits for an answer any more.
     pub stopping: bool,
 }
@@ -943,9 +979,11 @@ pub(super) fn ensure_loaded(state: &AppState) {
         }
     }
 
+    let enabled = super::enabled(state);
     let mut inner = avatars.inner.lock();
     inner.boot = boot_stamp(state.started_at);
     inner.records = records;
+    inner.enabled = Some(enabled);
     avatars.loaded.store(true, Ordering::Release);
 }
 
@@ -1016,6 +1054,11 @@ pub fn get(state: &AppState, tid: &str) -> ApiResult<AvatarInfo> {
 /// What a terminal event does to the avatars. The event's own time is the clock.
 pub(super) fn on_event(state: &AppState, event: &Event) {
     let kind = event.kind.as_str();
+    if kind == "settings.changed" {
+        ensure_loaded(state);
+        switched(state, event.ts);
+        return;
+    }
     if !matches!(kind, "terminal.created" | "terminal.updated" | "terminal.exited" | "terminal.removed") {
         return;
     }
@@ -1080,14 +1123,16 @@ fn make_record(state: &AppState, info: &TerminalInfo, now: i64, made_up: bool) {
         }
         let carried = moved_from.and_then(|old| inner.records.get(old)).map(|old| (old.on, old.design.clone(), old.unreadable));
         let stored = stored_file(state, &info.id).is_some_and(|file| stored_there(&file));
+        // The room its start held for it (`avatar::room_at_start`) is its own now, whatever follows.
+        let held = inner.held.remove(&info.id).is_some();
         if carried.is_none() && !wanted && !stored {
             return;
         }
         if made_up && carried.is_none() && !stored && info.status != TerminalStatus::Running {
             return;
         }
-        if inner.records.len() >= MAX_AVATARS {
-            tracing::info!(terminal = %info.id, "avatar: {MAX_AVATARS} sessions have an avatar already; this one gets none");
+        if !held && !room(&inner.records, &inner.held, &info.id) {
+            tracing::info!(terminal = %info.id, "avatar: {MAX_AVATARS} open sessions have an avatar already; this one gets none");
             return;
         }
         let mut rec = match take_over(state, info, now) {
@@ -1107,7 +1152,7 @@ fn make_record(state: &AppState, info: &TerminalInfo, now: i64, made_up: bool) {
             }
         };
         // Once, should the session be idle already.
-        let tell = brief_due(&mut rec, info, now);
+        let tell = brief_due(&mut rec, info, now, true);
         emit_changed(state, &info.id, &rec);
         inner.asked.retain(|id| id != &info.id);
         inner.records.insert(info.id.clone(), rec);
@@ -1121,13 +1166,15 @@ fn make_record(state: &AppState, info: &TerminalInfo, now: i64, made_up: bool) {
 /// Whether the lifecycle tells the session of its avatar now, and if so it is marked as tried: a
 /// session that was not told is told when it is idle, once per idle, at most every
 /// [`BRIEF_RETRY_SECS`], and no more after [`BRIEF_REFUSALS`] refusals until its avatar is turned
-/// on again. Called with the store lock held, after `rec.session` took the event's state.
-fn brief_due(rec: &mut Record, info: &TerminalInfo, now: i64) -> bool {
+/// on again. Nobody is told while avatars are switched off (`enabled`, read before the store lock
+/// was taken): the session stays to be told, and that idle is not counted as tried. Called with
+/// the store lock held, after `rec.session` took the event's state.
+fn brief_due(rec: &mut Record, info: &TerminalInfo, now: i64, enabled: bool) -> bool {
     if rec.session != Some(AgentState::Idle) {
         rec.brief_idle = false;
         return false;
     }
-    let due = rec.on && rec.unbriefed && running_agent(info) && info.open && !rec.brief_idle && rec.brief_refusals < BRIEF_REFUSALS && now - rec.brief_at >= BRIEF_RETRY_SECS * 1000;
+    let due = enabled && rec.on && rec.unbriefed && running_agent(info) && info.open && !rec.brief_idle && rec.brief_refusals < BRIEF_REFUSALS && now - rec.brief_at >= BRIEF_RETRY_SECS * 1000;
     if due {
         rec.brief_idle = true;
         rec.brief_at = now;
@@ -1148,14 +1195,19 @@ fn updated(state: &AppState, info: &TerminalInfo, now: i64) {
     // Asked before the store lock is taken: while the brief is being pasted, the session that
     // starts working does so because of it, not because the user answered in the terminal.
     let telling = state.avatar.briefing.lock().contains(&info.id);
+    let enabled = super::enabled(state);
     let mut changed = false;
     let tell = {
-        let mut inner = state.avatar.inner.lock();
+        let mut guard = state.avatar.inner.lock();
+        let inner = &mut *guard;
         let Some(rec) = inner.records.get_mut(&info.id) else { return };
         rec.project_id = info.project_id.clone();
         let was = rec.session;
         rec.session = info.agent.as_ref().map(|a| a.state);
-        let tell = brief_due(rec, info, now);
+        // Opened again from History, or running again: from now on it takes room.
+        let back = live(info) && !rec.live;
+        rec.live = live(info);
+        let tell = brief_due(rec, info, now, enabled);
         if !info.open {
             // The tab is closed: nobody answers there, and what was not presented will not be.
             // Those lines leave the transcript. The browsers learn first that they are over, then
@@ -1176,6 +1228,18 @@ fn updated(state: &AppState, info: &TerminalInfo, now: i64) {
                 rec.close_ask(state, &info.id, Reason::MovedOn, now);
             }
         }
+        if rec.live {
+            // The room its restart held for it is its record's own now.
+            let held = inner.held.remove(&info.id).is_some();
+            // The tab of an ended session opened again from History needs room as a new avatar
+            // does: without, its avatar is put away until there is. A session that runs again
+            // got its room at its restart (`at_restart`), where it may have been told of its
+            // avatar: that one is never put away here.
+            if back && !held && info.status == TerminalStatus::Exited && !room(&inner.records, &inner.held, &info.id) {
+                put_away(state, inner, &info.id, now);
+                changed = true;
+            }
+        }
         tell
     };
     if changed {
@@ -1184,6 +1248,101 @@ fn updated(state: &AppState, info: &TerminalInfo, now: i64) {
     if tell {
         tell_soon(state, &info.id, now);
     }
+}
+
+/// `settings.changed`: avatars may have been switched on or off. Switched on, every session that
+/// is still to be told of its avatar and is idle now is told, once, as at its next idle (while
+/// they were off, nobody was told).
+fn switched(state: &AppState, now: i64) {
+    let enabled = super::enabled(state);
+    let due: Vec<String> = {
+        let mut inner = state.avatar.inner.lock();
+        let was = inner.enabled.replace(enabled);
+        if !enabled || was != Some(false) {
+            return;
+        }
+        inner.records.iter().filter(|(_, rec)| rec.on && rec.unbriefed && rec.session == Some(AgentState::Idle)).map(|(id, _)| id.clone()).collect()
+    };
+    // What only the terminals slice knows is asked before the lock is taken again.
+    let infos: Vec<TerminalInfo> = due.iter().filter_map(|id| state.terminals.info(id)).collect();
+    let tell: Vec<String> = {
+        let mut inner = state.avatar.inner.lock();
+        infos.iter().filter(|info| inner.records.get_mut(&info.id).is_some_and(|rec| brief_due(rec, info, now, true))).map(|info| info.id.clone()).collect()
+    };
+    for tid in &tell {
+        tell_soon(state, tid, now);
+    }
+}
+
+/// The avatar of a session that came back from History while [`MAX_AVATARS`] open sessions have
+/// one is put away until there is room: its record leaves memory and its file stays, with the
+/// session to be told of it again once it has it back (meanwhile its calls read that it has
+/// none). The browsers read the list again. A record made for it later takes the file over
+/// ([`take_over`]): a session's call, a device's on, its next restart. Called with the store lock
+/// held.
+fn put_away(state: &AppState, inner: &mut Inner, tid: &str, now: i64) {
+    inner.held.remove(tid);
+    let Some(mut rec) = inner.records.remove(tid) else { return };
+    rec.close_ask(state, tid, Reason::SessionEnded, now);
+    if !rec.unbriefed {
+        rec.unbriefed = true;
+        save(state, tid, &rec);
+    }
+    tracing::info!(terminal = tid, "avatar: {MAX_AVATARS} open sessions have an avatar already; this one's stays in its file until there is room");
+    state.events.emit("avatar.changed", rec.project_id.as_deref(), json!({ "terminalId": tid, "revision": rec.revision, "on": rec.on }));
+}
+
+/// A restart of the session (`avatar::active`): whether it starts with its avatar on, and with it
+/// its brief and its tools. A session that ended and whose tab is closed comes back from History
+/// with this restart and needs room as a new avatar does: with room, the room is held for it until
+/// its terminal shows it running; without, its avatar is put away ([`put_away`]) and the session
+/// starts without one. A session without a record whose file is there (put away before) takes it
+/// back when there is room. The terminal is asked for before the store lock is taken.
+pub(super) fn at_restart(state: &AppState, tid: &str, now: i64) -> bool {
+    ensure_loaded(state);
+    let Some(info) = state.terminals.info(tid).filter(|info| info.kind == TerminalKind::Agent) else { return false };
+    let back = !live(&info);
+    {
+        let mut guard = state.avatar.inner.lock();
+        let inner = &mut *guard;
+        match inner.records.get(tid).map(|rec| rec.on) {
+            Some(on) if !back => return on,
+            Some(on) if room(&inner.records, &inner.held, tid) => {
+                inner.held.insert(tid.to_string(), now);
+                return on;
+            }
+            Some(_) => put_away(state, inner, tid, now),
+            None => {
+                if !room(&inner.records, &inner.held, tid) {
+                    return false;
+                }
+                let Some(rec) = take_over(state, &info, now) else { return false };
+                let on = rec.on;
+                if back {
+                    inner.held.insert(tid.to_string(), now);
+                }
+                emit_changed(state, tid, &rec);
+                inner.asked.retain(|id| id != tid);
+                inner.records.insert(tid.to_string(), rec);
+                return on;
+            }
+        }
+    }
+    state.avatar.bump();
+    false
+}
+
+/// Room for a session that starts now with an avatar (`avatar::room_at_start`), held for it under
+/// its new terminal's id until its record is made. False: there is none.
+pub(super) fn hold_for_start(state: &AppState, tid: &str, now: i64) -> bool {
+    ensure_loaded(state);
+    let mut guard = state.avatar.inner.lock();
+    let inner = &mut *guard;
+    if !room(&inner.records, &inner.held, tid) {
+        return false;
+    }
+    inner.held.insert(tid.to_string(), now);
+    true
 }
 
 /// A conversation of the session started anew (a restart): `told` says whether the brief went
@@ -1207,6 +1366,7 @@ fn exited(state: &AppState, info: &TerminalInfo, now: i64) {
         let Some(rec) = inner.records.get_mut(&info.id) else { return };
         rec.project_id = info.project_id.clone();
         rec.session = info.agent.as_ref().map(|a| a.state);
+        rec.live = live(info);
         rec.close_ask(state, &info.id, Reason::SessionEnded, now);
         rec.pending_unheard(state, &info.id, now)
     };
@@ -1215,13 +1375,18 @@ fn exited(state: &AppState, info: &TerminalInfo, now: i64) {
     }
 }
 
-/// The terminal is gone: so are its avatar, its file and its corrupt file.
+/// The terminal is gone: so are its avatar, its file and its corrupt file (also the file of an
+/// avatar that was put away, which has no record).
 fn remove(state: &AppState, tid: &str) {
     {
         let mut inner = state.avatar.inner.lock();
         inner.asked.retain(|id| id != tid);
         inner.limits.remove(tid);
-        let Some(mut rec) = inner.records.remove(tid) else { return };
+        inner.held.remove(tid);
+        let Some(mut rec) = inner.records.remove(tid) else {
+            remove_stored(state, tid);
+            return;
+        };
         if let Some((_, waiter)) = rec.ask.take().and_then(|open| open.waiter) {
             let _ = waiter.send(AskEnd::Closed(Reason::SessionEnded));
         }
@@ -1248,13 +1413,18 @@ pub(super) fn reconcile(state: &AppState, now: i64) {
             remove(state, &id);
             continue;
         };
-        let mut inner = state.avatar.inner.lock();
+        let mut guard = state.avatar.inner.lock();
+        let inner = &mut *guard;
         let Some(rec) = inner.records.get_mut(&id) else { continue };
         rec.project_id = info.project_id.clone();
         rec.session = info.agent.as_ref().map(|a| a.state);
+        rec.live = live(&info);
         if info.status != TerminalStatus::Running {
             rec.close_ask(state, &id, Reason::SessionEnded, now);
             changed |= rec.pending_unheard(state, &id, now);
+        }
+        if rec.live {
+            inner.held.remove(&id);
         }
     }
     // A moved or restarted session takes its avatar along, one started with the option gets
@@ -1288,9 +1458,11 @@ pub(super) fn sweep(state: &AppState, now: i64) {
     let mut heard = false;
     {
         let mut guard = state.avatar.inner.lock();
-        let Inner { records, asked, limits, act_count, .. } = &mut *guard;
+        let Inner { records, asked, limits, held, act_count, .. } = &mut *guard;
         asked.retain(|id| !matches!(known.get(id), Some(None | Some(false))) && !records.contains_key(id));
         limits.retain(|id, _| known.get(id) != Some(&None));
+        // Room held for a start that never showed its session running is free again.
+        held.retain(|_, since| now - *since < ROOM_HELD_SECS * 1000);
 
         for (tid, rec) in records.iter_mut() {
             // A line is stale when nobody acknowledged it in time and no tab is saying it.

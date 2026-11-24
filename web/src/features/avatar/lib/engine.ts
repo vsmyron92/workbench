@@ -10,7 +10,9 @@
 //   everything up into numbers per part, `settle` turns the numbers into what is written.
 // - `createEngine` runs one shared frame loop per window and writes poses to nodes. It
 //   counts visible time only, runs at most 30 frames a second, catches per figure, and
-//   freezes a figure whose frames cost too much. Between the two steps of each frame it puts
+//   freezes a figure whose frames cost too much: in its own script, or, for a figure with a
+//   filter, a mask or a clip, in the browser's drawing, which shows as frames that keep coming
+//   late while it moves (`LATE_MS`). Between the two steps of each frame it puts
 //   a limiter (`REVERSAL_MS`): whatever the tracks, gestures, drives and inputs make
 //   together, no channel it writes turns back more often than three flashes a second allow.
 //
@@ -196,6 +198,23 @@ const MAX_STEP_MS = 250
 /** A figure whose frames average over this many milliseconds across this many frames is frozen. */
 export const BUDGET_MS = 4
 export const BUDGET_FRAMES = 30
+/**
+ * What the browser's drawing costs never shows in a figure's script: it shows as frames that come
+ * late. A frame this long after the one before is late (the loop asks for one every 33 ms; ten a
+ * second is where motion stutters). When frames keep coming late, at least `LATE_FRAMES` of them
+ * that together last `LATE_SPAN_MS` (each counting `LATE_MOST_MS` at most) with no `ON_TIME_MS`
+ * of frames on time in between, the costliest figure that moved meanwhile and has a filter, a
+ * mask or a clip is frozen, and counting starts again: one figure at a time, those with filters
+ * first, never one without. A pause (a tab that comes back, a garbage collection, a page or a
+ * machine busy for a few seconds) is a handful of late frames and never reaches it; a figure
+ * whose frames take a second or more each reaches it in eight of them. A frozen figure moves
+ * again when it is shown anew (the avatars hidden and shown, a reload, a new look).
+ */
+export const LATE_MS = 100
+export const LATE_FRAMES = 8
+export const LATE_SPAN_MS = 8000
+export const LATE_MOST_MS = 1000
+export const ON_TIME_MS = 1000
 /** A held or looping gesture ends by itself after this (the server's HOLD_MAX_SECS). */
 const HOLD_MAX_MS = 120_000
 const MAX_GESTURES = 6
@@ -1764,6 +1783,41 @@ interface Figure {
   frame(now: number, dt: number): void
   /** Back to the artwork's own values, and no more frames. */
   end(): void
+  /** What drawing it may cost the browser beyond its script (`heavyOf`): 0 for a figure that lateness never freezes. */
+  readonly heavy: number
+  /** It wrote a change since the lateness was last counted from nothing: it moves. */
+  moved: boolean
+  /** Frozen, as a figure whose frames cost too much. */
+  freeze(): void
+}
+
+/**
+ * What a look may cost the browser to draw beyond its script, for choosing the figure to freeze
+ * when frames come late: every element with a filter weighs 4 and 1 more for each step of the
+ * filter, a mask 2, a clip 1. 0: nothing of it is drawn into a layer of its own.
+ */
+function heavyOf(look: Look): number {
+  const index = lookIndex(look)
+  let weight = 0
+  let left = LIMITS.elements
+  const walk = (nodes: unknown, depth: number) => {
+    if (!Array.isArray(nodes) || depth > LIMITS.depth) return
+    for (const item of nodes) {
+      const node = item as LookNode | null
+      if (typeof node !== 'object' || node === null || left-- <= 0) continue
+      const attrs: unknown = node.attrs
+      if (typeof attrs === 'object' && attrs !== null) {
+        const { filterRef, maskRef, clipPathRef } = attrs as Record<string, unknown>
+        const filter = typeof filterRef === 'string' ? index.get(filterRef) : undefined
+        if (filter?.tag === 'filter') weight += 4 + (Array.isArray(filter.node.children) ? filter.node.children.length : 0)
+        if (typeof maskRef === 'string') weight += 2
+        if (typeof clipPathRef === 'string') weight += 1
+      }
+      walk(node.children, depth + 1)
+    }
+  }
+  walk(look.nodes, 1)
+  return weight
 }
 
 const INERT: FigureHandle = Object.freeze({
@@ -1791,6 +1845,30 @@ export function createEngine(host: EngineHost): Engine {
   let lastFrame: number | null = null
   let clock = 0
   let ticking = false
+  /** Frames that came late since frames were last on time for `ON_TIME_MS`, how long they lasted (each at most `LATE_MOST_MS`), and the time on time since the last of them. */
+  let late = { frames: 0, ms: 0, onTime: 0 }
+
+  const lateFrom = (delta: number) => {
+    if (delta >= LATE_MS) {
+      late.frames += 1
+      late.ms += Math.min(delta, LATE_MOST_MS)
+      late.onTime = 0
+      return
+    }
+    late.onTime += delta
+    if (late.onTime >= ON_TIME_MS) countAgain()
+  }
+  const countAgain = () => {
+    late = { frames: 0, ms: 0, onTime: 0 }
+    for (const figure of figures) figure.moved = false
+  }
+  /** Frames keep coming late: the costliest figure that moves and is drawn into layers of its own stands still. */
+  const freezeCostliest = () => {
+    let costliest: Figure | null = null
+    for (const figure of figures) if (figure.heavy > 0 && figure.moved && (!costliest || figure.heavy > costliest.heavy)) costliest = figure
+    countAgain()
+    costliest?.freeze()
+  }
 
   const random = (): number => {
     let r = 0.5
@@ -1812,6 +1890,8 @@ export function createEngine(host: EngineHost): Engine {
   }
 
   const halt = () => {
+    // Time that was not watched says nothing of how late frames come.
+    late = { frames: 0, ms: 0, onTime: 0 }
     if (pending !== null) {
       try {
         host.cancelFrame(pending)
@@ -1840,11 +1920,13 @@ export function createEngine(host: EngineHost): Engine {
         }
         if (delta < FRAME_MS) return
         dt = Math.min(delta, MAX_STEP_MS)
+        lateFrom(delta)
       }
       lastFrame = tMs
       clock += dt
       // A figure may leave the set while it is being walked (it froze or threw): that is safe.
       for (const figure of figures) figure.frame(clock, dt)
+      if (late.frames >= LATE_FRAMES && late.ms >= LATE_SPAN_MS) freezeCostliest()
       if (figures.size === 0) halt()
     } finally {
       ticking = false
@@ -1918,13 +2000,16 @@ export function createEngine(host: EngineHost): Engine {
       return now - g.startMs <= anim.durationMs * g.times + anim.maxDelayMs + (reduced ? 0 : GESTURE_BLEND_MS)
     }
 
-    const write = (poses: ReadonlyMap<string, Pose>, careful: boolean) => {
+    /** Writes what differs from what the nodes hold; true when anything did. */
+    const write = (poses: ReadonlyMap<string, Pose>, careful: boolean): boolean => {
+      let changed = false
       for (const [id, pose] of poses) {
         const node = nodes.get(id)
         const was = written.get(id)
         if (!node || !was) continue
         try {
           if (pose.transform !== was.transform) {
+            changed = true
             if (pose.transform === undefined) node.removeAttribute('transform')
             else node.setAttribute('transform', pose.transform)
             was.transform = pose.transform
@@ -1934,6 +2019,7 @@ export function createEngine(host: EngineHost): Engine {
             if (was.attrs.get(name) === value) continue
             // Without the prefix a gradient could not be put back: such a paint keeps what was rendered.
             if (atRest?.has(name)) continue
+            changed = true
             if (value === null) node.removeAttribute(name)
             else node.setAttribute(name, value)
             was.attrs.set(name, value)
@@ -1942,6 +2028,7 @@ export function createEngine(host: EngineHost): Engine {
             for (const [name, ref] of pose.refs) {
               const value = gradient(ref)
               if (was.attrs.get(name) === value) continue
+              changed = true
               node.setAttribute(name, value)
               was.attrs.set(name, value)
             }
@@ -1951,6 +2038,7 @@ export function createEngine(host: EngineHost): Engine {
           if (!careful) throw e
         }
       }
+      return changed
     }
 
     const figure: Figure = {
@@ -2076,7 +2164,7 @@ export function createEngine(host: EngineHost): Engine {
           // Added up, limited (no channel turns back sooner than REVERSAL_MS after it last turned), written.
           const numbers = accumulate(full, clips, now, { mouth, gaze, pace, turn, held }, { reducedMotion: reduced })
           limit(numbers, now)
-          write(settle(full, compiled.look, numbers), false)
+          if (write(settle(full, compiled.look, numbers), false)) figure.moved = true
           cost = host.now() - t0
         } catch {
           // A figure that throws is taken out of the loop and stays static; the others go on.
@@ -2097,6 +2185,9 @@ export function createEngine(host: EngineHost): Engine {
         restored = true
         write(full.rest, true)
       },
+      heavy: heavyOf(compiled.look),
+      moved: false,
+      freeze: () => freeze(),
     }
 
     const out = () => {

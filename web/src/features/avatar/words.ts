@@ -53,9 +53,12 @@ export function cut(text: string, max: number): string {
   return chars.length > max ? `${chars.slice(0, Math.max(max - 1, 0)).join('').trimEnd()}…` : chars.join('')
 }
 
-/** What an avatar is called in the app's phrases: the agent's own name, else the session's title, cut to a few words. */
+/** What an avatar is called in the app's phrases (as `calledAs` of Bubble.tsx): the session's title, then the agent's own name in quotation marks; the title alone without a name. */
 export function called(name: string, title: string): string {
-  return cut(name || title, MAX_CALLED_CHARS)
+  if (!name) return cut(title, MAX_CALLED_CHARS)
+  const quoted = `“${cut(name, MAX_CALLED_CHARS)}”`
+  const session = cut(title, 28)
+  return session ? `${session} ${quoted}` : quoted
 }
 
 /** A session's title as the app's phrases name it, at most `max` characters. A session without one is still named. */
